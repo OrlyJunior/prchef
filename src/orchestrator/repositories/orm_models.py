@@ -1,0 +1,68 @@
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from orchestrator.config.database import Base
+
+
+class WorkflowExecutionEntity(Base):
+    __tablename__ = "workflow_executions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    trello_card_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    trello_card_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    repository: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    base_branch: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    working_branch: Mapped[str | None] = mapped_column(String(255))
+    commit_sha: Mapped[str | None] = mapped_column(String(64))
+    pr_url: Mapped[str | None] = mapped_column(Text)
+    current_stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    task_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    spec_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    implementation_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    validation_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    pull_request_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    spec_jules_session_id: Mapped[str | None] = mapped_column(String(255))
+    spec_jules_session_url: Mapped[str | None] = mapped_column(Text)
+    review_jules_session_id: Mapped[str | None] = mapped_column(String(255))
+    review_jules_session_url: Mapped[str | None] = mapped_column(Text)
+    review_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    steps: Mapped[list["WorkflowStepEntity"]] = relationship(
+        back_populates="execution", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_workflow_executions_trello_card_id", "trello_card_id"),
+        Index("ix_workflow_executions_status", "status"),
+        Index("ix_workflow_executions_current_stage", "current_stage"),
+    )
+
+
+class WorkflowStepEntity(Base):
+    __tablename__ = "workflow_steps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_execution_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("workflow_executions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    execution: Mapped[WorkflowExecutionEntity] = relationship(back_populates="steps")
+
+    __table_args__ = (
+        Index("ix_workflow_steps_execution_id", "workflow_execution_id"),
+        Index("ix_workflow_steps_stage_status", "stage", "status"),
+    )

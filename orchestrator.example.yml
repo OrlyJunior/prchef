@@ -1,0 +1,42 @@
+defaults:
+  repository:
+    base_branch: develop
+    protected_branches: [main, master, develop]
+  roles:
+    spec: jules
+    implementation: codex
+    review: jules
+  safety:
+    allow_direct_merge: false
+    require_tests: true
+  validation:
+    auto_detect: true
+    commands: []
+  integrations:
+    jules:
+      # API oficial de sessoes (sem launcher stdin/stdout). Exporte JULES_API_KEY.
+      # A CLI oficial pode ser usada para login e inspecao manual: jules login.
+      # Source opcional; se ausente, resolve pelo remote GitHub de origin.
+      # source: sources/github-owner-repository
+      # Polling dos estados remotos; 1800 s e o timeout global da operacao.
+      poll_interval_seconds: 15
+      timeout_seconds: 1800
+      poll_retry_attempts: 3
+      poll_retry_backoff_seconds: 2
+    codex:
+      command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
+      timeout_seconds: 3600
+    github:
+      command: [gh]
+      timeout_seconds: 120
+
+# O valor do custom field "Repository" do Trello seleciona uma destas entradas.
+repositories:
+  example-api:
+    path: /absolute/path/to/example-api
+    repository:
+      base_branch: develop
+    validation:
+      commands:
+        - [python, -m, pytest]
+        - [python, -m, ruff, check, .]
