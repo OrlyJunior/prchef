@@ -8,7 +8,10 @@ from orchestrator.models.workflow_status import WorkflowStage, WorkflowStatus
 @dataclass(slots=True)
 class WorkflowExecution:
     id: str
-    trello_card_id: str
+    task_id: str = ""
+    task_source: str = "trello"
+    task_url: str = ""
+    trello_card_id: str = ""
     trello_card_url: str = ""
     repository: str = ""
     base_branch: str = ""

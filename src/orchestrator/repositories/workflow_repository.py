@@ -41,11 +41,15 @@ class WorkflowRepository:
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._sessions = session_factory
 
-    def create_execution(self, trello_card_id: str) -> WorkflowExecution:
+    def create_execution(self, task_id: str, task_source: str = "trello") -> WorkflowExecution:
         now = _utcnow()
+        legacy_trello_id = task_id if task_source == "trello" else ""
         entity = WorkflowExecutionEntity(
             id=str(uuid.uuid4()),
-            trello_card_id=trello_card_id,
+            task_source=task_source,
+            task_id=task_id,
+            task_url="",
+            trello_card_id=legacy_trello_id,
             trello_card_url="",
             repository="",
             base_branch="",
@@ -60,7 +64,12 @@ class WorkflowRepository:
 
     def update_task(self, execution_id: str, task: DevelopmentTask) -> None:
         def mutate(entity: WorkflowExecutionEntity) -> None:
-            entity.trello_card_url = task.url
+            entity.task_source = task.source
+            entity.task_id = task.id
+            entity.task_url = task.url
+            if task.source == "trello":
+                entity.trello_card_id = task.id
+                entity.trello_card_url = task.url
             entity.task_snapshot_json = _dump(task)
 
         self._mutate(execution_id, mutate)
@@ -212,6 +221,9 @@ class WorkflowRepository:
     def _to_domain(entity: WorkflowExecutionEntity) -> WorkflowExecution:
         return WorkflowExecution(
             id=entity.id,
+            task_source=entity.task_source,
+            task_id=entity.task_id,
+            task_url=entity.task_url,
             trello_card_id=entity.trello_card_id,
             trello_card_url=entity.trello_card_url,
             repository=entity.repository,

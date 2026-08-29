@@ -33,8 +33,13 @@ class FakeWorkflowRepository:
         self.stage_changes: list[WorkflowStage] = []
         self.next_step = 1
 
-    def create_execution(self, trello_card_id: str) -> WorkflowExecution:
-        self.execution = WorkflowExecution(id="execution-1", trello_card_id=trello_card_id)
+    def create_execution(self, task_id: str, task_source: str = "trello") -> WorkflowExecution:
+        self.execution = WorkflowExecution(
+            id="execution-1",
+            task_id=task_id,
+            task_source=task_source,
+            trello_card_id=task_id if task_source == "trello" else "",
+        )
         return self.execution
 
     def _execution(self) -> WorkflowExecution:
@@ -44,7 +49,12 @@ class FakeWorkflowRepository:
 
     def update_task(self, execution_id: str, task: DevelopmentTask) -> None:
         execution = self._execution()
-        execution.trello_card_url = task.url
+        execution.task_id = task.id
+        execution.task_source = task.source
+        execution.task_url = task.url
+        if task.source == "trello":
+            execution.trello_card_id = task.id
+            execution.trello_card_url = task.url
         execution.task_snapshot = asdict(task)
 
     def update_project(self, execution_id: str, repository: str, base_branch: str) -> None:
@@ -130,10 +140,12 @@ class FakeTrelloClient:
         if self.error:
             raise self.error
         return DevelopmentTask(
-            card_id=card_id,
+            id=card_id,
+            source="trello",
             title="Add audit log",
             description="Persist an audit record after updates.",
             url=f"https://trello.example/{card_id}",
+            repository="example",
             metadata={"custom_fields": {"Repository": "example"}},
         )
 
@@ -243,10 +255,12 @@ class FakeGitClient:
 class FakeGitHubClient:
     def __init__(self) -> None:
         self.error: Exception | None = None
+        self.last_pull_request_body: str | None = None
 
     def create_pull_request(self, **kwargs: Any) -> PullRequest:
         if self.error:
             raise self.error
+        self.last_pull_request_body = str(kwargs["body"])
         return PullRequest(
             number=42,
             url="https://github.example/pr/42",

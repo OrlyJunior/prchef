@@ -1,3 +1,8 @@
+task:
+  # Provider usado com `orchestrator run --task-id ...`.
+  # --trello-card e --github-issue selecionam explicitamente o provider.
+  provider: github
+
 defaults:
   repository:
     base_branch: develop
@@ -30,7 +35,7 @@ defaults:
       command: [gh]
       timeout_seconds: 120
 
-# O valor do custom field "Repository" do Trello seleciona uma destas entradas.
+# Trello usa o custom field "Repository". Para GitHub Issues, prefira owner/repo.
 repositories:
   example-api:
     path: /absolute/path/to/example-api
@@ -40,3 +45,5 @@ repositories:
       commands:
         - [python, -m, pytest]
         - [python, -m, ruff, check, .]
+  owner/example-api:
+    path: /absolute/path/to/example-api

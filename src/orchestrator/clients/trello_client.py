@@ -44,11 +44,14 @@ class TrelloClient:
             "short_url": card.get("shortUrl"),
             "custom_fields": custom_fields,
         }
+        repository = self._repository_from_custom_fields(custom_fields)
         return DevelopmentTask(
-            card_id=str(card["id"]),
+            id=str(card["id"]),
+            source="trello",
             title=str(card.get("name", "")),
             description=str(card.get("desc", "")),
             url=str(card.get("url") or card.get("shortUrl") or ""),
+            repository=repository,
             metadata=metadata,
         )
 
@@ -85,3 +88,12 @@ class TrelloClient:
             if selected:
                 mapped[name] = selected.get("value", {}).get("text")
         return mapped
+
+    @staticmethod
+    def _repository_from_custom_fields(custom_fields: dict[str, Any]) -> str | None:
+        lowered = {str(key).casefold(): value for key, value in custom_fields.items()}
+        for key in ("repository", "repo"):
+            value = lowered.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return None

@@ -2,7 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.models import StepStatus, WorkflowStage, WorkflowStatus
+from orchestrator.models import (
+    DevelopmentTask,
+    StepStatus,
+    ValidationResult,
+    WorkflowStage,
+    WorkflowStatus,
+)
+from orchestrator.services.task_provider import GitHubIssueTaskProvider, TrelloTaskProvider
 from orchestrator.services.workflow_service import WorkflowService
 from tests.unit.fakes import (
     FakeClientFactory,
@@ -17,7 +24,9 @@ def workflow(tmp_path: Path):
     repository = FakeWorkflowRepository()
     trello = FakeTrelloClient()
     factory = FakeClientFactory()
-    service = WorkflowService(repository, trello, FakeConfigLoader(tmp_path), factory)
+    service = WorkflowService(
+        repository, TrelloTaskProvider(trello), FakeConfigLoader(tmp_path), factory
+    )
     return service, repository, trello, factory
 
 
@@ -33,6 +42,9 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
     assert result.pull_request_snapshot is not None
     assert result.validation_snapshot is not None
     assert result.review_snapshot is not None
+    assert result.task_source == "trello"
+    assert result.task_id == "card-1"
+    assert result.task_url == "https://trello.example/card-1"
     assert result.spec_jules_session_id == "spec-123"
     assert result.review_jules_session_url == "https://jules.example/review-123"
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
@@ -147,3 +159,38 @@ def test_every_stage_transition_is_persisted_in_order(workflow) -> None:
         WorkflowStage.CREATE_PR,
         WorkflowStage.REVIEW,
     ]
+
+
+def test_pull_request_closes_github_issue_in_same_repository() -> None:
+    task = DevelopmentTask(
+        id="42",
+        source="github",
+        title="Fix timeout",
+        description="",
+        url="https://github.com/owner/api/issues/42",
+        repository="owner/api",
+    )
+
+    provider = GitHubIssueTaskProvider(object(), "owner/api")  # type: ignore[arg-type]
+    reference = provider.pull_request_reference(task, "owner/api")
+    body = WorkflowService._pull_request_body(task, ValidationResult(success=True), reference)
+
+    assert "Closes #42" in body
+
+
+def test_pull_request_only_references_cross_repository_issue() -> None:
+    task = DevelopmentTask(
+        id="42",
+        source="github",
+        title="Fix timeout",
+        description="",
+        url="https://github.com/product/backlog/issues/42",
+        repository="product/backlog",
+    )
+
+    provider = GitHubIssueTaskProvider(object(), "product/backlog")  # type: ignore[arg-type]
+    reference = provider.pull_request_reference(task, "owner/api")
+    body = WorkflowService._pull_request_body(task, ValidationResult(success=True), reference)
+
+    assert "Related issue: product/backlog#42" in body
+    assert "Closes" not in body
