@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from alembic import command
+from alembic.config import Config
 from sqlalchemy.exc import OperationalError
 
 from orchestrator.clients.command_client import CommandClient
@@ -43,6 +45,30 @@ def _print_execution(execution: WorkflowExecution) -> None:
 def _repository(settings: Settings) -> WorkflowRepository:
     engine = build_engine(settings.database_url)
     return WorkflowRepository(build_session_factory(engine))
+
+
+class MigrationError(RuntimeError):
+    pass
+
+
+def _apply_pending_migrations(settings: Settings) -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option("sqlalchemy.url", settings.database_url)
+    try:
+        command.upgrade(alembic_config, "head")
+    except Exception as exc:
+        raise MigrationError(f"Could not apply pending database migrations: {exc}") from exc
+
+
+def _migrated_repository(settings: Settings) -> WorkflowRepository:
+    try:
+        _apply_pending_migrations(settings)
+    except MigrationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    return _repository(settings)
 
 
 def _task_provider(
@@ -128,7 +154,7 @@ def run(
         task_id=task_id,
         repository=repository,
     )
-    workflow_repository = _repository(settings)
+    workflow_repository = _migrated_repository(settings)
     service = WorkflowService(
         workflow_repository=workflow_repository,
         task_provider=provider,
@@ -138,7 +164,7 @@ def run(
     try:
         execution = service.run(selected_id, repository)
     except OperationalError as exc:
-        typer.echo(f"Database is not migrated; run 'alembic upgrade head'. Detail: {exc}", err=True)
+        typer.echo(f"Database access failed after migrations: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     _print_execution(execution)
     if execution.status not in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:
@@ -154,7 +180,7 @@ def show(
     if config is not None:
         settings.config_file = config
     try:
-        execution = _repository(settings).get_execution(execution_id)
+        execution = _migrated_repository(settings).get_execution(execution_id)
     except KeyError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc

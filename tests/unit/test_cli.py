@@ -3,9 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import inspect
 from typer.testing import CliRunner
 
 from orchestrator.cli import main
+from orchestrator.config.database import build_engine
+from orchestrator.config.settings import Settings
 from orchestrator.models import WorkflowExecution, WorkflowStatus
 
 runner = CliRunner()
@@ -31,6 +34,7 @@ def _stub_runtime(monkeypatch: Any) -> None:
     StubWorkflowService.calls.clear()
     monkeypatch.setattr(main, "WorkflowService", StubWorkflowService)
     monkeypatch.setattr(main, "_repository", lambda settings: object())
+    monkeypatch.setattr(main, "_apply_pending_migrations", lambda settings: None)
     monkeypatch.setattr(main, "ClientFactory", lambda api_key: object())
 
 
@@ -53,6 +57,37 @@ def test_cli_runs_github_issue_provider(monkeypatch: Any) -> None:
 
     assert result.exit_code == 0, result.output
     assert StubWorkflowService.calls == [("github", "42", "owner/api")]
+
+
+def test_cli_aborts_before_repository_when_migration_fails(monkeypatch: Any) -> None:
+    repository_accessed = False
+
+    def fail_migration(settings: Any) -> None:
+        raise main.MigrationError("Could not apply pending database migrations: database locked")
+
+    def repository_should_not_run(settings: Any) -> object:
+        nonlocal repository_accessed
+        repository_accessed = True
+        return object()
+
+    monkeypatch.setattr(main, "_apply_pending_migrations", fail_migration)
+    monkeypatch.setattr(main, "_repository", repository_should_not_run)
+
+    result = runner.invoke(main.app, ["run", "--trello-card", "card-1"])
+
+    assert result.exit_code == 2
+    assert "Could not apply pending database migrations" in result.output
+    assert not repository_accessed
+
+
+def test_pending_migrations_are_applied_to_configured_database(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
+
+    main._apply_pending_migrations(Settings(database_url=database_url))
+
+    engine = build_engine(database_url)
+    assert "workflow_executions" in inspect(engine).get_table_names()
+    engine.dispose()
 
 
 def test_cli_rejects_multiple_task_origins(monkeypatch: Any) -> None:
