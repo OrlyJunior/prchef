@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -19,6 +19,10 @@ class RepositorySettings(BaseModel):
     base_branch: str = "develop"
     protected_branches: list[str] = Field(default_factory=lambda: ["main", "master", "develop"])
     branch_prefix: str = "orchestrator"
+
+
+class TaskSettings(BaseModel):
+    provider: Literal["trello", "github"] | None = None
 
 
 class RolesSettings(BaseModel):
@@ -74,6 +78,7 @@ class IntegrationsSettings(BaseModel):
 
 class ProjectConfig(BaseModel):
     path: Path
+    task: TaskSettings = Field(default_factory=TaskSettings)
     repository: RepositorySettings = Field(default_factory=RepositorySettings)
     roles: RolesSettings = Field(default_factory=RolesSettings)
     safety: SafetySettings = Field(default_factory=SafetySettings)
@@ -120,7 +125,7 @@ class ProjectConfigLoader:
         repository_ref = repository_override or self._repository_ref_from_task(task)
         if not repository_ref:
             raise ConfigurationError(
-                "Trello card has no Repository/Repo custom field; use --repository explicitly"
+                "Task has no repository; configure one in the task or use --repository"
             )
 
         registered = global_config.get("repositories", {})
@@ -169,6 +174,8 @@ class ProjectConfigLoader:
 
     @staticmethod
     def _repository_ref_from_task(task: DevelopmentTask) -> str | None:
+        if task.repository:
+            return task.repository
         custom_fields = task.metadata.get("custom_fields", {})
         if isinstance(custom_fields, dict):
             lowered = {str(key).lower(): value for key, value in custom_fields.items()}
@@ -178,3 +185,21 @@ class ProjectConfigLoader:
                     return str(value).strip()
         direct = task.metadata.get("repository")
         return str(direct).strip() if direct else None
+
+    def default_task_provider(self) -> str | None:
+        global_config = _load_yaml(self._config_file, required=True)
+        raw_task = global_config.get("task")
+        if raw_task is None:
+            defaults = global_config.get("defaults", {})
+            raw_task = defaults.get("task") if isinstance(defaults, dict) else None
+        if raw_task is None:
+            return None
+        if not isinstance(raw_task, dict):
+            raise ConfigurationError("'task' must be a mapping")
+        provider = raw_task.get("provider")
+        if provider is None:
+            return None
+        normalized = str(provider).strip().casefold()
+        if normalized not in {"trello", "github"}:
+            raise ConfigurationError("task.provider must be 'trello' or 'github'")
+        return normalized

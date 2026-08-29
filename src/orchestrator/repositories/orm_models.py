@@ -10,6 +10,9 @@ class WorkflowExecutionEntity(Base):
     __tablename__ = "workflow_executions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_source: Mapped[str] = mapped_column(String(32), nullable=False, default="trello")
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    task_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     trello_card_id: Mapped[str] = mapped_column(String(128), nullable=False)
     trello_card_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     repository: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -39,6 +42,7 @@ class WorkflowExecutionEntity(Base):
     )
 
     __table_args__ = (
+        Index("ix_workflow_executions_task_source_id", "task_source", "task_id"),
         Index("ix_workflow_executions_trello_card_id", "trello_card_id"),
         Index("ix_workflow_executions_status", "status"),
         Index("ix_workflow_executions_current_stage", "current_stage"),

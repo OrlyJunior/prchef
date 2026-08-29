@@ -56,7 +56,7 @@ class SpecService:
     @staticmethod
     def _build_prompt(task: DevelopmentTask) -> str:
         return f"""You are the read-only technical specification role.
-Analyze the repository and the original Trello task below.
+Analyze the repository and the original task below.
 
 STRICT SAFETY RULES:
 - Do not edit, create, delete, or rename files.

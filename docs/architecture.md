@@ -3,17 +3,17 @@
 ## Componentes
 
 - `models`: dataclasses e enums do dominio, sem dependencias de infraestrutura.
-- `services`: prompts, parsing de resultados, validacao e maquina de workflow.
-- `clients`: Trello HTTP, API oficial de sessoes Jules, Codex, Git e GitHub CLI.
+- `services`: providers de task, prompts, parsing de resultados, validacao e maquina de workflow.
+- `clients`: Trello HTTP, GitHub Issues/PRs via `gh`, API de sessoes Jules, Codex e Git.
 - `repositories`: entidades SQLAlchemy, serializacao e `WorkflowRepository`.
 - `config`: settings de ambiente, merge YAML e fabrica de sessoes.
 - `cli`: composicao das dependencias e interface Typer.
 
 ## Sequencia
 
-1. A CLI cria um registro minimo de execucao antes de acessar o Trello.
-2. O card e carregado e preservado como snapshot JSON.
-3. A referencia `Repository` do card resolve uma entrada do registro global.
+1. A CLI seleciona exatamente um `TaskProvider`: Trello ou GitHub Issues.
+2. O workflow cria um registro minimo e solicita ao provider um `DevelopmentTask` comum.
+3. `task.repository` ou o custom field Trello `Repository` resolve uma entrada do registro global.
 4. Defaults, configuracao registrada e `.orchestrator.yml` do alvo sao mesclados.
 5. Jules cria uma sessao remota read-only; seu ID e URL sao persistidos antes do polling.
 6. Ambiguidade bloqueante encerra em `NEEDS_HUMAN`.
@@ -28,9 +28,11 @@ cada etapa, permitindo que uma V2 selecione um ponto de retomada sem mudar o sch
 
 ## Persistencia
 
-`workflow_executions` guarda os identificadores operacionais, IDs/URLs das sessoes Jules e
+`workflow_executions` guarda `task_source`, `task_id`, `task_url`, identificadores operacionais,
+IDs/URLs das sessoes Jules e
 snapshots JSON de task, spec, implementacao, validacao e review. `workflow_steps` guarda inicio, fim, estado e erro de cada
-etapa. As foreign keys usam `ON DELETE CASCADE`; indices atendem busca por card, status e etapa.
+etapa. As colunas Trello legadas permanecem para compatibilidade. As foreign keys usam
+`ON DELETE CASCADE`; indices atendem busca por origem/ID, card legado, status e etapa.
 
 ## Limites intencionais
 

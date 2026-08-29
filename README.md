@@ -3,8 +3,9 @@
 CLI em Python que executa e persiste o fluxo:
 
 ```text
-Trello -> Jules (spec read-only) -> Codex -> validacoes locais
-       -> Git branch/commit/push -> GitHub PR -> Jules review
+Trello Card   ─┐
+               ├─> Jules (spec read-only) -> Codex -> validacoes locais
+GitHub Issue  ─┘   -> Git branch/commit/push -> GitHub PR -> Jules review
 ```
 
 A V1 nunca faz merge, nunca envia commits diretamente a branches protegidas e encerra em
@@ -18,8 +19,8 @@ A V1 nunca faz merge, nunca envia commits diretamente a branches protegidas e en
 - Jules Tools CLI instalado e autenticado (`npm install -g @google/jules`, `jules login`) para
   inspecao operacional das sessoes
 - `JULES_API_KEY` em variavel de ambiente para o lifecycle automatizado pela API oficial do Jules
-- GitHub CLI (`gh`) autenticado
-- credenciais Trello
+- GitHub CLI (`gh`) autenticado, usado para GitHub Issues e Pull Requests
+- credenciais Trello quando esse provider for utilizado
 
 O adaptador Codex usa o modo oficial nao interativo `codex exec`, com workspace limitado ao
 repositorio. Jules cria uma sessao remota oficial, persiste ID e URL, acompanha a execucao por
@@ -42,11 +43,12 @@ cp .env.example .env       # Windows: Copy-Item .env.example .env
 cp orchestrator.example.yml orchestrator.yml
 ```
 
-Edite `.env` e `orchestrator.yml`. O card deve possuir um custom field Trello chamado
-`Repository` (ou `Repo`) cujo valor corresponda a uma chave em `repositories`. Como alternativa
-operacional, passe `--repository` com uma chave configurada ou um caminho absoluto. Antes da
-primeira execucao, conecte o repositorio ao Jules. Sem `integrations.jules.source`, o cliente usa
-o remote `origin` para localizar a source correspondente na API.
+Edite `.env` e `orchestrator.yml`. Para Trello, o card deve possuir um custom field chamado
+`Repository` (ou `Repo`) cujo valor corresponda a uma chave em `repositories`; `--repository`
+continua podendo sobrescrevê-lo. Para GitHub Issues, informe `--repository owner/repo` e use essa
+mesma chave no registro `repositories` para associá-la ao checkout local. Antes da primeira
+execucao, conecte o repositorio ao Jules. Sem `integrations.jules.source`, o cliente usa o remote
+`origin` para localizar a source correspondente na API.
 
 ## Banco e migrations
 
@@ -68,6 +70,7 @@ alembic upgrade head
 
 ```bash
 orchestrator run --trello-card CARD_ID
+orchestrator run --github-issue 42 --repository owner/repository
 ```
 
 Overrides uteis:
@@ -75,11 +78,18 @@ Overrides uteis:
 ```bash
 orchestrator run --trello-card CARD_ID --repository example-api
 orchestrator run --trello-card CARD_ID --config ./orchestrator.yml
+orchestrator run --task-id 42 --repository owner/repository  # usa task.provider
 orchestrator show EXECUTION_ID
 ```
 
+Exatamente uma origem deve ser informada por execução. GitHub Issues é a opção recomendada para
+projetos hospedados no GitHub porque reutiliza a autenticação existente do `gh` e permite que o PR
+inclua `Closes #<numero>` quando issue e PR pertencem ao mesmo repositório. Para issues em outro
+repositório, o PR registra apenas `owner/repo#numero`, sem solicitar fechamento automático.
+
 Cada etapa e persistida em `workflow_executions` e `workflow_steps`. A saida final do comando e
-JSON e inclui card, repositorio, branch, commit, PR, validacoes, review e status final.
+JSON e inclui `task_source`, `task_id`, `task_url`, repositorio, branch, commit, PR, validacoes,
+review e status final. As colunas Trello antigas são mantidas para leitura de execuções existentes.
 As sessoes Jules de spec e review tambem ficam registradas com ID e URL para inspecao futura.
 O orquestrador ainda nao retoma sessoes apos reinicio, mas esses identificadores permitem localizar
 uma sessao interrompida sem criar outra.
@@ -103,6 +113,9 @@ Os defaults e a entrada do registro global sao mesclados com `.orchestrator.yml`
 alvo; o arquivo local tem maior precedencia. Exemplo:
 
 ```yaml
+task:
+  provider: github  # usado apenas com --task-id; opções explícitas têm precedência
+
 repository:
   base_branch: develop
   protected_branches: [main, master, develop, release]
@@ -118,6 +131,11 @@ validation:
   commands:
     - [python, -m, pytest]
 ```
+
+Providers suportados:
+
+- `trello`: usa `ORCHESTRATOR_TRELLO_API_KEY` e `ORCHESTRATOR_TRELLO_TOKEN`.
+- `github`: executa `gh issue view` com a autenticação já ativa no GitHub CLI.
 
 `allow_direct_merge: true` e rejeitado nesta V1. Credenciais ficam exclusivamente em variaveis
 de ambiente e `.env` nao e versionado.
