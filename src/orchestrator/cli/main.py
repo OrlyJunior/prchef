@@ -145,6 +145,7 @@ def run(
     settings = Settings()
     if config is not None:
         settings.config_file = config
+    workflow_repository = _migrated_repository(settings)
     config_loader = ProjectConfigLoader(settings.config_file)
     selected_id, provider = _task_provider(
         settings=settings,
@@ -154,7 +155,6 @@ def run(
         task_id=task_id,
         repository=repository,
     )
-    workflow_repository = _migrated_repository(settings)
     service = WorkflowService(
         workflow_repository=workflow_repository,
         task_provider=provider,

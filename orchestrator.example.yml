@@ -16,6 +16,7 @@ defaults:
     require_tests: true
   validation:
     auto_detect: true
+    # `python -m pytest` usa .pytest-tmp/run automaticamente via pyproject.toml.
     commands: []
   integrations:
     jules:
@@ -24,6 +25,7 @@ defaults:
       # Source opcional; se ausente, resolve pelo remote GitHub de origin.
       # source: sources/github-owner-repository
       # Polling dos estados remotos; 1800 s e o timeout global da operacao.
+      # AWAITING_USER_FEEDBACK, PAUSED e AWAITING_PLAN_APPROVAL encerram em NEEDS_HUMAN.
       poll_interval_seconds: 15
       timeout_seconds: 1800
       poll_retry_attempts: 3

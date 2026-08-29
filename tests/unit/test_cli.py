@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -84,10 +85,18 @@ def test_pending_migrations_are_applied_to_configured_database(tmp_path: Path) -
     database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
 
     main._apply_pending_migrations(Settings(database_url=database_url))
+    main._apply_pending_migrations(Settings(database_url=database_url))
 
     engine = build_engine(database_url)
     assert "workflow_executions" in inspect(engine).get_table_names()
     engine.dispose()
+
+
+def test_pytest_uses_a_project_local_temporary_directory() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    pyproject = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "--basetemp=.pytest-tmp/run" in pyproject["tool"]["pytest"]["ini_options"]["addopts"]
 
 
 def test_cli_rejects_multiple_task_origins(monkeypatch: Any) -> None:

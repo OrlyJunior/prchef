@@ -10,6 +10,7 @@ from orchestrator.clients.exceptions import (
     JulesClientError,
     JulesSessionCancelledError,
     JulesSessionFailedError,
+    JulesSessionNeedsHumanError,
     JulesSessionTimeoutError,
     JulesTransientPollError,
 )
@@ -28,6 +29,11 @@ class JulesClient:
         JulesSessionState.COMPLETED,
         JulesSessionState.FAILED,
         JulesSessionState.CANCELLED,
+    }
+    _HUMAN_INTERVENTION_STATES = {
+        JulesSessionState.AWAITING_PLAN_APPROVAL,
+        JulesSessionState.AWAITING_USER_FEEDBACK,
+        JulesSessionState.PAUSED,
     }
 
     def __init__(
@@ -72,14 +78,14 @@ class JulesClient:
         self,
         prompt: str,
         repository_slug: str,
-        base_branch: str,
+        starting_branch: str,
         on_session_created: Callable[[JulesSession], None],
     ) -> JulesOperationResult:
         return self._run_operation(
             prompt,
             "Orchestrator code review",
             repository_slug,
-            base_branch,
+            starting_branch,
             on_session_created,
         )
 
@@ -88,12 +94,12 @@ class JulesClient:
         prompt: str,
         title: str,
         repository_slug: str,
-        base_branch: str,
+        starting_branch: str,
         on_session_created: Callable[[JulesSession], None],
     ) -> JulesOperationResult:
         deadline = self._clock() + self._settings.timeout_seconds
         source = self._settings.source or self._resolve_source(repository_slug)
-        session = self._create_session(prompt, title, source, base_branch)
+        session = self._create_session(prompt, title, source, starting_branch)
         on_session_created(session)
         completed = self._wait_for_session(session, deadline)
         return JulesOperationResult(completed, self._get_session_result(completed, deadline))
@@ -171,6 +177,10 @@ class JulesClient:
                 raise JulesSessionFailedError("Jules session failed", session.id)
             if session.state is JulesSessionState.CANCELLED:
                 raise JulesSessionCancelledError("Jules session was cancelled", session.id)
+            if session.state in self._HUMAN_INTERVENTION_STATES:
+                raise JulesSessionNeedsHumanError(
+                    self._human_intervention_message(session), session.id
+                )
             self._sleep_until_deadline(
                 self._settings.poll_interval_seconds, deadline, session.id
             )
@@ -179,6 +189,18 @@ class JulesClient:
         return self._session_from_payload(
             self._request("GET", f"/sessions/{session_id}", transient=True)
         )
+
+    @staticmethod
+    def _human_intervention_message(session: JulesSession) -> str:
+        reasons = {
+            JulesSessionState.AWAITING_PLAN_APPROVAL: "awaiting plan approval",
+            JulesSessionState.AWAITING_USER_FEEDBACK: "awaiting user feedback",
+            JulesSessionState.PAUSED: "paused",
+        }
+        message = f"Jules session is {reasons[session.state]} and requires human intervention"
+        if session.url:
+            message = f"{message}: {session.url}"
+        return message
 
     def _get_session_result(self, session: JulesSession, deadline: float) -> str:
         def fetch() -> list[dict[str, Any]]:

@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.clients.exceptions import JulesSessionNeedsHumanError
 from orchestrator.models import (
     DevelopmentTask,
     StepStatus,
@@ -31,7 +32,7 @@ def workflow(tmp_path: Path):
 
 
 def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
-    service, repository, _, _ = workflow
+    service, repository, _, factory = workflow
 
     result = service.run("card-1")
 
@@ -47,6 +48,8 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
     assert result.task_url == "https://trello.example/card-1"
     assert result.spec_jules_session_id == "spec-123"
     assert result.review_jules_session_url == "https://jules.example/review-123"
+    assert factory.jules.spec_starting_branch == "develop"
+    assert factory.jules.review_starting_branch == result.working_branch
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
 
 
@@ -94,6 +97,8 @@ def test_validation_failure_stops_before_commit(workflow) -> None:
     assert result.validation_snapshot is not None
     assert result.commit_sha is None
     assert WorkflowStage.COMMIT not in repository.stage_changes
+    assert WorkflowStage.PUSH not in repository.stage_changes
+    assert WorkflowStage.CREATE_PR not in repository.stage_changes
 
 
 def test_branch_creation_failure_is_terminal(workflow) -> None:
@@ -140,6 +145,33 @@ def test_jules_changes_requested_is_final_status(workflow) -> None:
     assert result.status is WorkflowStatus.CHANGES_REQUESTED
     assert result.review_snapshot is not None
     assert result.review_snapshot["result"] == "CHANGES_REQUESTED"
+
+
+def test_malformed_jules_review_requires_human_instead_of_assuming_approval(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.malformed_review = True
+
+    result = service.run("card-malformed-review")
+
+    assert result.status is WorkflowStatus.NEEDS_HUMAN
+    assert result.review_snapshot is not None
+    assert result.review_snapshot["result"] == "NEEDS_HUMAN"
+    assert "could not be interpreted safely" in result.review_snapshot["summary"]
+    assert "could not be interpreted safely" in (result.error_message or "")
+
+
+def test_jules_human_intervention_stops_workflow_and_keeps_session_reference(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.spec_error = JulesSessionNeedsHumanError(
+        "Jules session is awaiting user feedback and requires human intervention", "spec-123"
+    )
+
+    result = service.run("card-needs-human")
+
+    assert result.status is WorkflowStatus.NEEDS_HUMAN
+    assert result.spec_jules_session_id == "spec-123"
+    assert result.working_branch is None
+    assert "awaiting user feedback" in (result.error_message or "")
 
 
 def test_every_stage_transition_is_persisted_in_order(workflow) -> None:

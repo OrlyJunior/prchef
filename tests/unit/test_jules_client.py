@@ -9,6 +9,7 @@ import pytest
 from orchestrator.clients.exceptions import (
     JulesSessionCancelledError,
     JulesSessionFailedError,
+    JulesSessionNeedsHumanError,
     JulesSessionTimeoutError,
     JulesTransientPollError,
 )
@@ -81,6 +82,7 @@ def test_creates_session_polls_to_completed_and_recovers_final_result() -> None:
                 "startingBranch": "develop"
             }
             assert payload["automationMode"] == "AUTOMATION_MODE_UNSPECIFIED"
+            assert payload["requirePlanApproval"] is False
             return httpx.Response(200, json=_session("QUEUED"))
         if request.url.path.endswith("/activities"):
             return httpx.Response(
@@ -101,6 +103,49 @@ def test_creates_session_polls_to_completed_and_recovers_final_result() -> None:
     assert result.result_text == '{"safe_to_implement": true}'
     assert len(created) == 1
     assert sum(request.method == "POST" for request in requests) == 1
+
+
+def test_persists_session_before_the_first_poll() -> None:
+    clock = FakeClock()
+    persisted_session_ids: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json=_session("QUEUED"))
+        assert persisted_session_ids == ["session-1"]
+        if request.url.path.endswith("/activities"):
+            return httpx.Response(
+                200, json={"activities": [{"agentMessaged": {"agentMessage": "done"}}]}
+            )
+        return httpx.Response(200, json=_session("COMPLETED"))
+
+    _client(handler, clock).generate_spec(
+        "produce JSON",
+        "example/api",
+        "develop",
+        lambda session: persisted_session_ids.append(session.id),
+    )
+
+
+def test_review_uses_feature_branch_and_never_enables_auto_create_pr() -> None:
+    clock = FakeClock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            payload = json.loads(request.content)
+            context = payload["sourceContext"]["githubRepoContext"]
+            assert context["startingBranch"] == "orchestrator/42"
+            assert payload["automationMode"] != "AUTO_CREATE_PR"
+            return httpx.Response(200, json=_session("QUEUED"))
+        if request.url.path.endswith("/activities"):
+            return httpx.Response(
+                200, json={"activities": [{"agentMessaged": {"agentMessage": "done"}}]}
+            )
+        return httpx.Response(200, json=_session("COMPLETED"))
+
+    _client(handler, clock).review(
+        "review", "example/api", "orchestrator/42", lambda session: None
+    )
 
 
 def test_failed_session_preserves_created_session_and_raises() -> None:
@@ -131,6 +176,38 @@ def test_cancelled_session_preserves_created_session_and_raises() -> None:
 
     assert error.value.session_id == "session-1"
     assert len(created) == 1
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        ("AWAITING_USER_FEEDBACK", "awaiting user feedback"),
+        ("PAUSED", "paused"),
+        ("AWAITING_PLAN_APPROVAL", "awaiting plan approval"),
+    ],
+)
+def test_human_intervention_states_stop_polling_immediately(
+    state: str, message: str
+) -> None:
+    clock = FakeClock()
+    get_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal get_count
+        if request.method == "POST":
+            return httpx.Response(200, json=_session("QUEUED"))
+        get_count += 1
+        return httpx.Response(200, json=_session(state))
+
+    created: list[object] = []
+    with pytest.raises(JulesSessionNeedsHumanError) as error:
+        _run(_client(handler, clock), created)
+
+    assert error.value.session_id == "session-1"
+    assert message in str(error.value)
+    assert len(created) == 1
+    assert get_count == 1
+    assert clock.value == 0
 
 
 def test_timeout_does_not_create_a_second_session() -> None:
