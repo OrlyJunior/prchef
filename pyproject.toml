@@ -35,7 +35,7 @@ orchestrator = "orchestrator.cli.main:app"
 packages = ["src/orchestrator"]
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q --basetemp=.pytest-tmp/run"
 testpaths = ["tests"]
 
 [tool.ruff]

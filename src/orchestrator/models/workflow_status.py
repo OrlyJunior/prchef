@@ -34,4 +34,4 @@ class StepStatus(StrEnum):
 class ReviewDecision(StrEnum):
     APPROVED = "APPROVED"
     CHANGES_REQUESTED = "CHANGES_REQUESTED"
-
+    NEEDS_HUMAN = "NEEDS_HUMAN"

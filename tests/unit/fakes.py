@@ -172,13 +172,21 @@ class FakeJulesClient:
     def __init__(self) -> None:
         self.ambiguous = False
         self.changes_requested = False
+        self.malformed_review = False
+        self.spec_error: Exception | None = None
+        self.review_error: Exception | None = None
+        self.spec_starting_branch: str | None = None
+        self.review_starting_branch: str | None = None
 
     def generate_spec(self, prompt: str, *args: Any) -> JulesOperationResult:
+        self.spec_starting_branch = str(args[1])
         callback = args[-1]
         session = JulesSession(
             "spec-123", "https://jules.example/spec-123", JulesSessionState.QUEUED
         )
         callback(session)
+        if self.spec_error:
+            raise self.spec_error
         return JulesOperationResult(session, json.dumps(
             {
                 "technical_context": "Service and repository layers",
@@ -194,18 +202,25 @@ class FakeJulesClient:
         ))
 
     def review(self, prompt: str, *args: Any) -> JulesOperationResult:
+        self.review_starting_branch = str(args[1])
         callback = args[-1]
         session = JulesSession(
             "review-123", "https://jules.example/review-123", JulesSessionState.QUEUED
         )
         callback(session)
+        if self.review_error:
+            raise self.review_error
+        if self.malformed_review:
+            return JulesOperationResult(session, "not valid JSON")
         return JulesOperationResult(session, json.dumps(
             {
-                "result": "CHANGES_REQUESTED" if self.changes_requested else "APPROVED",
-                "requirements": ["Audit row is created"],
-                "issues": ["Missing edge case"] if self.changes_requested else [],
-                "scope_violations": [],
-                "test_gaps": [],
+                "decision": "CHANGES_REQUESTED" if self.changes_requested else "APPROVED",
+                "summary": (
+                    "An edge case needs coverage" if self.changes_requested else "Looks good"
+                ),
+                "findings": ["Missing edge case"] if self.changes_requested else [],
+                "blocking_findings": ["Missing edge case"] if self.changes_requested else [],
+                "suggestions": [],
             }
         ))
 

@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
+from orchestrator.clients.exceptions import JulesSessionNeedsHumanError
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import ConfigurationError, ProjectConfigLoader
 from orchestrator.models.development_task import DevelopmentTask
@@ -137,19 +138,25 @@ class WorkflowService:
                     validation=validation,
                     repository_slug=repository_slug,
                     base_branch=config.repository.base_branch,
+                    feature_branch=working_branch,
                     on_session_created=lambda session: self._repository.record_review_jules_session(
                         execution.id, session.id, session.url
                     ),
                 )
                 self._repository.record_review(execution.id, review)
+                if review.result is ReviewDecision.NEEDS_HUMAN:
+                    self._repository.record_error(execution.id, review.summary)
 
-            final_status = (
-                WorkflowStatus.APPROVED
-                if review.result is ReviewDecision.APPROVED
-                else WorkflowStatus.CHANGES_REQUESTED
-            )
+            final_status = {
+                ReviewDecision.APPROVED: WorkflowStatus.APPROVED,
+                ReviewDecision.CHANGES_REQUESTED: WorkflowStatus.CHANGES_REQUESTED,
+                ReviewDecision.NEEDS_HUMAN: WorkflowStatus.NEEDS_HUMAN,
+            }[review.result]
             self._repository.finish(execution.id, final_status)
         except ConfigurationError as exc:
+            self._repository.record_error(execution.id, str(exc))
+            self._repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+        except JulesSessionNeedsHumanError as exc:
             self._repository.record_error(execution.id, str(exc))
             self._repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
         except Exception as exc:

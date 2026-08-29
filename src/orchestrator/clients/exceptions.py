@@ -36,5 +36,9 @@ class JulesSessionCancelledError(JulesClientError):
     pass
 
 
+class JulesSessionNeedsHumanError(JulesClientError):
+    """The Jules session is paused waiting for a human interaction."""
+
+
 class JulesSessionTimeoutError(JulesClientError):
     pass

@@ -9,7 +9,9 @@ GitHub Issue  ─┘   -> Git branch/commit/push -> GitHub PR -> Jules review
 ```
 
 A V1 nunca faz merge, nunca envia commits diretamente a branches protegidas e encerra em
-`NEEDS_HUMAN` quando a spec informa que uma ambiguidade impede uma implementacao segura.
+`NEEDS_HUMAN` quando a spec informa que uma ambiguidade impede uma implementacao segura ou quando
+o Jules exige uma interação humana. O fluxo é sempre: task -> spec -> branch -> Codex -> validação
+local -> commit -> push -> PR -> review. O merge continua inteiramente manual.
 
 ## Requisitos
 
@@ -30,8 +32,10 @@ O orquestrador nao usa um launcher, `stdin` ou `stdout` para o Jules. A CLI aute
 para login e inspecao manual; o ciclo programatico usa a API oficial de sessoes, que oferece
 estados e atividades estruturados. Por isso a chave deve estar no ambiente do processo
 (`JULES_API_KEY`, tambem aceito como `ORCHESTRATOR_JULES_API_KEY`), e nao em arquivos versionados.
-O modo de automacao enviado e o modo padrao sem automacao: Jules nao recebe autorizacao para criar
-PR, publicar commits ou alterar o repositorio local durante spec/review.
+O modo de automacao enviado e o modo padrao sem automacao (`AUTOMATION_MODE_UNSPECIFIED`): Jules
+nao recebe autorizacao para criar PR, publicar commits ou alterar o repositorio local durante
+spec/review. Ambas as sessoes tambem definem `requirePlanApproval: false`, para que a API
+auto-aprove o plano em vez de parar por uma aprovação manual.
 
 ## Instalacao
 
@@ -100,15 +104,33 @@ uma sessao interrompida sem criar outra.
 ## Lifecycle do Jules
 
 Para cada spec ou review, o client cria uma unica sessao, persiste imediatamente `session_id` e
-URL e consulta seu estado ate um terminal. Os estados oficiais nao terminais (`QUEUED`,
-`PLANNING`, `AWAITING_PLAN_APPROVAL`, `AWAITING_USER_FEEDBACK`, `IN_PROGRESS` e `PAUSED`) continuam
-em polling; `COMPLETED` recupera a ultima `agentMessage` das activities; `FAILED` e `CANCELLED`
-interrompem com erro que inclui o ID da sessao. Tambem tratamos `CANCELLED` de forma compatível caso
-seja devolvido pelo serviço.
+URL e consulta seu estado ate uma decisão. Os estados de processamento (`QUEUED`, `PLANNING` e
+`IN_PROGRESS`) continuam em polling; `COMPLETED` recupera a ultima `agentMessage` das activities.
+Estados que aguardam interação humana e os estados de falha encerram a operação sem criar outra
+sessão.
 
 O intervalo, timeout global e retentativas de consulta ficam em `integrations.jules`. O default é
 15 s, 1800 s e 3 retentativas, respectivamente. Apenas consultas transitórias (rede, 408, 429 e
 5xx) recebem retry, com backoff exponencial simples; criar sessão nunca é repetido automaticamente.
+`QUEUED`, `PLANNING` e `IN_PROGRESS` continuam em polling. `AWAITING_USER_FEEDBACK`, `PAUSED` e
+`AWAITING_PLAN_APPROVAL` encerram imediatamente em `NEEDS_HUMAN`, preservando o ID/URL da sessão
+e uma mensagem que explica a intervenção necessária. `FAILED` e `CANCELLED` encerram em `FAILED`.
+
+## Review e Pull Request
+
+Depois do push e da criação do PR pelo `gh` autenticado, o Jules recebe uma nova sessão de review
+com a feature branch como `startingBranch`, a task, a spec, o repositório, as branches base/feature,
+o PR, o diff e os resultados das validações. O resultado deve ser um JSON com `decision`
+(`APPROVED`, `CHANGES_REQUESTED` ou `NEEDS_HUMAN`), `summary`, `findings`, `blocking_findings` e
+`suggestions`. Resposta malformada ou contraditória vira `NEEDS_HUMAN`; o orquestrador nunca infere
+aprovação de texto livre. `CHANGES_REQUESTED` não inicia uma nova rodada do Codex nesta V1.
+
+`APPROVED` e `CHANGES_REQUESTED` são estados internos do orquestrador, não GitHub Pull Request
+Reviews formais. A V1 não chama APIs de approve/request-changes, não usa bot/GitHub App e não faz
+auto-merge. O PR é criado pela identidade autenticada no `gh`. Para um ruleset inicial, recomenda-se:
+PR obrigatório para merge, 0 approvals obrigatórios, bloquear deleções e force pushes, exigir
+resolução de conversas, sem bypass de IA/bot e sem status checks obrigatórios por enquanto. Uma
+integração com GitHub App para reviews formais é evolução posterior.
 
 ## Configuracao por repositorio
 
@@ -155,6 +177,10 @@ ruff check .
 mypy src/orchestrator
 pytest
 ```
+
+O `pytest` já configura `--basetemp=.pytest-tmp/run`, um diretório relativo ao projeto ignorado
+pelo Git. Isso evita a dependência de `%LOCALAPPDATA%\\Temp\\pytest-of-...` no Windows; basta executar
+`python -m pytest`, sem workaround adicional.
 
 ## Arquitetura
 
