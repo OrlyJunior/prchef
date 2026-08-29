@@ -52,8 +52,11 @@ execucao, conecte o repositorio ao Jules. Sem `integrations.jules.source`, o cli
 
 ## Banco e migrations
 
-Crie/atualize o schema antes da primeira execucao. O Alembic le
-`ORCHESTRATOR_DATABASE_URL` do ambiente ou do arquivo `.env`:
+No startup, os comandos da CLI aplicam automaticamente todas as migrations pendentes antes de
+acessar o banco. Se uma migration falhar, o comando aborta com erro claro. O Alembic le
+`ORCHESTRATOR_DATABASE_URL` do ambiente ou do arquivo `.env`.
+
+O comando manual continua disponível para provisionamento e diagnóstico:
 
 ```bash
 alembic upgrade head
