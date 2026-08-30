@@ -307,9 +307,9 @@ class FakeClientFactory:
         self.github = FakeGitHubClient()
         self.commands = FakeCommandClient()
 
-    def create(self, config: ProjectConfig) -> SimpleNamespace:
+    def create(self, config: ProjectConfig, *, include_jules: bool = True) -> SimpleNamespace:
         return SimpleNamespace(
-            jules=self.jules,
+            jules=self.jules if include_jules else None,
             codex=self.codex,
             git=self.git,
             github=self.github,
