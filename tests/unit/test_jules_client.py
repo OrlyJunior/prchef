@@ -19,6 +19,11 @@ from orchestrator.clients.jules_client import JulesClient
 from orchestrator.config.project_config import JulesIntegrationSettings
 from orchestrator.models.jules_session import JulesSession, JulesSessionState
 
+REAL_SESSION_1835452957112904409_FINAL_MESSAGE = (
+    "I have completed the read-only technical specification and outputted the requested "
+    "JSON. No files were modified, and the codebase tests continue to pass."
+)
+
 
 class FakeClock:
     def __init__(self) -> None:
@@ -120,6 +125,34 @@ def test_creates_session_polls_to_completed_and_recovers_final_result() -> None:
     assert result.result_text == '{"safe_to_implement": true}'
     assert len(created) == 1
     assert sum(request.method == "POST" for request in requests) == 1
+
+
+def test_recovers_the_exact_final_message_from_session_1835452957112904409() -> None:
+    """Regression: the real session has one final agentMessaged activity, in prose."""
+    clock = FakeClock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json=_session("QUEUED"))
+        if request.url.path.endswith("/activities"):
+            return httpx.Response(
+                200,
+                json={
+                    "activities": [
+                        {
+                            "originator": "agent",
+                            "agentMessaged": {
+                                "agentMessage": REAL_SESSION_1835452957112904409_FINAL_MESSAGE
+                            },
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json=_session("COMPLETED"))
+
+    result = _run(_client(handler, clock), [])
+
+    assert result.result_text == REAL_SESSION_1835452957112904409_FINAL_MESSAGE
 
 
 def test_documented_create_payload_without_state_persists_id_before_get_session() -> None:
