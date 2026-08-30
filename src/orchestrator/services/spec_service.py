@@ -78,5 +78,11 @@ Return exactly one JSON object with this shape:
   "ambiguities": ["string"],
   "safe_to_implement": true
 }}
+OUTPUT CONTRACT:
+- Your final Jules agent message itself must be that JSON object.
+- Return plain valid JSON only: no Markdown fence, heading, explanation, status, or
+  prose before or after it.
+- Do not claim that JSON was returned in a tool result, plan, artifact, or completion
+  note; include it directly in the final agent message.
 Set safe_to_implement to false if an ambiguity prevents safe implementation.
 """
