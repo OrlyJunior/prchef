@@ -22,6 +22,11 @@ from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import WorkflowStatus
 from orchestrator.repositories.workflow_repository import WorkflowRepository
 from orchestrator.runtime_logging import configure_logging, redact_text
+from orchestrator.services.debug_service import (
+    DebugExecutionError,
+    DebugService,
+    parse_debug_stage,
+)
 from orchestrator.services.task_provider import (
     GitHubIssueTaskProvider,
     TaskProvider,
@@ -133,6 +138,26 @@ def _task_provider(
     )
 
 
+def _debug_task_provider(settings: Settings, execution: WorkflowExecution) -> TaskProvider:
+    source = execution.task_source.casefold()
+    if source == "trello":
+        return TrelloTaskProvider(TrelloClient(settings.trello_api_key, settings.trello_token))
+    if source == "github":
+        snapshot = execution.task_snapshot or {}
+        repository = snapshot.get("repository")
+        metadata = snapshot.get("metadata")
+        if not isinstance(repository, str) or not repository.strip():
+            repository = metadata.get("repository") if isinstance(metadata, dict) else None
+        if not isinstance(repository, str) or not repository.strip():
+            raise ConfigurationError(
+                "task-loading debug for GitHub requires repository in persisted task_snapshot"
+            )
+        return GitHubIssueTaskProvider(
+            GitHubIssueClient(CommandClient()), repository.strip()
+        )
+    raise ConfigurationError(f"Unsupported persisted task source: {execution.task_source}")
+
+
 @app.command()
 def run(
     trello_card: Annotated[
@@ -188,6 +213,83 @@ def run(
     _print_final_summary(execution)
     if execution.status not in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def debug(
+    execution_id: Annotated[
+        str, typer.Option("--execution-id", "-e", help="Persisted execution to inspect")
+    ],
+    stage: Annotated[
+        str,
+        typer.Option(
+            "--stage",
+            "-s",
+            help="Stage: task-loading, spec-generation, implementation, validation, or review",
+        ),
+    ],
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Global YAML configuration")
+    ] = None,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show additional subprocess and retry details")
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Validate stage inputs and report the planned operation without executing it",
+        ),
+    ] = False,
+) -> None:
+    try:
+        debug_stage = parse_debug_stage(stage)
+    except DebugExecutionError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--stage") from exc
+
+    settings = Settings()
+    if config is not None:
+        settings.config_file = config
+    configure_logging(verbose=verbose, configured_level=settings.log_level)
+    workflow_repository = _migrated_repository(settings)
+    try:
+        execution = workflow_repository.get_execution(execution_id)
+    except KeyError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    logger.info(
+        "[debug] %s stage for execution %s%s",
+        debug_stage.value,
+        execution.id,
+        " (dry-run)" if dry_run else "",
+    )
+    service = DebugService(
+        config_loader=ProjectConfigLoader(settings.config_file),
+        client_factory=ClientFactory(settings.jules_api_key),
+        task_provider_factory=lambda item: _debug_task_provider(settings, item),
+    )
+    try:
+        result = service.execute(execution, debug_stage, dry_run=dry_run)
+    except Exception as exc:
+        message = redact_text(str(exc))
+        logger.error("[debug] %s failed: %s", debug_stage.value, message)
+        typer.echo(
+            json.dumps(
+                {
+                    "execution_id": execution.id,
+                    "stage": debug_stage.value,
+                    "dry_run": dry_run,
+                    "execution_mutated": False,
+                    "error": message,
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=_json_default,
+            )
+        )
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
 
 
 @app.command()
