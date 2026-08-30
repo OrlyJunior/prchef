@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -108,6 +109,83 @@ def test_windows_native_shim_can_run_from_path(
 
     assert result.success
     assert result.stdout.strip() == "argument with spaces"
+
+
+def test_launch_diagnostics_log_resolved_command_without_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    target_logger = logging.getLogger(command_client.__name__)
+    previous_propagation = target_logger.propagate
+    previous_disabled = target_logger.disabled
+    target_logger.addHandler(caplog.handler)
+    target_logger.propagate = False
+    target_logger.disabled = False
+    try:
+        monkeypatch.setattr(command_client, "_is_windows", lambda: True)
+        monkeypatch.setattr(
+            command_client.shutil,
+            "which",
+            lambda candidate, path=None: "C:\\npm\\codex.cmd",
+        )
+        monkeypatch.setattr(
+            command_client.subprocess,
+            "run",
+            lambda command, **kwargs: _completed(command),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger=target_logger.name):
+            CommandClient().run(
+                ["codex", "exec", "--prompt", "prompt-argument", "argument with spaces"],
+                cwd=tmp_path,
+                input_text="private stdin prompt",
+            )
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.propagate = previous_propagation
+        target_logger.disabled = previous_disabled
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[command] Resolved executable: C:\\npm\\codex.cmd" in messages
+    assert f"[command] Working directory: {tmp_path.resolve()}" in messages
+    assert (
+        "[command] Arguments: exec --prompt [REDACTED] argument with spaces" in messages
+    )
+    assert "private stdin prompt" not in caplog.text
+
+
+def test_file_not_found_includes_safe_os_error_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    target_logger = logging.getLogger(command_client.__name__)
+    previous_propagation = target_logger.propagate
+    previous_disabled = target_logger.disabled
+    target_logger.addHandler(caplog.handler)
+    target_logger.propagate = False
+    target_logger.disabled = False
+    try:
+        error = FileNotFoundError(2, "No such file", "missing-tool")
+        error.winerror = 2  # type: ignore[attr-defined]
+
+        def missing(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            raise error
+
+        monkeypatch.setattr(command_client.subprocess, "run", missing)
+
+        with caplog.at_level(logging.INFO, logger=target_logger.name):
+            with pytest.raises(CommandExecutionError, match="Executable not found: missing-tool"):
+                CommandClient().run(["missing-tool"], cwd=tmp_path)
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.propagate = previous_propagation
+        target_logger.disabled = previous_disabled
+
+    assert "filename='missing-tool'" in caplog.text
+    assert "errno=2" in caplog.text
+    assert "winerror=2" in caplog.text
 
 
 def test_missing_executable_keeps_existing_error_semantics(

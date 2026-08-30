@@ -51,7 +51,18 @@ class CommandClient:
     ) -> CommandResult:
         resolved_command = self._resolve_command(command, cwd=cwd, env=env)
         started = time.monotonic()
+        resolved_executable = resolved_command[0] if resolved_command else "<none>"
         logger.debug("[command] Running: %s", format_command(command))
+        logger.debug(
+            "[command] Resolved executable: %s",
+            format_command([resolved_executable]),
+        )
+        try:
+            effective_cwd = cwd.resolve()
+        except (OSError, RuntimeError):
+            effective_cwd = cwd
+        logger.debug("[command] Working directory: %s", effective_cwd)
+        logger.debug("[command] Arguments: %s", format_command(resolved_command[1:]))
         stop_heartbeat = threading.Event()
         heartbeat_thread: threading.Thread | None = None
         if on_progress is not None and heartbeat_interval_seconds > 0:
@@ -79,6 +90,10 @@ class CommandClient:
                 shell=False,
             )
         except FileNotFoundError as exc:
+            details = self._os_error_details(exc)
+            logger.error(
+                "[command] Executable not found: %s (%s)", command[0], details
+            )
             raise CommandExecutionError(f"Executable not found: {command[0]}") from exc
         except subprocess.TimeoutExpired as exc:
             raise CommandExecutionError(
@@ -145,3 +160,11 @@ class CommandClient:
             if key.casefold() == name.casefold():
                 return value
         return None
+
+    @staticmethod
+    def _os_error_details(error: OSError) -> str:
+        details = [f"filename={error.filename!r}", f"errno={error.errno!r}"]
+        winerror = getattr(error, "winerror", None)
+        if winerror is not None:
+            details.append(f"winerror={winerror!r}")
+        return ", ".join(details)
