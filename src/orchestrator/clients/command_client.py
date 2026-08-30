@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import subprocess
 import threading
 import time
@@ -12,6 +14,12 @@ from orchestrator.clients.exceptions import CommandExecutionError
 from orchestrator.runtime_logging import format_command
 
 logger = logging.getLogger(__name__)
+
+_WINDOWS_EXECUTABLE_SUFFIXES = (".exe", ".com", ".cmd", ".bat")
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
 
 
 @dataclass(slots=True)
@@ -41,6 +49,7 @@ class CommandClient:
         on_progress: Callable[[float], None] | None = None,
         heartbeat_interval_seconds: float = 60.0,
     ) -> CommandResult:
+        resolved_command = self._resolve_command(command, cwd=cwd, env=env)
         started = time.monotonic()
         logger.debug("[command] Running: %s", format_command(command))
         stop_heartbeat = threading.Event()
@@ -57,7 +66,7 @@ class CommandClient:
             heartbeat_thread.start()
         try:
             completed = subprocess.run(
-                list(command),
+                resolved_command,
                 cwd=cwd,
                 input=input_text,
                 capture_output=True,
@@ -94,3 +103,45 @@ class CommandClient:
             stderr=completed.stderr,
             duration_seconds=time.monotonic() - started,
         )
+
+    @staticmethod
+    def _resolve_command(
+        command: Sequence[str], *, cwd: Path, env: Mapping[str, str] | None
+    ) -> list[str]:
+        """Resolve native Windows command shims without enabling shell parsing."""
+        resolved = list(command)
+        if not resolved or not _is_windows():
+            return resolved
+
+        executable = resolved[0]
+        if "/" in executable or "\\" in executable:
+            return resolved
+
+        suffix = Path(executable).suffix.casefold()
+        if suffix and suffix not in _WINDOWS_EXECUTABLE_SUFFIXES:
+            return resolved
+
+        environment = os.environ if env is None else env
+        path = CommandClient._environment_value(environment, "PATH")
+        search_path = str(cwd)
+        if path:
+            search_path = os.pathsep.join((search_path, path))
+
+        candidates = (
+            (executable,)
+            if suffix
+            else tuple(f"{executable}{item}" for item in _WINDOWS_EXECUTABLE_SUFFIXES)
+        )
+        for candidate in candidates:
+            located = shutil.which(candidate, path=search_path)
+            if located is not None:
+                resolved[0] = located
+                return resolved
+        return resolved
+
+    @staticmethod
+    def _environment_value(environment: Mapping[str, str], name: str) -> str | None:
+        for key, value in environment.items():
+            if key.casefold() == name.casefold():
+                return value
+        return None
