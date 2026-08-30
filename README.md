@@ -28,6 +28,28 @@ O adaptador Codex usa o modo oficial nao interativo `codex exec`, com workspace 
 repositorio. Jules cria uma sessao remota oficial, persiste ID e URL, acompanha a execucao por
 polling e recupera a ultima mensagem do agente quando a sessao chega a `COMPLETED`.
 
+### Diagnostico do sandbox Codex no Windows
+
+O orquestrador preserva `--sandbox workspace-write`; ele nunca seleciona automaticamente acesso
+total nem altera ACLs do repositorio. Se a CLI do Codex informar uma negacao de escrita do sandbox,
+o workflow falha com o caminho do repositorio e o modo de sandbox em vez de informar apenas que o
+Codex nao alterou arquivos.
+
+Para isolar o problema, execute no diretorio do repositorio e solicite a criacao e remocao de um
+arquivo descartavel no diretorio afetado:
+
+```powershell
+@'
+Crie e remova apenas o arquivo descartavel codex-sandbox-probe.txt neste diretorio.
+Nao altere nenhum outro arquivo.
+'@ | codex exec --sandbox workspace-write -
+```
+
+No Windows, a configuracao oficial tambem oferece os modos sandboxed `elevated` e `unelevated`.
+Qualquer mudanca entre eles deve ser uma decisao explicita do usuario ou administrador; o
+orquestrador nao faz esse fallback automaticamente. Consulte a documentacao do sandbox Windows do
+[Codex](https://learn.chatgpt.com/docs/windows/windows-sandbox).
+
 O orquestrador nao usa um launcher, `stdin` ou `stdout` para o Jules. A CLI autenticada serve
 para login e inspecao manual; o ciclo programatico usa a API oficial de sessoes, que oferece
 estados e atividades estruturados. Por isso a chave deve estar no ambiente do processo
