@@ -28,6 +28,15 @@ O adaptador Codex usa o modo oficial nao interativo `codex exec`, com workspace 
 repositorio. Jules cria uma sessao remota oficial, persiste ID e URL, acompanha a execucao por
 polling e recupera a ultima mensagem do agente quando a sessao chega a `COMPLETED`.
 
+Por padrao, o Codex roda com `--sandbox workspace-write`. Para optar explicitamente pela revisao
+automatica de pedidos de aprovacao da CLI, configure `approval_policy: approve-for-me` em
+`integrations.codex`. Nesse modo o orquestrador invoca `codex exec --approve-for-me` sem
+`--sandbox`: a CLI associa esse modo a `workspace-write` e rejeita a combinacao dos dois flags.
+Isso aumenta a autonomia para escalacoes suportadas, mas nao equivale a `danger-full-access`.
+O orquestrador nunca troca de politica automaticamente apos uma falha.
+Consulte a [documentacao oficial de aprovacoes do Codex](https://learn.chatgpt.com/docs/agent-approvals-security)
+para os limites e criterios da revisao automatica.
+
 ### Diagnostico do sandbox Codex no Windows
 
 O orquestrador preserva `--sandbox workspace-write`; ele nunca seleciona automaticamente acesso

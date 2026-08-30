@@ -241,6 +241,35 @@ def test_codex_client_delegates_its_configured_command_to_command_client(tmp_pat
     command, kwargs = commands.calls[0]
     assert command[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
     assert command[-1] == "-"
+    assert "--approve-for-me" not in command
+    assert kwargs["input_text"] == "private prompt"
+
+
+def test_codex_client_approve_for_me_replaces_explicit_sandbox(tmp_path: Path) -> None:
+    commands = RecordingCommandClient()
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        [
+            "codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--output-last-message",
+            "{output_file}",
+            "-",
+        ],
+        timeout_seconds=30,
+        approval_policy="approve-for-me",
+    )
+
+    client.implement("private prompt", tmp_path)
+
+    command, kwargs = commands.calls[0]
+    assert command[:3] == ["codex", "exec", "--approve-for-me"]
+    assert "--sandbox" not in command
+    assert "--output-last-message" in command
+    assert "danger-full-access" not in command
+    assert command[-1] == "-"
     assert kwargs["input_text"] == "private prompt"
 
 

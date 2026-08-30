@@ -47,6 +47,32 @@ class CommandIntegrationSettings(BaseModel):
     timeout_seconds: int = 1800
 
 
+class CodexIntegrationSettings(CommandIntegrationSettings):
+    """Codex-specific controls layered over the generic command settings."""
+
+    approval_policy: Literal["approve-for-me"] | None = None
+
+    @model_validator(mode="after")
+    def validate_approval_policy(self) -> CodexIntegrationSettings:
+        if self.approval_policy is None:
+            return self
+
+        sandbox_mode: str | None = None
+        for index, argument in enumerate(self.command):
+            if argument == "--sandbox" and index + 1 < len(self.command):
+                sandbox_mode = self.command[index + 1]
+                break
+            if argument.startswith("--sandbox="):
+                sandbox_mode = argument.partition("=")[2]
+                break
+        if sandbox_mode is not None and sandbox_mode != "workspace-write":
+            raise ValueError(
+                "integrations.codex.approval_policy='approve-for-me' requires "
+                "the workspace-write sandbox"
+            )
+        return self
+
+
 class JulesIntegrationSettings(BaseModel):
     source: str | None = None
     poll_interval_seconds: float = Field(default=15.0, gt=0)
@@ -57,8 +83,8 @@ class JulesIntegrationSettings(BaseModel):
 
 class IntegrationsSettings(BaseModel):
     jules: JulesIntegrationSettings = Field(default_factory=JulesIntegrationSettings)
-    codex: CommandIntegrationSettings = Field(
-        default_factory=lambda: CommandIntegrationSettings(
+    codex: CodexIntegrationSettings = Field(
+        default_factory=lambda: CodexIntegrationSettings(
             command=[
                 "codex",
                 "exec",

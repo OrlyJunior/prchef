@@ -34,6 +34,7 @@ class ClientFactory:
                 commands,
                 config.integrations.codex.command,
                 config.integrations.codex.timeout_seconds,
+                approval_policy=config.integrations.codex.approval_policy,
             ),
             git=GitClient(commands, config.path),
             github=GitHubClient(
