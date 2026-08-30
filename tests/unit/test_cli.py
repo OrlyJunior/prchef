@@ -11,12 +11,20 @@ import pytest
 from sqlalchemy import inspect
 from typer.testing import CliRunner
 
+import orchestrator
 from orchestrator.cli import main
 from orchestrator.config.database import build_engine
 from orchestrator.config.settings import Settings
 from orchestrator.models import WorkflowExecution, WorkflowStage, WorkflowStatus
 
 runner = CliRunner()
+
+
+def test_cli_version_option() -> None:
+    result = runner.invoke(main.app, ["--version"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{orchestrator.__version__}\n"
 
 
 class StubWorkflowService:

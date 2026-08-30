@@ -11,6 +11,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.exc import OperationalError
 
+import orchestrator
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.clients.github_issue_client import GitHubIssueClient
@@ -47,6 +48,27 @@ app = typer.Typer(
 
 
 logger = logging.getLogger(__name__)
+
+
+def version_callback(value: bool) -> None:
+    if value:
+        typer.echo(orchestrator.__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def callback(
+    version: Annotated[
+        bool | None,
+        typer.Option(
+            "--version",
+            callback=version_callback,
+            is_eager=True,
+            help="Show the package version and exit.",
+        ),
+    ] = None,
+) -> None:
+    pass
 
 
 def _json_default(value: Any) -> str:
