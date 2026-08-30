@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 import time
 from collections.abc import Sequence
@@ -11,6 +12,10 @@ from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.runtime_logging import format_duration, summarize_text
 
 logger = logging.getLogger(__name__)
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
 
 
 class CodexClient:
@@ -53,8 +58,17 @@ class CodexClient:
                 if output_file.exists()
                 else result.stdout.strip()
             )
+            sandbox_write_error = self._sandbox_write_error(
+                repository_path,
+                summary,
+                result.stdout,
+                result.stderr,
+            )
             if result.success:
-                logger.info("[codex] Completed in %s", format_duration(result.duration_seconds))
+                if sandbox_write_error is None:
+                    logger.info("[codex] Completed in %s", format_duration(result.duration_seconds))
+                else:
+                    logger.error("[codex] %s", sandbox_write_error)
             else:
                 detail = summarize_text(result.stderr or result.stdout)
                 logger.error(
@@ -64,9 +78,62 @@ class CodexClient:
                     detail or "no output",
                 )
             return ImplementationResult(
-                success=result.success,
+                success=result.success and sandbox_write_error is None,
                 summary=summary,
                 error_message=None
-                if result.success
-                else (result.stderr.strip() or result.stdout.strip() or "Codex failed"),
+                if result.success and sandbox_write_error is None
+                else (
+                    sandbox_write_error
+                    or result.stderr.strip()
+                    or result.stdout.strip()
+                    or "Codex failed"
+                ),
             )
+
+    def _sandbox_write_error(
+        self,
+        repository_path: Path,
+        summary: str,
+        stdout: str,
+        stderr: str,
+    ) -> str | None:
+        if not self._reported_sandbox_write_denial(summary, stdout, stderr):
+            return None
+
+        try:
+            repository = repository_path.resolve()
+        except OSError:
+            repository = repository_path
+        sandbox_name = "Codex Windows sandbox" if _is_windows() else "Codex sandbox"
+        return (
+            f"{sandbox_name} could not modify workspace files "
+            f"(repository: {repository}; sandbox: {self._sandbox_mode()}). "
+            "The Codex CLI reported a sandbox write denial. Run `codex exec --sandbox "
+            "workspace-write -` from the repository and ask it to create a disposable file in "
+            "the affected directory."
+        )
+
+    @staticmethod
+    def _reported_sandbox_write_denial(*messages: str) -> bool:
+        text = "\n".join(messages).casefold()
+        write_marker = any(
+            marker in text
+            for marker in (
+                "failed to write file",
+                "write access",
+                "requested file path",
+                "access to the path",
+                "could not modify",
+            )
+        )
+        sandbox_marker = "sandbox" in text
+        denial_marker = "denied" in text or "policy_denied" in text
+        return write_marker and sandbox_marker and denial_marker
+
+    def _sandbox_mode(self) -> str:
+        for index, argument in enumerate(self._command):
+            if argument == "--sandbox" and index + 1 < len(self._command):
+                return self._command[index + 1]
+            if argument.startswith("--sandbox="):
+                return argument.partition("=")[2] or "unspecified"
+        return "unspecified"

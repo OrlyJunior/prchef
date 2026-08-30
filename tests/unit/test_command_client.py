@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from orchestrator.clients import command_client
+from orchestrator.clients import codex_client, command_client
 from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.command_client import CommandClient, CommandResult
 from orchestrator.clients.exceptions import CommandExecutionError
@@ -209,16 +209,21 @@ def test_missing_executable_keeps_existing_error_semantics(
 
 
 class RecordingCommandClient:
-    def __init__(self) -> None:
+    def __init__(
+        self, *, exit_code: int = 0, stdout: str = "completed", stderr: str = ""
+    ) -> None:
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
+        self._exit_code = exit_code
+        self._stdout = stdout
+        self._stderr = stderr
 
     def run(self, command: list[str], **kwargs: Any) -> CommandResult:
         self.calls.append((command, kwargs))
         return CommandResult(
             command=command,
-            exit_code=0,
-            stdout="completed",
-            stderr="",
+            exit_code=self._exit_code,
+            stdout=self._stdout,
+            stderr=self._stderr,
             duration_seconds=0.1,
         )
 
@@ -237,3 +242,71 @@ def test_codex_client_delegates_its_configured_command_to_command_client(tmp_pat
     assert command[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
     assert command[-1] == "-"
     assert kwargs["input_text"] == "private prompt"
+
+
+def test_codex_client_surfaces_windows_sandbox_write_denial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(codex_client, "_is_windows", lambda: True)
+    commands = RecordingCommandClient(
+        stdout="Creation failed because sandbox access to the requested file path was denied."
+    )
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    result = client.implement("private prompt", tmp_path)
+
+    assert not result.success
+    assert result.summary == (
+        "Creation failed because sandbox access to the requested file path was denied."
+    )
+    assert result.error_message is not None
+    assert "Codex Windows sandbox could not modify workspace files" in result.error_message
+    assert f"repository: {tmp_path.resolve()}" in result.error_message
+    assert "sandbox: workspace-write" in result.error_message
+    assert "codex exec --sandbox workspace-write -" in result.error_message
+    assert "danger-full-access" not in commands.calls[0][0]
+
+
+def test_codex_client_surfaces_non_windows_sandbox_write_denial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(codex_client, "_is_windows", lambda: False)
+    commands = RecordingCommandClient(
+        stdout="Creation failed because sandbox access to the requested file path was denied."
+    )
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    result = client.implement("private prompt", tmp_path)
+
+    assert not result.success
+    assert result.error_message is not None
+    assert "Codex sandbox could not modify workspace files" in result.error_message
+    assert "Windows" not in result.error_message
+
+
+def test_codex_client_recognizes_policy_denied_sandbox_write_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(codex_client, "_is_windows", lambda: True)
+    commands = RecordingCommandClient(
+        stdout="codex_sandboxing policy_denied: Failed to write file output.txt"
+    )
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    result = client.implement("private prompt", tmp_path)
+
+    assert not result.success
+    assert result.error_message is not None
+    assert "Codex Windows sandbox" in result.error_message
