@@ -6,6 +6,7 @@ import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.models.implementation_result import ImplementationResult
@@ -24,15 +25,17 @@ class CodexClient:
         command_client: CommandClient,
         command: Sequence[str],
         timeout_seconds: int,
+        approval_policy: Literal["approve-for-me"] | None = None,
     ) -> None:
         self._commands = command_client
         self._command = list(command)
         self._timeout_seconds = timeout_seconds
+        self._approval_policy = approval_policy
 
     def implement(self, prompt: str, repository_path: Path) -> ImplementationResult:
         with tempfile.TemporaryDirectory(prefix="orchestrator-codex-") as temp_root:
             output_file = Path(temp_root) / "last-message.txt"
-            command = [part.replace("{output_file}", str(output_file)) for part in self._command]
+            command = self._execution_command(output_file)
             logger.info("[codex] Starting implementation")
             started = time.monotonic()
             try:
@@ -131,9 +134,37 @@ class CodexClient:
         return write_marker and sandbox_marker and denial_marker
 
     def _sandbox_mode(self) -> str:
+        if self._approval_policy == "approve-for-me":
+            return "workspace-write"
         for index, argument in enumerate(self._command):
             if argument == "--sandbox" and index + 1 < len(self._command):
                 return self._command[index + 1]
             if argument.startswith("--sandbox="):
                 return argument.partition("=")[2] or "unspecified"
         return "unspecified"
+
+    def _execution_command(self, output_file: Path) -> list[str]:
+        command = [part.replace("{output_file}", str(output_file)) for part in self._command]
+        if self._approval_policy is None:
+            return command
+
+        command = self._without_explicit_sandbox(command)
+        if "--approve-for-me" not in command:
+            command.insert(min(2, len(command)), "--approve-for-me")
+        return command
+
+    @staticmethod
+    def _without_explicit_sandbox(command: list[str]) -> list[str]:
+        filtered: list[str] = []
+        skip_next = False
+        for argument in command:
+            if skip_next:
+                skip_next = False
+                continue
+            if argument == "--sandbox":
+                skip_next = True
+                continue
+            if argument.startswith("--sandbox="):
+                continue
+            filtered.append(argument)
+        return filtered

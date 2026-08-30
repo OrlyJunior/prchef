@@ -33,6 +33,9 @@ defaults:
     codex:
       command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
       timeout_seconds: 3600
+      # Opcional: usa o modo de revisao automatica do Codex CLI.
+      # Ele implica workspace-write e nao pode ser combinado com --sandbox.
+      # approval_policy: approve-for-me
     github:
       command: [gh]
       timeout_seconds: 120
