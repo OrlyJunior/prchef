@@ -27,7 +27,7 @@ class ValidationService:
         commands = [list(command) for command in settings.commands]
         if settings.auto_detect:
             for detected in self._detect(repository_path):
-                if detected not in commands:
+                if not self._is_redundant_detected_command(detected, commands):
                     commands.append(detected)
         if not commands:
             message = "No validation commands configured or detected"
@@ -84,6 +84,22 @@ class ValidationService:
     def _is_test_command(command: list[str]) -> bool:
         normalized = " ".join(command).casefold()
         return any(token in normalized for token in ("pytest", " test", "test ", "test:"))
+
+    @staticmethod
+    def _is_redundant_detected_command(
+        detected: list[str], configured: list[list[str]]
+    ) -> bool:
+        if detected in configured:
+            return True
+        return ValidationService._is_mypy_command(detected) and any(
+            ValidationService._is_mypy_command(command) for command in configured
+        )
+
+    @staticmethod
+    def _is_mypy_command(command: list[str]) -> bool:
+        if len(command) >= 3 and command[1] == "-m":
+            return command[2].casefold() == "mypy"
+        return bool(command) and Path(command[0]).stem.casefold() == "mypy"
 
     def _detect(self, path: Path) -> list[list[str]]:
         commands: list[list[str]] = []

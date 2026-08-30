@@ -107,9 +107,12 @@ alembic upgrade head
 ## Uso
 
 ```bash
+orchestrator --version
 orchestrator run --trello-card CARD_ID
 orchestrator run --github-issue 42 --repository owner/repository
 ```
+
+Use `orchestrator --version` para exibir a versao atual do pacote.
 
 Overrides uteis:
 
