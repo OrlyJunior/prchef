@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 
 from orchestrator.clients.command_client import CommandClient, CommandResult
 from orchestrator.clients.exceptions import GitHubClientError
 from orchestrator.models.pull_request import PullRequest
+
+logger = logging.getLogger(__name__)
 
 
 class GitHubClient:
@@ -30,6 +33,7 @@ class GitHubClient:
         base_branch: str,
         head_branch: str,
     ) -> PullRequest:
+        logger.info("[github] Creating pull request from branch: %s", head_branch)
         created = self._run(
             "pr",
             "create",
@@ -61,13 +65,19 @@ class GitHubClient:
         )
         try:
             data = json.loads(viewed.stdout)
-            return PullRequest(
+            pull_request = PullRequest(
                 number=int(data["number"]),
                 url=str(data["url"]),
                 title=str(data["title"]),
                 base_branch=str(data["baseRefName"]),
                 head_branch=str(data["headRefName"]),
             )
+            logger.info(
+                "[github] Pull request created: #%s %s",
+                pull_request.number,
+                pull_request.url,
+            )
+            return pull_request
         except (ValueError, KeyError, TypeError) as exc:
             raise GitHubClientError(f"Invalid GitHub CLI response: {viewed.stdout}") from exc
 

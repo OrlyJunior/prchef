@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any
@@ -20,6 +21,7 @@ from orchestrator.config.settings import Settings
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import WorkflowStatus
 from orchestrator.repositories.workflow_repository import WorkflowRepository
+from orchestrator.runtime_logging import configure_logging, redact_text
 from orchestrator.services.task_provider import (
     GitHubIssueTaskProvider,
     TaskProvider,
@@ -34,12 +36,24 @@ app = typer.Typer(
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 def _json_default(value: Any) -> str:
     return str(value)
 
 
 def _print_execution(execution: WorkflowExecution) -> None:
     typer.echo(json.dumps(asdict(execution), ensure_ascii=False, indent=2, default=_json_default))
+
+
+def _print_final_summary(execution: WorkflowExecution) -> None:
+    logger.info("[workflow] Finished")
+    logger.info("Status: %s", execution.status)
+    logger.info("Stage: %s", execution.current_stage)
+    logger.info("Execution ID: %s", execution.id)
+    if execution.error_message:
+        logger.info("Reason: %s", redact_text(execution.error_message))
 
 
 def _repository(settings: Settings) -> WorkflowRepository:
@@ -141,10 +155,14 @@ def run(
     config: Annotated[
         Path | None, typer.Option("--config", help="Global YAML configuration")
     ] = None,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show additional subprocess and retry details")
+    ] = False,
 ) -> None:
     settings = Settings()
     if config is not None:
         settings.config_file = config
+    configure_logging(verbose=verbose, configured_level=settings.log_level)
     workflow_repository = _migrated_repository(settings)
     config_loader = ProjectConfigLoader(settings.config_file)
     selected_id, provider = _task_provider(
@@ -167,6 +185,7 @@ def run(
         typer.echo(f"Database access failed after migrations: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     _print_execution(execution)
+    _print_final_summary(execution)
     if execution.status not in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:
         raise typer.Exit(code=1)
 
@@ -179,6 +198,7 @@ def show(
     settings = Settings()
     if config is not None:
         settings.config_file = config
+    configure_logging(configured_level=settings.log_level)
     try:
         execution = _migrated_repository(settings).get_execution(execution_id)
     except KeyError as exc:

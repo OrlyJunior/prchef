@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -191,6 +192,28 @@ def test_every_stage_transition_is_persisted_in_order(workflow) -> None:
         WorkflowStage.CREATE_PR,
         WorkflowStage.REVIEW,
     ]
+
+
+def test_workflow_logs_stage_entry_and_completion(
+    workflow, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _, _, _ = workflow
+    target_logger = logging.getLogger("orchestrator.services.workflow_service")
+    target_logger.addHandler(caplog.handler)
+    previous_propagation = target_logger.propagate
+    target_logger.propagate = False
+    try:
+        with caplog.at_level(logging.INFO, logger=target_logger.name):
+            service.run("card-logs")
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.propagate = previous_propagation
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[workflow] Loading trello task card-logs" in messages
+    assert "[workflow] Entering task loading" in messages
+    assert "[workflow] Completed task loading" in messages
+    assert "[workflow] Repository resolved:" in " ".join(messages)
 
 
 def test_pull_request_closes_github_issue_in_same_repository() -> None:

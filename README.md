@@ -101,6 +101,23 @@ As sessoes Jules de spec e review tambem ficam registradas com ID e URL para ins
 O orquestrador ainda nao retoma sessoes apos reinicio, mas esses identificadores permitem localizar
 uma sessao interrompida sem criar outra.
 
+## Observabilidade da CLI
+
+O progresso do workflow e escrito em `stderr`, mantendo o JSON da execucao exclusivamente em
+`stdout` para que possa ser consumido por scripts. Os logs mostram entrada e conclusao de cada
+etapa, transicoes de estado e heartbeats do Jules, execucao das validacoes, branch/commit/push,
+criação do PR e um resumo final mesmo quando o resultado e `FAILED` ou `NEEDS_HUMAN`.
+
+Use `--verbose` para incluir detalhes adicionais de subprocessos e retentativas de polling:
+
+```bash
+orchestrator run --github-issue 42 --repository owner/repository --verbose
+```
+
+Prompts, respostas completas do Codex/Jules e credenciais nao sao incluidos nos logs. O intervalo
+de polling e o timeout do Jules continuam configuraveis em `integrations.jules` (15 s e 1800 s
+por padrao); `--verbose` nao altera o comportamento do workflow.
+
 ## Lifecycle do Jules
 
 Para cada spec ou review, o client cria uma unica sessao, persiste imediatamente `session_id` e

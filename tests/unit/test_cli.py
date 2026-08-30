@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import json
+import logging
 import tomllib
 from pathlib import Path
 from typing import Any
 
+import pytest
 from sqlalchemy import inspect
 from typer.testing import CliRunner
 
 from orchestrator.cli import main
 from orchestrator.config.database import build_engine
 from orchestrator.config.settings import Settings
-from orchestrator.models import WorkflowExecution, WorkflowStatus
+from orchestrator.models import WorkflowExecution, WorkflowStage, WorkflowStatus
 
 runner = CliRunner()
 
@@ -46,6 +49,50 @@ def test_cli_runs_trello_provider(monkeypatch: Any) -> None:
 
     assert result.exit_code == 0, result.output
     assert StubWorkflowService.calls == [("trello", "card-1", None)]
+
+
+def test_cli_keeps_json_on_stdout_and_emits_final_summary_on_stderr(monkeypatch: Any) -> None:
+    _stub_runtime(monkeypatch)
+
+    result = runner.invoke(main.app, ["run", "--trello-card", "card-1"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "APPROVED"
+    assert "[workflow] Finished" in result.stderr
+    assert "Status: APPROVED" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "status", [WorkflowStatus.APPROVED, WorkflowStatus.NEEDS_HUMAN, WorkflowStatus.FAILED]
+)
+def test_final_summary_is_emitted_for_all_terminal_statuses(
+    status: WorkflowStatus, caplog: Any
+) -> None:
+    target_logger = logging.getLogger("orchestrator.cli.main")
+    target_logger.addHandler(caplog.handler)
+    previous_propagation = target_logger.propagate
+    target_logger.propagate = False
+    try:
+        with caplog.at_level(logging.INFO, logger=target_logger.name):
+            main._print_final_summary(
+                WorkflowExecution(
+                    id="execution-1",
+                    status=status,
+                    current_stage=WorkflowStage.GENERATE_SPEC,
+                    error_message=(
+                        "JULES_API_KEY=should-not-appear"
+                        if status is WorkflowStatus.FAILED
+                        else None
+                    ),
+                )
+            )
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.propagate = previous_propagation
+
+    assert "[workflow] Finished" in caplog.text
+    assert f"Status: {status}" in caplog.text
+    assert "should-not-appear" not in caplog.text
 
 
 def test_cli_runs_github_issue_provider(monkeypatch: Any) -> None:

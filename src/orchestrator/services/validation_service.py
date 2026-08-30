@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.config.project_config import ValidationSettings
 from orchestrator.models.validation_result import ValidationCheck, ValidationResult
+from orchestrator.runtime_logging import format_command, format_duration, summarize_text
+
+logger = logging.getLogger(__name__)
 
 
 class ValidationService:
@@ -36,11 +40,28 @@ class ValidationService:
 
         checks: list[ValidationCheck] = []
         for command in commands:
+            command_text = format_command(command)
+            logger.info("[validation] Running: %s", command_text)
             result = self._commands.run(
                 command,
                 cwd=repository_path,
                 timeout_seconds=settings.timeout_seconds,
             )
+            if result.success:
+                logger.info(
+                    "[validation] Passed: %s (%s)",
+                    command_text,
+                    format_duration(result.duration_seconds),
+                )
+            else:
+                output = summarize_text(result.stderr or result.stdout)
+                logger.error(
+                    "[validation] Failed: %s (exit %s, %s): %s",
+                    command_text,
+                    result.exit_code,
+                    format_duration(result.duration_seconds),
+                    output or "no output",
+                )
             checks.append(
                 ValidationCheck(
                     name=" ".join(command),
