@@ -18,13 +18,18 @@ from orchestrator.clients.trello_client import TrelloClient
 from orchestrator.config.database import build_engine, build_session_factory
 from orchestrator.config.project_config import ConfigurationError, ProjectConfigLoader
 from orchestrator.config.settings import Settings
+from orchestrator.models.pull_request import PullRequest
+from orchestrator.models.repository_spec import RepositorySpec
+from orchestrator.models.validation_result import ValidationCheck, ValidationResult
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import WorkflowStatus
 from orchestrator.repositories.workflow_repository import WorkflowRepository
 from orchestrator.runtime_logging import configure_logging, redact_text
 from orchestrator.services.debug_service import (
     DebugExecutionError,
+    DebugInputs,
     DebugService,
+    DebugStage,
     parse_debug_stage,
 )
 from orchestrator.services.task_provider import (
@@ -138,24 +143,73 @@ def _task_provider(
     )
 
 
-def _debug_task_provider(settings: Settings, execution: WorkflowExecution) -> TaskProvider:
-    source = execution.task_source.casefold()
+def _debug_task_provider(
+    settings: Settings, source: str, repository: str | None
+) -> TaskProvider:
+    source = source.casefold()
     if source == "trello":
         return TrelloTaskProvider(TrelloClient(settings.trello_api_key, settings.trello_token))
     if source == "github":
-        snapshot = execution.task_snapshot or {}
-        repository = snapshot.get("repository")
-        metadata = snapshot.get("metadata")
-        if not isinstance(repository, str) or not repository.strip():
-            repository = metadata.get("repository") if isinstance(metadata, dict) else None
         if not isinstance(repository, str) or not repository.strip():
             raise ConfigurationError(
-                "task-loading debug for GitHub requires repository in persisted task_snapshot"
+                "GitHub task input requires --repository owner/repository"
             )
         return GitHubIssueTaskProvider(
             GitHubIssueClient(CommandClient()), repository.strip()
         )
-    raise ConfigurationError(f"Unsupported persisted task source: {execution.task_source}")
+    raise ConfigurationError(f"Unsupported task provider: {source}")
+
+
+def _read_debug_text(path: Path, label: str) -> str:
+    try:
+        value = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise typer.BadParameter(f"Cannot read {label} file {path}: {exc}") from exc
+    if not value.strip():
+        raise typer.BadParameter(f"{label} file must not be empty: {path}")
+    return value
+
+
+def _read_debug_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise typer.BadParameter(f"Cannot parse {label} JSON file {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(f"{label} JSON file must contain an object: {path}")
+    return payload
+
+
+def _read_debug_spec(path: Path) -> RepositorySpec:
+    try:
+        return RepositorySpec(**_read_debug_json(path, "spec"))
+    except (TypeError, ValueError) as exc:
+        raise typer.BadParameter(f"Invalid spec JSON in {path}: {exc}") from exc
+
+
+def _read_debug_validation(path: Path) -> ValidationResult:
+    payload = _read_debug_json(path, "validation")
+    raw_checks = payload.get("checks", [])
+    if not isinstance(raw_checks, list) or not isinstance(payload.get("success"), bool):
+        raise typer.BadParameter(
+            f"Invalid validation JSON in {path}: expected boolean success and checks list"
+        )
+    try:
+        checks = [ValidationCheck(**check) for check in raw_checks]
+        return ValidationResult(
+            success=payload["success"],
+            checks=checks,
+            error_message=payload.get("error_message"),
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        raise typer.BadParameter(f"Invalid validation JSON in {path}: {exc}") from exc
+
+
+def _read_debug_pull_request(path: Path) -> PullRequest:
+    try:
+        return PullRequest(**_read_debug_json(path, "pull-request"))
+    except (TypeError, ValueError) as exc:
+        raise typer.BadParameter(f"Invalid pull-request JSON in {path}: {exc}") from exc
 
 
 @app.command()
@@ -217,9 +271,6 @@ def run(
 
 @app.command()
 def debug(
-    execution_id: Annotated[
-        str, typer.Option("--execution-id", "-e", help="Persisted execution to inspect")
-    ],
     stage: Annotated[
         str,
         typer.Option(
@@ -228,6 +279,58 @@ def debug(
             help="Stage: task-loading, spec-generation, implementation, validation, or review",
         ),
     ],
+    from_execution: Annotated[
+        str | None,
+        typer.Option(
+            "--from-execution",
+            "--execution-id",
+            "-e",
+            help="Optional persisted execution used as read-only input defaults",
+        ),
+    ] = None,
+    trello_card: Annotated[
+        str | None, typer.Option("--trello-card", help="Trello card ID for task loading")
+    ] = None,
+    github_issue: Annotated[
+        int | None, typer.Option("--github-issue", help="GitHub issue number for task loading")
+    ] = None,
+    task_id: Annotated[
+        str | None, typer.Option("--task-id", help="Task ID using configured task.provider")
+    ] = None,
+    task_source: Annotated[
+        str | None, typer.Option("--task-source", help="Task provider: trello or github")
+    ] = None,
+    repository: Annotated[
+        str | None,
+        typer.Option(
+            "--repository",
+            help="Registered repository key/path; required for direct GitHub task loading",
+        ),
+    ] = None,
+    base_branch: Annotated[
+        str | None, typer.Option("--base-branch", help="Base branch context for spec/review")
+    ] = None,
+    feature_branch: Annotated[
+        str | None, typer.Option("--feature-branch", help="Feature branch context for review")
+    ] = None,
+    prompt: Annotated[
+        str | None, typer.Option("--prompt", help="Explicit implementation input")
+    ] = None,
+    prompt_file: Annotated[
+        Path | None, typer.Option("--prompt-file", help="Read explicit implementation input")
+    ] = None,
+    spec_file: Annotated[
+        Path | None, typer.Option("--spec-file", help="JSON RepositorySpec input")
+    ] = None,
+    validation_file: Annotated[
+        Path | None, typer.Option("--validation-file", help="JSON ValidationResult input")
+    ] = None,
+    pull_request_file: Annotated[
+        Path | None, typer.Option("--pull-request-file", help="JSON PullRequest input")
+    ] = None,
+    diff_file: Annotated[
+        Path | None, typer.Option("--diff-file", help="Read implementation diff for review")
+    ] = None,
     config: Annotated[
         Path | None, typer.Option("--config", help="Global YAML configuration")
     ] = None,
@@ -251,33 +354,95 @@ def debug(
     if config is not None:
         settings.config_file = config
     configure_logging(verbose=verbose, configured_level=settings.log_level)
-    workflow_repository = _migrated_repository(settings)
-    try:
-        execution = workflow_repository.get_execution(execution_id)
-    except KeyError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
+
+    origins = sum(value is not None for value in (trello_card, github_issue, task_id))
+    if origins > 1:
+        raise typer.BadParameter(
+            "Provide at most one of --trello-card, --github-issue, or --task-id"
+        )
+    if task_source is not None and task_source.casefold() not in {"trello", "github"}:
+        raise typer.BadParameter("--task-source must be 'trello' or 'github'")
+    if github_issue is not None:
+        task_source = "github"
+        task_id = str(github_issue)
+    elif trello_card is not None:
+        task_source = "trello"
+        task_id = trello_card
+
+    if prompt is not None and prompt_file is not None:
+        raise typer.BadParameter("Use only one of --prompt or --prompt-file")
+    if (
+        (prompt is not None or prompt_file is not None)
+        and debug_stage is not DebugStage.IMPLEMENTATION
+    ):
+        raise typer.BadParameter("--prompt/--prompt-file is only valid for implementation debug")
+    if spec_file is not None and debug_stage not in {
+        DebugStage.IMPLEMENTATION,
+        DebugStage.REVIEW,
+    }:
+        raise typer.BadParameter("--spec-file is only valid for implementation or review debug")
+    if validation_file is not None and debug_stage is not DebugStage.REVIEW:
+        raise typer.BadParameter("--validation-file is only valid for review debug")
+    if pull_request_file is not None and debug_stage is not DebugStage.REVIEW:
+        raise typer.BadParameter("--pull-request-file is only valid for review debug")
+    if diff_file is not None and debug_stage is not DebugStage.REVIEW:
+        raise typer.BadParameter("--diff-file is only valid for review debug")
+
+    prompt_value = prompt
+    if prompt_file is not None:
+        prompt_value = _read_debug_text(prompt_file, "prompt")
+    explicit_spec = _read_debug_spec(spec_file) if spec_file is not None else None
+    explicit_validation = (
+        _read_debug_validation(validation_file) if validation_file is not None else None
+    )
+    explicit_pull_request = (
+        _read_debug_pull_request(pull_request_file)
+        if pull_request_file is not None
+        else None
+    )
+    explicit_diff = _read_debug_text(diff_file, "diff") if diff_file is not None else None
+
+    execution: WorkflowExecution | None = None
+    if from_execution is not None:
+        workflow_repository = _migrated_repository(settings)
+        try:
+            execution = workflow_repository.get_execution(from_execution)
+        except KeyError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
 
     logger.info(
-        "[debug] %s stage for execution %s%s",
+        "[debug] %s stage%s%s",
         debug_stage.value,
-        execution.id,
+        f" from execution {execution.id}" if execution is not None else "",
         " (dry-run)" if dry_run else "",
+    )
+    explicit_inputs = DebugInputs(
+        task_source=task_source,
+        task_id=task_id,
+        repository=repository,
+        base_branch=base_branch,
+        feature_branch=feature_branch,
+        prompt=prompt_value,
+        spec=explicit_spec,
+        validation=explicit_validation,
+        pull_request=explicit_pull_request,
+        diff=explicit_diff,
     )
     service = DebugService(
         config_loader=ProjectConfigLoader(settings.config_file),
         client_factory=ClientFactory(settings.jules_api_key),
-        task_provider_factory=lambda item: _debug_task_provider(settings, item),
+        task_provider_factory=lambda source, repo: _debug_task_provider(settings, source, repo),
     )
     try:
-        result = service.execute(execution, debug_stage, dry_run=dry_run)
+        result = service.execute(execution, debug_stage, inputs=explicit_inputs, dry_run=dry_run)
     except Exception as exc:
         message = redact_text(str(exc))
         logger.error("[debug] %s failed: %s", debug_stage.value, message)
         typer.echo(
             json.dumps(
                 {
-                    "execution_id": execution.id,
+                    "execution_id": execution.id if execution is not None else None,
                     "stage": debug_stage.value,
                     "dry_run": dry_run,
                     "execution_mutated": False,

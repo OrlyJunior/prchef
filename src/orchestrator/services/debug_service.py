@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -36,6 +35,26 @@ class DebugExecutionError(RuntimeError):
     pass
 
 
+@dataclass(slots=True)
+class DebugInputs:
+    """Explicit inputs for one isolated debug invocation."""
+
+    task_source: str | None = None
+    task_id: str | None = None
+    repository: str | None = None
+    base_branch: str | None = None
+    feature_branch: str | None = None
+    prompt: str | None = None
+    task: DevelopmentTask | None = None
+    spec: RepositorySpec | None = None
+    validation: ValidationResult | None = None
+    pull_request: PullRequest | None = None
+    diff: str | None = None
+
+
+TaskProviderFactory = Callable[[str, str | None], TaskProvider]
+
+
 _STAGE_ALIASES = {
     "task": DebugStage.TASK_LOADING,
     "load-task": DebugStage.TASK_LOADING,
@@ -63,14 +82,14 @@ def parse_debug_stage(value: str) -> DebugStage:
 
 
 class DebugService:
-    """Run one workflow stage using a persisted execution as its input contract."""
+    """Assemble inputs and run exactly one workflow/provider boundary."""
 
     def __init__(
         self,
         *,
         config_loader: ProjectConfigLoader,
         client_factory: ClientFactory,
-        task_provider_factory: Callable[[WorkflowExecution], TaskProvider],
+        task_provider_factory: TaskProviderFactory,
     ) -> None:
         self._config_loader = config_loader
         self._client_factory = client_factory
@@ -78,31 +97,62 @@ class DebugService:
 
     def execute(
         self,
-        execution: WorkflowExecution,
+        execution: WorkflowExecution | None,
         stage: DebugStage,
         *,
+        inputs: DebugInputs | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
+        values = inputs or DebugInputs()
         if dry_run:
-            inputs = self._describe_inputs(execution, stage)
-            return self._envelope(execution, stage, dry_run=True, inputs=inputs)
+            return self._envelope(
+                execution,
+                stage,
+                dry_run=True,
+                inputs=self._describe_inputs(execution, stage, values),
+            )
 
         if stage is DebugStage.TASK_LOADING:
-            task = self._task_provider_factory(execution).get_task(execution.task_id)
+            task = self._resolve_task(execution, values, stage=stage)
+            if task is None:
+                raise DebugExecutionError("task-loading requires provider task input")
             return self._envelope(execution, stage, result={"task": asdict(task)})
 
-        task, config = self._project_context(execution)
-        if stage in {DebugStage.IMPLEMENTATION, DebugStage.REVIEW}:
-            self._require_working_branch(execution, stage)
-        clients = self._client_factory.create(config)
-        if stage is DebugStage.SPEC_GENERATION:
-            return self._run_spec(execution, stage, task, config, clients)
-        if stage is DebugStage.IMPLEMENTATION:
-            self._assert_implementation_checkout(execution, config, clients)
-            spec = self._spec_from_execution(execution)
-            implementation_result = ImplementationService(clients.codex, clients.git).implement(
-                task, spec, config.path
+        task = (
+            None
+            if stage is DebugStage.VALIDATION
+            else self._resolve_task(
+                execution,
+                values,
+                stage=stage,
+                required=not (
+                    stage is DebugStage.IMPLEMENTATION and values.prompt is not None
+                ),
             )
+        )
+        config = self._resolve_config(execution, values, task)
+        clients = self._client_factory.create(
+            config, include_jules=stage in {DebugStage.SPEC_GENERATION, DebugStage.REVIEW}
+        )
+        if stage is DebugStage.SPEC_GENERATION:
+            if task is None:
+                raise DebugExecutionError("spec-generation requires task provider inputs")
+            return self._run_spec(execution, stage, task, config, clients, values)
+        if stage is DebugStage.IMPLEMENTATION:
+            implementation_service = ImplementationService(clients.codex, clients.git)
+            if values.prompt is not None:
+                implementation_result = implementation_service.implement_prompt(
+                    values.prompt, config.path
+                )
+            else:
+                if task is None:
+                    raise DebugExecutionError(
+                        "implementation requires task inputs or --prompt/--prompt-file"
+                    )
+                spec = self._resolve_spec(execution, values)
+                implementation_result = implementation_service.implement(
+                    task, spec, config.path
+                )
             return self._envelope(
                 execution, stage, result={"implementation": asdict(implementation_result)}
             )
@@ -116,50 +166,56 @@ class DebugService:
                 execution, stage, result={"validation": asdict(validation_result)}
             )
         if stage is DebugStage.REVIEW:
-            return self._run_review(execution, stage, task, config, clients)
+            if task is None:
+                raise DebugExecutionError("review requires task provider inputs")
+            return self._run_review(execution, stage, task, config, clients, values)
         raise DebugExecutionError(f"Unsupported debug stage: {stage}")
 
     def _describe_inputs(
-        self, execution: WorkflowExecution, stage: DebugStage
+        self,
+        execution: WorkflowExecution | None,
+        stage: DebugStage,
+        values: DebugInputs,
     ) -> dict[str, Any]:
         if stage is DebugStage.TASK_LOADING:
-            if not execution.task_source or not execution.task_id:
-                raise DebugExecutionError(
-                    "task-loading requires persisted task_source and task_id"
-                )
-            if execution.task_source.casefold() not in {"trello", "github"}:
-                raise DebugExecutionError(
-                    f"Unsupported persisted task source: {execution.task_source}"
-                )
-            repository = self._task_repository(execution)
-            if execution.task_source.casefold() == "github" and not repository:
-                raise DebugExecutionError(
-                    "task-loading debug for GitHub requires repository in persisted task_snapshot"
-                )
+            source, task_id, repository = self._provider_inputs(execution, values, stage)
             return {
-                "task_source": execution.task_source,
-                "task_id": execution.task_id,
+                "task_source": source,
+                "task_id": task_id,
                 "repository": repository,
             }
 
-        task, config = self._project_context(execution)
+        task = None if stage is DebugStage.VALIDATION else self._preview_task(execution, values)
+        if stage is not DebugStage.VALIDATION and task is None:
+            if stage is DebugStage.IMPLEMENTATION and values.prompt is not None:
+                pass
+            else:
+                self._provider_inputs(execution, values, stage)
+        config = self._resolve_config(execution, values, task)
         inputs: dict[str, Any] = {
-            "task_snapshot": True,
             "repository_path": str(config.path),
-            "base_branch": config.repository.base_branch,
+            "base_branch": self._base_branch(execution, values, config),
         }
+        if task is not None:
+            inputs["task_snapshot"] = True
+        elif stage is not DebugStage.VALIDATION and not (
+            stage is DebugStage.IMPLEMENTATION and values.prompt is not None
+        ):
+            inputs["task_provider"] = self._provider_inputs(execution, values, stage)
+
         if stage is DebugStage.SPEC_GENERATION:
             inputs["jules_session"] = "new read-only session"
         elif stage is DebugStage.IMPLEMENTATION:
-            self._spec_from_execution(execution)
-            self._require_working_branch(execution, stage)
-            inputs.update(
-                {
-                    "spec_snapshot": True,
-                    "working_branch": execution.working_branch,
-                    "requires_existing_checkout": True,
-                }
+            if values.prompt is None:
+                self._preview_spec(execution, values)
+                inputs["spec_snapshot"] = True
+            else:
+                inputs["prompt"] = "explicit implementation input"
+            inputs["workspace"] = "configured repository path/current checkout"
+            inputs["working_branch"] = (
+                execution.working_branch if execution is not None else None
             )
+            inputs["requires_original_branch_checkout"] = False
         elif stage is DebugStage.VALIDATION:
             inputs.update(
                 {
@@ -169,15 +225,17 @@ class DebugService:
                 }
             )
         elif stage is DebugStage.REVIEW:
-            self._spec_from_execution(execution)
-            self._validation_from_execution(execution)
-            self._pull_request_from_execution(execution)
-            self._require_working_branch(execution, stage)
+            self._preview_spec(execution, values)
+            self._preview_validation(execution, values)
+            self._preview_pull_request(execution, values)
+            feature_branch = self._feature_branch(execution, values)
             inputs.update(
                 {
+                    "spec_snapshot": True,
                     "validation_snapshot": True,
                     "pull_request_snapshot": True,
-                    "working_branch": execution.working_branch,
+                    "working_branch": feature_branch,
+                    "diff": "explicit input or configured workspace diff",
                     "jules_session": "new read-only session",
                 }
             )
@@ -185,17 +243,20 @@ class DebugService:
 
     def _run_spec(
         self,
-        execution: WorkflowExecution,
+        execution: WorkflowExecution | None,
         stage: DebugStage,
         task: DevelopmentTask,
         config: ProjectConfig,
         clients: WorkflowClients,
+        values: DebugInputs,
     ) -> dict[str, Any]:
         sessions: list[Any] = []
+        if clients.jules is None:
+            raise DebugExecutionError("Jules client is required for spec-generation debug")
         spec = SpecService(clients.jules).generate(
             task,
             clients.git.github_repository(),
-            config.repository.base_branch,
+            self._base_branch(execution, values, config),
             sessions.append,
         )
         return self._envelope(
@@ -209,25 +270,30 @@ class DebugService:
 
     def _run_review(
         self,
-        execution: WorkflowExecution,
+        execution: WorkflowExecution | None,
         stage: DebugStage,
         task: DevelopmentTask,
         config: ProjectConfig,
         clients: WorkflowClients,
+        values: DebugInputs,
     ) -> dict[str, Any]:
-        spec = self._spec_from_execution(execution)
-        validation = self._validation_from_execution(execution)
-        pull_request = self._pull_request_from_execution(execution)
-        feature_branch = self._require_working_branch(execution, DebugStage.REVIEW)
+        spec = self._resolve_spec(execution, values)
+        validation = self._resolve_validation(execution, values)
+        pull_request = self._resolve_pull_request(execution, values)
+        feature_branch = self._feature_branch(execution, values)
+        base_branch = self._base_branch(execution, values, config)
+        diff = values.diff if values.diff is not None else clients.git.diff(base_branch)
         sessions: list[Any] = []
+        if clients.jules is None:
+            raise DebugExecutionError("Jules client is required for review debug")
         review = ReviewService(clients.jules).review(
             task=task,
             spec=spec,
             pull_request=pull_request,
-            diff=clients.git.diff(config.repository.base_branch),
+            diff=diff,
             validation=validation,
             repository_slug=clients.git.github_repository(),
-            base_branch=config.repository.base_branch,
+            base_branch=base_branch,
             feature_branch=feature_branch,
             on_session_created=sessions.append,
         )
@@ -240,20 +306,183 @@ class DebugService:
             },
         )
 
-    def _project_context(
-        self, execution: WorkflowExecution
-    ) -> tuple[DevelopmentTask, ProjectConfig]:
-        task = self._task_from_execution(execution)
-        repository_ref = task.repository or execution.repository
+    def _resolve_config(
+        self,
+        execution: WorkflowExecution | None,
+        values: DebugInputs,
+        task: DevelopmentTask | None,
+    ) -> ProjectConfig:
+        repository_ref = values.repository
+        if not repository_ref and task is not None:
+            repository_ref = task.repository
+        if not repository_ref and execution is not None:
+            repository_ref = self._task_repository(execution)
+        if not repository_ref and execution is not None:
+            repository_ref = execution.repository
         if not repository_ref:
             raise DebugExecutionError(
-                "stage requires task.repository or persisted execution.repository"
+                "stage requires --repository or a repository from --from-execution"
             )
+        config_task = task or DevelopmentTask(
+            id=values.task_id or (execution.task_id if execution is not None else "debug"),
+            source=values.task_source
+            or (execution.task_source if execution is not None else "debug"),
+            title="",
+            description="",
+            url="",
+            repository=repository_ref,
+        )
         try:
-            config = self._config_loader.load(task, repository_override=repository_ref)
+            config = self._config_loader.load(config_task, repository_override=repository_ref)
         except ConfigurationError as exc:
             raise DebugExecutionError(f"Cannot load repository configuration: {exc}") from exc
-        return task, config
+        return config
+
+    def _resolve_task(
+        self,
+        execution: WorkflowExecution | None,
+        values: DebugInputs,
+        *,
+        stage: DebugStage,
+        required: bool = True,
+    ) -> DevelopmentTask | None:
+        if values.task is not None:
+            return values.task
+
+        explicit_provider = values.task_source is not None or values.task_id is not None
+        if not explicit_provider and execution is not None and execution.task_snapshot:
+            return self._task_from_execution(execution)
+        if not required and not explicit_provider:
+            return None
+
+        source, task_id, repository = self._provider_inputs(execution, values, stage)
+        if not task_id:
+            if required:
+                raise DebugExecutionError(
+                    f"{stage.value} requires a task snapshot or provider task input"
+                )
+            return None
+        return self._task_provider_factory(source, repository).get_task(task_id)
+
+    def _provider_inputs(
+        self,
+        execution: WorkflowExecution | None,
+        values: DebugInputs,
+        stage: DebugStage,
+    ) -> tuple[str, str | None, str | None]:
+        source = values.task_source or (execution.task_source if execution is not None else None)
+        task_id = values.task_id or (execution.task_id if execution is not None else None)
+        repository = values.repository or (
+            self._task_repository(execution) if execution is not None else None
+        )
+        if source is None:
+            try:
+                source = self._config_loader.default_task_provider()
+            except ConfigurationError as exc:
+                raise DebugExecutionError(str(exc)) from exc
+        if not source:
+            raise DebugExecutionError(
+                f"{stage.value} requires --task-id with a task provider or --from-execution"
+            )
+        normalized_source = source.casefold()
+        if normalized_source not in {"trello", "github"}:
+            raise DebugExecutionError(f"Unsupported task provider: {source}")
+        if normalized_source == "github" and not repository:
+            raise DebugExecutionError(
+                f"{stage.value} GitHub input requires --repository owner/repository"
+            )
+        return normalized_source, task_id, repository
+
+    def _preview_task(
+        self, execution: WorkflowExecution | None, values: DebugInputs
+    ) -> DevelopmentTask | None:
+        if values.task is not None:
+            return values.task
+        if values.task_source is not None or values.task_id is not None:
+            return None
+        if execution is not None and execution.task_snapshot:
+            return self._task_from_execution(execution)
+        return None
+
+    def _resolve_spec(
+        self, execution: WorkflowExecution | None, values: DebugInputs
+    ) -> RepositorySpec:
+        if values.spec is not None:
+            return values.spec
+        if execution is not None and execution.spec_snapshot:
+            return self._spec_from_execution(execution)
+        raise DebugExecutionError("implementation/review requires --spec-file or historical spec")
+
+    def _resolve_validation(
+        self, execution: WorkflowExecution | None, values: DebugInputs
+    ) -> ValidationResult:
+        if values.validation is not None:
+            return values.validation
+        if execution is not None and execution.validation_snapshot:
+            return self._validation_from_execution(execution)
+        raise DebugExecutionError("review requires --validation-file or historical validation")
+
+    def _resolve_pull_request(
+        self, execution: WorkflowExecution | None, values: DebugInputs
+    ) -> PullRequest:
+        if values.pull_request is not None:
+            return values.pull_request
+        if execution is not None and execution.pull_request_snapshot:
+            return self._pull_request_from_execution(execution)
+        raise DebugExecutionError("review requires --pull-request-file or historical pull request")
+
+    def _preview_spec(
+        self, execution: WorkflowExecution | None, values: DebugInputs
+    ) -> None:
+        if values.spec is None and not (execution is not None and execution.spec_snapshot):
+            raise DebugExecutionError(
+                "implementation/review requires --spec-file or historical spec"
+            )
+
+    def _preview_validation(
+        self, execution: WorkflowExecution | None, values: DebugInputs
+    ) -> None:
+        if values.validation is None and not (
+            execution is not None and execution.validation_snapshot
+        ):
+            raise DebugExecutionError("review requires --validation-file or historical validation")
+
+    def _preview_pull_request(
+        self, execution: WorkflowExecution | None, values: DebugInputs
+    ) -> None:
+        if values.pull_request is None and not (
+            execution is not None and execution.pull_request_snapshot
+        ):
+            raise DebugExecutionError(
+                "review requires --pull-request-file or historical pull request"
+            )
+
+    @staticmethod
+    def _feature_branch(
+        execution: WorkflowExecution | None, values: DebugInputs
+    ) -> str:
+        branch = values.feature_branch
+        if not branch and execution is not None:
+            branch = execution.working_branch
+        if not branch and values.pull_request is not None:
+            branch = values.pull_request.head_branch
+        if not branch and execution is not None and execution.pull_request_snapshot:
+            branch = str(execution.pull_request_snapshot.get("head_branch") or "")
+        if not branch:
+            raise DebugExecutionError("review requires --feature-branch or historical branch")
+        return branch
+
+    @staticmethod
+    def _base_branch(
+        execution: WorkflowExecution | None,
+        values: DebugInputs,
+        config: ProjectConfig,
+    ) -> str:
+        if values.base_branch:
+            return values.base_branch
+        if execution is not None and execution.base_branch:
+            return execution.base_branch
+        return config.repository.base_branch
 
     @staticmethod
     def _task_from_execution(execution: WorkflowExecution) -> DevelopmentTask:
@@ -298,7 +527,9 @@ class DebugService:
             raise DebugExecutionError("persisted pull_request_snapshot is invalid") from exc
 
     @staticmethod
-    def _task_repository(execution: WorkflowExecution) -> str | None:
+    def _task_repository(execution: WorkflowExecution | None) -> str | None:
+        if execution is None:
+            return None
         snapshot = execution.task_snapshot or {}
         repository = snapshot.get("repository")
         if isinstance(repository, str) and repository.strip():
@@ -311,40 +542,8 @@ class DebugService:
         return None
 
     @staticmethod
-    def _assert_implementation_checkout(
-        execution: WorkflowExecution,
-        config: ProjectConfig,
-        clients: WorkflowClients,
-    ) -> None:
-        branch = DebugService._require_working_branch(execution, DebugStage.IMPLEMENTATION)
-        protected = {
-            value.casefold()
-            for value in ["main", "master", "develop", *config.repository.protected_branches]
-        }
-        if branch.casefold() in protected or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
-            raise DebugExecutionError(
-                f"implementation refuses unsafe or protected working_branch: {branch}"
-            )
-        current = clients.git.current_branch()
-        if current != branch:
-            raise DebugExecutionError(
-                f"implementation requires checkout on {branch!r}; current branch is {current!r}"
-            )
-
-    @staticmethod
-    def _require_working_branch(
-        execution: WorkflowExecution, stage: DebugStage
-    ) -> str:
-        branch = execution.working_branch
-        if not branch:
-            raise DebugExecutionError(
-                f"{stage.value} requires persisted working_branch; debug does not create branches"
-            )
-        return branch
-
-    @staticmethod
     def _envelope(
-        execution: WorkflowExecution,
+        execution: WorkflowExecution | None,
         stage: DebugStage,
         *,
         dry_run: bool = False,
@@ -352,7 +551,7 @@ class DebugService:
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         envelope: dict[str, Any] = {
-            "execution_id": execution.id,
+            "execution_id": execution.id if execution is not None else None,
             "stage": stage.value,
             "dry_run": dry_run,
             "execution_mutated": False,

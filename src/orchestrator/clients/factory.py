@@ -11,7 +11,7 @@ from orchestrator.config.project_config import ProjectConfig
 @dataclass(slots=True)
 class WorkflowClients:
     commands: CommandClient
-    jules: JulesClient
+    jules: JulesClient | None
     codex: CodexClient
     git: GitClient
     github: GitHubClient
@@ -21,11 +21,15 @@ class ClientFactory:
     def __init__(self, jules_api_key: str | None) -> None:
         self._jules_api_key = jules_api_key
 
-    def create(self, config: ProjectConfig) -> WorkflowClients:
+    def create(self, config: ProjectConfig, *, include_jules: bool = True) -> WorkflowClients:
         commands = CommandClient()
         return WorkflowClients(
             commands=commands,
-            jules=JulesClient(self._jules_api_key, config.integrations.jules),
+            jules=(
+                JulesClient(self._jules_api_key, config.integrations.jules)
+                if include_jules
+                else None
+            ),
             codex=CodexClient(
                 commands,
                 config.integrations.codex.command,

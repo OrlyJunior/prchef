@@ -30,6 +30,22 @@ Do not invent requirements.
 Preserve the conventions of the target repository.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
+        return self._run_prompt(prompt, repository_path)
+
+    def implement_prompt(self, prompt: str, repository_path: Path) -> ImplementationResult:
+        """Run explicit implementation input while retaining the safety contract."""
+        if not prompt.strip():
+            raise ValueError("Implementation prompt must not be empty")
+        safe_prompt = f"""EXPLICIT IMPLEMENTATION INPUT:
+{prompt}
+
+STRICT SAFETY RULES:
+Implement only the requested input in the configured workspace.
+Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+"""
+        return self._run_prompt(safe_prompt, repository_path)
+
+    def _run_prompt(self, prompt: str, repository_path: Path) -> ImplementationResult:
         result = self._codex.implement(prompt, repository_path)
         if result.success:
             result.changed_files = self._git.changed_files()
@@ -37,4 +53,3 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
                 result.success = False
                 result.error_message = "Codex completed without changing files"
         return result
-
