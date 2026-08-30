@@ -82,10 +82,13 @@ class WorkflowService:
                     config.repository.base_branch,
                 )
                 clients = self._client_factory.create(config)
+                if clients.jules is None:
+                    raise ConfigurationError("Jules client is required for workflow execution")
+                jules_client = clients.jules
                 repository_slug = clients.git.github_repository()
 
             with self._step(execution.id, WorkflowStage.GENERATE_SPEC):
-                spec = SpecService(clients.jules).generate(
+                spec = SpecService(jules_client).generate(
                     task,
                     repository_slug,
                     config.repository.base_branch,
@@ -156,7 +159,7 @@ class WorkflowService:
                 self._repository.record_pull_request(execution.id, pull_request)
 
             with self._step(execution.id, WorkflowStage.REVIEW):
-                review = ReviewService(clients.jules).review(
+                review = ReviewService(jules_client).review(
                     task=task,
                     spec=spec,
                     pull_request=pull_request,

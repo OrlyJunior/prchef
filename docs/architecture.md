@@ -26,9 +26,13 @@
     JSON inválido/contraditório ou estados Jules aguardando intervenção humana viram
     `NEEDS_HUMAN`; falhas operacionais viram `FAILED`.
 
-O comando `debug` usa uma `WorkflowExecution` persistida como contrato de entrada e chama apenas a
-etapa selecionada. Ele não atualiza `workflow_executions`/`workflow_steps` nem inicia etapas
-seguintes; `--dry-run` valida os snapshots e a configuração sem executar integrações.
+O comando `debug` monta inputs explícitos e chama apenas a etapa selecionada. Uma
+`WorkflowExecution` pode ser informada por `--from-execution` como fonte somente leitura de defaults,
+mas não é necessária para uma invocação limpa. O debug não atualiza `workflow_executions`/
+`workflow_steps`, não inicia etapas seguintes e `--dry-run` não executa integrações. Na etapa de
+implementação, o Codex usa o caminho do repositório configurado/selecionado e não exige, troca ou
+cria a `working_branch` histórica; não há commit, push ou PR. Isso é deliberadamente separado de uma
+futura operação `resume`, que poderá continuar o estado Git persistido.
 
 Cada operacao logica cria uma linha em `workflow_steps`. `current_stage` e atualizado antes de
 cada etapa, permitindo que uma V2 selecione um ponto de retomada sem mudar o schema conceitual.

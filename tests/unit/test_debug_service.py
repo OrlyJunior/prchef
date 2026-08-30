@@ -5,8 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from orchestrator.config.project_config import ProjectConfig
 from orchestrator.models import (
     DevelopmentTask,
@@ -16,7 +14,7 @@ from orchestrator.models import (
     WorkflowExecution,
 )
 from orchestrator.services.debug_service import (
-    DebugExecutionError,
+    DebugInputs,
     DebugService,
     DebugStage,
     parse_debug_stage,
@@ -73,9 +71,9 @@ class RecordingFactory(FakeClientFactory):
         super().__init__()
         self.create_calls = 0
 
-    def create(self, config: ProjectConfig) -> SimpleNamespace:
+    def create(self, config: ProjectConfig, *, include_jules: bool = True) -> SimpleNamespace:
         self.create_calls += 1
-        return super().create(config)
+        return super().create(config, include_jules=include_jules)
 
 
 def _service(
@@ -84,7 +82,7 @@ def _service(
     task_provider_factory: Any = None,
 ) -> tuple[DebugService, RecordingFactory]:
     clients = factory or RecordingFactory()
-    provider_factory = task_provider_factory or (lambda execution: FakeTrelloClient())
+    provider_factory = task_provider_factory or (lambda source, repository: FakeTrelloClient())
     return (
         DebugService(
             config_loader=FakeConfigLoader(tmp_path),
@@ -103,14 +101,17 @@ def test_parse_debug_stage_accepts_documented_aliases() -> None:
 
 def test_dry_run_describes_inputs_without_creating_clients(tmp_path: Path) -> None:
     service, factory = _service(tmp_path)
+    execution = _execution(tmp_path)
+    execution.working_branch = None
 
     result = service.execute(
-        _execution(tmp_path), DebugStage.IMPLEMENTATION, dry_run=True
+        execution, DebugStage.IMPLEMENTATION, dry_run=True
     )
 
     assert result["dry_run"] is True
     assert result["execution_mutated"] is False
     assert result["inputs"]["spec_snapshot"] is True
+    assert result["inputs"]["requires_original_branch_checkout"] is False
     assert factory.create_calls == 0
 
 
@@ -123,9 +124,15 @@ def test_task_loading_debug_runs_only_the_selected_provider(tmp_path: Path) -> N
             calls.append(task_id)
             return _task()
 
-    service, factory = _service(tmp_path, task_provider_factory=lambda item: Provider())
+    service, factory = _service(
+        tmp_path, task_provider_factory=lambda source, repository: Provider()
+    )
 
-    result = service.execute(execution, DebugStage.TASK_LOADING)
+    result = service.execute(
+        execution,
+        DebugStage.TASK_LOADING,
+        inputs=DebugInputs(task_source="trello", task_id=execution.task_id),
+    )
 
     assert result["result"]["task"]["id"] == "card-debug"
     assert calls == ["card-debug"]
@@ -145,15 +152,104 @@ def test_spec_debug_reuses_persisted_task_without_mutating_execution(tmp_path: P
     assert factory.create_calls == 1
 
 
-def test_implementation_debug_requires_persisted_checkout_branch(tmp_path: Path) -> None:
+def test_spec_debug_accepts_direct_provider_inputs_without_execution(tmp_path: Path) -> None:
+    execution = None
+
+    class Provider:
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            return _task()
+
+    service, factory = _service(
+        tmp_path, task_provider_factory=lambda source, repository: Provider()
+    )
+
+    result = service.execute(
+        execution,
+        DebugStage.SPEC_GENERATION,
+        inputs=DebugInputs(
+            task_source="trello",
+            task_id="card-debug",
+            repository="example",
+        ),
+    )
+
+    assert result["execution_id"] is None
+    assert result["result"]["spec"]["safe_to_implement"] is True
+    assert factory.create_calls == 1
+
+
+def test_dry_run_does_not_load_direct_provider_or_create_clients(tmp_path: Path) -> None:
+    provider_calls: list[tuple[str, str | None]] = []
+
+    def provider_factory(source: str, repository: str | None) -> Any:
+        provider_calls.append((source, repository))
+        raise AssertionError("dry-run must not create task providers")
+
+    service, factory = _service(tmp_path, task_provider_factory=provider_factory)
+
+    result = service.execute(
+        None,
+        DebugStage.SPEC_GENERATION,
+        inputs=DebugInputs(
+            task_source="trello",
+            task_id="card-debug",
+            repository="example",
+        ),
+        dry_run=True,
+    )
+
+    assert result["dry_run"] is True
+    assert provider_calls == []
+    assert factory.create_calls == 0
+
+
+def test_implementation_debug_does_not_require_original_working_branch(tmp_path: Path) -> None:
     execution = _execution(tmp_path)
     execution.working_branch = None
     service, factory = _service(tmp_path)
+    original = asdict(execution)
 
-    with pytest.raises(DebugExecutionError, match="does not create branches"):
-        service.execute(execution, DebugStage.IMPLEMENTATION)
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("implementation debug must not perform workflow Git operations")
 
-    assert factory.create_calls == 0
+    factory.git.create_branch = forbidden  # type: ignore[method-assign]
+    factory.git.commit_all = forbidden  # type: ignore[method-assign]
+    factory.git.push = forbidden  # type: ignore[method-assign]
+    factory.git.current_branch = forbidden  # type: ignore[attr-defined]
+
+    result = service.execute(execution, DebugStage.IMPLEMENTATION)
+
+    assert result["result"]["implementation"]["success"] is True
+    assert asdict(execution) == original
+    assert factory.create_calls == 1
+
+
+def test_implementation_debug_accepts_direct_prompt_without_execution(tmp_path: Path) -> None:
+    service, factory = _service(tmp_path)
+
+    result = service.execute(
+        None,
+        DebugStage.IMPLEMENTATION,
+        inputs=DebugInputs(repository="example", prompt="Add a version flag"),
+    )
+
+    assert result["execution_id"] is None
+    assert result["result"]["implementation"]["success"] is True
+    assert factory.create_calls == 1
+
+
+def test_validation_debug_accepts_direct_repository_without_execution(tmp_path: Path) -> None:
+    service, factory = _service(tmp_path)
+
+    result = service.execute(
+        None,
+        DebugStage.VALIDATION,
+        inputs=DebugInputs(repository="example"),
+    )
+
+    assert result["execution_id"] is None
+    assert result["result"]["validation"]["success"] is True
+    assert factory.create_calls == 1
 
 
 def test_validation_debug_returns_result_without_persisting_snapshot(tmp_path: Path) -> None:
@@ -176,3 +272,20 @@ def test_review_debug_reuses_all_persisted_inputs(tmp_path: Path) -> None:
 
     assert result["result"]["review"]["result"] == "APPROVED"
     assert result["result"]["jules_sessions"][0]["id"] == "review-123"
+
+
+def test_review_debug_explicit_inputs_override_historical_defaults(tmp_path: Path) -> None:
+    execution = _execution(tmp_path)
+    service, factory = _service(tmp_path)
+
+    result = service.execute(
+        execution,
+        DebugStage.REVIEW,
+        inputs=DebugInputs(
+            feature_branch="debug/explicit",
+            diff="explicit diff",
+        ),
+    )
+
+    assert result["result"]["review"]["result"] == "APPROVED"
+    assert factory.jules.review_starting_branch == "debug/explicit"

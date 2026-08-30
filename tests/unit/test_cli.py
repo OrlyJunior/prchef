@@ -37,14 +37,24 @@ class StubWorkflowService:
 
 class StubDebugService:
     calls: list[tuple[str, str, bool]] = []
+    inputs: list[Any] = []
 
     def __init__(self, **kwargs: Any) -> None:
         pass
 
-    def execute(self, execution: WorkflowExecution, stage: Any, *, dry_run: bool) -> dict[str, Any]:
-        self.calls.append((execution.id, stage.value, dry_run))
+    def execute(
+        self,
+        execution: WorkflowExecution | None,
+        stage: Any,
+        *,
+        inputs: Any,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        execution_id = execution.id if execution is not None else ""
+        self.calls.append((execution_id, stage.value, dry_run))
+        self.inputs.append(inputs)
         return {
-            "execution_id": execution.id,
+            "execution_id": execution.id if execution is not None else None,
             "stage": stage.value,
             "dry_run": dry_run,
             "execution_mutated": False,
@@ -64,6 +74,7 @@ def test_cli_debug_runs_only_selected_stage_and_supports_dry_run(
 ) -> None:
     _stub_runtime(monkeypatch)
     StubDebugService.calls.clear()
+    StubDebugService.inputs.clear()
 
     class Repository:
         def get_execution(self, execution_id: str) -> WorkflowExecution:
@@ -93,6 +104,63 @@ def test_cli_debug_runs_only_selected_stage_and_supports_dry_run(
         "execution_mutated": False,
     }
     assert StubDebugService.calls == [("execution-1", "validation", True)]
+
+
+def test_cli_debug_runs_without_loading_execution(monkeypatch: Any) -> None:
+    _stub_runtime(monkeypatch)
+    StubDebugService.calls.clear()
+    StubDebugService.inputs.clear()
+    repository_accessed = False
+
+    def repository_should_not_run(settings: Any) -> object:
+        nonlocal repository_accessed
+        repository_accessed = True
+        raise AssertionError("clean debug must not access workflow persistence")
+
+    monkeypatch.setattr(main, "_repository", repository_should_not_run)
+    monkeypatch.setattr(main, "DebugService", StubDebugService)
+
+    result = runner.invoke(
+        main.app,
+        ["debug", "--stage", "validation", "--repository", "owner/repository"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["execution_id"] is None
+    assert not repository_accessed
+    assert StubDebugService.calls == [("", "validation", False)]
+
+
+def test_cli_debug_explicit_inputs_override_historical_source(monkeypatch: Any) -> None:
+    _stub_runtime(monkeypatch)
+    StubDebugService.calls.clear()
+    StubDebugService.inputs.clear()
+
+    class Repository:
+        def get_execution(self, execution_id: str) -> WorkflowExecution:
+            return WorkflowExecution(id=execution_id, repository="historical")
+
+    monkeypatch.setattr(main, "_repository", lambda settings: Repository())
+    monkeypatch.setattr(main, "DebugService", StubDebugService)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "debug",
+            "--from-execution",
+            "historical-1",
+            "--stage",
+            "implementation",
+            "--repository",
+            "explicit",
+            "--prompt",
+            "Use explicit input",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert StubDebugService.inputs[0].repository == "explicit"
+    assert StubDebugService.inputs[0].prompt == "Use explicit input"
 
 
 def test_cli_runs_trello_provider(monkeypatch: Any) -> None:

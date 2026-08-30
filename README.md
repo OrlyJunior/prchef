@@ -91,32 +91,41 @@ orchestrator show EXECUTION_ID
 
 ### Debug isolado por etapa
 
-O comando `debug` executa somente uma etapa contra uma execucao ja persistida; ele nao chama
-`run`, nao avanca o workflow e nao altera o registro original. Use `--dry-run` para validar os
-inputs e mostrar o plano sem chamar provider, Jules, Codex ou comandos de validacao:
+O comando `debug` executa somente uma etapa em isolamento. Ele nao chama `run`, nao avanca o
+workflow e nao cria nem altera uma execucao persistida. Use `--from-execution` (ou o alias legado
+`--execution-id`) somente quando quiser reutilizar dados historicos como defaults:
 
 ```bash
-orchestrator debug --execution-id EXECUTION_ID --stage validation --dry-run
-orchestrator debug --execution-id EXECUTION_ID --stage review --verbose
+orchestrator debug --stage task-loading --github-issue 2 --repository owner/repository
+orchestrator debug --stage validation --repository owner/repository --dry-run
+orchestrator debug --stage implementation --repository owner/repository --prompt "Add --version"
+orchestrator debug --stage review --from-execution EXECUTION_ID --verbose
 ```
 
-As etapas aceitas e seus inputs sao:
+As etapas aceitas e seus inputs sao (a entrada explicita sempre tem precedencia sobre historico e
+defaults de configuracao):
 
-- `task-loading`: `task_source`, `task_id` e, para GitHub, o repositorio persistido no snapshot da task.
-- `spec-generation`: `task_snapshot`, configuracao/caminho do repositorio e autenticacao Jules; cria
-  uma sessao remota read-only sem persistir seu resultado na execucao original.
-- `implementation`: `task_snapshot`, `spec_snapshot`, caminho do repositorio e `working_branch`
-  persistida ja em checkout. O Codex pode alterar arquivos locais, mas o debug nunca cria branch,
-  commit, push ou PR; use `--dry-run` para evitar essa alteracao.
-- `validation`: caminho/configuracao do repositorio e comandos de validacao; os comandos sao
-  executados localmente quando `--dry-run` nao e usado.
-- `review`: `task_snapshot`, `spec_snapshot`, `validation_snapshot`, `pull_request_snapshot`,
-  diff local e `working_branch`; cria uma sessao Jules read-only sem publicar alteracoes.
+- `task-loading`: `--trello-card` ou `--github-issue`/`--task-id`, mais `--repository` quando
+  necessario pelo provider. Sem esses argumentos, use `--from-execution`.
+- `spec-generation`: os mesmos inputs de task-loading para obter a task normalizada, mais
+  `--repository`/configuracao e autenticacao Jules. Cria uma sessao remota read-only sem persistir
+  o resultado na execucao original.
+- `implementation`: `--repository` e `--prompt`/`--prompt-file`, ou task via provider e spec via
+  `--spec-file`/`--from-execution`. Usa o workspace configurado/atual;
+  uma execucao real pode modificar arquivos locais. Nao depende da branch historica, nao troca/cria
+  branches e nunca faz commit, push ou PR. Use `--dry-run` para nao chamar o Codex.
+- `validation`: `--repository` e a configuracao normal de validacao. Os comandos locais rodam apenas
+  sem `--dry-run` e nenhuma persistencia de workflow e alterada.
+- `review`: task via provider ou historico, `--spec-file`, `--validation-file`,
+  `--pull-request-file`, `--feature-branch` e opcionalmente `--diff-file`; `--from-execution` pode
+  preencher esses dados. A operacao Jules permanece read-only e nao publica alteracoes.
 
-O resultado do debug e JSON em `stdout`, e o progresso continua em `stderr`. Nenhuma etapa seguinte
-e iniciada automaticamente.
+`--dry-run` valida os inputs sem chamar providers, Jules, Codex ou comandos locais. O resultado do
+debug e JSON em `stdout`, e o progresso continua em `stderr`. Nenhuma etapa seguinte e iniciada
+automaticamente. `debug` e diagnostico isolado; uma futura funcionalidade `resume` sera responsavel
+por continuar o workflow original usando seu estado Git persistido e nao faz parte deste comando.
 
-Exatamente uma origem deve ser informada por execução. GitHub Issues é a opção recomendada para
+No comando `run`, exatamente uma origem deve ser informada por execução. GitHub Issues é a opção recomendada para
 projetos hospedados no GitHub porque reutiliza a autenticação existente do `gh` e permite que o PR
 inclua `Closes #<numero>` quando issue e PR pertencem ao mesmo repositório. Para issues em outro
 repositório, o PR registra apenas `owner/repo#numero`, sem solicitar fechamento automático.
