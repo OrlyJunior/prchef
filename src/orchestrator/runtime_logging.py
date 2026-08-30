@@ -4,6 +4,7 @@ import logging
 import re
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 _SENSITIVE_VALUE = re.compile(
     r"(?i)(jules_api_key|orchestrator_jules_api_key|github_token|gh_token|authorization|token)"
@@ -11,6 +12,15 @@ _SENSITIVE_VALUE = re.compile(
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _GITHUB_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
+
+
+class UtcTimestampFormatter(logging.Formatter):
+    """Format runtime log timestamps as compact ISO 8601 UTC values."""
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        del datefmt
+        timestamp = datetime.fromtimestamp(record.created, UTC)
+        return timestamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def redact_text(value: str) -> str:
@@ -76,7 +86,7 @@ def configure_logging(*, verbose: bool = False, configured_level: str = "INFO") 
     if handler is None:
         handler = logging.StreamHandler(sys.stderr)
         handler._orchestrator_handler = True  # type: ignore[attr-defined]
-        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler.setFormatter(UtcTimestampFormatter("%(asctime)s %(message)s"))
         logger.addHandler(handler)
     handler.setLevel(logging.NOTSET)
     level = logging.DEBUG if verbose else getattr(
