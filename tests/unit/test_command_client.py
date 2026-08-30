@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from orchestrator.clients import command_client
+from orchestrator.clients.codex_client import CodexClient
+from orchestrator.clients.command_client import CommandClient, CommandResult
+from orchestrator.clients.exceptions import CommandExecutionError
+
+
+def _completed(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(command, 0, stdout="completed", stderr="")
+
+
+def test_non_windows_command_is_passed_to_subprocess_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launched: list[list[str]] = []
+
+    monkeypatch.setattr(command_client, "_is_windows", lambda: False)
+    monkeypatch.setattr(
+        command_client.shutil,
+        "which",
+        lambda *args, **kwargs: pytest.fail("non-Windows should not resolve shims"),
+    )
+    monkeypatch.setattr(
+        command_client.subprocess,
+        "run",
+        lambda command, **kwargs: (launched.append(command), _completed(command))[1],
+    )
+
+    configured = ["tool", "argument with spaces", "&literal"]
+    result = CommandClient().run(configured, cwd=tmp_path)
+
+    assert launched == [configured]
+    assert result.command == configured
+
+
+@pytest.mark.parametrize("suffix", [".cmd", ".bat"])
+def test_windows_native_shim_is_resolved_without_shell_parsing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, suffix: str
+) -> None:
+    launched: list[tuple[list[str], dict[str, Any]]] = []
+    lookups: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(command_client, "_is_windows", lambda: True)
+
+    def fake_which(candidate: str, *, path: str | None = None) -> str | None:
+        lookups.append((candidate, path))
+        if candidate == f"codex{suffix}":
+            return f"C:\\tools\\codex{suffix}"
+        return None
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        launched.append((command, kwargs))
+        return _completed(command)
+
+    monkeypatch.setattr(command_client.shutil, "which", fake_which)
+    monkeypatch.setattr(command_client.subprocess, "run", fake_run)
+
+    configured = ["codex", "exec", "argument with spaces", "&literal"]
+    result = CommandClient().run(
+        configured,
+        cwd=tmp_path,
+        env={"Path": "C:\\tools", "PATHEXT": ".CMD;.BAT"},
+    )
+
+    assert launched == [
+        (
+            [f"C:\\tools\\codex{suffix}", "exec", "argument with spaces", "&literal"],
+            {
+                "cwd": tmp_path,
+                "input": None,
+                "capture_output": True,
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
+                "timeout": 900,
+                "check": False,
+                "env": {"Path": "C:\\tools", "PATHEXT": ".CMD;.BAT"},
+                "shell": False,
+            },
+        )
+    ]
+    assert lookups[-1][0] == f"codex{suffix}"
+    assert str(tmp_path) in (lookups[-1][1] or "")
+    assert result.command == configured
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows command shims are Windows-specific")
+@pytest.mark.parametrize("suffix", [".cmd", ".bat"])
+def test_windows_native_shim_can_run_from_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, suffix: str
+) -> None:
+    command_name = f"orchestrator-test-shim-{suffix.removeprefix('.')}"
+    shim = tmp_path / f"{command_name}{suffix}"
+    shim.write_text("@echo off\r\necho %~1\r\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path), os.environ.get("PATH", ""))))
+
+    result = CommandClient().run(
+        [command_name, "argument with spaces"], cwd=tmp_path, timeout_seconds=10
+    )
+
+    assert result.success
+    assert result.stdout.strip() == "argument with spaces"
+
+
+def test_missing_executable_keeps_existing_error_semantics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launched: list[list[str]] = []
+
+    monkeypatch.setattr(command_client, "_is_windows", lambda: True)
+    monkeypatch.setattr(command_client.shutil, "which", lambda *args, **kwargs: None)
+
+    def missing(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        launched.append(command)
+        raise FileNotFoundError
+
+    monkeypatch.setattr(command_client.subprocess, "run", missing)
+
+    with pytest.raises(CommandExecutionError, match="Executable not found: missing-tool"):
+        CommandClient().run(["missing-tool", "argument with spaces"], cwd=tmp_path)
+
+    assert launched == [["missing-tool", "argument with spaces"]]
+
+
+class RecordingCommandClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+        self.calls.append((command, kwargs))
+        return CommandResult(
+            command=command,
+            exit_code=0,
+            stdout="completed",
+            stderr="",
+            duration_seconds=0.1,
+        )
+
+
+def test_codex_client_delegates_its_configured_command_to_command_client(tmp_path: Path) -> None:
+    commands = RecordingCommandClient()
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    client.implement("private prompt", tmp_path)
+
+    command, kwargs = commands.calls[0]
+    assert command[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
+    assert command[-1] == "-"
+    assert kwargs["input_text"] == "private prompt"
