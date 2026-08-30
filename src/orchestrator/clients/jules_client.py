@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -20,11 +21,15 @@ from orchestrator.models.jules_session import (
     JulesSession,
     JulesSessionState,
 )
+from orchestrator.runtime_logging import format_duration, redact_text
+
+logger = logging.getLogger(__name__)
 
 
 class JulesClient:
     """Official Jules REST session lifecycle, using only documented endpoints."""
 
+    _HEARTBEAT_INTERVAL_SECONDS = 60.0
     _TERMINAL_STATES = {
         JulesSessionState.COMPLETED,
         JulesSessionState.FAILED,
@@ -99,10 +104,22 @@ class JulesClient:
     ) -> JulesOperationResult:
         deadline = self._clock() + self._settings.timeout_seconds
         source = self._settings.source or self._resolve_source(repository_slug)
+        logger.info(
+            "[jules] Starting %s session on %s (%s)",
+            title,
+            repository_slug,
+            starting_branch,
+        )
+        logger.info("[jules] Creating session")
         session = self._create_session(prompt, title, source, starting_branch)
+        logger.info("[jules] Session created: %s", session.id)
+        if session.url:
+            logger.info("[jules] Session URL: %s", session.url)
         on_session_created(session)
         completed = self._wait_for_session(session, deadline)
-        return JulesOperationResult(completed, self._get_session_result(completed, deadline))
+        result = self._get_session_result(completed, deadline)
+        logger.info("[jules] Session completed: %s", session.id)
+        return JulesOperationResult(completed, result)
 
     def _resolve_source(self, repository_slug: str) -> str:
         page_token: str | None = None
@@ -150,11 +167,19 @@ class JulesClient:
                 "requirePlanApproval": False,
             },
         )
-        return self._session_from_payload(payload)
+        # The official quickstart shows that a successful create response may
+        # contain the new Session identity before its output-only state is
+        # materialized. Persist that identity before making the first GET.
+        return self._session_from_payload(
+            payload, response_name="Create Session", require_state=False
+        )
 
     def _wait_for_session(self, created: JulesSession, deadline: float) -> JulesSession:
         session = created
         retry_count = 0
+        observed_state: JulesSessionState | None = None
+        state_since = self._clock()
+        last_heartbeat = state_since
         while True:
             self._ensure_before_deadline(deadline, session.id)
             try:
@@ -163,6 +188,13 @@ class JulesClient:
             except JulesTransientPollError as exc:
                 if retry_count >= self._settings.poll_retry_attempts:
                     raise JulesTransientPollError(str(exc), session.id) from exc
+                logger.debug(
+                    "[jules] Poll transient failure for %s; retry %s/%s: %s",
+                    session.id,
+                    retry_count + 1,
+                    self._settings.poll_retry_attempts,
+                    redact_text(str(exc)),
+                )
                 self._sleep_until_deadline(
                     self._settings.poll_retry_backoff_seconds * (2**retry_count),
                     deadline,
@@ -170,6 +202,28 @@ class JulesClient:
                 )
                 retry_count += 1
                 continue
+
+            now = self._clock()
+            if session.state is not observed_state:
+                if observed_state is None:
+                    logger.info("[jules] State: %s", session.state)
+                else:
+                    logger.info(
+                        "[jules] State changed: %s -> %s", observed_state, session.state
+                    )
+                observed_state = session.state
+                state_since = now
+                last_heartbeat = now
+            elif (
+                session.state not in self._TERMINAL_STATES
+                and now - last_heartbeat >= self._HEARTBEAT_INTERVAL_SECONDS
+            ):
+                logger.info(
+                    "[jules] Still %s after %s",
+                    session.state,
+                    format_duration(now - state_since),
+                )
+                last_heartbeat = now
 
             if session.state is JulesSessionState.COMPLETED:
                 return session
@@ -187,7 +241,9 @@ class JulesClient:
 
     def _get_session_status(self, session_id: str) -> JulesSession:
         return self._session_from_payload(
-            self._request("GET", f"/sessions/{session_id}", transient=True)
+            self._request("GET", f"/sessions/{session_id}", transient=True),
+            response_name="Get Session",
+            require_state=True,
         )
 
     @staticmethod
@@ -245,6 +301,13 @@ class JulesClient:
             except JulesTransientPollError as exc:
                 if attempt >= self._settings.poll_retry_attempts:
                     raise JulesTransientPollError(str(exc), session_id) from exc
+                logger.debug(
+                    "[jules] Result polling transient failure for %s; retry %s/%s: %s",
+                    session_id,
+                    attempt + 1,
+                    self._settings.poll_retry_attempts,
+                    redact_text(str(exc)),
+                )
                 self._sleep_until_deadline(
                     self._settings.poll_retry_backoff_seconds * (2**attempt),
                     deadline,
@@ -278,36 +341,50 @@ class JulesClient:
                 raise JulesTransientPollError(f"Transient Jules request failure: {exc}") from exc
             raise JulesClientError(f"Jules request failed: {exc}") from exc
         if response.status_code in {408, 429} or response.status_code >= 500:
-            message = f"Jules returned HTTP {response.status_code}: {response.text}"
+            message = f"Jules returned HTTP {response.status_code}"
             if transient:
                 raise JulesTransientPollError(message)
             raise JulesClientError(message)
         if response.is_error:
-            raise JulesClientError(f"Jules returned HTTP {response.status_code}: {response.text}")
+            raise JulesClientError(f"Jules returned HTTP {response.status_code}")
         try:
             payload = response.json()
         except ValueError as exc:
             raise JulesClientError("Jules returned invalid JSON") from exc
         if not isinstance(payload, dict):
-            raise JulesClientError("Jules response must be a JSON object")
+            raise JulesClientError(
+                "Jules response must be a JSON object; "
+                f"received JSON {type(payload).__name__}"
+            )
         return payload
 
     @staticmethod
-    def _session_from_payload(payload: dict[str, Any]) -> JulesSession:
+    def _session_from_payload(
+        payload: dict[str, Any], *, response_name: str, require_state: bool
+    ) -> JulesSession:
         session_id = payload.get("id")
         name = payload.get("name")
         if not isinstance(session_id, str) or not session_id:
-            if isinstance(name, str) and name.startswith("sessions/"):
-                session_id = name.removeprefix("sessions/")
-            else:
-                raise JulesClientError("Jules session response has no id")
-        raw_state = payload.get("state")
-        try:
-            state = JulesSessionState(str(raw_state))
-        except ValueError as exc:
             raise JulesClientError(
-                f"Unsupported Jules session state: {raw_state}", session_id
-            ) from exc
+                JulesClient._missing_field_message(response_name, "id", payload)
+            )
+        raw_state = payload.get("state")
+        if raw_state is None:
+            if require_state:
+                raise JulesClientError(
+                    JulesClient._missing_field_message(response_name, "state", payload),
+                    session_id,
+                )
+            state = JulesSessionState.STATE_UNSPECIFIED
+        else:
+            try:
+                state = JulesSessionState(str(raw_state))
+            except ValueError as exc:
+                raise JulesClientError(
+                    f"Unsupported Jules session state {raw_state!r} in {response_name}; "
+                    f"response keys: {JulesClient._payload_keys(payload)}",
+                    session_id,
+                ) from exc
         url = payload.get("url")
         return JulesSession(
             id=session_id,
@@ -315,3 +392,16 @@ class JulesClient:
             state=state,
             resource_name=name if isinstance(name, str) else None,
         )
+
+    @staticmethod
+    def _missing_field_message(
+        response_name: str, field: str, payload: dict[str, Any]
+    ) -> str:
+        return (
+            f"Jules {response_name} response is missing required field {field!r}; "
+            f"response keys: {JulesClient._payload_keys(payload)}"
+        )
+
+    @staticmethod
+    def _payload_keys(payload: dict[str, Any]) -> str:
+        return ", ".join(sorted(str(key) for key in payload)) or "<none>"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from collections.abc import Iterator
@@ -19,12 +20,29 @@ from orchestrator.models.workflow_status import (
     WorkflowStatus,
 )
 from orchestrator.repositories.workflow_repository import WorkflowRepository
+from orchestrator.runtime_logging import redact_text
 from orchestrator.services.exceptions import WorkflowError
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.review_service import ReviewService
 from orchestrator.services.spec_service import SpecService
 from orchestrator.services.task_provider import TaskProvider
 from orchestrator.services.validation_service import ValidationService
+
+logger = logging.getLogger(__name__)
+
+
+_STAGE_LABELS = {
+    WorkflowStage.LOAD_TASK: "task loading",
+    WorkflowStage.LOAD_CONFIG: "repository/config resolution",
+    WorkflowStage.GENERATE_SPEC: "Jules spec generation",
+    WorkflowStage.PREPARE_BRANCH: "branch preparation",
+    WorkflowStage.IMPLEMENT: "Codex implementation",
+    WorkflowStage.VALIDATE: "local validation",
+    WorkflowStage.COMMIT: "commit",
+    WorkflowStage.PUSH: "push",
+    WorkflowStage.CREATE_PR: "pull request creation",
+    WorkflowStage.REVIEW: "Jules review",
+}
 
 
 class WorkflowService:
@@ -46,6 +64,9 @@ class WorkflowService:
         )
         self._repository.update_status(execution.id, WorkflowStatus.RUNNING)
         try:
+            logger.info(
+                "[workflow] Loading %s task %s", self._task_provider.source, task_id
+            )
             with self._step(execution.id, WorkflowStage.LOAD_TASK):
                 task = self._task_provider.get_task(task_id)
                 self._repository.update_task(execution.id, task)
@@ -54,6 +75,11 @@ class WorkflowService:
                 config = self._config_loader.load(task, repository_override)
                 self._repository.update_project(
                     execution.id, str(config.path), config.repository.base_branch
+                )
+                logger.info(
+                    "[workflow] Repository resolved: %s (base: %s)",
+                    config.path,
+                    config.repository.base_branch,
                 )
                 clients = self._client_factory.create(config)
                 repository_slug = clients.git.github_repository()
@@ -166,15 +192,19 @@ class WorkflowService:
 
     @contextmanager
     def _step(self, execution_id: str, stage: WorkflowStage) -> Iterator[None]:
+        label = _STAGE_LABELS.get(stage, stage.value.casefold().replace("_", " "))
+        logger.info("[workflow] Entering %s", label)
         self._repository.update_stage(execution_id, stage)
         step_id = self._repository.start_step(execution_id, stage)
         try:
             yield
         except Exception as exc:
             self._repository.finish_step(step_id, StepStatus.FAILED, str(exc))
+            logger.error("[workflow] %s failed: %s", label, redact_text(str(exc)))
             raise
         else:
             self._repository.finish_step(step_id, StepStatus.SUCCEEDED)
+            logger.info("[workflow] Completed %s", label)
 
     @staticmethod
     def _branch_name(prefix: str, card_id: str, title: str) -> str:

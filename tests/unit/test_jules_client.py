@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 
 import httpx
 import pytest
 
 from orchestrator.clients.exceptions import (
+    JulesClientError,
     JulesSessionCancelledError,
     JulesSessionFailedError,
     JulesSessionNeedsHumanError,
@@ -15,6 +17,7 @@ from orchestrator.clients.exceptions import (
 )
 from orchestrator.clients.jules_client import JulesClient
 from orchestrator.config.project_config import JulesIntegrationSettings
+from orchestrator.models.jules_session import JulesSession, JulesSessionState
 
 
 class FakeClock:
@@ -60,6 +63,20 @@ def _session(state: str) -> dict[str, str]:
     }
 
 
+def _documented_create_session() -> dict[str, object]:
+    """The immediate POST example in Jules' official quickstart."""
+    return {
+        "name": "sessions/session-1",
+        "id": "session-1",
+        "title": "Orchestrator technical specification",
+        "sourceContext": {
+            "source": "sources/github-example-api",
+            "githubRepoContext": {"startingBranch": "develop"},
+        },
+        "prompt": "produce JSON",
+    }
+
+
 def _run(client: JulesClient, created: list[object]):
     return client.generate_spec(
         "produce JSON",
@@ -95,7 +112,7 @@ def test_creates_session_polls_to_completed_and_recovers_final_result() -> None:
             )
         return httpx.Response(200, json=_session(next(states)))
 
-    created: list[object] = []
+    created: list[JulesSession] = []
     result = _run(_client(handler, clock), created)
 
     assert result.session.id == "session-1"
@@ -103,6 +120,208 @@ def test_creates_session_polls_to_completed_and_recovers_final_result() -> None:
     assert result.result_text == '{"safe_to_implement": true}'
     assert len(created) == 1
     assert sum(request.method == "POST" for request in requests) == 1
+
+
+def test_documented_create_payload_without_state_persists_id_before_get_session() -> None:
+    clock = FakeClock()
+    requests: list[httpx.Request] = []
+    created: list[JulesSession] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            assert request.url.path == "/v1alpha/sessions"
+            return httpx.Response(200, json=_documented_create_session())
+        if request.url.path == "/v1alpha/sessions/session-1":
+            assert len(created) == 1
+            return httpx.Response(200, json=_session("COMPLETED"))
+        assert request.url.path == "/v1alpha/sessions/session-1/activities"
+        return httpx.Response(
+            200, json={"activities": [{"agentMessaged": {"agentMessage": "done"}}]}
+        )
+
+    result = _run(_client(handler, clock), created)
+
+    assert result.result_text == "done"
+    assert len(created) == 1
+    session = created[0]
+    assert session.id == "session-1"
+    assert session.url is None
+    assert session.state is JulesSessionState.STATE_UNSPECIFIED
+    assert [request.url.path for request in requests] == [
+        "/v1alpha/sessions",
+        "/v1alpha/sessions/session-1",
+        "/v1alpha/sessions/session-1/activities",
+    ]
+
+
+def test_get_session_requires_state_and_preserves_created_session_on_none_state() -> None:
+    clock = FakeClock()
+    post_count = 0
+    created: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal post_count
+        if request.method == "POST":
+            post_count += 1
+            return httpx.Response(200, json=_documented_create_session())
+        return httpx.Response(
+            200,
+            json={
+                "id": "session-1",
+                "name": "sessions/session-1",
+                "url": "https://jules.google.com/session/session-1",
+                "state": None,
+            },
+        )
+
+    with pytest.raises(JulesClientError) as error:
+        _run(_client(handler, clock), created)
+
+    assert "Get Session response is missing required field 'state'" in str(error.value)
+    assert "response keys: id, name, state, url" in str(error.value)
+    assert len(created) == 1
+    assert post_count == 1
+
+
+def test_documented_get_session_payload_is_parsed_as_a_session() -> None:
+    session = JulesClient._session_from_payload(
+        _session("IN_PROGRESS"), response_name="Get Session", require_state=True
+    )
+
+    assert session.id == "session-1"
+    assert session.state is JulesSessionState.IN_PROGRESS
+    assert session.url == "https://jules.google.com/session/session-1"
+
+
+def test_get_session_with_activity_shape_reports_available_keys() -> None:
+    with pytest.raises(JulesClientError) as error:
+        JulesClient._session_from_payload(
+            {"activities": []}, response_name="Get Session", require_state=True
+        )
+
+    assert "missing required field 'id'" in str(error.value)
+    assert "response keys: activities" in str(error.value)
+
+
+def test_poll_logs_state_transitions_without_repeating_unchanged_state(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = FakeClock()
+    states = iter(["IN_PROGRESS", "IN_PROGRESS", "COMPLETED"])
+    target_logger = logging.getLogger("orchestrator.clients.jules_client")
+    target_logger.addHandler(caplog.handler)
+    previous_propagation = target_logger.propagate
+    target_logger.propagate = False
+    try:
+        with caplog.at_level(logging.INFO, logger=target_logger.name):
+            _run(
+                _client(
+                    lambda request: (
+                        httpx.Response(200, json=_session("QUEUED"))
+                        if request.method == "POST"
+                        else (
+                            httpx.Response(
+                                200,
+                                json={
+                                    "activities": [
+                                        {"agentMessaged": {"agentMessage": "done"}}
+                                    ]
+                                },
+                            )
+                            if request.url.path.endswith("/activities")
+                            else httpx.Response(200, json=_session(next(states)))
+                        )
+                    ),
+                    clock,
+                ),
+                [],
+            )
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.propagate = previous_propagation
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum(message == "[jules] State: IN_PROGRESS" for message in messages) == 1
+    assert "[jules] State changed: IN_PROGRESS -> COMPLETED" in messages
+    assert "[jules] State changed: IN_PROGRESS -> IN_PROGRESS" not in messages
+
+
+def test_poll_logs_heartbeat_for_a_long_unchanged_state(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = FakeClock()
+    states = iter(["IN_PROGRESS", "IN_PROGRESS", "IN_PROGRESS", "COMPLETED"])
+    target_logger = logging.getLogger("orchestrator.clients.jules_client")
+    target_logger.addHandler(caplog.handler)
+    previous_propagation = target_logger.propagate
+    target_logger.propagate = False
+    try:
+        with caplog.at_level(logging.INFO, logger=target_logger.name):
+            _run(
+                _client(
+                    lambda request: (
+                        httpx.Response(200, json=_session("QUEUED"))
+                        if request.method == "POST"
+                        else (
+                            httpx.Response(
+                                200,
+                                json={
+                                    "activities": [
+                                        {"agentMessaged": {"agentMessage": "done"}}
+                                    ]
+                                },
+                            )
+                            if request.url.path.endswith("/activities")
+                            else httpx.Response(200, json=_session(next(states)))
+                        )
+                    ),
+                    clock,
+                    poll_interval_seconds=30,
+                    timeout_seconds=200,
+                ),
+                [],
+            )
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.propagate = previous_propagation
+
+    assert any(
+        "[jules] Still IN_PROGRESS after 1m" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_poll_logs_no_jules_api_key_from_transient_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = FakeClock()
+    target_logger = logging.getLogger("orchestrator.clients.jules_client")
+    target_logger.addHandler(caplog.handler)
+    previous_propagation = target_logger.propagate
+    target_logger.propagate = False
+    try:
+        with caplog.at_level(logging.DEBUG, logger=target_logger.name):
+            with pytest.raises(JulesTransientPollError):
+                _run(
+                    _client(
+                        lambda request: (
+                            httpx.Response(200, json=_session("QUEUED"))
+                            if request.method == "POST"
+                            else httpx.Response(
+                                503, text="JULES_API_KEY=super-secret-value"
+                            )
+                        ),
+                        clock,
+                        poll_retry_attempts=1,
+                    ),
+                    [],
+                )
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.propagate = previous_propagation
+
+    assert "super-secret-value" not in caplog.text
 
 
 def test_persists_session_before_the_first_poll() -> None:

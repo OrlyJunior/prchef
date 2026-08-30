@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 from orchestrator.clients.command_client import CommandClient, CommandResult
 from orchestrator.clients.exceptions import GitClientError
+
+logger = logging.getLogger(__name__)
 
 
 class GitClient:
@@ -21,16 +24,19 @@ class GitClient:
         self, base_branch: str, working_branch: str, protected_branches: list[str]
     ) -> None:
         self._assert_safe_working_branch(working_branch, protected_branches)
+        logger.info("[git] Preparing base branch: %s", base_branch)
         self.ensure_clean()
         self._git("fetch", "origin", base_branch)
         switched = self._git("switch", base_branch, check=False)
         if not switched.success:
             self._git("switch", "--create", base_branch, "--track", f"origin/{base_branch}")
         self._git("merge", "--ff-only", f"origin/{base_branch}")
+        logger.info("[git] Creating working branch: %s", working_branch)
         self._git("switch", "--create", working_branch)
         current = self.current_branch()
         if current != working_branch:
             raise GitClientError(f"Expected branch {working_branch}, got {current}")
+        logger.info("[git] Working branch ready: %s", working_branch)
 
     def current_branch(self) -> str:
         return self._git("branch", "--show-current").stdout.strip()
@@ -54,14 +60,19 @@ class GitClient:
         staged = self._git("diff", "--cached", "--name-only").stdout.strip()
         if not staged:
             raise GitClientError("Codex produced no changes to commit")
+        logger.info("[git] Creating commit on %s", working_branch)
         self._git("commit", "-m", message)
-        return self._git("rev-parse", "HEAD").stdout.strip()
+        commit_sha = self._git("rev-parse", "HEAD").stdout.strip()
+        logger.info("[git] Commit created: %s", commit_sha)
+        return commit_sha
 
     def push(self, working_branch: str, protected_branches: list[str]) -> None:
         self._assert_safe_working_branch(working_branch, protected_branches)
         if self.current_branch() != working_branch:
             raise GitClientError("Refusing to push outside the workflow branch")
+        logger.info("[git] Pushing branch: %s", working_branch)
         self._git("push", "--set-upstream", "origin", working_branch)
+        logger.info("[git] Push completed: %s", working_branch)
 
     def diff(self, base_branch: str) -> str:
         return self._git("diff", "--no-ext-diff", f"{base_branch}...HEAD").stdout

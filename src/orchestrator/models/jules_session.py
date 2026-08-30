@@ -3,6 +3,7 @@ from enum import StrEnum
 
 
 class JulesSessionState(StrEnum):
+    STATE_UNSPECIFIED = "STATE_UNSPECIFIED"
     QUEUED = "QUEUED"
     PLANNING = "PLANNING"
     AWAITING_PLAN_APPROVAL = "AWAITING_PLAN_APPROVAL"
