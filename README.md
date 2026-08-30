@@ -89,6 +89,33 @@ orchestrator run --task-id 42 --repository owner/repository  # usa task.provider
 orchestrator show EXECUTION_ID
 ```
 
+### Debug isolado por etapa
+
+O comando `debug` executa somente uma etapa contra uma execucao ja persistida; ele nao chama
+`run`, nao avanca o workflow e nao altera o registro original. Use `--dry-run` para validar os
+inputs e mostrar o plano sem chamar provider, Jules, Codex ou comandos de validacao:
+
+```bash
+orchestrator debug --execution-id EXECUTION_ID --stage validation --dry-run
+orchestrator debug --execution-id EXECUTION_ID --stage review --verbose
+```
+
+As etapas aceitas e seus inputs sao:
+
+- `task-loading`: `task_source`, `task_id` e, para GitHub, o repositorio persistido no snapshot da task.
+- `spec-generation`: `task_snapshot`, configuracao/caminho do repositorio e autenticacao Jules; cria
+  uma sessao remota read-only sem persistir seu resultado na execucao original.
+- `implementation`: `task_snapshot`, `spec_snapshot`, caminho do repositorio e `working_branch`
+  persistida ja em checkout. O Codex pode alterar arquivos locais, mas o debug nunca cria branch,
+  commit, push ou PR; use `--dry-run` para evitar essa alteracao.
+- `validation`: caminho/configuracao do repositorio e comandos de validacao; os comandos sao
+  executados localmente quando `--dry-run` nao e usado.
+- `review`: `task_snapshot`, `spec_snapshot`, `validation_snapshot`, `pull_request_snapshot`,
+  diff local e `working_branch`; cria uma sessao Jules read-only sem publicar alteracoes.
+
+O resultado do debug e JSON em `stdout`, e o progresso continua em `stderr`. Nenhuma etapa seguinte
+e iniciada automaticamente.
+
 Exatamente uma origem deve ser informada por execução. GitHub Issues é a opção recomendada para
 projetos hospedados no GitHub porque reutiliza a autenticação existente do `gh` e permite que o PR
 inclua `Closes #<numero>` quando issue e PR pertencem ao mesmo repositório. Para issues em outro

@@ -35,12 +35,64 @@ class StubWorkflowService:
         )
 
 
+class StubDebugService:
+    calls: list[tuple[str, str, bool]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        pass
+
+    def execute(self, execution: WorkflowExecution, stage: Any, *, dry_run: bool) -> dict[str, Any]:
+        self.calls.append((execution.id, stage.value, dry_run))
+        return {
+            "execution_id": execution.id,
+            "stage": stage.value,
+            "dry_run": dry_run,
+            "execution_mutated": False,
+        }
+
+
 def _stub_runtime(monkeypatch: Any) -> None:
     StubWorkflowService.calls.clear()
     monkeypatch.setattr(main, "WorkflowService", StubWorkflowService)
     monkeypatch.setattr(main, "_repository", lambda settings: object())
     monkeypatch.setattr(main, "_apply_pending_migrations", lambda settings: None)
     monkeypatch.setattr(main, "ClientFactory", lambda api_key: object())
+
+
+def test_cli_debug_runs_only_selected_stage_and_supports_dry_run(
+    monkeypatch: Any,
+) -> None:
+    _stub_runtime(monkeypatch)
+    StubDebugService.calls.clear()
+
+    class Repository:
+        def get_execution(self, execution_id: str) -> WorkflowExecution:
+            return WorkflowExecution(id=execution_id)
+
+    monkeypatch.setattr(main, "_repository", lambda settings: Repository())
+    monkeypatch.setattr(main, "DebugService", StubDebugService)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "debug",
+            "--execution-id",
+            "execution-1",
+            "--stage",
+            "validation",
+            "--dry-run",
+            "--verbose",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "execution_id": "execution-1",
+        "stage": "validation",
+        "dry_run": True,
+        "execution_mutated": False,
+    }
+    assert StubDebugService.calls == [("execution-1", "validation", True)]
 
 
 def test_cli_runs_trello_provider(monkeypatch: Any) -> None:

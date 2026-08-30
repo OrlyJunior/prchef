@@ -3,7 +3,7 @@
 ## Componentes
 
 - `models`: dataclasses e enums do dominio, sem dependencias de infraestrutura.
-- `services`: providers de task, prompts, parsing de resultados, validacao e maquina de workflow.
+- `services`: providers de task, prompts, parsing de resultados, validacao, debug isolado e maquina de workflow.
 - `clients`: Trello HTTP, GitHub Issues/PRs via `gh`, API de sessoes Jules, Codex e Git.
 - `repositories`: entidades SQLAlchemy, serializacao e `WorkflowRepository`.
 - `config`: settings de ambiente, merge YAML e fabrica de sessoes.
@@ -25,6 +25,10 @@
 11. O review devolve decisão estruturada (`APPROVED`, `CHANGES_REQUESTED` ou `NEEDS_HUMAN`).
     JSON inválido/contraditório ou estados Jules aguardando intervenção humana viram
     `NEEDS_HUMAN`; falhas operacionais viram `FAILED`.
+
+O comando `debug` usa uma `WorkflowExecution` persistida como contrato de entrada e chama apenas a
+etapa selecionada. Ele não atualiza `workflow_executions`/`workflow_steps` nem inicia etapas
+seguintes; `--dry-run` valida os snapshots e a configuração sem executar integrações.
 
 Cada operacao logica cria uma linha em `workflow_steps`. `current_stage` e atualizado antes de
 cada etapa, permitindo que uma V2 selecione um ponto de retomada sem mudar o schema conceitual.
