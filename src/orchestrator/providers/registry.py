@@ -70,7 +70,6 @@ class AgentProviderRegistry:
     def _build_codex(
         name: str, settings: AgentProviderSettings, commands: CommandClient
     ) -> AgentProvider:
-        del name
         options = CodexCliProviderSettings.model_validate(settings.model_dump())
         return CodexAgentProvider(
             CodexClient(
@@ -78,6 +77,9 @@ class AgentProviderRegistry:
                 options.command,
                 options.timeout_seconds,
                 approval_policy=options.approval_policy,
+                model=options.model,
+                reasoning_effort=options.reasoning_effort,
+                provider_name=name,
             )
         )
 

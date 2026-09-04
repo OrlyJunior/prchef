@@ -26,17 +26,56 @@ class CodexClient:
         command: Sequence[str],
         timeout_seconds: int,
         approval_policy: Literal["approve-for-me"] | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        provider_name: str = "codex",
     ) -> None:
         self._commands = command_client
         self._command = list(command)
         self._timeout_seconds = timeout_seconds
         self._approval_policy = approval_policy
+        self._model = model
+        self._reasoning_effort = reasoning_effort
+        self._provider_name = provider_name
+        command_model = self._command_model(self._command)
+        if (
+            model is not None
+            and self._has_command_model_flag(self._command)
+            and command_model is None
+        ):
+            raise ValueError("Codex command has a model flag without a value")
+        if model is not None and command_model is not None and command_model != model:
+            raise ValueError(
+                "Codex command contains a model flag that conflicts with the configured model"
+            )
+        command_reasoning_effort = self._command_reasoning_effort(self._command)
+        if (
+            reasoning_effort is not None
+            and self._has_command_reasoning_effort(self._command)
+            and command_reasoning_effort is None
+        ):
+            raise ValueError("Codex command has model_reasoning_effort without a value")
+        if (
+            reasoning_effort is not None
+            and command_reasoning_effort is not None
+            and command_reasoning_effort != reasoning_effort
+        ):
+            raise ValueError(
+                "Codex command contains a reasoning effort that conflicts with the configured "
+                "reasoning effort"
+            )
 
     def implement(self, prompt: str, repository_path: Path) -> ImplementationResult:
         with tempfile.TemporaryDirectory(prefix="orchestrator-codex-") as temp_root:
             output_file = Path(temp_root) / "last-message.txt"
             command = self._execution_command(output_file)
             logger.info("[codex] Starting implementation")
+            logger.debug(
+                "[codex] Starting provider=%s model=%s reasoning_effort=%s",
+                self._provider_name,
+                self._model or "<external-default>",
+                self._reasoning_effort or "<external-default>",
+            )
             started = time.monotonic()
             try:
                 result = self._commands.run(
@@ -145,6 +184,18 @@ class CodexClient:
 
     def _execution_command(self, output_file: Path) -> list[str]:
         command = [part.replace("{output_file}", str(output_file)) for part in self._command]
+        runtime_arguments: list[str] = []
+        if self._model is not None and self._command_model(command) is None:
+            runtime_arguments.extend(("--model", self._model))
+        if (
+            self._reasoning_effort is not None
+            and self._command_reasoning_effort(command) is None
+        ):
+            runtime_arguments.extend(
+                ("--config", f'model_reasoning_effort="{self._reasoning_effort}"')
+            )
+        insert_at = self._runtime_insert_index(command)
+        command[insert_at:insert_at] = runtime_arguments
         if self._approval_policy is None:
             return command
 
@@ -152,6 +203,59 @@ class CodexClient:
         if "--approve-for-me" not in command:
             command.insert(min(2, len(command)), "--approve-for-me")
         return command
+
+    @staticmethod
+    def _command_model(command: Sequence[str]) -> str | None:
+        for index, argument in enumerate(command):
+            if argument in {"--model", "-m"}:
+                return command[index + 1] if index + 1 < len(command) else None
+            if argument.startswith("--model="):
+                return argument.partition("=")[2] or None
+        return None
+
+    @staticmethod
+    def _has_command_model_flag(command: Sequence[str]) -> bool:
+        return any(
+            argument in {"--model", "-m"} or argument.startswith("--model=")
+            for argument in command
+        )
+
+    @staticmethod
+    def _command_reasoning_effort(command: Sequence[str]) -> str | None:
+        for index, argument in enumerate(command):
+            value: str | None = None
+            if argument in {"--config", "-c"} and index + 1 < len(command):
+                value = command[index + 1]
+            elif argument.startswith("--config="):
+                value = argument.partition("=")[2]
+            if value is None or "=" not in value:
+                continue
+            key, configured = value.split("=", maxsplit=1)
+            if key.strip() == "model_reasoning_effort":
+                normalized = configured.strip().strip("\"'")
+                return normalized or None
+        return None
+
+    @staticmethod
+    def _has_command_reasoning_effort(command: Sequence[str]) -> bool:
+        for index, argument in enumerate(command):
+            value: str | None = None
+            if argument in {"--config", "-c"} and index + 1 < len(command):
+                value = command[index + 1]
+            elif argument.startswith("--config="):
+                value = argument.partition("=")[2]
+            if value is not None and "=" in value:
+                key, _ = value.split("=", maxsplit=1)
+                if key.strip() == "model_reasoning_effort":
+                    return True
+        return False
+
+    @staticmethod
+    def _runtime_insert_index(command: Sequence[str]) -> int:
+        try:
+            return command.index("exec") + 1
+        except ValueError:
+            return min(2, len(command))
 
     @staticmethod
     def _without_explicit_sandbox(command: list[str]) -> list[str]:

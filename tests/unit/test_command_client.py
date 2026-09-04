@@ -12,6 +12,7 @@ from orchestrator.clients import codex_client, command_client
 from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.command_client import CommandClient, CommandResult
 from orchestrator.clients.exceptions import CommandExecutionError
+from orchestrator.config.project_config import CodexCliProviderSettings
 
 
 def _completed(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -271,6 +272,150 @@ def test_codex_client_approve_for_me_replaces_explicit_sandbox(tmp_path: Path) -
     assert "danger-full-access" not in command
     assert command[-1] == "-"
     assert kwargs["input_text"] == "private prompt"
+
+
+def test_codex_client_passes_configured_model_and_reasoning_effort(tmp_path: Path) -> None:
+    commands = RecordingCommandClient()
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
+        timeout_seconds=30,
+        model="model-one",
+        reasoning_effort="high",
+    )
+
+    client.implement("private prompt", tmp_path)
+
+    command, _ = commands.calls[0]
+    assert command[2:6] == [
+        "--model",
+        "model-one",
+        "--config",
+        'model_reasoning_effort="high"',
+    ]
+    assert command.count("--model") == 1
+
+
+@pytest.mark.parametrize("model", ["model-one", "model-two"])
+def test_codex_client_changes_only_the_selected_model_argument(
+    tmp_path: Path, model: str
+) -> None:
+    commands = RecordingCommandClient(exit_code=1, stderr="configured model unavailable")
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "{output_file}", "-"],
+        timeout_seconds=30,
+        model=model,
+    )
+
+    result = client.implement("private prompt", tmp_path)
+
+    assert not result.success
+    assert commands.calls[0][0][2:4] == ["--model", model]
+    assert len(commands.calls) == 1
+
+
+def test_codex_client_preserves_custom_matching_runtime_flags(tmp_path: Path) -> None:
+    commands = RecordingCommandClient()
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        [
+            "codex",
+            "exec",
+            "--model",
+            "model-one",
+            "--config=model_reasoning_effort='high'",
+            "{output_file}",
+            "-",
+        ],
+        timeout_seconds=30,
+        model="model-one",
+        reasoning_effort="high",
+    )
+
+    client.implement("private prompt", tmp_path)
+
+    command, _ = commands.calls[0]
+    assert command.count("--model") == 1
+    assert command.count("--config=model_reasoning_effort='high'") == 1
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        (
+            {"model": "model-one", "command": ["codex", "exec", "--model", "model-two"]},
+            "conflicting model flag",
+        ),
+        (
+            {
+                "reasoning_effort": "high",
+                "command": ["codex", "exec", "-c", "model_reasoning_effort=low"],
+            },
+            "conflicting model_reasoning_effort",
+        ),
+        (
+            {"model": "model-one", "command": ["codex", "exec", "--model"]},
+            "model flag without a value",
+        ),
+        (
+            {
+                "reasoning_effort": "high",
+                "command": ["codex", "exec", "--config", "model_reasoning_effort="],
+            },
+            "model_reasoning_effort without a value",
+        ),
+    ],
+)
+def test_codex_custom_command_rejects_conflicting_runtime_settings(
+    settings: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        CodexCliProviderSettings.model_validate({"type": "codex-cli", **settings})
+
+
+@pytest.mark.parametrize("field", ["model", "reasoning_effort"])
+def test_codex_empty_runtime_settings_fail_clearly(field: str) -> None:
+    with pytest.raises(ValueError, match=f"{field} must be a non-empty string"):
+        CodexCliProviderSettings.model_validate(
+            {"type": "codex-cli", "command": ["codex", "exec", "-"], field: "  "}
+        )
+
+
+def test_codex_client_approve_for_me_preserves_model_and_reasoning(tmp_path: Path) -> None:
+    commands = RecordingCommandClient()
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
+        timeout_seconds=30,
+        approval_policy="approve-for-me",
+        model="model-one",
+        reasoning_effort="medium",
+    )
+
+    client.implement("private prompt", tmp_path)
+
+    command, _ = commands.calls[0]
+    assert command[:7] == [
+        "codex",
+        "exec",
+        "--approve-for-me",
+        "--model",
+        "model-one",
+        "--config",
+        'model_reasoning_effort="medium"',
+    ]
+    assert "--sandbox" not in command
+
+
+def test_codex_runtime_settings_do_not_embed_a_hard_coded_model_or_leak_to_services() -> None:
+    client_source = Path(codex_client.__file__).read_text(encoding="utf-8")
+    services = Path(__file__).parents[2] / "src" / "orchestrator" / "services"
+
+    assert "gpt-" not in client_source.casefold()
+    for filename in ("spec_service.py", "implementation_service.py", "review_service.py"):
+        source = (services / filename).read_text(encoding="utf-8")
+        assert "reasoning_effort" not in source
 
 
 def test_codex_client_surfaces_windows_sandbox_write_denial(

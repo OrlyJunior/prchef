@@ -41,6 +41,9 @@ defaults:
       poll_retry_backoff_seconds: 2
     codex:
       type: codex-cli
+      # Fixe estes valores com opcoes suportadas pela sua Codex CLI; nao dependa do default externo.
+      # model: <your-supported-codex-model>
+      # reasoning_effort: <your-supported-reasoning-effort>
       command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
       timeout_seconds: 3600
       # Opcional: usa o modo de revisao automatica do Codex CLI.

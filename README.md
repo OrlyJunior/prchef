@@ -43,6 +43,12 @@ O orquestrador nunca troca de politica automaticamente apos uma falha.
 Consulte a [documentacao oficial de aprovacoes do Codex](https://learn.chatgpt.com/docs/agent-approvals-security)
 para os limites e criterios da revisao automatica.
 
+Para execucoes reproduziveis, configure `model` e, quando desejado, `reasoning_effort` dentro da
+instancia `codex-cli`. O orquestrador envia o modelo por `--model` e o esforco por
+`--config model_reasoning_effort="..."`; ambos substituem somente aquela execucao, sem depender
+dos defaults da CLI ou do app. Os valores precisam ser suportados pela CLI e pela conta usada; nao
+ha fallback automatico se um deles for rejeitado.
+
 ### Diagnostico do sandbox Codex no Windows
 
 O orquestrador preserva `--sandbox workspace-write`; ele nunca seleciona automaticamente acesso
@@ -251,6 +257,9 @@ providers:
     timeout_seconds: 1800
   codex:
     type: codex-cli
+    # Exemplos: substitua por opcoes suportadas pela sua CLI/conta.
+    model: <your-supported-codex-model>
+    reasoning_effort: <your-supported-reasoning-effort>
     command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
     timeout_seconds: 3600
   vertex-gemini:
@@ -281,6 +290,12 @@ Agent providers sao instancias nomeadas em `providers`, dos tipos `jules`, `code
 do workflow a essas instancias. Mais de um papel pode reutilizar a mesma instancia, ou cada papel
 pode apontar para uma configuracao diferente do mesmo tipo. Opcoes de runtime/modelo permanecem
 dentro da instancia do provider.
+
+No `codex-cli`, `model` e `reasoning_effort` sao opcionais somente para compatibilidade com
+configuracoes legadas. Quando ausentes, a execucao usa o default externo da Codex CLI e o log
+verbose mostra `<external-default>`. Prefira fixa-los para controle de reproducibilidade, quota e
+custo. Em comandos customizados, o orquestrador injeta cada opcao apenas se a flag correspondente
+nao existir; uma flag existente com valor diferente e rejeitada antes do subprocesso.
 
 `gemini-vertex` exige `project` e `model`; `location` tem default `global`. A autenticacao e sempre
 via ADC, nunca por API key. Quando uma etapa solicita JSON estruturado, o adapter usa
