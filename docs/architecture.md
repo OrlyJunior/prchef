@@ -56,6 +56,10 @@ O papel define as instrucoes e a expectativa de output estruturado. O provider r
 de execucao. `AgentProviderRegistry` associa `providers.<nome>.type` a um adaptador explicito; task
 providers de GitHub/Trello continuam sendo um dominio separado.
 
+O provider `codex-cli` recebe `model` e `reasoning_effort` somente na sua propria configuracao e
+os traduz para argumentos da CLI. Os services continuam conhecendo apenas `AgentProvider`; eles nao
+selecionam modelo, esforco de raciocinio ou fallback de runtime.
+
 O adapter `gemini-vertex` traduz `StructuredOutputExpectation` para `application/json` e
 `response_json_schema` nativos do `google-genai`. Tipos e excecoes do SDK permanecem dentro do
 adapter; o restante do workflow recebe apenas `AgentResult` e erros neutros de provider.
