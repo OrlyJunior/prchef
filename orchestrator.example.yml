@@ -7,10 +7,13 @@ defaults:
   repository:
     base_branch: develop
     protected_branches: [main, master, develop]
-  roles:
-    spec: jules
-    implementation: codex
-    review: jules
+  agents:
+    planner:
+      provider: jules
+    implementer:
+      provider: codex
+    reviewer:
+      provider: jules
   safety:
     allow_direct_merge: false
     require_tests: true
@@ -18,8 +21,9 @@ defaults:
     auto_detect: true
     # `python -m pytest` usa .pytest-tmp/run automaticamente via pyproject.toml.
     commands: []
-  integrations:
+  providers:
     jules:
+      type: jules
       # API oficial de sessoes (sem launcher stdin/stdout). Exporte JULES_API_KEY.
       # A CLI oficial pode ser usada para login e inspecao manual: jules login.
       # Source opcional; se ausente, resolve pelo remote GitHub de origin.
@@ -31,11 +35,13 @@ defaults:
       poll_retry_attempts: 3
       poll_retry_backoff_seconds: 2
     codex:
+      type: codex-cli
       command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
       timeout_seconds: 3600
       # Opcional: usa o modo de revisao automatica do Codex CLI.
       # Ele implica workspace-write e nao pode ser combinado com --sandbox.
       # approval_policy: approve-for-me
+  integrations:
     github:
       command: [gh]
       timeout_seconds: 120

@@ -1,15 +1,16 @@
 from pathlib import Path
 
-from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.git_client import GitClient
+from orchestrator.models.agent import AgentRequest
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.repository_spec import RepositorySpec
+from orchestrator.providers.agent_provider import AgentProvider
 
 
 class ImplementationService:
-    def __init__(self, codex_client: CodexClient, git_client: GitClient) -> None:
-        self._codex = codex_client
+    def __init__(self, provider: AgentProvider, git_client: GitClient) -> None:
+        self._provider = provider
         self._git = git_client
 
     def implement(
@@ -46,10 +47,21 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         return self._run_prompt(safe_prompt, repository_path)
 
     def _run_prompt(self, prompt: str, repository_path: Path) -> ImplementationResult:
-        result = self._codex.implement(prompt, repository_path)
+        agent_result = self._provider.execute(
+            AgentRequest(
+                instructions=prompt,
+                title="Orchestrator implementation",
+                workspace_path=repository_path,
+            )
+        )
+        result = ImplementationResult(
+            success=agent_result.success,
+            summary=agent_result.output,
+            error_message=agent_result.error_message,
+        )
         if result.success:
             result.changed_files = self._git.changed_files()
             if not result.changed_files:
                 result.success = False
-                result.error_message = "Codex completed without changing files"
+                result.error_message = "Implementation provider completed without changing files"
         return result

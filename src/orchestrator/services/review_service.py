@@ -1,22 +1,52 @@
 import json
 from collections.abc import Callable
 from dataclasses import asdict
+from pathlib import Path
 
-from orchestrator.clients.jules_client import JulesClient
+from orchestrator.models.agent import (
+    AgentExecutionReference,
+    AgentRequest,
+    StructuredOutputExpectation,
+)
 from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.models.jules_session import JulesSession
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationResult
 from orchestrator.models.workflow_status import ReviewDecision
+from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.services.exceptions import StructuredOutputError
 from orchestrator.services.structured_output import parse_json_object, string_list
 
+_REVIEW_OUTPUT = StructuredOutputExpectation(
+    name="code-review",
+    schema={
+        "type": "object",
+        "properties": {
+            "decision": {
+                "type": "string",
+                "enum": ["APPROVED", "CHANGES_REQUESTED", "NEEDS_HUMAN"],
+            },
+            "summary": {"type": "string"},
+            "findings": {"type": "array", "items": {"type": "string"}},
+            "blocking_findings": {"type": "array", "items": {"type": "string"}},
+            "suggestions": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [
+            "decision",
+            "summary",
+            "findings",
+            "blocking_findings",
+            "suggestions",
+        ],
+        "additionalProperties": False,
+    },
+)
+
 
 class ReviewService:
-    def __init__(self, jules_client: JulesClient) -> None:
-        self._jules = jules_client
+    def __init__(self, provider: AgentProvider) -> None:
+        self._provider = provider
 
     def review(
         self,
@@ -26,10 +56,11 @@ class ReviewService:
         pull_request: PullRequest,
         diff: str,
         validation: ValidationResult,
+        repository_path: Path,
         repository_slug: str,
         base_branch: str,
         feature_branch: str,
-        on_session_created: Callable[[JulesSession], None],
+        on_execution_started: Callable[[AgentExecutionReference], None],
     ) -> CodeReview:
         prompt = f"""Review this implementation against the original task and technical spec.
 Do not edit files, create commits, push, merge, or change the pull request.
@@ -71,16 +102,32 @@ Return exactly one JSON object:
 }}
 Use NEEDS_HUMAN when a safe decision cannot be made from the available context.
 """
-        operation = self._jules.review(
-            prompt, repository_slug, feature_branch, on_session_created
+        result = self._provider.execute(
+            AgentRequest(
+                instructions=prompt,
+                title="Orchestrator code review",
+                workspace_path=repository_path,
+                repository=repository_slug,
+                revision=feature_branch,
+                structured_output=_REVIEW_OUTPUT,
+            ),
+            on_started=on_execution_started,
         )
-        raw = operation.result_text
+        if not result.success:
+            raise RuntimeError(result.error_message or "Reviewer provider failed")
+        raw = result.output
         try:
-            data = parse_json_object(raw, "Jules review")
+            data = (
+                dict(result.structured_output)
+                if result.structured_output is not None
+                else parse_json_object(raw, "Reviewer output")
+            )
             decision = ReviewDecision(str(data.get("decision")))
             summary = data.get("summary")
             if not isinstance(summary, str) or not summary.strip():
-                raise StructuredOutputError("Jules review.summary must be a non-empty string")
+                raise StructuredOutputError(
+                    "Reviewer output.summary must be a non-empty string"
+                )
             findings = string_list(data.get("findings"), "findings", "review")
             blocking_findings = string_list(
                 data.get("blocking_findings"), "blocking_findings", "review"
@@ -88,16 +135,16 @@ Use NEEDS_HUMAN when a safe decision cannot be made from the available context.
             suggestions = string_list(data.get("suggestions", []), "suggestions", "review")
             if decision is ReviewDecision.APPROVED and blocking_findings:
                 raise StructuredOutputError(
-                    "Jules review is contradictory: APPROVED has blocking findings"
+                    "Reviewer output is contradictory: APPROVED has blocking findings"
                 )
             if decision is ReviewDecision.CHANGES_REQUESTED and not blocking_findings:
                 raise StructuredOutputError(
-                    "Jules review is contradictory: CHANGES_REQUESTED has no blocking findings"
+                    "Reviewer output is contradictory: CHANGES_REQUESTED has no blocking findings"
                 )
         except (StructuredOutputError, ValueError) as exc:
             return CodeReview(
                 result=ReviewDecision.NEEDS_HUMAN,
-                summary=f"Jules review could not be interpreted safely: {exc}",
+                summary=f"Reviewer output could not be interpreted safely: {exc}",
                 raw_text=raw,
             )
         return CodeReview(

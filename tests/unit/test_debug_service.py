@@ -7,6 +7,7 @@ from typing import Any
 
 from orchestrator.config.project_config import ProjectConfig
 from orchestrator.models import (
+    AgentRole,
     DevelopmentTask,
     PullRequest,
     RepositorySpec,
@@ -71,9 +72,14 @@ class RecordingFactory(FakeClientFactory):
         super().__init__()
         self.create_calls = 0
 
-    def create(self, config: ProjectConfig, *, include_jules: bool = True) -> SimpleNamespace:
+    def create(
+        self,
+        config: ProjectConfig,
+        *,
+        agent_roles: set[AgentRole] | None = None,
+    ) -> SimpleNamespace:
         self.create_calls += 1
-        return super().create(config, include_jules=include_jules)
+        return super().create(config, agent_roles=agent_roles)
 
 
 def _service(

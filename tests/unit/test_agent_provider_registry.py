@@ -1,0 +1,121 @@
+from pathlib import Path
+
+import pytest
+
+from orchestrator.clients.factory import ClientFactory
+from orchestrator.config.project_config import ConfigurationError, ProjectConfig
+from orchestrator.models import AgentRole
+from orchestrator.providers.codex_provider import CodexAgentProvider
+from orchestrator.providers.jules_provider import JulesAgentProvider
+
+
+def _config(
+    tmp_path: Path,
+    *,
+    agents: dict[str, object],
+    providers: dict[str, object],
+) -> ProjectConfig:
+    return ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "agents": agents,
+            "providers": providers,
+        }
+    )
+
+
+def test_resolves_named_provider_types_and_reuses_shared_instances(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        agents={
+            "planner": {"provider": "remote"},
+            "implementer": {"provider": "local"},
+            "reviewer": {"provider": "remote"},
+        },
+        providers={
+            "remote": {"type": "jules", "poll_interval_seconds": 7},
+            "local": {
+                "type": "codex-cli",
+                "command": ["codex", "exec", "-"],
+                "timeout_seconds": 45,
+            },
+        },
+    )
+
+    clients = ClientFactory("test-key").create(config)
+
+    assert isinstance(clients.agent(AgentRole.PLANNER), JulesAgentProvider)
+    assert isinstance(clients.agent(AgentRole.IMPLEMENTER), CodexAgentProvider)
+    assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.REVIEWER)
+
+
+def test_different_roles_can_reference_different_named_instances(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        agents={
+            "planner": {"provider": "planner-jules"},
+            "implementer": {"provider": "codex"},
+            "reviewer": {"provider": "review-jules"},
+        },
+        providers={
+            "planner-jules": {"type": "jules", "poll_interval_seconds": 5},
+            "review-jules": {"type": "jules", "poll_interval_seconds": 20},
+            "codex": {
+                "type": "codex-cli",
+                "command": ["codex", "exec", "-"],
+                "timeout_seconds": 45,
+            },
+        },
+    )
+
+    clients = ClientFactory("test-key").create(config)
+
+    assert clients.agent(AgentRole.PLANNER) is not clients.agent(AgentRole.REVIEWER)
+
+
+def test_unknown_provider_name_has_an_actionable_error(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        agents={"planner": {"provider": "missing"}},
+        providers={"codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]}},
+    )
+
+    with pytest.raises(ConfigurationError, match="Unknown agent provider name 'missing'"):
+        ClientFactory("test-key").create(config, agent_roles={AgentRole.PLANNER})
+
+
+def test_unknown_provider_type_has_an_actionable_error(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        agents={"planner": {"provider": "future"}},
+        providers={"future": {"type": "gemini-vertex", "model": "future-model"}},
+    )
+
+    with pytest.raises(ConfigurationError, match="Unknown agent provider type 'gemini-vertex'"):
+        ClientFactory("test-key").create(config, agent_roles={AgentRole.PLANNER})
+
+
+def test_unselected_provider_options_are_not_validated_by_another_provider(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        agents={
+            "planner": {"provider": "jules"},
+            "implementer": {"provider": "codex"},
+        },
+        providers={
+            "jules": {"type": "jules", "poll_interval_seconds": 5},
+            "codex": {"type": "codex-cli", "jules_only_option": True},
+        },
+    )
+
+    clients = ClientFactory("test-key").create(
+        config, agent_roles={AgentRole.PLANNER}
+    )
+
+    assert isinstance(clients.agent(AgentRole.PLANNER), JulesAgentProvider)
+    with pytest.raises(ConfigurationError, match="Invalid configuration.*'codex'"):
+        ClientFactory("test-key").create(
+            config, agent_roles={AgentRole.IMPLEMENTER}
+        )

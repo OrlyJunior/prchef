@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.clients.exceptions import JulesSessionNeedsHumanError
 from orchestrator.models import (
     DevelopmentTask,
     StepStatus,
@@ -11,6 +10,7 @@ from orchestrator.models import (
     WorkflowStage,
     WorkflowStatus,
 )
+from orchestrator.providers.agent_provider import AgentNeedsHumanError
 from orchestrator.services.task_provider import GitHubIssueTaskProvider, TrelloTaskProvider
 from orchestrator.services.workflow_service import WorkflowService
 from tests.unit.fakes import (
@@ -163,7 +163,7 @@ def test_malformed_jules_review_requires_human_instead_of_assuming_approval(work
 
 def test_jules_human_intervention_stops_workflow_and_keeps_session_reference(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.spec_error = JulesSessionNeedsHumanError(
+    factory.jules.spec_error = AgentNeedsHumanError(
         "Jules session is awaiting user feedback and requires human intervention", "spec-123"
     )
 

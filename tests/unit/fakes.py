@@ -10,12 +10,13 @@ from typing import Any
 from orchestrator.clients.command_client import CommandResult
 from orchestrator.config.project_config import ProjectConfig
 from orchestrator.models import (
+    AgentExecutionReference,
+    AgentRequest,
+    AgentResult,
+    AgentRole,
     CodeReview,
     DevelopmentTask,
     ImplementationResult,
-    JulesOperationResult,
-    JulesSession,
-    JulesSessionState,
     PullRequest,
     RepositorySpec,
     StepStatus,
@@ -178,61 +179,82 @@ class FakeJulesClient:
         self.spec_starting_branch: str | None = None
         self.review_starting_branch: str | None = None
 
-    def generate_spec(self, prompt: str, *args: Any) -> JulesOperationResult:
-        self.spec_starting_branch = str(args[1])
-        callback = args[-1]
-        session = JulesSession(
-            "spec-123", "https://jules.example/spec-123", JulesSessionState.QUEUED
+    def execute(
+        self, request: AgentRequest, *, on_started: Any = None
+    ) -> AgentResult:
+        is_spec = (
+            request.structured_output is not None
+            and request.structured_output.name == "repository-spec"
         )
-        callback(session)
-        if self.spec_error:
-            raise self.spec_error
-        return JulesOperationResult(session, json.dumps(
-            {
-                "technical_context": "Service and repository layers",
-                "current_behavior": "No audit record",
-                "involved_artifacts": ["src/audit.py"],
-                "implementation_proposal": "Write audit record transactionally",
-                "acceptance_criteria": ["Audit row is created"],
-                "expected_tests": ["Unit test"],
-                "risks": [],
-                "ambiguities": ["Audit retention is unspecified"] if self.ambiguous else [],
-                "safe_to_implement": not self.ambiguous,
-            }
-        ))
-
-    def review(self, prompt: str, *args: Any) -> JulesOperationResult:
-        self.review_starting_branch = str(args[1])
-        callback = args[-1]
-        session = JulesSession(
-            "review-123", "https://jules.example/review-123", JulesSessionState.QUEUED
+        external_id = "spec-123" if is_spec else "review-123"
+        reference = AgentExecutionReference(
+            provider="jules",
+            external_id=external_id,
+            url=f"https://jules.example/{external_id}",
+            metadata={"state": "QUEUED", "resource_name": None},
         )
-        callback(session)
+        if on_started is not None:
+            on_started(reference)
+        if is_spec:
+            self.spec_starting_branch = request.revision
+            if self.spec_error:
+                raise self.spec_error
+            return AgentResult(
+                output=json.dumps(
+                    {
+                        "technical_context": "Service and repository layers",
+                        "current_behavior": "No audit record",
+                        "involved_artifacts": ["src/audit.py"],
+                        "implementation_proposal": "Write audit record transactionally",
+                        "acceptance_criteria": ["Audit row is created"],
+                        "expected_tests": ["Unit test"],
+                        "risks": [],
+                        "ambiguities": (
+                            ["Audit retention is unspecified"] if self.ambiguous else []
+                        ),
+                        "safe_to_implement": not self.ambiguous,
+                    }
+                ),
+                execution=reference,
+            )
+        self.review_starting_branch = request.revision
         if self.review_error:
             raise self.review_error
         if self.malformed_review:
-            return JulesOperationResult(session, "not valid JSON")
-        return JulesOperationResult(session, json.dumps(
-            {
-                "decision": "CHANGES_REQUESTED" if self.changes_requested else "APPROVED",
-                "summary": (
-                    "An edge case needs coverage" if self.changes_requested else "Looks good"
-                ),
-                "findings": ["Missing edge case"] if self.changes_requested else [],
-                "blocking_findings": ["Missing edge case"] if self.changes_requested else [],
-                "suggestions": [],
-            }
-        ))
+            return AgentResult(output="not valid JSON", execution=reference)
+        return AgentResult(
+            output=json.dumps(
+                {
+                    "decision": (
+                        "CHANGES_REQUESTED" if self.changes_requested else "APPROVED"
+                    ),
+                    "summary": (
+                        "An edge case needs coverage"
+                        if self.changes_requested
+                        else "Looks good"
+                    ),
+                    "findings": ["Missing edge case"] if self.changes_requested else [],
+                    "blocking_findings": (
+                        ["Missing edge case"] if self.changes_requested else []
+                    ),
+                    "suggestions": [],
+                }
+            ),
+            execution=reference,
+        )
 
 
 class FakeCodexClient:
     def __init__(self) -> None:
         self.fail = False
 
-    def implement(self, prompt: str, repository_path: Path) -> ImplementationResult:
-        return ImplementationResult(
+    def execute(
+        self, request: AgentRequest, *, on_started: Any = None
+    ) -> AgentResult:
+        del request, on_started
+        return AgentResult(
             success=not self.fail,
-            summary="implemented" if not self.fail else "",
+            output="implemented" if not self.fail else "",
             error_message="codex exploded" if self.fail else None,
         )
 
@@ -307,10 +329,25 @@ class FakeClientFactory:
         self.github = FakeGitHubClient()
         self.commands = FakeCommandClient()
 
-    def create(self, config: ProjectConfig, *, include_jules: bool = True) -> SimpleNamespace:
+    def create(
+        self,
+        config: ProjectConfig,
+        *,
+        agent_roles: set[AgentRole] | None = None,
+    ) -> SimpleNamespace:
+        selected = agent_roles if agent_roles is not None else set(AgentRole)
+        provider_by_name = {"jules": self.jules, "codex": self.codex}
+        role_names = {
+            AgentRole.PLANNER: config.agents.planner.provider,
+            AgentRole.IMPLEMENTER: config.agents.implementer.provider,
+            AgentRole.REVIEWER: config.agents.reviewer.provider,
+        }
+        agents = {
+            role: provider_by_name[role_names[role]]
+            for role in selected
+        }
         return SimpleNamespace(
-            jules=self.jules if include_jules else None,
-            codex=self.codex,
+            agent=lambda role: agents[role],
             git=self.git,
             github=self.github,
             commands=self.commands,

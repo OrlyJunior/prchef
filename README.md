@@ -4,8 +4,8 @@ CLI em Python que executa e persiste o fluxo:
 
 ```text
 Trello Card   ─┐
-               ├─> Jules (spec read-only) -> Codex -> validacoes locais
-GitHub Issue  ─┘   -> Git branch/commit/push -> GitHub PR -> Jules review
+               ├─> planner -> implementer -> validacoes locais
+GitHub Issue  ─┘   -> Git branch/commit/push -> GitHub PR -> reviewer
 ```
 
 A V1 nunca faz merge, nunca envia commits diretamente a branches protegidas e encerra em
@@ -30,7 +30,8 @@ polling e recupera a ultima mensagem do agente quando a sessao chega a `COMPLETE
 
 Por padrao, o Codex roda com `--sandbox workspace-write`. Para optar explicitamente pela revisao
 automatica de pedidos de aprovacao da CLI, configure `approval_policy: approve-for-me` em
-`integrations.codex`. Nesse modo o orquestrador invoca `codex exec --approve-for-me` sem
+`providers.<nome-codex>.approval_policy`. Nesse modo o orquestrador invoca
+`codex exec --approve-for-me` sem
 `--sandbox`: a CLI associa esse modo a `workspace-write` e rejeita a combinacao dos dois flags.
 Isso aumenta a autonomia para escalacoes suportadas, mas nao equivale a `danger-full-access`.
 O orquestrador nunca troca de politica automaticamente apos uma falha.
@@ -82,8 +83,8 @@ Edite `.env` e `orchestrator.yml`. Para Trello, o card deve possuir um custom fi
 `Repository` (ou `Repo`) cujo valor corresponda a uma chave em `repositories`; `--repository`
 continua podendo sobrescrevê-lo. Para GitHub Issues, informe `--repository owner/repo` e use essa
 mesma chave no registro `repositories` para associá-la ao checkout local. Antes da primeira
-execucao, conecte o repositorio ao Jules. Sem `integrations.jules.source`, o cliente usa o remote
-`origin` para localizar a source correspondente na API.
+execucao, conecte o repositorio ao Jules. Sem `providers.<nome-jules>.source`, o cliente usa o
+remote `origin` para localizar a source correspondente na API.
 
 ## Banco e migrations
 
@@ -185,7 +186,7 @@ orchestrator run --github-issue 42 --repository owner/repository --verbose
 ```
 
 Prompts, respostas completas do Codex/Jules e credenciais nao sao incluidos nos logs. O intervalo
-de polling e o timeout do Jules continuam configuraveis em `integrations.jules` (15 s e 1800 s
+de polling e o timeout do Jules continuam configuraveis no provider Jules (15 s e 1800 s
 por padrao); `--verbose` nao altera o comportamento do workflow.
 
 ## Lifecycle do Jules
@@ -196,7 +197,7 @@ URL e consulta seu estado ate uma decisão. Os estados de processamento (`QUEUED
 Estados que aguardam interação humana e os estados de falha encerram a operação sem criar outra
 sessão.
 
-O intervalo, timeout global e retentativas de consulta ficam em `integrations.jules`. O default é
+O intervalo, timeout global e retentativas de consulta ficam no provider Jules. O default é
 15 s, 1800 s e 3 retentativas, respectivamente. Apenas consultas transitórias (rede, 408, 429 e
 5xx) recebem retry, com backoff exponencial simples; criar sessão nunca é repetido automaticamente.
 `QUEUED`, `PLANNING` e `IN_PROGRESS` continuam em polling. `AWAITING_USER_FEEDBACK`, `PAUSED` e
@@ -231,10 +232,22 @@ task:
 repository:
   base_branch: develop
   protected_branches: [main, master, develop, release]
-roles:
-  spec: jules
-  implementation: codex
-  review: jules
+agents:
+  planner:
+    provider: jules
+  implementer:
+    provider: codex
+  reviewer:
+    provider: jules
+providers:
+  jules:
+    type: jules
+    poll_interval_seconds: 15
+    timeout_seconds: 1800
+  codex:
+    type: codex-cli
+    command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
+    timeout_seconds: 3600
 safety:
   allow_direct_merge: false
   require_tests: true
@@ -244,10 +257,21 @@ validation:
     - [python, -m, pytest]
 ```
 
-Providers suportados:
+Task providers suportados:
 
 - `trello`: usa `ORCHESTRATOR_TRELLO_API_KEY` e `ORCHESTRATOR_TRELLO_TOKEN`.
 - `github`: executa `gh issue view` com a autenticação já ativa no GitHub CLI.
+
+Agent providers sao instancias nomeadas em `providers`, atualmente dos tipos `jules` e
+`codex-cli`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
+do workflow a essas instancias. Mais de um papel pode reutilizar a mesma instancia, ou cada papel
+pode apontar para uma configuracao diferente do mesmo tipo. Opcoes de runtime/modelo permanecem
+dentro da instancia do provider.
+
+Configuracoes legadas com `roles.spec|implementation|review` e
+`integrations.jules|codex` continuam aceitas e sao normalizadas para os providers `jules` e
+`codex`. Nomes de provider ou tipos desconhecidos produzem um erro de configuracao com os nomes
+disponiveis/suportados.
 
 `allow_direct_merge: true` e rejeitado nesta V1. Credenciais ficam exclusivamente em variaveis
 de ambiente e `.env` nao e versionado.
@@ -273,4 +297,6 @@ pelo Git. Isso evita a dependência de `%LOCALAPPDATA%\\Temp\\pytest-of-...` no 
 
 Veja [docs/architecture.md](docs/architecture.md). Em resumo, models nao conhecem HTTP,
 subprocessos ou SQLAlchemy; services coordenam regras; clients encapsulam integracoes externas;
-e repositories sao a unica porta de persistencia.
+e repositories sao a unica porta de persistencia. Os services de planner, implementacao e review
+dependem apenas de `AgentProvider.execute(AgentRequest) -> AgentResult`; adaptadores acima de
+`JulesClient` e `CodexClient` encapsulam REST/polling e subprocessos, respectivamente.

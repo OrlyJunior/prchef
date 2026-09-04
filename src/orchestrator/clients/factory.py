@@ -1,41 +1,57 @@
 from dataclasses import dataclass
 
-from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.clients.git_client import GitClient
 from orchestrator.clients.github_client import GitHubClient
-from orchestrator.clients.jules_client import JulesClient
 from orchestrator.config.project_config import ProjectConfig
+from orchestrator.models.agent import AgentRole
+from orchestrator.providers.agent_provider import AgentProvider
+from orchestrator.providers.registry import AgentProviderRegistry
 
 
 @dataclass(slots=True)
 class WorkflowClients:
     commands: CommandClient
-    jules: JulesClient | None
-    codex: CodexClient
+    agents: dict[AgentRole, AgentProvider]
     git: GitClient
     github: GitHubClient
+
+    def agent(self, role: AgentRole) -> AgentProvider:
+        try:
+            return self.agents[role]
+        except KeyError as exc:
+            raise RuntimeError(f"Agent provider for role {role.value!r} was not created") from exc
 
 
 class ClientFactory:
     def __init__(self, jules_api_key: str | None) -> None:
-        self._jules_api_key = jules_api_key
+        self._agent_providers = AgentProviderRegistry(jules_api_key)
 
-    def create(self, config: ProjectConfig, *, include_jules: bool = True) -> WorkflowClients:
+    def create(
+        self,
+        config: ProjectConfig,
+        *,
+        agent_roles: set[AgentRole] | None = None,
+    ) -> WorkflowClients:
         commands = CommandClient()
+        selected_roles = agent_roles if agent_roles is not None else set(AgentRole)
+        role_names = {
+            AgentRole.PLANNER: config.agents.planner.provider,
+            AgentRole.IMPLEMENTER: config.agents.implementer.provider,
+            AgentRole.REVIEWER: config.agents.reviewer.provider,
+        }
+        instances: dict[str, AgentProvider] = {}
+        agents: dict[AgentRole, AgentProvider] = {}
+        for role in selected_roles:
+            provider_name = role_names[role]
+            if provider_name not in instances:
+                instances[provider_name] = self._agent_providers.create(
+                    provider_name, config.providers, commands
+                )
+            agents[role] = instances[provider_name]
         return WorkflowClients(
             commands=commands,
-            jules=(
-                JulesClient(self._jules_api_key, config.integrations.jules)
-                if include_jules
-                else None
-            ),
-            codex=CodexClient(
-                commands,
-                config.integrations.codex.command,
-                config.integrations.codex.timeout_seconds,
-                approval_policy=config.integrations.codex.approval_policy,
-            ),
+            agents=agents,
             git=GitClient(commands, config.path),
             github=GitHubClient(
                 commands,

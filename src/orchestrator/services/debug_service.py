@@ -11,6 +11,7 @@ from orchestrator.config.project_config import (
     ProjectConfig,
     ProjectConfigLoader,
 )
+from orchestrator.models.agent import AgentExecutionReference, AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
@@ -131,15 +132,24 @@ class DebugService:
             )
         )
         config = self._resolve_config(execution, values, task)
+        role_by_stage = {
+            DebugStage.SPEC_GENERATION: AgentRole.PLANNER,
+            DebugStage.IMPLEMENTATION: AgentRole.IMPLEMENTER,
+            DebugStage.REVIEW: AgentRole.REVIEWER,
+        }
+        selected_role = role_by_stage.get(stage)
         clients = self._client_factory.create(
-            config, include_jules=stage in {DebugStage.SPEC_GENERATION, DebugStage.REVIEW}
+            config,
+            agent_roles={selected_role} if selected_role is not None else set(),
         )
         if stage is DebugStage.SPEC_GENERATION:
             if task is None:
                 raise DebugExecutionError("spec-generation requires task provider inputs")
             return self._run_spec(execution, stage, task, config, clients, values)
         if stage is DebugStage.IMPLEMENTATION:
-            implementation_service = ImplementationService(clients.codex, clients.git)
+            implementation_service = ImplementationService(
+                clients.agent(AgentRole.IMPLEMENTER), clients.git
+            )
             if values.prompt is not None:
                 implementation_result = implementation_service.implement_prompt(
                     values.prompt, config.path
@@ -204,7 +214,7 @@ class DebugService:
             inputs["task_provider"] = self._provider_inputs(execution, values, stage)
 
         if stage is DebugStage.SPEC_GENERATION:
-            inputs["jules_session"] = "new read-only session"
+            inputs["agent_execution"] = "new read-only provider execution"
         elif stage is DebugStage.IMPLEMENTATION:
             if values.prompt is None:
                 self._preview_spec(execution, values)
@@ -236,7 +246,7 @@ class DebugService:
                     "pull_request_snapshot": True,
                     "working_branch": feature_branch,
                     "diff": "explicit input or configured workspace diff",
-                    "jules_session": "new read-only session",
+                    "agent_execution": "new read-only provider execution",
                 }
             )
         return inputs
@@ -250,21 +260,21 @@ class DebugService:
         clients: WorkflowClients,
         values: DebugInputs,
     ) -> dict[str, Any]:
-        sessions: list[Any] = []
-        if clients.jules is None:
-            raise DebugExecutionError("Jules client is required for spec-generation debug")
-        spec = SpecService(clients.jules).generate(
+        executions: list[AgentExecutionReference] = []
+        spec = SpecService(clients.agent(AgentRole.PLANNER)).generate(
             task,
+            config.path,
             clients.git.github_repository(),
             self._base_branch(execution, values, config),
-            sessions.append,
+            executions.append,
         )
         return self._envelope(
             execution,
             stage,
             result={
                 "spec": asdict(spec),
-                "jules_sessions": [asdict(session) for session in sessions],
+                "agent_executions": [asdict(reference) for reference in executions],
+                "jules_sessions": [self._legacy_session(reference) for reference in executions],
             },
         )
 
@@ -283,28 +293,38 @@ class DebugService:
         feature_branch = self._feature_branch(execution, values)
         base_branch = self._base_branch(execution, values, config)
         diff = values.diff if values.diff is not None else clients.git.diff(base_branch)
-        sessions: list[Any] = []
-        if clients.jules is None:
-            raise DebugExecutionError("Jules client is required for review debug")
-        review = ReviewService(clients.jules).review(
+        executions: list[AgentExecutionReference] = []
+        review = ReviewService(clients.agent(AgentRole.REVIEWER)).review(
             task=task,
             spec=spec,
             pull_request=pull_request,
             diff=diff,
             validation=validation,
+            repository_path=config.path,
             repository_slug=clients.git.github_repository(),
             base_branch=base_branch,
             feature_branch=feature_branch,
-            on_session_created=sessions.append,
+            on_execution_started=executions.append,
         )
         return self._envelope(
             execution,
             stage,
             result={
                 "review": asdict(review),
-                "jules_sessions": [asdict(session) for session in sessions],
+                "agent_executions": [asdict(reference) for reference in executions],
+                "jules_sessions": [self._legacy_session(reference) for reference in executions],
             },
         )
+
+    @staticmethod
+    def _legacy_session(reference: AgentExecutionReference) -> dict[str, Any]:
+        """Keep the existing debug response shape while persistence remains Jules-named."""
+        return {
+            "id": reference.external_id,
+            "url": reference.url,
+            "state": reference.metadata.get("state"),
+            "resource_name": reference.metadata.get("resource_name"),
+        }
 
     def _resolve_config(
         self,
