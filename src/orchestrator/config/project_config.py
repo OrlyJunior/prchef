@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from orchestrator.models.development_task import DevelopmentTask
 
@@ -29,6 +29,22 @@ class RolesSettings(BaseModel):
     spec: str = "jules"
     implementation: str = "codex"
     review: str = "jules"
+
+
+class AgentRoleSettings(BaseModel):
+    provider: str
+
+
+class AgentsSettings(BaseModel):
+    planner: AgentRoleSettings = Field(
+        default_factory=lambda: AgentRoleSettings(provider="jules")
+    )
+    implementer: AgentRoleSettings = Field(
+        default_factory=lambda: AgentRoleSettings(provider="codex")
+    )
+    reviewer: AgentRoleSettings = Field(
+        default_factory=lambda: AgentRoleSettings(provider="jules")
+    )
 
 
 class SafetySettings(BaseModel):
@@ -67,7 +83,7 @@ class CodexIntegrationSettings(CommandIntegrationSettings):
                 break
         if sandbox_mode is not None and sandbox_mode != "workspace-write":
             raise ValueError(
-                "integrations.codex.approval_policy='approve-for-me' requires "
+                "Codex approval_policy='approve-for-me' requires "
                 "the workspace-write sandbox"
             )
         return self
@@ -79,6 +95,24 @@ class JulesIntegrationSettings(BaseModel):
     timeout_seconds: int = Field(default=1800, gt=0)
     poll_retry_attempts: int = Field(default=3, ge=0)
     poll_retry_backoff_seconds: float = Field(default=2.0, gt=0)
+
+
+class AgentProviderSettings(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+
+
+class JulesProviderSettings(JulesIntegrationSettings):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["jules"] = "jules"
+
+
+class CodexCliProviderSettings(CodexIntegrationSettings):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["codex-cli"] = "codex-cli"
 
 
 class IntegrationsSettings(BaseModel):
@@ -107,9 +141,54 @@ class ProjectConfig(BaseModel):
     task: TaskSettings = Field(default_factory=TaskSettings)
     repository: RepositorySettings = Field(default_factory=RepositorySettings)
     roles: RolesSettings = Field(default_factory=RolesSettings)
+    agents: AgentsSettings = Field(default_factory=AgentsSettings)
+    providers: dict[str, AgentProviderSettings] = Field(default_factory=dict)
     safety: SafetySettings = Field(default_factory=SafetySettings)
     validation: ValidationSettings = Field(default_factory=ValidationSettings)
     integrations: IntegrationsSettings = Field(default_factory=IntegrationsSettings)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_agent_configuration(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        values = deepcopy(data)
+        if "agents" not in values:
+            raw_roles = values.get("roles", {})
+            roles = raw_roles if isinstance(raw_roles, dict) else {}
+            values["agents"] = {
+                "planner": {"provider": roles.get("spec", "jules")},
+                "implementer": {"provider": roles.get("implementation", "codex")},
+                "reviewer": {"provider": roles.get("review", "jules")},
+            }
+        if "providers" not in values:
+            raw_integrations = values.get("integrations", {})
+            integrations = raw_integrations if isinstance(raw_integrations, dict) else {}
+            jules = JulesIntegrationSettings.model_validate(
+                integrations.get("jules", {})
+            ).model_dump()
+            codex = CodexIntegrationSettings.model_validate(
+                integrations.get(
+                    "codex",
+                    {
+                        "command": [
+                            "codex",
+                            "exec",
+                            "--sandbox",
+                            "workspace-write",
+                            "--output-last-message",
+                            "{output_file}",
+                            "-",
+                        ],
+                        "timeout_seconds": 3600,
+                    },
+                )
+            ).model_dump()
+            values["providers"] = {
+                "jules": {"type": "jules", **jules},
+                "codex": {"type": "codex-cli", **codex},
+            }
+        return values
 
     @model_validator(mode="after")
     def enforce_v1_safety(self) -> ProjectConfig:

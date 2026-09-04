@@ -1,30 +1,80 @@
 from collections.abc import Callable
+from pathlib import Path
 
-from orchestrator.clients.jules_client import JulesClient
+from orchestrator.models.agent import (
+    AgentExecutionReference,
+    AgentRequest,
+    StructuredOutputExpectation,
+)
 from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.models.jules_session import JulesSession
 from orchestrator.models.repository_spec import RepositorySpec
+from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.services.exceptions import StructuredOutputError
 from orchestrator.services.structured_output import parse_json_object, string_list
 
+_SPEC_OUTPUT = StructuredOutputExpectation(
+    name="repository-spec",
+    schema={
+        "type": "object",
+        "properties": {
+            "technical_context": {"type": "string"},
+            "current_behavior": {"type": "string"},
+            "involved_artifacts": {"type": "array", "items": {"type": "string"}},
+            "implementation_proposal": {"type": "string"},
+            "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+            "expected_tests": {"type": "array", "items": {"type": "string"}},
+            "risks": {"type": "array", "items": {"type": "string"}},
+            "ambiguities": {"type": "array", "items": {"type": "string"}},
+            "safe_to_implement": {"type": "boolean"},
+        },
+        "required": [
+            "technical_context",
+            "current_behavior",
+            "involved_artifacts",
+            "implementation_proposal",
+            "acceptance_criteria",
+            "expected_tests",
+            "risks",
+            "ambiguities",
+            "safe_to_implement",
+        ],
+        "additionalProperties": False,
+    },
+)
+
 
 class SpecService:
-    def __init__(self, jules_client: JulesClient) -> None:
-        self._jules = jules_client
+    def __init__(self, provider: AgentProvider) -> None:
+        self._provider = provider
 
     def generate(
         self,
         task: DevelopmentTask,
+        repository_path: Path,
         repository_slug: str,
         base_branch: str,
-        on_session_created: Callable[[JulesSession], None],
+        on_execution_started: Callable[[AgentExecutionReference], None],
     ) -> RepositorySpec:
         prompt = self._build_prompt(task)
-        operation = self._jules.generate_spec(
-            prompt, repository_slug, base_branch, on_session_created
+        result = self._provider.execute(
+            AgentRequest(
+                instructions=prompt,
+                title="Orchestrator technical specification",
+                workspace_path=repository_path,
+                repository=repository_slug,
+                revision=base_branch,
+                structured_output=_SPEC_OUTPUT,
+            ),
+            on_started=on_execution_started,
         )
-        raw = operation.result_text
-        data = parse_json_object(raw, "Jules spec")
+        if not result.success:
+            raise RuntimeError(result.error_message or "Planner provider failed")
+        raw = result.output
+        data = (
+            dict(result.structured_output)
+            if result.structured_output is not None
+            else parse_json_object(raw, "Planner output")
+        )
         required_text = [
             "technical_context",
             "current_behavior",
@@ -32,10 +82,10 @@ class SpecService:
         ]
         for field in required_text:
             if not isinstance(data.get(field), str):
-                raise StructuredOutputError(f"Jules spec.{field} must be a string")
+                raise StructuredOutputError(f"Planner output.{field} must be a string")
         safe = data.get("safe_to_implement")
         if not isinstance(safe, bool):
-            raise StructuredOutputError("Jules spec.safe_to_implement must be a boolean")
+            raise StructuredOutputError("Planner output.safe_to_implement must be a boolean")
         return RepositorySpec(
             technical_context=data["technical_context"],
             current_behavior=data["current_behavior"],
@@ -79,7 +129,7 @@ Return exactly one JSON object with this shape:
   "safe_to_implement": true
 }}
 OUTPUT CONTRACT:
-- Your final Jules agent message itself must be that JSON object.
+- Your final agent message itself must be that JSON object.
 - Return plain valid JSON only: no Markdown fence, heading, explanation, status, or
   prose before or after it.
 - Do not claim that JSON was returned in a tool result, plan, artifact, or completion
