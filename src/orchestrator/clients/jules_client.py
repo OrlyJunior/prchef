@@ -79,6 +79,23 @@ class JulesClient:
             on_session_created,
         )
 
+    def execute(
+        self,
+        prompt: str,
+        title: str,
+        repository_slug: str,
+        starting_branch: str,
+        on_session_created: Callable[[JulesSession], None],
+    ) -> JulesOperationResult:
+        """Execute one generic remote agent task using the Jules session lifecycle."""
+        return self._run_operation(
+            prompt,
+            title,
+            repository_slug,
+            starting_branch,
+            on_session_created,
+        )
+
     def review(
         self,
         prompt: str,

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from orchestrator.config.project_config import ProjectConfig
+from orchestrator.config.project_config import CodexCliProviderSettings, ProjectConfig
 
 
 def _config(tmp_path: Path, codex: dict[str, object]) -> ProjectConfig:
@@ -75,3 +75,43 @@ def test_approve_for_me_rejects_a_non_workspace_write_sandbox(tmp_path: Path) ->
                 },
             }
         )
+
+
+def test_legacy_roles_and_integrations_are_migrated_to_named_providers(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, {"approval_policy": "approve-for-me"})
+
+    assert config.agents.planner.provider == "jules"
+    assert config.agents.implementer.provider == "codex"
+    assert config.agents.reviewer.provider == "jules"
+    codex = CodexCliProviderSettings.model_validate(
+        config.providers["codex"].model_dump()
+    )
+    assert codex.approval_policy == "approve-for-me"
+
+
+def test_new_agent_configuration_keeps_provider_options_scoped_by_name(
+    tmp_path: Path,
+) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "agents": {
+                "planner": {"provider": "planner"},
+                "implementer": {"provider": "worker"},
+                "reviewer": {"provider": "planner"},
+            },
+            "providers": {
+                "planner": {"type": "jules", "poll_interval_seconds": 9},
+                "worker": {
+                    "type": "codex-cli",
+                    "command": ["codex", "exec", "-"],
+                    "approval_policy": "approve-for-me",
+                },
+            },
+        }
+    )
+
+    assert config.providers["planner"].model_dump()["poll_interval_seconds"] == 9
+    assert config.providers["worker"].model_dump()["approval_policy"] == "approve-for-me"

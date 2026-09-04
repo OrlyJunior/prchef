@@ -15,6 +15,10 @@ from orchestrator.models.workflow_status import (
 from orchestrator.models.workflow_step import WorkflowStep
 
 __all__ = [
+    "AgentExecutionReference",
+    "AgentRequest",
+    "AgentResult",
+    "AgentRole",
     "CodeReview",
     "DevelopmentTask",
     "ImplementationResult",
@@ -25,6 +29,7 @@ __all__ = [
     "RepositorySpec",
     "ReviewDecision",
     "StepStatus",
+    "StructuredOutputExpectation",
     "ValidationCheck",
     "ValidationResult",
     "WorkflowExecution",
@@ -32,3 +37,10 @@ __all__ = [
     "WorkflowStatus",
     "WorkflowStep",
 ]
+from orchestrator.models.agent import (
+    AgentExecutionReference,
+    AgentRequest,
+    AgentResult,
+    AgentRole,
+    StructuredOutputExpectation,
+)

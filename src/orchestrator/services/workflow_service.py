@@ -7,9 +7,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
-from orchestrator.clients.exceptions import JulesSessionNeedsHumanError
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import ConfigurationError, ProjectConfigLoader
+from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.validation_result import ValidationResult
 from orchestrator.models.workflow_execution import WorkflowExecution
@@ -19,6 +19,7 @@ from orchestrator.models.workflow_status import (
     WorkflowStage,
     WorkflowStatus,
 )
+from orchestrator.providers.agent_provider import AgentNeedsHumanError
 from orchestrator.repositories.workflow_repository import WorkflowRepository
 from orchestrator.runtime_logging import redact_text
 from orchestrator.services.exceptions import WorkflowError
@@ -34,14 +35,14 @@ logger = logging.getLogger(__name__)
 _STAGE_LABELS = {
     WorkflowStage.LOAD_TASK: "task loading",
     WorkflowStage.LOAD_CONFIG: "repository/config resolution",
-    WorkflowStage.GENERATE_SPEC: "Jules spec generation",
+    WorkflowStage.GENERATE_SPEC: "spec generation",
     WorkflowStage.PREPARE_BRANCH: "branch preparation",
-    WorkflowStage.IMPLEMENT: "Codex implementation",
+    WorkflowStage.IMPLEMENT: "implementation",
     WorkflowStage.VALIDATE: "local validation",
     WorkflowStage.COMMIT: "commit",
     WorkflowStage.PUSH: "push",
     WorkflowStage.CREATE_PR: "pull request creation",
-    WorkflowStage.REVIEW: "Jules review",
+    WorkflowStage.REVIEW: "review",
 }
 
 
@@ -82,23 +83,21 @@ class WorkflowService:
                     config.repository.base_branch,
                 )
                 clients = self._client_factory.create(config)
-                if clients.jules is None:
-                    raise ConfigurationError("Jules client is required for workflow execution")
-                jules_client = clients.jules
                 repository_slug = clients.git.github_repository()
 
             with self._step(execution.id, WorkflowStage.GENERATE_SPEC):
-                spec = SpecService(jules_client).generate(
+                spec = SpecService(clients.agent(AgentRole.PLANNER)).generate(
                     task,
+                    config.path,
                     repository_slug,
                     config.repository.base_branch,
-                    lambda session: self._repository.record_spec_jules_session(
-                        execution.id, session.id, session.url
+                    lambda reference: self._repository.record_spec_jules_session(
+                        execution.id, reference.external_id, reference.url
                     ),
                 )
                 self._repository.record_spec(execution.id, spec)
             if spec.has_blocking_ambiguity:
-                message = "; ".join(spec.ambiguities) or "Jules reported blocking ambiguity"
+                message = "; ".join(spec.ambiguities) or "Planner reported blocking ambiguity"
                 self._repository.record_error(execution.id, message)
                 self._repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
                 return self._repository.get_execution(execution.id)
@@ -115,13 +114,13 @@ class WorkflowService:
                 self._repository.record_branch(execution.id, working_branch)
 
             with self._step(execution.id, WorkflowStage.IMPLEMENT):
-                implementation = ImplementationService(clients.codex, clients.git).implement(
-                    task, spec, config.path
-                )
+                implementation = ImplementationService(
+                    clients.agent(AgentRole.IMPLEMENTER), clients.git
+                ).implement(task, spec, config.path)
                 self._repository.record_implementation(execution.id, implementation)
                 if not implementation.success:
                     raise WorkflowError(
-                        implementation.error_message or "Codex implementation failed"
+                        implementation.error_message or "Implementation provider failed"
                     )
 
             with self._step(execution.id, WorkflowStage.VALIDATE):
@@ -159,17 +158,20 @@ class WorkflowService:
                 self._repository.record_pull_request(execution.id, pull_request)
 
             with self._step(execution.id, WorkflowStage.REVIEW):
-                review = ReviewService(jules_client).review(
+                review = ReviewService(clients.agent(AgentRole.REVIEWER)).review(
                     task=task,
                     spec=spec,
                     pull_request=pull_request,
                     diff=clients.git.diff(config.repository.base_branch),
                     validation=validation,
+                    repository_path=config.path,
                     repository_slug=repository_slug,
                     base_branch=config.repository.base_branch,
                     feature_branch=working_branch,
-                    on_session_created=lambda session: self._repository.record_review_jules_session(
-                        execution.id, session.id, session.url
+                    on_execution_started=lambda reference: (
+                        self._repository.record_review_jules_session(
+                            execution.id, reference.external_id, reference.url
+                        )
                     ),
                 )
                 self._repository.record_review(execution.id, review)
@@ -185,7 +187,7 @@ class WorkflowService:
         except ConfigurationError as exc:
             self._repository.record_error(execution.id, str(exc))
             self._repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
-        except JulesSessionNeedsHumanError as exc:
+        except AgentNeedsHumanError as exc:
             self._repository.record_error(execution.id, str(exc))
             self._repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
         except Exception as exc:
