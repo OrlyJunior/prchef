@@ -120,11 +120,20 @@ alembic upgrade head
 
 ```bash
 orchestrator --version
+orchestrator providers
 orchestrator run --trello-card CARD_ID
 orchestrator run --github-issue 42 --repository owner/repository
 ```
 
 Use `orchestrator --version` para exibir a versao atual do pacote.
+
+Para listar as instancias de agent provider configuradas nos defaults globais, use:
+
+```text
+$ orchestrator providers
+jules  jules
+codex  codex-cli
+```
 
 Overrides uteis:
 

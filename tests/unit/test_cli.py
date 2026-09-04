@@ -27,6 +27,70 @@ def test_cli_version_option() -> None:
     assert result.stdout == f"{orchestrator.__version__}\n"
 
 
+def test_cli_providers_lists_configured_provider_names_and_types(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    config = tmp_path / "orchestrator.yml"
+    config.write_text(
+        """defaults:
+  agents:
+    planner:
+      provider: vertex-gemini
+    implementer:
+      provider: codex
+    reviewer:
+      provider: vertex-gemini
+  providers:
+    vertex-gemini:
+      type: gemini-vertex
+      project: example-project
+      model: gemini-test-model
+    codex:
+      type: codex-cli
+      command: [codex, exec, -]
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_migrated_repository",
+        lambda settings: (_ for _ in ()).throw(AssertionError("must not access persistence")),
+    )
+    monkeypatch.setattr(
+        main,
+        "ClientFactory",
+        lambda api_key: (_ for _ in ()).throw(AssertionError("must not create clients")),
+    )
+
+    result = runner.invoke(main.app, ["providers", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "vertex-gemini  gemini-vertex\ncodex  codex-cli\n"
+
+
+def test_cli_providers_succeeds_without_configured_providers(tmp_path: Path) -> None:
+    config = tmp_path / "orchestrator.yml"
+    config.write_text(
+        """defaults:
+  agents:
+    planner:
+      provider: planner
+    implementer:
+      provider: implementer
+    reviewer:
+      provider: reviewer
+  providers: {}
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(main.app, ["providers", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+
+
 class StubWorkflowService:
     calls: list[tuple[str, str, str | None]] = []
 

@@ -235,6 +235,26 @@ def _read_debug_pull_request(path: Path) -> PullRequest:
 
 
 @app.command()
+def providers(
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Global YAML configuration")
+    ] = None,
+) -> None:
+    """List the agent providers configured in the global defaults."""
+    settings = Settings()
+    if config is not None:
+        settings.config_file = config
+    try:
+        project_config = ProjectConfigLoader(settings.config_file).load_defaults()
+    except ConfigurationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    for name, provider in project_config.providers.items():
+        typer.echo(f"{name}  {provider.type}")
+
+
+@app.command()
 def run(
     trello_card: Annotated[
         str | None, typer.Option("--trello-card", help="Trello card ID")
