@@ -18,7 +18,9 @@
 4. Defaults, configuracao registrada e `.orchestrator.yml` do alvo sao mesclados.
 5. O provider associado a `agents.planner` recebe um `AgentRequest`. Com Jules, o adaptador cria
    uma sessao remota read-only com `AUTOMATION_MODE_UNSPECIFIED`; seu ID e URL sao persistidos antes
-   do polling. A spec parte da branch base e o review parte da feature branch.
+   do polling. Com `gemini-vertex`, o adaptador faz uma chamada Vertex AI request/response usando
+   ADC, sem acesso a filesystem, shell ou ferramentas locais. A spec parte da branch base e o review
+   parte da feature branch.
 6. Ambiguidade bloqueante encerra em `NEEDS_HUMAN`.
 7. Git cria uma branch nova a partir da branch base, recusando qualquer branch protegida.
 8. O provider associado a `agents.implementer` recebe a task original e a spec, e trabalha apenas
@@ -47,12 +49,16 @@ Spec/Implementation/Review service
 AgentProvider.execute(AgentRequest) -> AgentResult
               |
               v
-JulesClient (REST/polling) ou CodexClient (CLI/subprocesso)
+JulesClient (REST/polling), CodexClient (CLI/subprocesso) ou Gemini Vertex (SDK/Vertex AI)
 ```
 
 O papel define as instrucoes e a expectativa de output estruturado. O provider resolve o mecanismo
 de execucao. `AgentProviderRegistry` associa `providers.<nome>.type` a um adaptador explicito; task
 providers de GitHub/Trello continuam sendo um dominio separado.
+
+O adapter `gemini-vertex` traduz `StructuredOutputExpectation` para `application/json` e
+`response_json_schema` nativos do `google-genai`. Tipos e excecoes do SDK permanecem dentro do
+adapter; o restante do workflow recebe apenas `AgentResult` e erros neutros de provider.
 
 Cada operacao logica cria uma linha em `workflow_steps`. `current_stage` e atualizado antes de
 cada etapa, permitindo que uma V2 selecione um ponto de retomada sem mudar o schema conceitual.

@@ -115,6 +115,28 @@ class CodexCliProviderSettings(CodexIntegrationSettings):
     type: Literal["codex-cli"] = "codex-cli"
 
 
+class GeminiGenerationSettings(BaseModel):
+    """Small, provider-local set of generation controls for Vertex Gemini."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    temperature: float = Field(default=0.2, ge=0, le=2)
+    max_output_tokens: int | None = Field(default=None, gt=0)
+
+
+class GeminiVertexProviderSettings(BaseModel):
+    """Configuration for a Google Gen AI SDK client in Vertex AI mode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["gemini-vertex"] = "gemini-vertex"
+    project: str = Field(min_length=1)
+    location: str = Field(default="global", min_length=1)
+    model: str = Field(min_length=1)
+    timeout_seconds: int = Field(default=900, gt=0)
+    generation: GeminiGenerationSettings = Field(default_factory=GeminiGenerationSettings)
+
+
 class IntegrationsSettings(BaseModel):
     jules: JulesIntegrationSettings = Field(default_factory=JulesIntegrationSettings)
     codex: CodexIntegrationSettings = Field(
@@ -153,7 +175,23 @@ class ProjectConfig(BaseModel):
         if not isinstance(data, dict):
             return data
         values = deepcopy(data)
-        if "agents" not in values:
+        has_agents = "agents" in values
+        has_providers = "providers" in values
+        if has_agents != has_providers:
+            raise ValueError(
+                "Modern agent configuration requires both 'agents' and 'providers'. "
+                "Remove both to use legacy roles/integrations."
+            )
+        if has_agents:
+            raw_agents = values["agents"]
+            if isinstance(raw_agents, dict):
+                missing_roles = {"planner", "implementer", "reviewer"} - set(raw_agents)
+                if missing_roles:
+                    raise ValueError(
+                        "Explicit agents configuration is missing roles: "
+                        f"{', '.join(sorted(missing_roles))}"
+                    )
+        else:
             raw_roles = values.get("roles", {})
             roles = raw_roles if isinstance(raw_roles, dict) else {}
             values["agents"] = {
@@ -161,7 +199,7 @@ class ProjectConfig(BaseModel):
                 "implementer": {"provider": roles.get("implementation", "codex")},
                 "reviewer": {"provider": roles.get("review", "jules")},
             }
-        if "providers" not in values:
+        if not has_providers:
             raw_integrations = values.get("integrations", {})
             integrations = raw_integrations if isinstance(raw_integrations, dict) else {}
             jules = JulesIntegrationSettings.model_validate(
@@ -227,6 +265,7 @@ class ProjectConfigLoader:
 
     def load(self, task: DevelopmentTask, repository_override: str | None = None) -> ProjectConfig:
         global_config = _load_yaml(self._config_file, required=True)
+        self._reject_misplaced_project_settings(global_config)
         repository_ref = repository_override or self._repository_ref_from_task(task)
         if not repository_ref:
             raise ConfigurationError(
@@ -293,6 +332,7 @@ class ProjectConfigLoader:
 
     def default_task_provider(self) -> str | None:
         global_config = _load_yaml(self._config_file, required=True)
+        self._reject_misplaced_project_settings(global_config)
         raw_task = global_config.get("task")
         if raw_task is None:
             defaults = global_config.get("defaults", {})
@@ -308,3 +348,23 @@ class ProjectConfigLoader:
         if normalized not in {"trello", "github"}:
             raise ConfigurationError("task.provider must be 'trello' or 'github'")
         return normalized
+
+    @staticmethod
+    def _reject_misplaced_project_settings(global_config: dict[str, Any]) -> None:
+        project_settings = {
+            "agents",
+            "providers",
+            "roles",
+            "integrations",
+            "repository",
+            "safety",
+            "validation",
+        }
+        misplaced = sorted(project_settings.intersection(global_config))
+        if misplaced:
+            rendered = ", ".join(misplaced)
+            raise ConfigurationError(
+                f"Project settings at the top level are not applied: {rendered}. "
+                "Place them in 'defaults', a 'repositories.<name>' entry, or the target "
+                "repository's .orchestrator.yml."
+            )

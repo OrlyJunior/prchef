@@ -11,10 +11,12 @@ from orchestrator.config.project_config import (
     AgentProviderSettings,
     CodexCliProviderSettings,
     ConfigurationError,
+    GeminiVertexProviderSettings,
     JulesProviderSettings,
 )
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.providers.codex_provider import CodexAgentProvider
+from orchestrator.providers.gemini_vertex_provider import GeminiVertexAgentProvider
 from orchestrator.providers.jules_provider import JulesAgentProvider
 
 ProviderBuilder = Callable[[str, AgentProviderSettings, CommandClient], AgentProvider]
@@ -28,6 +30,7 @@ class AgentProviderRegistry:
         self._builders: dict[str, ProviderBuilder] = {
             "jules": self._build_jules,
             "codex-cli": self._build_codex,
+            "gemini-vertex": self._build_gemini_vertex,
         }
 
     def create(
@@ -77,3 +80,11 @@ class AgentProviderRegistry:
                 approval_policy=options.approval_policy,
             )
         )
+
+    @staticmethod
+    def _build_gemini_vertex(
+        name: str, settings: AgentProviderSettings, commands: CommandClient
+    ) -> AgentProvider:
+        del commands
+        options = GeminiVertexProviderSettings.model_validate(settings.model_dump())
+        return GeminiVertexAgentProvider(name, options)

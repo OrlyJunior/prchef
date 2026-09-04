@@ -23,10 +23,15 @@ local -> commit -> push -> PR -> review. O merge continua inteiramente manual.
 - `JULES_API_KEY` em variavel de ambiente para o lifecycle automatizado pela API oficial do Jules
 - GitHub CLI (`gh`) autenticado, usado para GitHub Issues e Pull Requests
 - credenciais Trello quando esse provider for utilizado
+- Para o provider `gemini-vertex`: projeto Google Cloud com Vertex AI habilitado e credenciais
+  Application Default Credentials (ADC), por exemplo `gcloud auth application-default login`.
+  Ele usa `google-genai` em modo Vertex AI; `GEMINI_API_KEY` nao e usado nem deve ser configurado.
 
 O adaptador Codex usa o modo oficial nao interativo `codex exec`, com workspace limitado ao
 repositorio. Jules cria uma sessao remota oficial, persiste ID e URL, acompanha a execucao por
 polling e recupera a ultima mensagem do agente quando a sessao chega a `COMPLETED`.
+O adaptador `gemini-vertex` faz uma unica chamada request/response ao Vertex AI usando ADC e nao
+recebe acesso ao filesystem, shell ou ferramentas locais.
 
 Por padrao, o Codex roda com `--sandbox workspace-write`. Para optar explicitamente pela revisao
 automatica de pedidos de aprovacao da CLI, configure `approval_policy: approve-for-me` em
@@ -248,6 +253,15 @@ providers:
     type: codex-cli
     command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
     timeout_seconds: 3600
+  vertex-gemini:
+    type: gemini-vertex
+    project: my-gcp-project
+    location: global
+    model: gemini-2.5-flash
+    timeout_seconds: 900
+    generation:
+      temperature: 0.2
+      # max_output_tokens: 8192
 safety:
   allow_direct_merge: false
   require_tests: true
@@ -262,11 +276,26 @@ Task providers suportados:
 - `trello`: usa `ORCHESTRATOR_TRELLO_API_KEY` e `ORCHESTRATOR_TRELLO_TOKEN`.
 - `github`: executa `gh issue view` com a autenticação já ativa no GitHub CLI.
 
-Agent providers sao instancias nomeadas em `providers`, atualmente dos tipos `jules` e
-`codex-cli`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
+Agent providers sao instancias nomeadas em `providers`, dos tipos `jules`, `codex-cli` e
+`gemini-vertex`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
 do workflow a essas instancias. Mais de um papel pode reutilizar a mesma instancia, ou cada papel
 pode apontar para uma configuracao diferente do mesmo tipo. Opcoes de runtime/modelo permanecem
 dentro da instancia do provider.
+
+`gemini-vertex` exige `project` e `model`; `location` tem default `global`. A autenticacao e sempre
+via ADC, nunca por API key. Quando uma etapa solicita JSON estruturado, o adapter usa
+`response_mime_type: application/json` e o JSON Schema neutro de `StructuredOutputExpectation` na
+configuracao nativa do SDK. Para, por exemplo, usar Gemini tanto no planejamento quanto no review:
+
+```yaml
+agents:
+  planner:
+    provider: vertex-gemini
+  implementer:
+    provider: codex
+  reviewer:
+    provider: vertex-gemini
+```
 
 Configuracoes legadas com `roles.spec|implementation|review` e
 `integrations.jules|codex` continuam aceitas e sao normalizadas para os providers `jules` e
