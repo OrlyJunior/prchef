@@ -14,6 +14,11 @@ defaults:
       provider: codex
     reviewer:
       provider: jules
+    # Exemplo Vertex AI: a mesma instancia pode atender planner e reviewer.
+    # planner:
+    #   provider: vertex-gemini
+    # reviewer:
+    #   provider: vertex-gemini
   safety:
     allow_direct_merge: false
     require_tests: true
@@ -41,6 +46,16 @@ defaults:
       # Opcional: usa o modo de revisao automatica do Codex CLI.
       # Ele implica workspace-write e nao pode ser combinado com --sandbox.
       # approval_policy: approve-for-me
+    # Requer ADC (por exemplo, `gcloud auth application-default login`), nao uma API key.
+    # vertex-gemini:
+    #   type: gemini-vertex
+    #   project: my-gcp-project
+    #   location: global
+    #   model: gemini-2.5-flash
+    #   timeout_seconds: 900
+    #   generation:
+    #     temperature: 0.2
+    #     # max_output_tokens: 8192
   integrations:
     github:
       command: [gh]

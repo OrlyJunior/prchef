@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -76,7 +77,11 @@ def test_different_roles_can_reference_different_named_instances(tmp_path: Path)
 def test_unknown_provider_name_has_an_actionable_error(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
-        agents={"planner": {"provider": "missing"}},
+        agents={
+            "planner": {"provider": "missing"},
+            "implementer": {"provider": "codex"},
+            "reviewer": {"provider": "codex"},
+        },
         providers={"codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]}},
     )
 
@@ -87,11 +92,15 @@ def test_unknown_provider_name_has_an_actionable_error(tmp_path: Path) -> None:
 def test_unknown_provider_type_has_an_actionable_error(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
-        agents={"planner": {"provider": "future"}},
-        providers={"future": {"type": "gemini-vertex", "model": "future-model"}},
+        agents={
+            "planner": {"provider": "future"},
+            "implementer": {"provider": "future"},
+            "reviewer": {"provider": "future"},
+        },
+        providers={"future": {"type": "future-provider", "model": "future-model"}},
     )
 
-    with pytest.raises(ConfigurationError, match="Unknown agent provider type 'gemini-vertex'"):
+    with pytest.raises(ConfigurationError, match="Unknown agent provider type 'future-provider'"):
         ClientFactory("test-key").create(config, agent_roles={AgentRole.PLANNER})
 
 
@@ -103,6 +112,7 @@ def test_unselected_provider_options_are_not_validated_by_another_provider(
         agents={
             "planner": {"provider": "jules"},
             "implementer": {"provider": "codex"},
+            "reviewer": {"provider": "jules"},
         },
         providers={
             "jules": {"type": "jules", "poll_interval_seconds": 5},
@@ -119,3 +129,32 @@ def test_unselected_provider_options_are_not_validated_by_another_provider(
         ClientFactory("test-key").create(
             config, agent_roles={AgentRole.IMPLEMENTER}
         )
+
+
+def test_verbose_factory_logging_reports_the_final_role_resolution(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config = _config(
+        tmp_path,
+        agents={
+            "planner": {"provider": "remote"},
+            "implementer": {"provider": "local"},
+            "reviewer": {"provider": "remote"},
+        },
+        providers={
+            "remote": {
+                "type": "gemini-vertex",
+                "project": "example-project",
+                "model": "gemini-test-model",
+            },
+            "local": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+        },
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="orchestrator"):
+        ClientFactory(None).create(config)
+
+    assert (
+        "planner -> remote (gemini-vertex); implementer -> local (codex-cli); "
+        "reviewer -> remote (gemini-vertex)"
+    ) in caplog.text
