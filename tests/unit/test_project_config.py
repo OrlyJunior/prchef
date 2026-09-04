@@ -97,6 +97,17 @@ def test_legacy_roles_and_integrations_are_migrated_to_named_providers(
     assert codex.approval_policy == "approve-for-me"
 
 
+def test_legacy_codex_runtime_settings_are_migrated_to_named_provider(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        {"model": "legacy-model", "reasoning_effort": "high"},
+    )
+    codex = CodexCliProviderSettings.model_validate(config.providers["codex"].model_dump())
+
+    assert codex.model == "legacy-model"
+    assert codex.reasoning_effort == "high"
+
+
 def test_new_agent_configuration_keeps_provider_options_scoped_by_name(
     tmp_path: Path,
 ) -> None:
@@ -132,7 +143,11 @@ def test_explicit_agent_configuration_takes_precedence_over_legacy_roles(
             "roles": {"spec": "jules", "implementation": "codex", "review": "jules"},
             "integrations": {
                 "jules": {"poll_interval_seconds": 5},
-                "codex": {"command": ["codex", "exec", "-"]},
+                "codex": {
+                    "command": ["codex", "exec", "-"],
+                    "model": "legacy-model",
+                    "reasoning_effort": "low",
+                },
             },
             "agents": {
                 "planner": {"provider": "vertex-gemini"},
@@ -145,7 +160,12 @@ def test_explicit_agent_configuration_takes_precedence_over_legacy_roles(
                     "project": "example-project",
                     "model": "gemini-test-model",
                 },
-                "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+                "codex": {
+                    "type": "codex-cli",
+                    "command": ["codex", "exec", "-"],
+                    "model": "modern-model",
+                    "reasoning_effort": "high",
+                },
             },
         }
     )
@@ -154,6 +174,9 @@ def test_explicit_agent_configuration_takes_precedence_over_legacy_roles(
     assert config.agents.implementer.provider == "codex"
     assert config.agents.reviewer.provider == "vertex-gemini"
     assert config.providers["vertex-gemini"].type == "gemini-vertex"
+    codex = CodexCliProviderSettings.model_validate(config.providers["codex"].model_dump())
+    assert codex.model == "modern-model"
+    assert codex.reasoning_effort == "high"
 
 
 @pytest.mark.parametrize(

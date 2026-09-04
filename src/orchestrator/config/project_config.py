@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from orchestrator.models.development_task import DevelopmentTask
 
@@ -67,12 +67,23 @@ class CodexIntegrationSettings(CommandIntegrationSettings):
     """Codex-specific controls layered over the generic command settings."""
 
     approval_policy: Literal["approve-for-me"] | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+
+    @field_validator("model", "reasoning_effort")
+    @classmethod
+    def validate_runtime_setting(
+        cls, value: str | None, info: ValidationInfo
+    ) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"Codex provider {info.field_name} must be a non-empty string")
+        return normalized
 
     @model_validator(mode="after")
     def validate_approval_policy(self) -> CodexIntegrationSettings:
-        if self.approval_policy is None:
-            return self
-
         sandbox_mode: str | None = None
         for index, argument in enumerate(self.command):
             if argument == "--sandbox" and index + 1 < len(self.command):
@@ -81,12 +92,94 @@ class CodexIntegrationSettings(CommandIntegrationSettings):
             if argument.startswith("--sandbox="):
                 sandbox_mode = argument.partition("=")[2]
                 break
-        if sandbox_mode is not None and sandbox_mode != "workspace-write":
+        if (
+            self.approval_policy == "approve-for-me"
+            and sandbox_mode is not None
+            and sandbox_mode != "workspace-write"
+        ):
             raise ValueError(
                 "Codex approval_policy='approve-for-me' requires "
                 "the workspace-write sandbox"
             )
+        command_model = _command_model(self.command)
+        if (
+            self.model is not None
+            and _has_command_model_flag(self.command)
+            and command_model is None
+        ):
+            raise ValueError("Codex command has a model flag without a value")
+        if self.model is not None and command_model is not None and command_model != self.model:
+            raise ValueError(
+                "Codex provider specifies both model "
+                f"{self.model!r} and conflicting model flag {command_model!r} in command"
+            )
+        command_reasoning_effort = _command_reasoning_effort(self.command)
+        if (
+            self.reasoning_effort is not None
+            and _has_command_reasoning_effort(self.command)
+            and command_reasoning_effort is None
+        ):
+            raise ValueError("Codex command has model_reasoning_effort without a value")
+        if (
+            self.reasoning_effort is not None
+            and command_reasoning_effort is not None
+            and command_reasoning_effort != self.reasoning_effort
+        ):
+            raise ValueError(
+                "Codex provider specifies both reasoning_effort "
+                f"{self.reasoning_effort!r} and conflicting model_reasoning_effort "
+                f"{command_reasoning_effort!r} in command"
+            )
         return self
+
+
+def _command_model(command: list[str]) -> str | None:
+    """Read the Codex CLI model flag without rebuilding command arguments."""
+    for index, argument in enumerate(command):
+        if argument in {"--model", "-m"}:
+            if index + 1 < len(command):
+                return command[index + 1]
+            return None
+        if argument.startswith("--model="):
+            return argument.partition("=")[2] or None
+    return None
+
+
+def _has_command_model_flag(command: list[str]) -> bool:
+    return any(
+        argument in {"--model", "-m"} or argument.startswith("--model=")
+        for argument in command
+    )
+
+
+def _command_reasoning_effort(command: list[str]) -> str | None:
+    for index, argument in enumerate(command):
+        value: str | None = None
+        if argument in {"--config", "-c"} and index + 1 < len(command):
+            value = command[index + 1]
+        elif argument.startswith("--config="):
+            value = argument.partition("=")[2]
+        if value is None or "=" not in value:
+            continue
+        key, configured = value.split("=", maxsplit=1)
+        if key.strip() == "model_reasoning_effort":
+            normalized = configured.strip().strip("\"'")
+            return normalized or None
+    return None
+
+
+def _has_command_reasoning_effort(command: list[str]) -> bool:
+    for index, argument in enumerate(command):
+        value: str | None = None
+        if argument in {"--config", "-c"} and index + 1 < len(command):
+            value = command[index + 1]
+        elif argument.startswith("--config="):
+            value = argument.partition("=")[2]
+        if value is not None and "=" in value:
+            key, _ = value.split("=", maxsplit=1)
+            if key.strip() == "model_reasoning_effort":
+                return True
+    return False
 
 
 class JulesIntegrationSettings(BaseModel):
