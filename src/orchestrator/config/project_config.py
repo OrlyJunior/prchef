@@ -356,6 +356,21 @@ class ProjectConfigLoader:
     def __init__(self, config_file: Path) -> None:
         self._config_file = config_file.resolve()
 
+    def load_defaults(self) -> ProjectConfig:
+        """Load the global default project configuration without selecting a repository."""
+        global_config = _load_yaml(self._config_file, required=True)
+        self._reject_misplaced_project_settings(global_config)
+        defaults = global_config.get("defaults", {})
+        if not isinstance(defaults, dict):
+            raise ConfigurationError("'defaults' must be a mapping")
+
+        configuration = deepcopy(defaults)
+        configuration["path"] = self._config_file.parent
+        try:
+            return ProjectConfig.model_validate(configuration)
+        except ValueError as exc:
+            raise ConfigurationError(f"Invalid project configuration: {exc}") from exc
+
     def load(self, task: DevelopmentTask, repository_override: str | None = None) -> ProjectConfig:
         global_config = _load_yaml(self._config_file, required=True)
         self._reject_misplaced_project_settings(global_config)
