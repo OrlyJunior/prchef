@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 
 from orchestrator.clients.command_client import CommandClient
@@ -7,6 +8,8 @@ from orchestrator.config.project_config import ProjectConfig
 from orchestrator.models.agent import AgentRole
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.providers.registry import AgentProviderRegistry
+
+logger = logging.getLogger("orchestrator")
 
 
 @dataclass(slots=True)
@@ -49,6 +52,12 @@ class ClientFactory:
                     provider_name, config.providers, commands
                 )
             agents[role] = instances[provider_name]
+        resolved = "; ".join(
+            f"{role.value} -> {role_names[role]} ({config.providers[role_names[role]].type})"
+            for role in AgentRole
+            if role in agents
+        )
+        logger.debug("[config] Resolved agent roles: %s", resolved)
         return WorkflowClients(
             commands=commands,
             agents=agents,

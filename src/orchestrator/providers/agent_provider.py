@@ -9,6 +9,10 @@ class AgentNeedsHumanError(RuntimeError):
         self.external_id = external_id
 
 
+class AgentProviderError(RuntimeError):
+    """A provider failed without exposing provider-specific SDK exceptions."""
+
+
 class AgentProvider(Protocol):
     """Provider-neutral boundary for one agent execution."""
 
