@@ -6,9 +6,11 @@ from typing import Any
 from orchestrator.models import (
     AgentRequest,
     AgentResult,
+    CodeReview,
     DevelopmentTask,
     PullRequest,
     RepositorySpec,
+    ReviewDecision,
     ValidationResult,
 )
 from orchestrator.services.implementation_service import ImplementationService
@@ -100,6 +102,33 @@ def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> No
     assert provider.requests[0].workspace_path == tmp_path
     assert "Stable architecture rule." in provider.requests[0].instructions
     assert "Keep PROJECT.md accurate" in provider.requests[0].instructions
+
+
+def test_review_correction_prompt_includes_structured_review_feedback(tmp_path: Path) -> None:
+    _write_project_context(tmp_path)
+    provider = RecordingProvider(AgentResult(output="corrected"))
+
+    result = ImplementationService(
+        provider, ChangedFilesGit()  # type: ignore[arg-type]
+    ).correct_review_findings(
+        _task(),
+        _spec(),
+        CodeReview(
+            result=ReviewDecision.CHANGES_REQUESTED,
+            summary="Handle the empty input case.",
+            findings=["Missing empty input behavior"],
+            blocking_findings=["Return a useful error for empty input"],
+            suggestions=["Add a focused unit test"],
+        ),
+        tmp_path,
+    )
+
+    assert result.success
+    prompt = provider.requests[0].instructions
+    assert "REVIEWER CHANGE REQUESTS FOR THE CURRENT IMPLEMENTATION" in prompt
+    assert "Handle the empty input case." in prompt
+    assert "Return a useful error for empty input" in prompt
+    assert "Add a focused unit test" in prompt
 
 
 def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:

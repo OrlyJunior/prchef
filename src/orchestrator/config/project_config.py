@@ -59,6 +59,12 @@ class ValidationSettings(BaseModel):
     max_validation_retries: int = Field(default=2, ge=0)
 
 
+class ReviewSettings(BaseModel):
+    """Controls bounded implementation corrections requested by code review."""
+
+    max_review_retries: int = Field(default=1, ge=0)
+
+
 class WorkspaceSettings(BaseModel):
     """Location for disposable, per-execution Git worktrees."""
 
@@ -267,6 +273,7 @@ class ProjectConfig(BaseModel):
     providers: dict[str, AgentProviderSettings] = Field(default_factory=dict)
     safety: SafetySettings = Field(default_factory=SafetySettings)
     validation: ValidationSettings = Field(default_factory=ValidationSettings)
+    review: ReviewSettings = Field(default_factory=ReviewSettings)
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     integrations: IntegrationsSettings = Field(default_factory=IntegrationsSettings)
 
@@ -475,6 +482,7 @@ class ProjectConfigLoader:
             "repository",
             "safety",
             "validation",
+            "review",
             "workspace",
         }
         misplaced = sorted(project_settings.intersection(global_config))
