@@ -23,6 +23,7 @@ class _StructuredFailure:
     message: str | None = None
     operation: str | None = None
     path: str | None = None
+    command: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,46 +238,95 @@ class CodexClient:
     ) -> _StructuredFailure:
         error = payload.get("error")
         error_mapping = error if isinstance(error, dict) else None
-        code = CodexClient._first_string(error_mapping, payload, "code", "kind")
+        mappings = CodexClient._failure_mappings(error_mapping, payload)
+        code = CodexClient._first_string(mappings, "code", "kind")
         if code is None:
-            code = CodexClient._string_field(error_mapping, "type")
-        message = CodexClient._first_string(
-            payload, error_mapping, "message", "detail", "reason"
-        )
+            code = CodexClient._first_string(mappings, "type")
+        message = CodexClient._first_string(mappings, "message", "detail", "reason")
         if message is None and isinstance(error, str):
             message = error
         operation = CodexClient._first_string(
-            payload, error_mapping, "operation", "action", "capability"
+            mappings, "operation", "action", "capability"
         )
         path = CodexClient._first_string(
-            payload,
-            error_mapping,
+            mappings,
             "path",
             "target_path",
             "file_path",
             "resource_path",
+            "target",
         )
+        command = CodexClient._first_command(mappings, "command", "cmd", "argv")
         return _StructuredFailure(
             event_type=event_type,
             code=code,
             message=message,
             operation=operation,
             path=path,
+            command=command,
         )
 
     @staticmethod
+    def _failure_mappings(
+        *roots: Mapping[str, object] | None,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Collect structured failure fields from version-varying Codex event shapes."""
+        mappings: list[Mapping[str, object]] = []
+        seen: set[int] = set()
+
+        def visit(value: object) -> None:
+            if isinstance(value, Mapping):
+                marker = id(value)
+                if marker in seen:
+                    return
+                seen.add(marker)
+                mappings.append(value)
+                for key in ("error", "details", "metadata", "context", "data"):
+                    nested_value = value.get(key)
+                    if nested_value is not None:
+                        visit(nested_value)
+            elif isinstance(value, list):
+                for nested_value in value:
+                    visit(nested_value)
+
+        for root in roots:
+            if root is not None:
+                visit(root)
+        return tuple(mappings)
+
+    @staticmethod
     def _first_string(
-        first: Mapping[str, object] | None,
-        second: Mapping[str, object] | None,
-        *keys: str,
+        mappings: Sequence[Mapping[str, object]], *keys: str
     ) -> str | None:
-        for mapping in (first, second):
-            if mapping is None:
-                continue
+        for mapping in mappings:
             for key in keys:
                 value = CodexClient._string_field(mapping, key)
                 if value is not None:
                     return value
+        return None
+
+    @staticmethod
+    def _first_command(
+        mappings: Sequence[Mapping[str, object]], *keys: str
+    ) -> str | None:
+        for mapping in mappings:
+            for key in keys:
+                value = mapping.get(key)
+                if isinstance(value, str):
+                    stripped = value.strip()
+                    if stripped:
+                        return stripped
+                elif isinstance(value, list):
+                    command_parts: list[str] = []
+                    for part in value:
+                        if not isinstance(part, str):
+                            break
+                        if part.strip():
+                            command_parts.append(part)
+                    else:
+                        command = " ".join(command_parts).strip()
+                        if command:
+                            return command
         return None
 
     @staticmethod
@@ -312,10 +362,27 @@ class CodexClient:
             details.append(f"operation={summarize_text(failure.operation, limit=160)}")
         if failure.path is not None:
             details.append(f"path={summarize_text(failure.path, limit=240)}")
+        if failure.command is not None:
+            details.append(f"command={summarize_text(failure.command, limit=320)}")
         if failure.message is not None:
             details.append(f"message={summarize_text(failure.message, limit=320)}")
-        category = "sandbox denial" if sandbox_denial else "execution failure"
-        return f"Codex reported a structured {category} (exit {exit_code}; {'; '.join(details)})"
+        if sandbox_denial:
+            specific_details = [
+                detail
+                for detail in details
+                if detail.startswith(("operation=", "path=", "command="))
+            ]
+            category = (
+                f"sandbox denial for {', '.join(specific_details)}"
+                if specific_details
+                else "workspace write denial"
+            )
+        else:
+            category = "execution failure"
+        return (
+            f"Codex reported a structured {category} "
+            f"(exit {exit_code}; {'; '.join(details)})"
+        )
 
     def _execution_command(self, output_file: Path) -> list[str]:
         command = [part.replace("{output_file}", str(output_file)) for part in self._command]
