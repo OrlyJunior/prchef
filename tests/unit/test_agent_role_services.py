@@ -51,7 +51,14 @@ def _spec() -> RepositorySpec:
     )
 
 
+def _write_project_context(path: Path) -> None:
+    (path / "PROJECT.md").write_text(
+        "# Durable context\nStable architecture rule.", encoding="utf-8"
+    )
+
+
 def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
+    _write_project_context(tmp_path)
     provider = RecordingProvider(
         AgentResult(
             output="provider-native structured output",
@@ -76,9 +83,12 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     assert spec.safe_to_implement
     assert provider.requests[0].structured_output is not None
     assert provider.requests[0].structured_output.name == "repository-spec"
+    assert "Stable architecture rule." in provider.requests[0].instructions
+    assert "keep\nPROJECT.md accurate" in provider.requests[0].instructions
 
 
 def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
+    _write_project_context(tmp_path)
     provider = RecordingProvider(AgentResult(output="implemented"))
 
     result = ImplementationService(
@@ -88,9 +98,12 @@ def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> No
     assert result.success
     assert result.changed_files == ["src/example.py"]
     assert provider.requests[0].workspace_path == tmp_path
+    assert "Stable architecture rule." in provider.requests[0].instructions
+    assert "Keep PROJECT.md accurate" in provider.requests[0].instructions
 
 
 def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
+    _write_project_context(tmp_path)
     provider = RecordingProvider(
         AgentResult(
             output="provider-native structured output",
@@ -126,3 +139,4 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     assert review.result == "APPROVED"
     assert provider.requests[0].structured_output is not None
     assert provider.requests[0].structured_output.name == "code-review"
+    assert "Stable architecture rule." in provider.requests[0].instructions
