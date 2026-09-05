@@ -11,6 +11,7 @@ from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.services.exceptions import StructuredOutputError
 from orchestrator.services.project_context import project_context_prompt
+from orchestrator.services.repository_context import repository_context_prompt
 from orchestrator.services.structured_output import parse_json_object, string_list
 
 _SPEC_OUTPUT = StructuredOutputExpectation(
@@ -118,6 +119,8 @@ ORIGINAL TASK (preserve as authoritative):
 {task.as_original_prompt()}
 
 {project_context_prompt(repository_path)}When writing implementation_proposal, explicitly direct
+{repository_context_prompt(repository_path, task)}When writing implementation_proposal, explicitly
+direct
 the implementation agent to keep
 PROJECT.md accurate when the change affects durable project knowledge (architecture, workflows,
 domain behavior, invariants, configuration, persistence, integrations, or design decisions).

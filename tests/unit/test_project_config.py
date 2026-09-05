@@ -352,6 +352,12 @@ def test_loader_rejects_project_settings_misplaced_at_global_top_level(tmp_path:
 def test_global_config_discovery_walks_up_from_the_working_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    for variable in (
+        "ORCHESTRATOR_CONFIG",
+        "ORCHESTRATOR_CONFIG_PATH",
+        "ORCHESTRATOR_CONFIG_FILE",
+    ):
+        monkeypatch.delenv(variable, raising=False)
     config_file = tmp_path / "orchestrator.yml"
     config_file.write_text("defaults: {}\n", encoding="utf-8")
     nested_working_directory = tmp_path / "one" / "two"

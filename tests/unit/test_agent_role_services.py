@@ -74,6 +74,10 @@ def _write_project_context(path: Path) -> None:
 
 def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     _write_project_context(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "provider_contract.py").write_text(
+        "class ProviderContract:\n    pass\n", encoding="utf-8"
+    )
     provider = RecordingProvider(
         AgentResult(
             output="provider-native structured output",
@@ -99,6 +103,8 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     assert provider.requests[0].structured_output is not None
     assert provider.requests[0].structured_output.name == "repository-spec"
     assert "Stable architecture rule." in provider.requests[0].instructions
+    assert "LOCAL REPOSITORY CONTEXT" in provider.requests[0].instructions
+    assert "src/provider_contract.py" in provider.requests[0].instructions
     assert "keep\nPROJECT.md accurate" in provider.requests[0].instructions
 
 

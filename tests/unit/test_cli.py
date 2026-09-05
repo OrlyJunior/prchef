@@ -100,6 +100,12 @@ def test_cli_providers_succeeds_without_configured_providers(tmp_path: Path) -> 
 def test_cli_providers_discovers_config_from_a_parent_of_an_isolated_cwd(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
+    for variable in (
+        "ORCHESTRATOR_CONFIG",
+        "ORCHESTRATOR_CONFIG_PATH",
+        "ORCHESTRATOR_CONFIG_FILE",
+    ):
+        monkeypatch.delenv(variable, raising=False)
     config = tmp_path / "orchestrator.yml"
     config.write_text("defaults: {}\n", encoding="utf-8")
     isolated_cwd = tmp_path / "unrelated" / "directory"
