@@ -8,6 +8,7 @@ from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationResult
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.runtime_logging import format_command, redact_text
+from orchestrator.services.project_context import project_context_prompt
 
 _CORRECTION_OUTPUT_LIMIT = 4_000
 
@@ -30,6 +31,13 @@ class ImplementationService:
 REPOSITORY SPEC:
 {spec.as_prompt_context()}
 
+{project_context_prompt(repository_path)}Keep PROJECT.md accurate when this task meaningfully
+changes durable project knowledge:
+architecture, workflows, domain behavior, invariants, configuration, persistence, integrations,
+or important design decisions. Treat any necessary PROJECT.md update as part of the normal diff.
+Do not update it for trivial implementation details. The current repository is authoritative if it
+conflicts with PROJECT.md.
+
 Implement the original task.
 Use the repository spec only as supporting technical context.
 Do not invent requirements.
@@ -47,6 +55,10 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
 
 STRICT SAFETY RULES:
 Implement only the requested input in the configured workspace.
+{project_context_prompt(repository_path)}Keep PROJECT.md accurate when the requested change
+meaningfully changes durable project knowledge; include any needed update in the normal diff. Do
+not update it for trivial details, and treat the repository as authoritative if it conflicts with
+PROJECT.md.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
         return self._run_prompt(safe_prompt, repository_path)
@@ -68,6 +80,10 @@ REPOSITORY SPEC:
 
 VALIDATION FAILURES FROM THE CURRENT IMPLEMENTATION:
 {failures}
+
+{project_context_prompt(repository_path)}Keep PROJECT.md accurate if correcting these failures also
+changes durable project knowledge.
+Do not update it for trivial details; current repository behavior is authoritative.
 
 Correct the existing implementation in this workspace to address the validation failures.
 Do not start over or revert unrelated existing changes.
