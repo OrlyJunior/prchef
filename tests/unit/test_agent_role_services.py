@@ -37,6 +37,16 @@ class ChangedFilesGit:
         return ["src/example.py"]
 
 
+class RecordingGit:
+    def __init__(self, changed_files: list[str]) -> None:
+        self.changed_files_result = changed_files
+        self.changed_files_calls = 0
+
+    def changed_files(self) -> list[str]:
+        self.changed_files_calls += 1
+        return self.changed_files_result
+
+
 def _task() -> DevelopmentTask:
     return DevelopmentTask(
         id="5",
@@ -105,6 +115,46 @@ def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> No
     assert provider.requests[0].workspace_path == tmp_path
     assert "Stable architecture rule." in provider.requests[0].instructions
     assert "Keep PROJECT.md accurate" in provider.requests[0].instructions
+
+
+def test_implementation_inspects_changes_after_a_structured_provider_failure(
+    tmp_path: Path,
+) -> None:
+    _write_project_context(tmp_path)
+    provider = RecordingProvider(
+        AgentResult(
+            output="The patch was applied before a structured policy denial.",
+            success=False,
+            error_message="Codex reported a structured sandbox denial",
+            workspace_changes_may_exist=True,
+        )
+    )
+    git = RecordingGit(["src/example.py"])
+
+    result = ImplementationService(provider, git).implement(_task(), _spec(), tmp_path)  # type: ignore[arg-type]
+
+    assert not result.success
+    assert result.changed_files == ["src/example.py"]
+    assert result.error_message == "Codex reported a structured sandbox denial"
+    assert result.workspace_changes_may_exist
+    assert git.changed_files_calls == 1
+
+
+def test_implementation_does_not_inspect_changes_for_regular_provider_failure(
+    tmp_path: Path,
+) -> None:
+    _write_project_context(tmp_path)
+    provider = RecordingProvider(
+        AgentResult(output="failed", success=False, error_message="provider unavailable")
+    )
+    git = RecordingGit(["src/example.py"])
+
+    result = ImplementationService(provider, git).implement(_task(), _spec(), tmp_path)  # type: ignore[arg-type]
+
+    assert not result.success
+    assert result.changed_files == []
+    assert result.error_message == "provider unavailable"
+    assert git.changed_files_calls == 0
 
 
 def test_review_correction_prompt_includes_structured_review_feedback(tmp_path: Path) -> None:

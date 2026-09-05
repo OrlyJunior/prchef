@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
-import os
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -15,8 +16,23 @@ from orchestrator.runtime_logging import format_duration, summarize_text
 logger = logging.getLogger(__name__)
 
 
-def _is_windows() -> bool:
-    return os.name == "nt"
+@dataclass(frozen=True, slots=True)
+class _StructuredFailure:
+    event_type: str
+    code: str | None = None
+    message: str | None = None
+    operation: str | None = None
+    path: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexExecutionSignals:
+    file_change_count: int = 0
+    failed_command_count: int = 0
+    turn_completed: bool = False
+    final_message: str | None = None
+    terminal_failure: _StructuredFailure | None = None
+    sandbox_denial: _StructuredFailure | None = None
 
 
 class CodexClient:
@@ -95,22 +111,34 @@ class CodexClient:
                     format_duration(time.monotonic() - started),
                 )
                 raise
-            summary = (
-                output_file.read_text(encoding="utf-8", errors="replace").strip()
-                if output_file.exists()
-                else result.stdout.strip()
+            signals = self._structured_execution_signals(result.stdout)
+            summary = self._summary(output_file, result.stdout, signals)
+            failure = signals.sandbox_denial or (
+                signals.terminal_failure if result.success else None
             )
-            sandbox_write_error = self._sandbox_write_error(
-                repository_path,
-                summary,
-                result.stdout,
-                result.stderr,
+            error_message = (
+                self._structured_failure_message(
+                    failure,
+                    result.exit_code,
+                    sandbox_denial=failure is signals.sandbox_denial,
+                )
+                if failure is not None
+                else None
             )
-            if result.success:
-                if sandbox_write_error is None:
-                    logger.info("[codex] Completed in %s", format_duration(result.duration_seconds))
-                else:
-                    logger.error("[codex] %s", sandbox_write_error)
+            logger.debug(
+                "[codex] Structured events: file_changes=%s failed_commands=%s terminal=%s",
+                signals.file_change_count,
+                signals.failed_command_count,
+                "failed"
+                if signals.terminal_failure is not None
+                else "completed"
+                if signals.turn_completed
+                else "unknown",
+            )
+            if result.success and failure is None:
+                logger.info("[codex] Completed in %s", format_duration(result.duration_seconds))
+            elif failure is not None:
+                logger.error("[codex] %s", error_message)
             else:
                 detail = summarize_text(result.stderr or result.stdout)
                 logger.error(
@@ -120,67 +148,174 @@ class CodexClient:
                     detail or "no output",
                 )
             return ImplementationResult(
-                success=result.success and sandbox_write_error is None,
+                success=result.success and failure is None,
                 summary=summary,
                 error_message=None
-                if result.success and sandbox_write_error is None
+                if result.success and failure is None
                 else (
-                    sandbox_write_error
-                    or result.stderr.strip()
-                    or result.stdout.strip()
+                    error_message
+                    or summarize_text(result.stderr or result.stdout, limit=2_000)
                     or "Codex failed"
                 ),
+                workspace_changes_may_exist=failure is not None,
             )
 
-    def _sandbox_write_error(
-        self,
-        repository_path: Path,
-        summary: str,
-        stdout: str,
-        stderr: str,
-    ) -> str | None:
-        if not self._reported_sandbox_write_denial(summary, stdout, stderr):
-            return None
+    @staticmethod
+    def _structured_execution_signals(stdout: str) -> _CodexExecutionSignals:
+        """Read Codex JSONL events without interpreting command output as an error."""
+        file_change_count = 0
+        failed_command_count = 0
+        turn_completed = False
+        latest_final_message: str | None = None
+        terminal_failure: _StructuredFailure | None = None
+        sandbox_denial: _StructuredFailure | None = None
 
-        try:
-            repository = repository_path.resolve()
-        except OSError:
-            repository = repository_path
-        sandbox_name = "Codex Windows sandbox" if _is_windows() else "Codex sandbox"
-        return (
-            f"{sandbox_name} could not modify workspace files "
-            f"(repository: {repository}; sandbox: {self._sandbox_mode()}). "
-            "The Codex CLI reported a sandbox write denial. Run `codex exec --sandbox "
-            "workspace-write -` from the repository and ask it to create a disposable file in "
-            "the affected directory."
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+
+            event_type = CodexClient._string_field(event, "type")
+            if event_type == "turn.completed":
+                turn_completed = True
+            item = event.get("item")
+            item_mapping = item if isinstance(item, dict) else None
+            item_type = CodexClient._string_field(item_mapping, "type")
+            item_status = CodexClient._string_field(item_mapping, "status")
+
+            if event_type == "item.completed" and item_type == "file_change":
+                file_change_count += 1
+            final_message = (
+                CodexClient._string_field(item_mapping, "text")
+                if event_type == "item.completed" and item_type == "agent_message"
+                else None
+            )
+            if final_message is not None:
+                latest_final_message = final_message
+            if event_type == "item.failed" and item_type == "command_execution":
+                failed_command_count += 1
+
+            failure_payload: Mapping[str, object] | None = None
+            if event_type in {"error", "turn.failed"}:
+                failure_payload = event
+            elif event_type == "item.failed" or item_status == "failed":
+                failure_payload = item_mapping or event
+            if failure_payload is None:
+                continue
+
+            failure = CodexClient._structured_failure(event_type or "unknown", failure_payload)
+            if CodexClient._is_structured_sandbox_denial(failure):
+                sandbox_denial = sandbox_denial or failure
+            if event_type in {"error", "turn.failed"}:
+                terminal_failure = terminal_failure or failure
+
+        return _CodexExecutionSignals(
+            file_change_count=file_change_count,
+            failed_command_count=failed_command_count,
+            turn_completed=turn_completed,
+            final_message=latest_final_message,
+            terminal_failure=terminal_failure,
+            sandbox_denial=sandbox_denial,
         )
 
     @staticmethod
-    def _reported_sandbox_write_denial(*messages: str) -> bool:
-        text = "\n".join(messages).casefold()
-        write_marker = any(
-            marker in text
-            for marker in (
-                "failed to write file",
-                "write access",
-                "requested file path",
-                "access to the path",
-                "could not modify",
-            )
-        )
-        sandbox_marker = "sandbox" in text
-        denial_marker = "denied" in text or "policy_denied" in text
-        return write_marker and sandbox_marker and denial_marker
+    def _summary(
+        output_file: Path, stdout: str, signals: _CodexExecutionSignals
+    ) -> str:
+        if output_file.exists():
+            return output_file.read_text(encoding="utf-8", errors="replace").strip()
+        if signals.final_message is not None:
+            return signals.final_message
+        return summarize_text(stdout, limit=2_000)
 
-    def _sandbox_mode(self) -> str:
-        if self._approval_policy == "approve-for-me":
-            return "workspace-write"
-        for index, argument in enumerate(self._command):
-            if argument == "--sandbox" and index + 1 < len(self._command):
-                return self._command[index + 1]
-            if argument.startswith("--sandbox="):
-                return argument.partition("=")[2] or "unspecified"
-        return "unspecified"
+    @staticmethod
+    def _structured_failure(
+        event_type: str, payload: Mapping[str, object]
+    ) -> _StructuredFailure:
+        error = payload.get("error")
+        error_mapping = error if isinstance(error, dict) else None
+        code = CodexClient._first_string(error_mapping, payload, "code", "kind")
+        if code is None:
+            code = CodexClient._string_field(error_mapping, "type")
+        message = CodexClient._first_string(
+            payload, error_mapping, "message", "detail", "reason"
+        )
+        if message is None and isinstance(error, str):
+            message = error
+        operation = CodexClient._first_string(
+            payload, error_mapping, "operation", "action", "capability"
+        )
+        path = CodexClient._first_string(
+            payload,
+            error_mapping,
+            "path",
+            "target_path",
+            "file_path",
+            "resource_path",
+        )
+        return _StructuredFailure(
+            event_type=event_type,
+            code=code,
+            message=message,
+            operation=operation,
+            path=path,
+        )
+
+    @staticmethod
+    def _first_string(
+        first: Mapping[str, object] | None,
+        second: Mapping[str, object] | None,
+        *keys: str,
+    ) -> str | None:
+        for mapping in (first, second):
+            if mapping is None:
+                continue
+            for key in keys:
+                value = CodexClient._string_field(mapping, key)
+                if value is not None:
+                    return value
+        return None
+
+    @staticmethod
+    def _string_field(mapping: Mapping[str, object] | None, key: str) -> str | None:
+        if mapping is None:
+            return None
+        value = mapping.get(key)
+        if not isinstance(value, str):
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @staticmethod
+    def _is_structured_sandbox_denial(failure: _StructuredFailure) -> bool:
+        text = " ".join(
+            value for value in (failure.code, failure.message) if value is not None
+        ).casefold()
+        if "policy_denied" in text:
+            return True
+        return "sandbox" in text and any(
+            marker in text
+            for marker in ("denied", "not permitted", "permission denied", "forbidden")
+        )
+
+    @staticmethod
+    def _structured_failure_message(
+        failure: _StructuredFailure, exit_code: int, *, sandbox_denial: bool
+    ) -> str:
+        details = [f"event={failure.event_type}"]
+        if failure.code is not None:
+            details.append(f"code={failure.code}")
+        if failure.operation is not None:
+            details.append(f"operation={summarize_text(failure.operation, limit=160)}")
+        if failure.path is not None:
+            details.append(f"path={summarize_text(failure.path, limit=240)}")
+        if failure.message is not None:
+            details.append(f"message={summarize_text(failure.message, limit=320)}")
+        category = "sandbox denial" if sandbox_denial else "execution failure"
+        return f"Codex reported a structured {category} (exit {exit_code}; {'; '.join(details)})"
 
     def _execution_command(self, output_file: Path) -> list[str]:
         command = [part.replace("{output_file}", str(output_file)) for part in self._command]
@@ -196,12 +331,20 @@ class CodexClient:
             )
         insert_at = self._runtime_insert_index(command)
         command[insert_at:insert_at] = runtime_arguments
+        command = self._with_json_events(command)
         if self._approval_policy is None:
             return command
 
         command = self._without_explicit_sandbox(command)
         if "--approve-for-me" not in command:
             command.insert(min(2, len(command)), "--approve-for-me")
+        return command
+
+    @staticmethod
+    def _with_json_events(command: list[str]) -> list[str]:
+        if "exec" not in command or "--json" in command:
+            return command
+        command.insert(CodexClient._runtime_insert_index(command), "--json")
         return command
 
     @staticmethod
