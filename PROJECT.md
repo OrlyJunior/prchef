@@ -75,7 +75,7 @@
   view` supplies the persisted PR fields. A later failure never rolls back a commit, push, PR, or
   worktree.
 
-## Validation and correction loop
+## Validation and review correction loops
 
 - Validation starts with configured commands, then appends conservative auto-detected commands.
   Exact duplicates are skipped; any explicit mypy command suppresses auto-detected `mypy .`.
@@ -89,6 +89,13 @@
 - Planning, execution ID, branch, and worktree are never recreated during corrections. A passing
   retry continues to commit/push/PR/review. Exhaustion or correction failure ends as `FAILED` and
   preserves the worktree.
+- A `CHANGES_REQUESTED` review is retried up to `review.max_review_retries` (default `1`,
+  non-negative). While budget remains, the implementer receives the structured review feedback in
+  the same worktree, then validation (with its own retry budget) runs again. A passing correction
+  is committed and pushed to the existing working branch, updating the existing PR without a new
+  PR creation attempt; the reviewer receives a fresh base...HEAD diff in a newly persisted
+  `REVIEW` step. Repeated requested changes after the budget is exhausted finish as
+  `CHANGES_REQUESTED`; approval finishes as `APPROVED`.
 
 ## Structured agents and integrations
 

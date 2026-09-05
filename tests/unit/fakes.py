@@ -176,12 +176,14 @@ class FakeJulesClient:
     def __init__(self) -> None:
         self.ambiguous = False
         self.changes_requested = False
+        self.review_decisions: list[str] = []
         self.malformed_review = False
         self.spec_error: Exception | None = None
         self.review_error: Exception | None = None
         self.spec_starting_branch: str | None = None
         self.review_starting_branch: str | None = None
         self.spec_calls = 0
+        self.review_calls = 0
 
     def execute(
         self, request: AgentRequest, *, on_started: Any = None
@@ -223,24 +225,29 @@ class FakeJulesClient:
                 execution=reference,
             )
         self.review_starting_branch = request.revision
+        self.review_calls += 1
         if self.review_error:
             raise self.review_error
         if self.malformed_review:
             return AgentResult(output="not valid JSON", execution=reference)
+        decision = (
+            self.review_decisions.pop(0)
+            if self.review_decisions
+            else ("CHANGES_REQUESTED" if self.changes_requested else "APPROVED")
+        )
+        changes_requested = decision == "CHANGES_REQUESTED"
         return AgentResult(
             output=json.dumps(
                 {
-                    "decision": (
-                        "CHANGES_REQUESTED" if self.changes_requested else "APPROVED"
-                    ),
+                    "decision": decision,
                     "summary": (
                         "An edge case needs coverage"
-                        if self.changes_requested
+                        if changes_requested
                         else "Looks good"
                     ),
-                    "findings": ["Missing edge case"] if self.changes_requested else [],
+                    "findings": ["Missing edge case"] if changes_requested else [],
                     "blocking_findings": (
-                        ["Missing edge case"] if self.changes_requested else []
+                        ["Missing edge case"] if changes_requested else []
                     ),
                     "suggestions": [],
                 }
@@ -281,6 +288,9 @@ class FakeGitClient:
         self.workspace_path: Path | None = None
         self.control_path: Path | None = None
         self.operation_paths: list[Path | None] = []
+        self.commit_calls = 0
+        self.push_calls = 0
+        self.diff_calls = 0
 
     def create_branch(
         self, base_branch: str, working_branch: str, protected_branches: list[str]
@@ -316,15 +326,18 @@ class FakeGitClient:
         return "example/api"
 
     def commit_all(self, message: str, working_branch: str, protected_branches: list[str]) -> str:
+        self.commit_calls += 1
         self.operation_paths.append(self.workspace_path)
         return "a" * 40
 
     def push(self, working_branch: str, protected_branches: list[str]) -> None:
+        self.push_calls += 1
         self.operation_paths.append(self.workspace_path)
         if self.push_error:
             raise self.push_error
 
     def diff(self, base_branch: str) -> str:
+        self.diff_calls += 1
         self.operation_paths.append(self.workspace_path)
         return "diff --git a/src/audit.py b/src/audit.py"
 
@@ -333,8 +346,10 @@ class FakeGitHubClient:
     def __init__(self) -> None:
         self.error: Exception | None = None
         self.last_pull_request_body: str | None = None
+        self.create_calls = 0
 
     def create_pull_request(self, **kwargs: Any) -> PullRequest:
+        self.create_calls += 1
         if self.error:
             raise self.error
         self.last_pull_request_body = str(kwargs["body"])
@@ -355,6 +370,7 @@ class FakeCommandClient:
     def __init__(self) -> None:
         self.fail = False
         self.failures_remaining = 0
+        self.failure_sequence: list[bool] = []
         self.working_directories: list[Path] = []
         self.commands: list[list[str]] = []
 
@@ -363,9 +379,12 @@ class FakeCommandClient:
         if isinstance(cwd, Path):
             self.working_directories.append(cwd)
         self.commands.append(command)
-        failed = self.fail or self.failures_remaining > 0
-        if self.failures_remaining > 0:
-            self.failures_remaining -= 1
+        if self.failure_sequence:
+            failed = self.failure_sequence.pop(0)
+        else:
+            failed = self.fail or self.failures_remaining > 0
+            if self.failures_remaining > 0:
+                self.failures_remaining -= 1
         return CommandResult(
             command=command,
             exit_code=1 if failed else 0,

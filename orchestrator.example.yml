@@ -31,6 +31,10 @@ defaults:
     commands: []
     # Tentativas de correcao no mesmo worktree apos uma validacao falhar.
     max_validation_retries: 2
+  review:
+    # Tentativas de correcao no mesmo worktree apos uma revisao pedir mudancas.
+    # Cada correcao valida, cria um novo commit e atualiza a PR existente antes de nova revisao.
+    max_review_retries: 1
   providers:
     jules:
       type: jules
