@@ -144,6 +144,11 @@
 - Safety defaults: direct merge is rejected, protected branches include main/master/develop unless
   changed, and tests are required unless deliberately disabled. Local `orchestrator.yml` may hold
   machine-specific paths and stays untracked; keep the example generic.
+- Notifications are opt-in per resolved project configuration through `notifications.enabled`
+  (default `false`) and `notifications.channel` (currently `desktop`). Workflow policy emits one
+  best-effort alert only for terminal `APPROVED`, `FAILED`, `NEEDS_HUMAN`, or exhausted-review
+  `CHANGES_REQUESTED` outcomes. Desktop delivery selects native Windows toasts; unsupported,
+  headless, or failed delivery only writes a warning and can never alter workflow state.
 
 ## Failure semantics
 

@@ -65,6 +65,21 @@ class ReviewSettings(BaseModel):
     max_review_retries: int = Field(default=1, ge=0)
 
 
+class NotificationsSettings(BaseModel):
+    """Optional delivery settings for user-visible workflow outcomes."""
+
+    enabled: bool = False
+    channel: str = "desktop"
+
+    @field_validator("channel")
+    @classmethod
+    def validate_channel(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if not normalized:
+            raise ValueError("Notification channel must be a non-empty string")
+        return normalized
+
+
 class WorkspaceSettings(BaseModel):
     """Location for disposable, per-execution Git worktrees."""
 
@@ -328,6 +343,7 @@ class ProjectConfig(BaseModel):
     safety: SafetySettings = Field(default_factory=SafetySettings)
     validation: ValidationSettings = Field(default_factory=ValidationSettings)
     review: ReviewSettings = Field(default_factory=ReviewSettings)
+    notifications: NotificationsSettings = Field(default_factory=NotificationsSettings)
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     integrations: IntegrationsSettings = Field(default_factory=IntegrationsSettings)
 
@@ -537,6 +553,7 @@ class ProjectConfigLoader:
             "safety",
             "validation",
             "review",
+            "notifications",
             "workspace",
         }
         misplaced = sorted(project_settings.intersection(global_config))

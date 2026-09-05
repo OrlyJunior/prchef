@@ -15,6 +15,7 @@ from orchestrator.models import (
 )
 from orchestrator.providers.agent_provider import AgentNeedsHumanError
 from orchestrator.runtime_logging import log_review_summary, log_spec_summary
+from orchestrator.services.notifications import NotificationService
 from orchestrator.services.task_provider import GitHubIssueTaskProvider, TrelloTaskProvider
 from orchestrator.services.workflow_service import WorkflowService
 from tests.unit.fakes import (
@@ -65,6 +66,67 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
         }
     ]
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
+
+
+class _RecordingNotifier:
+    def __init__(self) -> None:
+        self.events = []
+
+    def notify(self, event) -> None:
+        self.events.append(event)
+
+
+def _workflow_with_notifications(tmp_path: Path):
+    repository = FakeWorkflowRepository()
+    loader = FakeConfigLoader(tmp_path)
+    loader.config.notifications.enabled = True
+    recorder = _RecordingNotifier()
+    service = WorkflowService(
+        repository,
+        TrelloTaskProvider(FakeTrelloClient()),
+        loader,
+        FakeClientFactory(),
+        notification_service=NotificationService({"desktop": recorder}),
+    )
+    return service, recorder
+
+
+@pytest.mark.parametrize(
+    ("configure", "expected_status"),
+    [
+        (lambda factory: None, WorkflowStatus.APPROVED),
+        (lambda factory: setattr(factory.codex, "fail", True), WorkflowStatus.FAILED),
+        (lambda factory: setattr(factory.jules, "ambiguous", True), WorkflowStatus.NEEDS_HUMAN),
+        (
+            lambda factory: setattr(factory.jules, "changes_requested", True),
+            WorkflowStatus.CHANGES_REQUESTED,
+        ),
+    ],
+)
+def test_relevant_terminal_outcomes_emit_one_notification(
+    tmp_path: Path, configure, expected_status: WorkflowStatus
+) -> None:
+    service, recorder = _workflow_with_notifications(tmp_path)
+    configure(service._client_factory)
+
+    result = service.run("card-notifications")
+
+    assert result.status is expected_status
+    assert [event.status for event in recorder.events] == [expected_status]
+
+
+def test_recoverable_validation_and_review_retries_do_not_emit_notifications(
+    tmp_path: Path,
+) -> None:
+    service, recorder = _workflow_with_notifications(tmp_path)
+    factory = service._client_factory
+    factory.commands.failures_remaining = 1
+    factory.jules.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
+
+    result = service.run("card-retry-notifications")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert [event.status for event in recorder.events] == [WorkflowStatus.APPROVED]
 
 
 def test_trello_failure_is_persisted_as_failed(workflow) -> None:

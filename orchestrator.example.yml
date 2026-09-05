@@ -35,6 +35,10 @@ defaults:
     # Tentativas de correcao no mesmo worktree apos uma revisao pedir mudancas.
     # Cada correcao valida, cria um novo commit e atualiza a PR existente antes de nova revisao.
     max_review_retries: 1
+  notifications:
+    # Desktop alerts are opt-in. Windows is supported in this first version.
+    enabled: false
+    channel: desktop
   providers:
     jules:
       type: jules
