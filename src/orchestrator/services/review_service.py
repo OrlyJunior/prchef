@@ -29,9 +29,21 @@ _REVIEW_OUTPUT = StructuredOutputExpectation(
                 "enum": ["APPROVED", "CHANGES_REQUESTED", "NEEDS_HUMAN"],
             },
             "summary": {"type": "string"},
-            "findings": {"type": "array", "items": {"type": "string"}},
-            "blocking_findings": {"type": "array", "items": {"type": "string"}},
-            "suggestions": {"type": "array", "items": {"type": "string"}},
+            "findings": {
+                "type": "array",
+                "description": "Backwards-compatible copy of blocking findings.",
+                "items": {"type": "string"},
+            },
+            "blocking_findings": {
+                "type": "array",
+                "description": "Concrete blocking issues that require CHANGES_REQUESTED.",
+                "items": {"type": "string"},
+            },
+            "suggestions": {
+                "type": "array",
+                "description": "Non-blocking optional improvements; may accompany APPROVED.",
+                "items": {"type": "string"},
+            },
         },
         "required": [
             "decision",
@@ -64,8 +76,30 @@ class ReviewService:
         on_execution_started: Callable[[AgentExecutionReference], None],
     ) -> CodeReview:
         prompt = f"""Review this implementation against the original task and technical spec.
+Perform an adversarial, evidence-based risk analysis; do not limit the review to stated
+requirements. Look for concrete failure modes and regressions in the supplied context and diff.
 Do not edit files, create commits, push, merge, or change the pull request.
 Do not invent requirements.
+
+RISK REVIEW:
+- Where relevant, examine concurrency and races; persistence/state consistency; retries,
+  idempotency, duplicate execution, and partial-failure recovery; resource cleanup; filesystem
+  and path safety; subprocess or external-integration failures; restart/resume and cross-platform
+  behavior; and regressions in pre-existing flows.
+- Also assess unnecessary work, performance, memory/storage growth, token and prompt efficiency,
+  redundant model calls or duplicated context, provider coupling, quota/rate-limit handling,
+  configuration compatibility, migration safety, and consistency with PROJECT.md.
+- Report a blocking finding only when the diff and available context support a plausible concrete
+  correctness, safety, reliability, or architectural failure mode. State the failure mode and why
+  it applies. Do not reject for style or naming preferences, speculative concerns without a
+  plausible failure mode, or low-value refactors.
+- Put only blocking issues in `blocking_findings`; they require CHANGES_REQUESTED. Put optional
+  efficiency, token-optimization, or maintainability improvements in `suggestions`. Suggestions
+  may accompany APPROVED. Keep `findings` as a backwards-compatible copy of blocking findings; do
+  not put suggestions there or use them to block approval.
+- APPROVED requires no blocking findings and may have suggestions. CHANGES_REQUESTED requires at
+  least one concrete blocking finding. A clean implementation may return APPROVED with all lists
+  empty. Use NEEDS_HUMAN when a safe decision cannot be made from the available context.
 
 ORIGINAL TASK:
 {task.as_original_prompt()}
@@ -102,7 +136,6 @@ Return exactly one JSON object:
   "blocking_findings": ["string"],
   "suggestions": ["string"]
 }}
-Use NEEDS_HUMAN when a safe decision cannot be made from the available context.
 """
         result = self._provider.execute(
             AgentRequest(
