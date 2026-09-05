@@ -31,6 +31,7 @@ from orchestrator.repositories.workflow_repository import WorkflowRepository
 from orchestrator.runtime_logging import log_review_summary, log_spec_summary, redact_text
 from orchestrator.services.exceptions import WorkflowError
 from orchestrator.services.implementation_service import ImplementationService
+from orchestrator.services.notifications import NotificationService
 from orchestrator.services.review_service import ReviewService, format_pull_request_review
 from orchestrator.services.spec_service import SpecService
 from orchestrator.services.task_provider import TaskProvider
@@ -69,12 +70,14 @@ class WorkflowService:
         client_factory: ClientFactory,
         *,
         verbose: bool = False,
+        notification_service: NotificationService | None = None,
     ) -> None:
         self._repository = workflow_repository
         self._task_provider = task_provider
         self._config_loader = config_loader
         self._client_factory = client_factory
         self._verbose = verbose
+        self._notification_service = notification_service or NotificationService()
 
     def run(self, task_id: str, repository_override: str | None = None) -> WorkflowExecution:
         execution = self._repository.create_execution(
@@ -82,6 +85,7 @@ class WorkflowService:
         )
         self._repository.update_status(execution.id, WorkflowStatus.RUNNING)
         workspace_path: Path | None = None
+        config: ProjectConfig | None = None
         try:
             logger.info(
                 "[workflow] Loading %s task %s", self._task_provider.source, task_id
@@ -119,8 +123,7 @@ class WorkflowService:
             if spec.has_blocking_ambiguity:
                 message = "; ".join(spec.ambiguities) or "Planner reported blocking ambiguity"
                 self._repository.record_error(execution.id, message)
-                self._repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
-                return self._repository.get_execution(execution.id)
+                return self._finish(execution.id, WorkflowStatus.NEEDS_HUMAN, config)
 
             working_branch = self._branch_name(
                 config.repository.branch_prefix, task.id, task.title, execution.id
@@ -270,26 +273,39 @@ class WorkflowService:
                 ReviewDecision.CHANGES_REQUESTED: WorkflowStatus.CHANGES_REQUESTED,
                 ReviewDecision.NEEDS_HUMAN: WorkflowStatus.NEEDS_HUMAN,
             }[review.result]
-            self._repository.finish(execution.id, final_status)
+            return self._finish(execution.id, final_status, config)
         except ConfigurationError as exc:
             self._repository.record_error(execution.id, str(exc))
-            self._repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+            return self._finish(execution.id, WorkflowStatus.NEEDS_HUMAN, config)
         except AgentNeedsHumanError as exc:
             self._repository.record_error(execution.id, str(exc))
-            self._repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+            result = self._finish(execution.id, WorkflowStatus.NEEDS_HUMAN, config)
             if workspace_path is not None:
                 logger.error(
                     "[workspace] Workflow needs human input; preserving workspace: %s",
                     workspace_path,
                 )
+            return result
         except Exception as exc:
             self._repository.record_error(execution.id, str(exc))
-            self._repository.finish(execution.id, WorkflowStatus.FAILED)
+            result = self._finish(execution.id, WorkflowStatus.FAILED, config)
             if workspace_path is not None:
                 logger.error(
                     "[workspace] Workflow failed; preserving workspace: %s", workspace_path
                 )
-        return self._repository.get_execution(execution.id)
+            return result
+
+    def _finish(
+        self,
+        execution_id: str,
+        status: WorkflowStatus,
+        config: ProjectConfig | None,
+    ) -> WorkflowExecution:
+        self._repository.finish(execution_id, status)
+        execution = self._repository.get_execution(execution_id)
+        if config is not None:
+            self._notification_service.notify_outcome(config.notifications, execution)
+        return execution
 
     @contextmanager
     def _step(self, execution_id: str, stage: WorkflowStage) -> Iterator[None]:
