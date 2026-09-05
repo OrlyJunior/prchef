@@ -61,6 +61,71 @@ def test_default_codex_config_keeps_workspace_write_sandbox(tmp_path: Path) -> N
     assert "--approve-for-me" not in config.integrations.codex.command
 
 
+def test_role_runtime_overrides_are_validated_in_memory_and_keep_defaults(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "providers": {
+                "codex": {
+                    "type": "codex-cli",
+                    "command": ["codex", "exec", "-"],
+                    "model": "configured-model",
+                    "reasoning_effort": "medium",
+                },
+                "vertex": {
+                    "type": "gemini-vertex",
+                    "project": "example-project",
+                    "model": "configured-gemini",
+                    "generation": {"temperature": 0.2},
+                },
+                "jules": {"type": "jules"},
+            },
+            "agents": {
+                "planner": {"provider": "vertex"},
+                "implementer": {"provider": "codex"},
+                "reviewer": {"provider": "jules"},
+            },
+        }
+    )
+
+    overridden = config.with_agent_runtime_overrides(
+        {"implementer": "codex"},
+        {
+            "implementer": {"model": "free-form-model", "reasoning_effort": "high"},
+            "planner": {
+                "model": "another-gemini-model",
+                "generation": {"temperature": "0.8", "max_output_tokens": "512"},
+            },
+        },
+    )
+
+    assert config.agents.implementer.provider == "codex"
+    assert config.provider_runtime_values("codex") == {
+        "model": "configured-model",
+        "reasoning_effort": "medium",
+    }
+    assert overridden.agents.implementer.provider == "__tui_runtime_implementer"
+    assert overridden.provider_runtime_values("__tui_runtime_implementer") == {
+        "model": "free-form-model",
+        "reasoning_effort": "high",
+    }
+    assert overridden.provider_runtime_values("__tui_runtime_planner") == {
+        "model": "another-gemini-model",
+        "generation": {"temperature": 0.8, "max_output_tokens": 512},
+    }
+
+
+def test_role_runtime_overrides_reject_unsupported_and_invalid_values(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate({"path": tmp_path})
+
+    with pytest.raises(ConfigurationError, match="does not support runtime option"):
+        config.with_agent_runtime_overrides({}, {"planner": {"model": "not-supported"}})
+    with pytest.raises(ConfigurationError, match="must be a non-empty string"):
+        config.with_agent_runtime_overrides(
+            {}, {"implementer": {"reasoning_effort": " "}}
+        )
+
+
 def test_workspace_root_is_configurable(tmp_path: Path) -> None:
     config = ProjectConfig.model_validate(
         {"path": tmp_path, "workspace": {"root": "C:/Git/orchestrator-workspaces"}}
