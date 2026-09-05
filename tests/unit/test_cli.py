@@ -97,6 +97,35 @@ def test_cli_providers_succeeds_without_configured_providers(tmp_path: Path) -> 
     assert result.stdout == ""
 
 
+def test_cli_providers_discovers_config_from_a_parent_of_an_isolated_cwd(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    config = tmp_path / "orchestrator.yml"
+    config.write_text("defaults: {}\n", encoding="utf-8")
+    isolated_cwd = tmp_path / "unrelated" / "directory"
+    isolated_cwd.mkdir(parents=True)
+    monkeypatch.chdir(isolated_cwd)
+
+    result = runner.invoke(main.app, ["providers"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "jules  jules\ncodex  codex-cli\n"
+
+
+def test_cli_providers_reports_config_discovery_failure(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "ProjectConfigLoader", lambda _: (_ for _ in ()).throw(
+        main.ConfigurationError("Global configuration not found. Searched: test paths")
+    ))
+
+    result = runner.invoke(main.app, ["providers"])
+
+    assert result.exit_code == 2
+    assert "Global configuration not found. Searched: test paths" in result.output
+
+
 class StubWorkflowService:
     calls: list[tuple[str, str, str | None]] = []
 

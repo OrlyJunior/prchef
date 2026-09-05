@@ -18,5 +18,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ORCHESTRATOR_JULES_API_KEY", "JULES_API_KEY"),
     )
     database_url: str = "sqlite:///./orchestrator.db"
-    config_file: Path = Field(default=Path("orchestrator.yml"))
+    # Environment-based configuration selection is intentionally handled by
+    # resolve_global_config(), which preserves its documented precedence. The
+    # private validation alias keeps BaseSettings from consuming a public
+    # ORCHESTRATOR_CONFIG* variable before that resolver sees it.
+    config_file: Path | None = Field(
+        default=None,
+        validation_alias="_ORCHESTRATOR_CONFIG_CLI_PATH",
+    )
     log_level: str = "INFO"

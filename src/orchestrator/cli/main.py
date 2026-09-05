@@ -121,6 +121,14 @@ def _migrated_repository(settings: Settings) -> WorkflowRepository:
     return _repository(settings)
 
 
+def _config_loader(config_file: Path | None) -> ProjectConfigLoader:
+    try:
+        return ProjectConfigLoader(config_file)
+    except ConfigurationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+
 def _task_provider(
     *,
     settings: Settings,
@@ -249,7 +257,7 @@ def providers(
     if config is not None:
         settings.config_file = config
     try:
-        project_config = ProjectConfigLoader(settings.config_file).load_defaults()
+        project_config = _config_loader(settings.config_file).load_defaults()
     except ConfigurationError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
@@ -289,7 +297,7 @@ def run(
         settings.config_file = config
     configure_logging(verbose=verbose, configured_level=settings.log_level)
     workflow_repository = _migrated_repository(settings)
-    config_loader = ProjectConfigLoader(settings.config_file)
+    config_loader = _config_loader(settings.config_file)
     selected_id, provider = _task_provider(
         settings=settings,
         config_loader=config_loader,
@@ -477,7 +485,7 @@ def debug(
         diff=explicit_diff,
     )
     service = DebugService(
-        config_loader=ProjectConfigLoader(settings.config_file),
+        config_loader=_config_loader(settings.config_file),
         client_factory=ClientFactory(settings.jules_api_key),
         task_provider_factory=lambda source, repo: _debug_task_provider(settings, source, repo),
     )
@@ -557,7 +565,7 @@ def cleanup_workspaces(
     if config is not None:
         settings.config_file = config
     configure_logging(configured_level=settings.log_level)
-    config_loader = ProjectConfigLoader(settings.config_file)
+    config_loader = _config_loader(settings.config_file)
     cleanup_task = DevelopmentTask(
         id="workspace-cleanup",
         source="system",
