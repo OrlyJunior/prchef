@@ -88,6 +88,54 @@ def test_max_review_retries_defaults_to_one_and_rejects_negative_values(tmp_path
         )
 
 
+def test_notifications_are_disabled_by_default_and_normalize_the_channel(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {"path": tmp_path, "notifications": {"enabled": True, "channel": " Desktop "}}
+    )
+
+    assert config.notifications.enabled is True
+    assert config.notifications.channel == "desktop"
+    assert ProjectConfig.model_validate({"path": tmp_path}).notifications.enabled is False
+
+
+def test_notification_configuration_uses_repository_and_local_overrides(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    (repository / ".orchestrator.yml").write_text(
+        "notifications:\n  channel: desktop\n",
+        encoding="utf-8",
+    )
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        """defaults:
+  notifications:
+    enabled: false
+    channel: ignored
+repositories:
+  example:
+    path: repository
+    notifications:
+      enabled: true
+      channel: desktop
+""",
+        encoding="utf-8",
+    )
+    task = DevelopmentTask(
+        id="1",
+        source="trello",
+        title="Task",
+        description="",
+        url="https://example.test/1",
+        repository="example",
+    )
+
+    config = ProjectConfigLoader(config_file).load(task)
+
+    assert config.notifications.enabled is True
+    assert config.notifications.channel == "desktop"
+
+
 def test_github_app_configuration_accepts_exactly_one_private_key_source(tmp_path: Path) -> None:
     config = ProjectConfig.model_validate(
         {
