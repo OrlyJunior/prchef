@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,52 @@ def test_workspaces_and_branches_are_unique_and_remain_available_for_recovery(
     assert _git(first, "branch", "--show-current") == "orchestrator/execution-1"
     assert _git(second, "branch", "--show-current") == "orchestrator/execution-2"
     assert (first / "unfinished.txt").read_text(encoding="utf-8") == "recover me"
+
+
+def test_pytest_creates_its_temp_directory_inside_a_fresh_execution_worktree(
+    tmp_path: Path,
+) -> None:
+    control, _ = _repository_with_origin(tmp_path)
+    project_root = Path(__file__).resolve().parents[2]
+    for configuration_file in ("pyproject.toml", "conftest.py"):
+        (control / configuration_file).write_text(
+            (project_root / configuration_file).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    tests = control / "tests"
+    tests.mkdir()
+    (tests / "test_smoke.py").write_text(
+        "def test_smoke(tmp_path) -> None:\n    assert tmp_path.is_dir()\n", encoding="utf-8"
+    )
+    _git(control, "add", "pyproject.toml", "conftest.py", "tests/test_smoke.py")
+    _git(control, "commit", "-m", "Add pytest validation")
+    _git(control, "push")
+
+    manager = WorkspaceManager(
+        GitClient(CommandClient(), control),
+        control,
+        WorkspaceSettings(root=tmp_path / "workspaces"),
+    )
+    workspace = manager.create(
+        "windows-path-execution", "develop", "orchestrator/windows-path-execution", ["develop"]
+    )
+    workspace_temp = workspace / ".pytest-tmp"
+
+    assert not workspace_temp.exists()
+    assert not (control / ".pytest-tmp").exists()
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert workspace_temp.is_dir()
+    assert (workspace_temp / "run").is_dir()
+    assert not (control / ".pytest-tmp").exists()
 
 
 def test_workspace_root_inside_control_checkout_is_rejected(tmp_path: Path) -> None:
