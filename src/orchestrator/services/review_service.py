@@ -57,6 +57,37 @@ _REVIEW_OUTPUT = StructuredOutputExpectation(
 )
 
 
+def format_pull_request_review(review: CodeReview) -> str:
+    """Render provider-neutral review data as a readable GitHub review body."""
+    blocking_findings = review.blocking_findings or review.findings
+    sections = [
+        f"## Automated review: {review.result.value}",
+        "",
+        f"**Summary:** {review.summary.strip()}",
+    ]
+    if blocking_findings:
+        sections.extend(
+            [
+                "",
+                "### Blocking findings",
+                "",
+                *[f"- {finding}" for finding in blocking_findings],
+            ]
+        )
+    if review.suggestions:
+        sections.extend(
+            [
+                "",
+                "### Non-blocking suggestions",
+                "",
+                *[f"- {suggestion}" for suggestion in review.suggestions],
+            ]
+        )
+    if not blocking_findings and not review.suggestions:
+        sections.extend(["", "No blocking findings or non-blocking suggestions."])
+    return "\n".join(sections)
+
+
 class ReviewService:
     def __init__(self, provider: AgentProvider) -> None:
         self._provider = provider

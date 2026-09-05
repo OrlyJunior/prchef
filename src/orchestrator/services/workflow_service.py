@@ -15,6 +15,7 @@ from orchestrator.config.project_config import (
     ProjectConfigLoader,
 )
 from orchestrator.models.agent import AgentRole
+from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationResult
@@ -30,7 +31,7 @@ from orchestrator.repositories.workflow_repository import WorkflowRepository
 from orchestrator.runtime_logging import log_review_summary, log_spec_summary, redact_text
 from orchestrator.services.exceptions import WorkflowError
 from orchestrator.services.implementation_service import ImplementationService
-from orchestrator.services.review_service import ReviewService
+from orchestrator.services.review_service import ReviewService, format_pull_request_review
 from orchestrator.services.spec_service import SpecService
 from orchestrator.services.task_provider import TaskProvider
 from orchestrator.services.validation_service import ValidationService
@@ -210,6 +211,13 @@ class WorkflowService:
                         log_review_summary(logger, review)
                     if review.result is ReviewDecision.NEEDS_HUMAN:
                         self._repository.record_error(execution.id, review.summary)
+                    self._publish_review(
+                        execution_id=execution.id,
+                        execution_clients=execution_clients,
+                        repository_slug=repository_slug,
+                        pull_request_number=pull_request.number,
+                        review=review,
+                    )
 
                 if review.result is not ReviewDecision.CHANGES_REQUESTED:
                     break
@@ -343,6 +351,34 @@ class WorkflowService:
                         ) from exc
                 continue
             return validation
+
+    def _publish_review(
+        self,
+        *,
+        execution_id: str,
+        execution_clients: WorkflowClients,
+        repository_slug: str,
+        pull_request_number: int,
+        review: CodeReview,
+    ) -> None:
+        event = {
+            ReviewDecision.APPROVED: "APPROVE",
+            ReviewDecision.CHANGES_REQUESTED: "REQUEST_CHANGES",
+            ReviewDecision.NEEDS_HUMAN: "COMMENT",
+        }[review.result]
+        try:
+            execution_clients.github.submit_pull_request_review(
+                repository=repository_slug,
+                pull_request_number=pull_request_number,
+                event=event,
+                body=format_pull_request_review(review),
+            )
+        except Exception as exc:
+            message = f"GitHub review publication failed: {redact_text(str(exc))}"
+            logger.warning("[github] %s", message)
+            # Publication is an external side effect. Preserve the reviewer decision and let
+            # the terminal workflow status reflect it even when GitHub is unavailable.
+            self._repository.record_error(execution_id, message)
 
     @staticmethod
     def _branch_name(prefix: str, card_id: str, title: str, execution_id: str) -> str:

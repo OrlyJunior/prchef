@@ -345,8 +345,10 @@ class FakeGitClient:
 class FakeGitHubClient:
     def __init__(self) -> None:
         self.error: Exception | None = None
+        self.review_error: Exception | None = None
         self.last_pull_request_body: str | None = None
         self.create_calls = 0
+        self.review_calls: list[dict[str, Any]] = []
 
     def create_pull_request(self, **kwargs: Any) -> PullRequest:
         self.create_calls += 1
@@ -360,6 +362,11 @@ class FakeGitHubClient:
             base_branch=str(kwargs["base_branch"]),
             head_branch=str(kwargs["head_branch"]),
         )
+
+    def submit_pull_request_review(self, **kwargs: Any) -> None:
+        self.review_calls.append(kwargs)
+        if self.review_error:
+            raise self.review_error
 
     def at_path(self, repository_path: Path) -> FakeGitHubClient:
         del repository_path

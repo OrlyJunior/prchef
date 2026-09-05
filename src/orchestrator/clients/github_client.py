@@ -2,14 +2,138 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+import os
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from pathlib import Path
+from typing import Final, Protocol, cast
+
+import httpx
 
 from orchestrator.clients.command_client import CommandClient, CommandResult
 from orchestrator.clients.exceptions import GitHubClientError
+from orchestrator.config.project_config import GitHubAppSettings
 from orchestrator.models.pull_request import PullRequest
 
 logger = logging.getLogger(__name__)
+
+_GITHUB_API_VERSION: Final = "2022-11-28"
+_INSTALLATION_TOKEN_REFRESH_BUFFER: Final = timedelta(seconds=60)
+
+
+class _JwtEncoder(Protocol):
+    """Minimal PyJWT interface, kept optional until App auth is used."""
+
+    def encode(
+        self,
+        payload: dict[str, int | str],
+        key: str,
+        algorithm: str,
+    ) -> str: ...
+
+
+class _MissingJwtEncoder:
+    def encode(
+        self,
+        payload: dict[str, int | str],
+        key: str,
+        algorithm: str,
+    ) -> str:
+        raise RuntimeError("PyJWT is required for GitHub App authentication")
+
+
+try:
+    jwt: _JwtEncoder = cast(_JwtEncoder, import_module("jwt"))
+except ModuleNotFoundError:
+    # App credentials are optional. Avoid making every GitHub CLI interaction
+    # unavailable in environments that have not installed this optional path yet.
+    jwt = _MissingJwtEncoder()
+
+
+class GitHubAppAuthenticator:
+    """Mints and caches a GitHub App installation token for ``gh`` API calls."""
+
+    def __init__(
+        self,
+        settings: GitHubAppSettings,
+        *,
+        http_client: httpx.Client | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._settings = settings
+        self._http = http_client or httpx.Client(timeout=30.0)
+        self._now = now or (lambda: datetime.now(UTC))
+        self._token: str | None = None
+        self._token_expires_at: datetime | None = None
+
+    def token(self) -> str:
+        now = self._now()
+        if (
+            self._token is not None
+            and self._token_expires_at is not None
+            and now + _INSTALLATION_TOKEN_REFRESH_BUFFER < self._token_expires_at
+        ):
+            return self._token
+
+        app_jwt = self._app_jwt(now)
+        assert self._settings.installation_id is not None
+        try:
+            response = self._http.post(
+                f"{self._settings.api_url}/app/installations/"
+                f"{self._settings.installation_id}/access_tokens",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {app_jwt}",
+                    "X-GitHub-Api-Version": _GITHUB_API_VERSION,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            token = payload["token"]
+            expires_at = payload["expires_at"]
+            if not isinstance(token, str) or not token:
+                raise ValueError("response token is missing")
+            if not isinstance(expires_at, str):
+                raise ValueError("response expires_at is missing")
+            parsed_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise GitHubClientError("Could not mint a GitHub App installation token") from exc
+
+        self._token = token
+        self._token_expires_at = parsed_expiry.astimezone(UTC)
+        return token
+
+    def _app_jwt(self, now: datetime) -> str:
+        assert self._settings.app_id is not None
+        try:
+            encoded = jwt.encode(
+                {
+                    "iat": int((now - timedelta(seconds=60)).timestamp()),
+                    "exp": int((now + timedelta(minutes=9)).timestamp()),
+                    "iss": str(self._settings.app_id),
+                },
+                self._private_key(),
+                algorithm="RS256",
+            )
+            return encoded
+        except Exception as exc:
+            raise GitHubClientError("Could not sign a GitHub App authentication JWT") from exc
+
+    def _private_key(self) -> str:
+        if self._settings.private_key_path is not None:
+            try:
+                return self._settings.private_key_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise GitHubClientError("Could not read GitHub App private key file") from exc
+        assert self._settings.private_key_env is not None
+        private_key = os.environ.get(self._settings.private_key_env)
+        if not private_key:
+            raise GitHubClientError(
+                f"GitHub App private key environment variable is not set: "
+                f"{self._settings.private_key_env}"
+            )
+        return private_key.replace("\\n", "\n")
 
 
 class GitHubClient:
@@ -19,11 +143,17 @@ class GitHubClient:
         repository_path: Path,
         command: Sequence[str],
         timeout_seconds: int,
+        *,
+        app: GitHubAppSettings | None = None,
     ) -> None:
         self._commands = command_client
         self._path = repository_path
         self._command = list(command)
         self._timeout_seconds = timeout_seconds
+        self._app = app or GitHubAppSettings()
+        self._app_authenticator = (
+            GitHubAppAuthenticator(self._app) if self._app.is_configured else None
+        )
 
     def at_path(self, repository_path: Path) -> GitHubClient:
         return GitHubClient(
@@ -31,6 +161,7 @@ class GitHubClient:
             repository_path,
             self._command,
             self._timeout_seconds,
+            app=self._app,
         )
 
     def create_pull_request(
@@ -89,11 +220,53 @@ class GitHubClient:
         except (ValueError, KeyError, TypeError) as exc:
             raise GitHubClientError(f"Invalid GitHub CLI response: {viewed.stdout}") from exc
 
-    def _run(self, *arguments: str) -> CommandResult:
+    def submit_pull_request_review(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        event: str,
+        body: str,
+    ) -> None:
+        """Publish a formal review using the configured GitHub identity."""
+        if event not in {"APPROVE", "REQUEST_CHANGES", "COMMENT"}:
+            raise ValueError(f"Unsupported GitHub pull request review event: {event}")
+        if pull_request_number <= 0:
+            raise ValueError("Pull request number must be positive")
+        if not repository.strip():
+            raise ValueError("GitHub repository must be non-empty")
+
+        logger.info(
+            "[github] Publishing %s review to %s#%s",
+            event,
+            repository,
+            pull_request_number,
+        )
+        self._run(
+            "api",
+            "--method",
+            "POST",
+            f"repos/{repository}/pulls/{pull_request_number}/reviews",
+            "-f",
+            f"event={event}",
+            "-f",
+            f"body={body}",
+            env=self._review_auth_environment(),
+        )
+
+    def _review_auth_environment(self) -> dict[str, str] | None:
+        if self._app_authenticator is None:
+            return None
+        environment = dict(os.environ)
+        environment["GH_TOKEN"] = self._app_authenticator.token()
+        return environment
+
+    def _run(self, *arguments: str, env: dict[str, str] | None = None) -> CommandResult:
         result = self._commands.run(
             [*self._command, *arguments],
             cwd=self._path,
             timeout_seconds=self._timeout_seconds,
+            env=env,
         )
         if not result.success:
             detail = result.stderr.strip() or result.stdout.strip()

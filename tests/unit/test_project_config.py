@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from orchestrator.config.project_config import (
     CodexCliProviderSettings,
     ConfigurationError,
+    GitHubAppSettings,
     ProjectConfig,
     ProjectConfigLoader,
 )
@@ -85,6 +86,46 @@ def test_max_review_retries_defaults_to_one_and_rejects_negative_values(tmp_path
         ProjectConfig.model_validate(
             {"path": tmp_path, "review": {"max_review_retries": -1}}
         )
+
+
+def test_github_app_configuration_accepts_exactly_one_private_key_source(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "integrations": {
+                "github": {
+                    "command": ["gh"],
+                    "app": {
+                        "app_id": 123,
+                        "installation_id": 456,
+                        "private_key_env": "GITHUB_APP_PRIVATE_KEY",
+                    },
+                }
+            },
+        }
+    )
+
+    assert config.integrations.github.app.is_configured
+    assert config.integrations.github.app.app_id == 123
+
+
+@pytest.mark.parametrize(
+    "app",
+    [
+        {"app_id": 123, "installation_id": 456},
+        {
+            "app_id": 123,
+            "installation_id": 456,
+            "private_key_env": "KEY",
+            "private_key_path": "key.pem",
+        },
+    ],
+)
+def test_github_app_configuration_rejects_incomplete_or_ambiguous_credentials(
+    app: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="GitHub App"):
+        GitHubAppSettings.model_validate(app)
 
 
 def test_codex_approval_policy_accepts_approve_for_me(tmp_path: Path) -> None:

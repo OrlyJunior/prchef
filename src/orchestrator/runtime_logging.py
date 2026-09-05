@@ -113,6 +113,8 @@ def format_command(command: Sequence[str]) -> str:
         if part.casefold() in {"--body", "--prompt", "--input", "--token", "--password"}:
             parts.append(part)
             redact_next = True
+        elif part.casefold().startswith("body="):
+            parts.append("body=[REDACTED]")
         else:
             parts.append(redact_text(part))
     return " ".join(parts)
