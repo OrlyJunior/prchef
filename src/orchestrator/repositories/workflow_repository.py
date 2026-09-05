@@ -191,6 +191,14 @@ class WorkflowRepository:
                 raise KeyError(f"Workflow execution not found: {execution_id}")
             return self._to_domain(entity)
 
+    def list_executions(self) -> list[WorkflowExecution]:
+        """Return persisted executions in creation order for operational inspection."""
+        with self._sessions() as session:
+            entities = session.scalars(
+                select(WorkflowExecutionEntity).order_by(WorkflowExecutionEntity.created_at)
+            ).all()
+            return [self._to_domain(entity) for entity in entities]
+
     def list_steps(self, execution_id: str) -> list[WorkflowStep]:
         with self._sessions() as session:
             entities = session.scalars(

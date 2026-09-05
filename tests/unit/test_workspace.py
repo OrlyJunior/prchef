@@ -96,6 +96,23 @@ def test_workspaces_and_branches_are_unique_and_remain_available_for_recovery(
     assert (first / "unfinished.txt").read_text(encoding="utf-8") == "recover me"
 
 
+def test_git_client_removes_worktree_and_prunes_its_metadata(tmp_path: Path) -> None:
+    control, _ = _repository_with_origin(tmp_path)
+    manager = WorkspaceManager(
+        GitClient(CommandClient(), control),
+        control,
+        WorkspaceSettings(root=tmp_path / "workspaces"),
+    )
+    workspace = manager.create(
+        "execution-1", "develop", "orchestrator/execution-1", ["develop"]
+    )
+
+    GitClient(CommandClient(), control).remove_worktree(workspace)
+
+    assert not workspace.exists()
+    assert str(workspace) not in _git(control, "worktree", "list", "--porcelain")
+
+
 def test_pytest_creates_its_temp_directory_inside_a_fresh_execution_worktree(
     tmp_path: Path,
 ) -> None:

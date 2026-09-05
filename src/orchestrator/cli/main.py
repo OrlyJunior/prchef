@@ -14,11 +14,13 @@ from sqlalchemy.exc import OperationalError
 import orchestrator
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.clients.factory import ClientFactory
+from orchestrator.clients.git_client import GitClient
 from orchestrator.clients.github_issue_client import GitHubIssueClient
 from orchestrator.clients.trello_client import TrelloClient
 from orchestrator.config.database import build_engine, build_session_factory
 from orchestrator.config.project_config import ConfigurationError, ProjectConfigLoader
 from orchestrator.config.settings import Settings
+from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationCheck, ValidationResult
@@ -39,6 +41,8 @@ from orchestrator.services.task_provider import (
     TrelloTaskProvider,
 )
 from orchestrator.services.workflow_service import WorkflowService
+from orchestrator.services.workspace_cleaner import WorkspaceCleanupService
+from orchestrator.workspace.manager import WorkspaceManager
 
 app = typer.Typer(
     name="orchestrator",
@@ -515,6 +519,93 @@ def show(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
     _print_execution(execution)
+
+
+@app.command("cleanup-workspaces")
+def cleanup_workspaces(
+    repository: Annotated[
+        str,
+        typer.Option(
+            "--repository",
+            help="Registered repository key or local control-checkout path to clean",
+        ),
+    ],
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Global YAML configuration")
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="List retention decisions without deleting worktrees"),
+    ] = False,
+    include_failed: Annotated[
+        bool,
+        typer.Option(
+            "--include-failed",
+            help="Also clean FAILED and NEEDS_HUMAN workspaces; active runs remain protected",
+        ),
+    ] = False,
+    all_workspaces: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Alias for --include-failed; active and unmanaged workspaces remain protected",
+        ),
+    ] = False,
+) -> None:
+    """Inspect or remove retained execution worktrees for one configured repository."""
+    settings = Settings()
+    if config is not None:
+        settings.config_file = config
+    configure_logging(configured_level=settings.log_level)
+    config_loader = ProjectConfigLoader(settings.config_file)
+    cleanup_task = DevelopmentTask(
+        id="workspace-cleanup",
+        source="system",
+        title="Workspace cleanup",
+        description="Operational cleanup of retained execution worktrees.",
+        url="",
+        repository=repository,
+    )
+    try:
+        project_config = config_loader.load(cleanup_task, repository)
+        workspace_root = WorkspaceManager(
+            GitClient(CommandClient(), project_config.path),
+            project_config.path,
+            project_config.workspace,
+        ).workspace_root()
+    except (ConfigurationError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    service = WorkspaceCleanupService(
+        _migrated_repository(settings),
+        GitClient(CommandClient(), project_config.path),
+        project_config.path,
+        workspace_root,
+    )
+    report = service.cleanup(
+        dry_run=dry_run,
+        include_failed=include_failed or all_workspaces,
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "dry_run": report.dry_run,
+                "include_failed": include_failed or all_workspaces,
+                "workspaces": [asdict(item) for item in report.workspaces],
+                "summary": {
+                    "eligible": report.eligible_count,
+                    "removed": report.removed_count,
+                    "errors": report.error_count,
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+            default=_json_default,
+        )
+    )
+    if report.error_count:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
