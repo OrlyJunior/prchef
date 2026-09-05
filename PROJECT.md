@@ -105,8 +105,11 @@
   `REVIEW` step. Repeated requested changes after the budget is exhausted finish as
   `CHANGES_REQUESTED`; approval finishes as `APPROVED`.
 - A GitHub review-publication failure is logged and recorded without changing the structured
-  reviewer decision or its terminal status. GitHub App credentials, when configured, mint
-  short-lived installation tokens only for review publication; see `docs/github_app.md`.
+  reviewer decision or its terminal status. GitHub App credentials use separate optional reviewer
+  (`integrations.github.app`) and implementer (`integrations.github.implementer_app`) identities.
+  The implementer token is scoped to PR CLI operations and HTTPS pushes, while its bot metadata is
+  set only for commit subprocesses; SSH pushes retain ambient transport authentication. See
+  `docs/github_app.md`.
 
 ## Structured agents and integrations
 
@@ -132,9 +135,10 @@
   retain any files changed before the failure. Codex may edit only its assigned local workspace.
   Gemini Vertex uses ADC and has no local shell/filesystem access.
 - Jules credentials come from `JULES_API_KEY` or `ORCHESTRATOR_JULES_API_KEY`; GitHub PR creation
-  uses the authenticated `gh` CLI. Formal review publication may use a configured GitHub App
-  installation token, otherwise it uses `gh` authentication. Do not put credentials in YAML or
-  tracked files.
+  uses ambient `gh` authentication unless a configured implementer App supplies a short-lived,
+  process-local installation token. Formal review publication independently uses its configured
+  reviewer App token or ambient `gh` authentication. Do not put credentials in YAML or tracked
+  files.
 
 ## Configuration precedence
 

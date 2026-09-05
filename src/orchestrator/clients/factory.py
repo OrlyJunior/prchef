@@ -4,7 +4,7 @@ from pathlib import Path
 
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.clients.git_client import GitClient
-from orchestrator.clients.github_client import GitHubClient
+from orchestrator.clients.github_client import GitHubAppAuthenticator, GitHubClient
 from orchestrator.config.project_config import ProjectConfig
 from orchestrator.models.agent import AgentRole
 from orchestrator.providers.agent_provider import AgentProvider
@@ -68,15 +68,30 @@ class ClientFactory:
             if role in agents
         )
         logger.debug("[config] Resolved agent roles: %s", resolved)
+        reviewer_app = config.integrations.github.app
+        implementer_app = config.integrations.github.implementer_app
+        reviewer_authenticator = (
+            GitHubAppAuthenticator(reviewer_app) if reviewer_app.is_configured else None
+        )
+        implementer_authenticator = (
+            GitHubAppAuthenticator(implementer_app) if implementer_app.is_configured else None
+        )
         return WorkflowClients(
             commands=commands,
             agents=agents,
-            git=GitClient(commands, config.path),
+            git=GitClient(
+                commands,
+                config.path,
+                implementer_authenticator=implementer_authenticator,
+            ),
             github=GitHubClient(
                 commands,
                 config.path,
                 config.integrations.github.command,
                 config.integrations.github.timeout_seconds,
-                app=config.integrations.github.app,
+                app=reviewer_app,
+                implementer_app=implementer_app,
+                review_authenticator=reviewer_authenticator,
+                implementer_authenticator=implementer_authenticator,
             ),
         )

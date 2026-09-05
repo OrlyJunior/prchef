@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
 import logging
+import os
 import re
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Protocol
 
 from orchestrator.clients.command_client import CommandClient, CommandResult
 from orchestrator.clients.exceptions import GitClientError
@@ -11,13 +15,32 @@ from orchestrator.clients.exceptions import GitClientError
 logger = logging.getLogger(__name__)
 
 
+class GitHubAppAuthenticator(Protocol):
+    """The narrow App-auth boundary Git operations need."""
+
+    def token(self) -> str: ...
+
+    def bot_identity(self) -> tuple[str, str]: ...
+
+
 class GitClient:
-    def __init__(self, command_client: CommandClient, repository_path: Path) -> None:
+    def __init__(
+        self,
+        command_client: CommandClient,
+        repository_path: Path,
+        *,
+        implementer_authenticator: GitHubAppAuthenticator | None = None,
+    ) -> None:
         self._commands = command_client
         self._path = repository_path
+        self._implementer_authenticator = implementer_authenticator
 
     def at_path(self, repository_path: Path) -> GitClient:
-        return GitClient(self._commands, repository_path)
+        return GitClient(
+            self._commands,
+            repository_path,
+            implementer_authenticator=self._implementer_authenticator,
+        )
 
     def ensure_clean(self) -> None:
         result = self._git("status", "--porcelain")
@@ -111,7 +134,7 @@ class GitClient:
         if not staged:
             raise GitClientError("Codex produced no changes to commit")
         logger.info("[git] Creating commit on %s", working_branch)
-        self._git("commit", "-m", message)
+        self._git("commit", "-m", message, env=self._commit_environment())
         commit_sha = self._git("rev-parse", "HEAD").stdout.strip()
         logger.info("[git] Commit created: %s", commit_sha)
         return commit_sha
@@ -121,7 +144,8 @@ class GitClient:
         if self.current_branch() != working_branch:
             raise GitClientError("Refusing to push outside the workflow branch")
         logger.info("[git] Pushing branch: %s", working_branch)
-        self._git("push", "--set-upstream", "origin", working_branch)
+        environment = self._push_environment()
+        self._git("push", "--set-upstream", "origin", working_branch, env=environment)
         logger.info("[git] Push completed: %s", working_branch)
 
     def diff(self, base_branch: str) -> str:
@@ -136,8 +160,51 @@ class GitClient:
         if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or branch.startswith(("-", "/")):
             raise GitClientError(f"Unsafe branch name: {branch}")
 
-    def _git(self, *arguments: str, check: bool = True) -> CommandResult:
-        result = self._commands.run(["git", *arguments], cwd=self._path, timeout_seconds=300)
+    def _commit_environment(self) -> Mapping[str, str] | None:
+        if self._implementer_authenticator is None:
+            return None
+        name, email = self._implementer_authenticator.bot_identity()
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "GIT_AUTHOR_NAME": name,
+                "GIT_AUTHOR_EMAIL": email,
+                "GIT_COMMITTER_NAME": name,
+                "GIT_COMMITTER_EMAIL": email,
+            }
+        )
+        return environment
+
+    def _push_environment(self) -> Mapping[str, str] | None:
+        if self._implementer_authenticator is None:
+            return None
+        origin = self._git("remote", "get-url", "origin").stdout.strip()
+        if not origin.casefold().startswith(("https://", "http://")):
+            logger.info("[git] Origin does not use HTTP(S); using ambient push transport")
+            return None
+        token = self._implementer_authenticator.token()
+        encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
+        environment = dict(os.environ)
+        # Git reads these process-local config values. Keeping the header out of
+        # argv prevents installation tokens from entering command logs.
+        environment.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.extraHeader",
+                "GIT_CONFIG_VALUE_0": f"Authorization: Basic {encoded}",
+            }
+        )
+        return environment
+
+    def _git(
+        self,
+        *arguments: str,
+        check: bool = True,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandResult:
+        result = self._commands.run(
+            ["git", *arguments], cwd=self._path, timeout_seconds=300, env=env
+        )
         if check and not result.success:
             detail = result.stderr.strip() or result.stdout.strip()
             raise GitClientError(f"git {' '.join(arguments)} failed: {detail}")
