@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from pathlib import Path
 
 from orchestrator.clients.command_client import CommandClient, CommandResult
@@ -64,6 +65,29 @@ class GitClient:
         logger.info("[git] Creating worktree branch %s from %s", working_branch, base_ref)
         self._git("worktree", "add", "-b", working_branch, str(workspace_path), base_ref)
 
+    def remove_worktree(self, workspace_path: Path) -> bool:
+        """Remove a linked worktree and prune its shared Git metadata.
+
+        Returns whether a broken Git link required a filesystem-only fallback.  A worktree
+        with an intact link is never removed by the fallback: for example, Git can refuse
+        to remove it because it contains uncommitted recovery work.
+        """
+        result = self._git("worktree", "remove", str(workspace_path), check=False)
+        if result.success:
+            self._git("worktree", "prune")
+            return False
+
+        if self._worktree_link_is_intact(workspace_path):
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise GitClientError(
+                f"git worktree remove failed for {workspace_path}: {detail}"
+            )
+
+        if workspace_path.exists():
+            shutil.rmtree(workspace_path)
+        self._git("worktree", "prune")
+        return True
+
     def current_branch(self) -> str:
         return self._git("branch", "--show-current").stdout.strip()
 
@@ -118,3 +142,20 @@ class GitClient:
             detail = result.stderr.strip() or result.stdout.strip()
             raise GitClientError(f"git {' '.join(arguments)} failed: {detail}")
         return result
+
+    @staticmethod
+    def _worktree_link_is_intact(workspace_path: Path) -> bool:
+        git_file = workspace_path / ".git"
+        if not git_file.is_file():
+            return False
+        try:
+            value = git_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return False
+        prefix = "gitdir:"
+        if not value.startswith(prefix):
+            return False
+        gitdir = Path(value.removeprefix(prefix).strip())
+        if not gitdir.is_absolute():
+            gitdir = workspace_path / gitdir
+        return gitdir.exists()

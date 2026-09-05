@@ -5,6 +5,7 @@ import logging
 import re
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +17,11 @@ from orchestrator.cli import main
 from orchestrator.config.database import build_engine
 from orchestrator.config.settings import Settings
 from orchestrator.models import WorkflowExecution, WorkflowStage, WorkflowStatus
+from orchestrator.services.workspace_cleaner import (
+    CleanupWorkspace,
+    WorkspaceCleanupReport,
+    WorkspaceRetention,
+)
 
 runner = CliRunner()
 
@@ -385,3 +391,56 @@ def test_cli_uses_default_provider_from_configuration(
 
     assert result.exit_code == 0, result.output
     assert StubWorkflowService.calls == [("github", "42", "owner/api")]
+
+
+def test_cli_cleanup_workspaces_reports_dry_run_candidates(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    control = tmp_path / "control"
+    control.mkdir()
+
+    class ConfigLoader:
+        def __init__(self, _: Path) -> None:
+            pass
+
+        def load(self, task: Any, repository: str) -> Any:
+            assert task.repository == repository == "example"
+            return SimpleNamespace(
+                path=control,
+                workspace=SimpleNamespace(root=tmp_path / "workspaces"),
+            )
+
+    class CleanupService:
+        calls: list[tuple[bool, bool]] = []
+
+        def __init__(self, *_: Any) -> None:
+            pass
+
+        def cleanup(self, *, dry_run: bool, include_failed: bool) -> WorkspaceCleanupReport:
+            self.calls.append((dry_run, include_failed))
+            return WorkspaceCleanupReport(
+                workspaces=[
+                    CleanupWorkspace(
+                        path=tmp_path / "workspaces" / "control" / "execution-1",
+                        execution_id="execution-1",
+                        status=WorkflowStatus.APPROVED,
+                        retention=WorkspaceRetention.CLEANABLE,
+                        eligible=True,
+                        exists=True,
+                    )
+                ],
+                dry_run=dry_run,
+            )
+
+    monkeypatch.setattr(main, "ProjectConfigLoader", ConfigLoader)
+    monkeypatch.setattr(main, "WorkspaceCleanupService", CleanupService)
+    monkeypatch.setattr(main, "_migrated_repository", lambda settings: object())
+
+    result = runner.invoke(
+        main.app,
+        ["cleanup-workspaces", "--repository", "example", "--dry-run"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["workspaces"][0]["retention"] == "CLEANABLE"
+    assert CleanupService.calls == [(True, False)]
