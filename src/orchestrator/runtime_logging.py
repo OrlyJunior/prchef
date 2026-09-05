@@ -5,10 +5,19 @@ import re
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from orchestrator.models.code_review import CodeReview
+    from orchestrator.models.repository_spec import RepositorySpec
 
 _SENSITIVE_VALUE = re.compile(
-    r"(?i)(jules_api_key|orchestrator_jules_api_key|github_token|gh_token|authorization|token)"
+    r"(?i)(jules_api_key|orchestrator_jules_api_key|github_token|gh_token|"
+    r"x-api-key|[a-z0-9_-]*(?:api[_-]?key|secret|password))"
     r"(\s*[=:]\s*|\s+)([^\s,;]+)"
+)
+_SENSITIVE_HEADER_VALUE = re.compile(
+    r"(?i)(authorization|token)(\s*[=:]\s*)([^\s,;]+)"
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _GITHUB_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
@@ -25,8 +34,12 @@ class UtcTimestampFormatter(logging.Formatter):
 
 def redact_text(value: str) -> str:
     """Remove common credential forms before text reaches a log handler."""
-    redacted = _SENSITIVE_VALUE.sub(r"\1=[REDACTED]", value)
-    redacted = _BEARER.sub("Bearer [REDACTED]", redacted)
+    # Redact bearer values first.  Otherwise an ``Authorization: Bearer ...``
+    # value would have only ``Bearer`` consumed by _SENSITIVE_VALUE, leaving
+    # the credential itself in the log message.
+    redacted = _BEARER.sub("Bearer [REDACTED]", value)
+    redacted = _SENSITIVE_VALUE.sub(r"\1=[REDACTED]", redacted)
+    redacted = _SENSITIVE_HEADER_VALUE.sub(r"\1=[REDACTED]", redacted)
     return _GITHUB_TOKEN.sub("[REDACTED]", redacted)
 
 
@@ -35,6 +48,46 @@ def summarize_text(value: str | None, *, limit: int = 240) -> str:
     if len(compact) <= limit:
         return compact
     return f"{compact[: limit - 3]}..."
+
+
+def _log_text_items(
+    logger: logging.Logger, *, scope: str, label: str, values: Sequence[str]
+) -> None:
+    """Log a bounded list of already-parsed structured text values."""
+    for value in values[:3]:
+        logger.debug("[%s] %s: %s", scope, label, summarize_text(value, limit=160))
+    remaining = len(values) - 3
+    if remaining > 0:
+        logger.debug("[%s] additional_%s: %s", scope, label, remaining)
+
+
+def log_spec_summary(logger: logging.Logger, spec: RepositorySpec) -> None:
+    """Emit a compact, provider-neutral summary of a parsed repository spec."""
+    logger.debug("[spec] safe_to_implement=%s", str(spec.safe_to_implement).lower())
+    logger.debug("[spec] proposal: %s", summarize_text(spec.implementation_proposal))
+    logger.debug("[spec] artifacts: %s", len(spec.involved_artifacts))
+    logger.debug("[spec] acceptance_criteria: %s", len(spec.acceptance_criteria))
+    logger.debug("[spec] expected_tests: %s", len(spec.expected_tests))
+    logger.debug("[spec] ambiguities: %s", len(spec.ambiguities))
+    if spec.ambiguities:
+        _log_text_items(logger, scope="spec", label="ambiguity", values=spec.ambiguities)
+
+
+def log_review_summary(logger: logging.Logger, review: CodeReview) -> None:
+    """Emit a compact, provider-neutral summary of a parsed code review."""
+    logger.debug("[review] result=%s", review.result)
+    logger.debug("[review] summary: %s", summarize_text(review.summary))
+    logger.debug("[review] blocking_findings: %s", len(review.blocking_findings))
+    logger.debug("[review] suggestions: %s", len(review.suggestions))
+    if review.blocking_findings:
+        _log_text_items(
+            logger,
+            scope="review",
+            label="blocking_finding",
+            values=review.blocking_findings,
+        )
+    if review.suggestions:
+        _log_text_items(logger, scope="review", label="suggestion", values=review.suggestions)
 
 
 def format_duration(seconds: float) -> str:
