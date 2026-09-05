@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import jwt
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from orchestrator.clients.command_client import CommandResult
 from orchestrator.clients.github_client import GitHubAppAuthenticator, GitHubClient
@@ -64,6 +67,44 @@ def test_github_app_authenticator_mints_and_caches_installation_token(
     assert requested[0].url.path == "/app/installations/456/access_tokens"
     assert requested[0].headers["authorization"] == "Bearer signed-app-jwt"
     assert captured_jwt_payload["iss"] == "123"
+
+
+def test_github_app_authenticator_signs_jwt_with_installed_crypto(monkeypatch: Any) -> None:
+    requested: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request)
+        return httpx.Response(
+            201,
+            json={"token": "ghs_installation", "expires_at": "2030-01-01T01:00:00Z"},
+        )
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode("utf-8")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", pem)
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    authenticator = GitHubAppAuthenticator(
+        GitHubAppSettings(
+            app_id=123,
+            installation_id=456,
+            private_key_env="GITHUB_APP_PRIVATE_KEY",
+        ),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now=lambda: now,
+    )
+
+    assert authenticator.token() == "ghs_installation"
+    encoded = requested[0].headers["authorization"].removeprefix("Bearer ")
+    payload = jwt.decode(encoded, algorithms=["RS256"], options={"verify_signature": False})
+    assert payload == {
+        "iat": int((now.timestamp()) - 60),
+        "exp": int((now.timestamp()) + 9 * 60),
+        "iss": "123",
+    }
 
 
 def test_submit_pull_request_review_uses_app_token_and_api_payload(tmp_path: Path) -> None:

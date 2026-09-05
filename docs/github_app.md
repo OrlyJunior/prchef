@@ -37,6 +37,9 @@ integrations:
 When `app` is configured, `app_id`, `installation_id`, and exactly one private-key source are
 required. Never commit the PEM or place it in versioned YAML or `.env.example`.
 
+The standard orchestrator installation already includes the PyJWT cryptography support required
+to sign GitHub App JWTs. No separate `pip install "PyJWT[crypto]"` step is needed.
+
 Without `app`, review publication uses the ambient `gh` authentication. With it, only review
 publication receives `GH_TOKEN` containing the installation token; pull request creation retains
 the normal `gh` identity.
