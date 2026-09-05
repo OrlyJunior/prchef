@@ -142,6 +142,48 @@ def test_validation_failure_stops_before_commit(workflow) -> None:
     assert WorkflowStage.CREATE_PR not in repository.stage_changes
 
 
+def test_validation_failure_requests_in_place_implementation_correction(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.commands.failures_remaining = 1
+
+    result = service.run("card-correction")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert len(factory.codex.requests) == 2
+    correction = factory.codex.requests[1]
+    assert correction.workspace_path == factory.codex.requests[0].workspace_path
+    assert "VALIDATION FAILURES FROM THE CURRENT IMPLEMENTATION" in correction.instructions
+    assert "Command: pytest" in correction.instructions
+    assert "Exit code: 1" in correction.instructions
+    assert "assertion failed" in correction.instructions
+
+
+def test_multiple_validation_corrections_are_supported(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.commands.failures_remaining = 2
+
+    result = service.run("card-multiple-corrections")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert len(factory.codex.requests) == 3
+    assert repository.stage_changes.count(WorkflowStage.VALIDATE) == 3
+    assert repository.stage_changes.count(WorkflowStage.IMPLEMENT) == 3
+    assert factory.jules.spec_calls == 1
+
+
+def test_validation_retry_limit_fails_and_preserves_workspace(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.commands.fail = True
+
+    result = service.run("card-exhausted-corrections")
+
+    assert result.status is WorkflowStatus.FAILED
+    assert len(factory.codex.requests) == 3
+    assert result.workspace_path is not None
+    assert Path(result.workspace_path).is_dir()
+    assert WorkflowStage.COMMIT not in repository.stage_changes
+
+
 def test_branch_creation_failure_is_terminal(workflow) -> None:
     service, repository, _, factory = workflow
     factory.git.branch_error = RuntimeError("cannot create branch")

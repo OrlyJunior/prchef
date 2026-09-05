@@ -67,6 +67,16 @@ def test_workspace_root_is_configurable(tmp_path: Path) -> None:
     )
 
 
+def test_max_validation_retries_defaults_to_two_and_rejects_negative_values(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate({"path": tmp_path})
+
+    assert config.validation.max_validation_retries == 2
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        ProjectConfig.model_validate(
+            {"path": tmp_path, "validation": {"max_validation_retries": -1}}
+        )
+
+
 def test_codex_approval_policy_accepts_approve_for_me(tmp_path: Path) -> None:
     config = _config(tmp_path, {"approval_policy": "approve-for-me"})
 

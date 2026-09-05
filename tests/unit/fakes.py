@@ -181,6 +181,7 @@ class FakeJulesClient:
         self.review_error: Exception | None = None
         self.spec_starting_branch: str | None = None
         self.review_starting_branch: str | None = None
+        self.spec_calls = 0
 
     def execute(
         self, request: AgentRequest, *, on_started: Any = None
@@ -199,6 +200,7 @@ class FakeJulesClient:
         if on_started is not None:
             on_started(reference)
         if is_spec:
+            self.spec_calls += 1
             self.spec_starting_branch = request.revision
             if self.spec_error:
                 raise self.spec_error
@@ -252,12 +254,14 @@ class FakeCodexClient:
         self.fail = False
         self.leave_artifact_on_failure = False
         self.workspace_path: Path | None = None
+        self.requests: list[AgentRequest] = []
 
     def execute(
         self, request: AgentRequest, *, on_started: Any = None
     ) -> AgentResult:
         del on_started
         self.workspace_path = request.workspace_path
+        self.requests.append(request)
         if self.fail and self.leave_artifact_on_failure and self.workspace_path is not None:
             (self.workspace_path / "partial-implementation.txt").write_text(
                 "unfinished", encoding="utf-8"
@@ -350,17 +354,23 @@ class FakeGitHubClient:
 class FakeCommandClient:
     def __init__(self) -> None:
         self.fail = False
+        self.failures_remaining = 0
         self.working_directories: list[Path] = []
+        self.commands: list[list[str]] = []
 
     def run(self, command: list[str], **kwargs: Any) -> CommandResult:
         cwd = kwargs.get("cwd")
         if isinstance(cwd, Path):
             self.working_directories.append(cwd)
+        self.commands.append(command)
+        failed = self.fail or self.failures_remaining > 0
+        if self.failures_remaining > 0:
+            self.failures_remaining -= 1
         return CommandResult(
             command=command,
-            exit_code=1 if self.fail else 0,
+            exit_code=1 if failed else 0,
             stdout="tests completed",
-            stderr="assertion failed" if self.fail else "",
+            stderr="assertion failed" if failed else "",
             duration_seconds=0.01,
         )
 
