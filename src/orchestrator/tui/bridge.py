@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import (
     ConfiguredRepository,
+    GitHubAppSettings,
     ProjectConfig,
     ProjectConfigLoader,
 )
@@ -91,6 +93,26 @@ class WorkflowController:
 
     def configured_agent_providers(self, repository: str) -> list[str]:
         return list(self.project_config(repository).providers)
+
+    def github_app_settings(
+        self, repository: str
+    ) -> tuple[GitHubAppSettings, GitHubAppSettings]:
+        github = self.project_config(repository).integrations.github
+        return github.implementer_app, github.app
+
+    def save_github_app_settings(
+        self,
+        repository: str,
+        *,
+        implementer_app: GitHubAppSettings,
+        reviewer_app: GitHubAppSettings,
+    ) -> Path:
+        config = self.project_config(repository)
+        return self._config_loader.save_github_app_settings(
+            config.path,
+            implementer_app=implementer_app,
+            reviewer_app=reviewer_app,
+        )
 
     def list_tasks(
         self, *, repository: str, task_provider: str, limit: int = 50

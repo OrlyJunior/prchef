@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
+from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import (
     CodexCliProviderSettings,
     ConfigurationError,
@@ -156,6 +158,67 @@ def test_github_app_configuration_accepts_exactly_one_private_key_source(tmp_pat
 
     assert config.integrations.github.app.is_configured
     assert config.integrations.github.app.app_id == 123
+
+
+def test_implementer_and_reviewer_github_apps_are_independent(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "integrations": {
+                "github": {
+                    "command": ["gh"],
+                    "app": {
+                        "app_id": 123,
+                        "installation_id": 456,
+                        "private_key_env": "REVIEWER_APP_KEY",
+                    },
+                    "implementer_app": {
+                        "app_id": 789,
+                        "installation_id": 987,
+                        "private_key_env": "IMPLEMENTER_APP_KEY",
+                    },
+                }
+            },
+        }
+    )
+
+    clients = ClientFactory(None).create(config, agent_roles=set())
+
+    assert config.integrations.github.app.app_id == 123
+    assert config.integrations.github.implementer_app.app_id == 789
+    assert clients.git._implementer_authenticator is clients.github._implementer_authenticator
+    assert (
+        ProjectConfig.model_validate({"path": tmp_path})
+        .integrations.github.implementer_app.is_configured
+        is False
+    )
+
+
+def test_tui_configuration_writer_persists_only_app_references(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    loader = ProjectConfigLoader(tmp_path / "orchestrator.yml")
+    (tmp_path / "orchestrator.yml").write_text("defaults: {}\n", encoding="utf-8")
+
+    saved = loader.save_github_app_settings(
+        repository,
+        implementer_app=GitHubAppSettings(
+            app_id=789,
+            installation_id=987,
+            private_key_env="IMPLEMENTER_APP_KEY",
+        ),
+        reviewer_app=GitHubAppSettings(),
+    )
+
+    assert saved == repository / ".orchestrator.yml"
+    content = saved.read_text(encoding="utf-8")
+    assert "implementer_app:" in content
+    assert "IMPLEMENTER_APP_KEY" in content
+    assert "private_key:" not in content
+    resolved = ProjectConfig.model_validate(
+        {"path": repository, **yaml.safe_load(content)}
+    )
+    assert resolved.integrations.github.implementer_app.app_id == 789
 
 
 @pytest.mark.parametrize(

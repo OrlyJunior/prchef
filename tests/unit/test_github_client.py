@@ -151,3 +151,33 @@ def test_submit_pull_request_review_supports_approval_event(tmp_path: Path) -> N
     )
 
     assert "event=APPROVE" in commands.calls[0]["command"]
+
+
+def test_create_pull_request_uses_implementer_app_token(tmp_path: Path) -> None:
+    class PullRequestCommands(RecordingCommands):
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            self.calls.append({"command": command, **kwargs})
+            stdout = (
+                "https://github.example/owner/repository/pull/42\n"
+                if command[1:3] == ["pr", "create"]
+                else (
+                    '{"number": 42, "url": "https://github.example/owner/repository/pull/42", '
+                    '"title": "Title", "baseRefName": "main", "headRefName": "feature"}'
+                )
+            )
+            return CommandResult(command, 0, stdout, "", 0.01)
+
+    commands = PullRequestCommands()
+    client = GitHubClient(commands, tmp_path, ["gh"], 120)
+
+    class Authenticator:
+        def token(self) -> str:
+            return "ghs_implementer"
+
+    client._implementer_authenticator = Authenticator()  # type: ignore[assignment]
+    pull_request = client.create_pull_request(
+        title="Title", body="Body", base_branch="main", head_branch="feature"
+    )
+
+    assert pull_request.number == 42
+    assert all(call["env"]["GH_TOKEN"] == "ghs_implementer" for call in commands.calls)
