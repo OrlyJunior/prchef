@@ -1,60 +1,154 @@
-# Project context
+# Durable agent context
 
-## Purpose and boundary
+## Purpose and boundaries
 
-`autonomous-dev-orchestrator` is a Python 3.11+ CLI that turns one Trello card or GitHub issue
-into a guarded development workflow: plan, implement in an isolated Git worktree, validate,
-commit/push, open a GitHub PR, and review. It coordinates agents and integrations; it is not a
-general repository browser, merge bot, or source-control replacement.
+- Python 3.11+ CLI that turns one Trello card or GitHub issue into a guarded change: plan →
+  isolated implementation → validation → commit/push → GitHub PR → read-only review.
+- It coordinates providers, Git, GitHub, and persistence. It is **not** a merge bot, a generic
+  repository browser/RAG service, or a workflow-resume system.
+- `PROJECT.md` is injected as supporting context into planning and review prompts (capped at
+  12,000 characters). Current task text and repository state win over this file.
 
-## Architecture
+## Ownership and layering
 
-- `models` contains infrastructure-free dataclasses/enums. `services` owns workflow rules,
-  prompt assembly, result parsing, validation, and isolated debug stages.
-- `providers` exposes the provider-neutral `AgentProvider.execute(AgentRequest)` boundary and
-  adapters for Jules, Codex CLI, and Gemini Vertex. `clients` owns HTTP, subprocess, Git, and
-  GitHub/Trello/Jules details. `repositories` is the SQLAlchemy persistence boundary.
-- `config` loads settings and merges YAML; `cli` composes dependencies. Schema changes are Alembic
-  migrations, never runtime `create_all`.
+- `models`: infrastructure-free domain data. `services`: workflow policy, prompts, parsing,
+  validation, and debug orchestration. `providers`: role-neutral agent adapter boundary.
+- `clients`: transport/subprocess/Git details. `repositories`: the only SQLAlchemy persistence
+  boundary. `cli`: dependency composition and stdout/stderr contract.
+- Provider-specific commands, polling, credentials, or API shapes stay below
+  `AgentProvider.execute(AgentRequest)`. Planner/implementer/reviewer services stay provider
+  neutral.
+- Database schema changes require versioned Alembic migrations; never add runtime
+  `Base.metadata.create_all()`.
 
-## Workflow and invariants
+## Runtime and persistence contract
 
-1. Load exactly one normalized `DevelopmentTask` from Trello or GitHub, resolve its repository,
-   then merge configuration.
-2. Planner produces a structured `RepositorySpec`; blocking ambiguity ends as `NEEDS_HUMAN`.
-3. Create a new non-protected feature branch and disposable external worktree. Implementer edits
-   only that workspace; local validation may request bounded corrections.
-4. Commit all changes on the feature branch, push, create a PR, then reviewer returns structured
-   `APPROVED`, `CHANGES_REQUESTED`, or `NEEDS_HUMAN`. There is never automatic merge or a formal
-   GitHub review submission.
+- `run` applies pending Alembic migrations before opening the workflow repository. `show`, and
+  `debug --from-execution`, do the same before database access; a migration failure aborts with a
+  clear error. Keep `alembic upgrade head` usable for manual operations.
+- Runtime logs are UTC ISO-8601 timestamps on stderr. Final `run` execution JSON and all `debug`
+  result JSON stay on stdout. Redact secrets before logging.
+- An execution is created as `PENDING`, immediately marked `RUNNING`, and records every entered
+  stage as a separately persisted step. Repeated validation/correction attempts create repeated
+  `VALIDATE`/`IMPLEMENT` steps.
+- Persist: normalized task, resolved repository/base branch, worktree path, branch, latest
+  implementation and validation snapshots, commit, PR, review, status/error, and timestamps.
+  The implementation/validation snapshots are latest-attempt snapshots, not an attempt history.
+- Provider startup references during spec/review are persisted immediately in legacy-named
+  `spec_jules_session_*` / `review_jules_session_*` fields. Preserve those fields for later human
+  inspection; no automatic session/workflow resume exists.
 
-Workflow executions and steps, task/spec/implementation/validation/PR/review snapshots, and Jules
-session references are persisted. Failed or human-blocked worktrees are preserved for inspection.
-Malformed or contradictory structured agent output is handled conservatively.
+## Normal `run` behavior
 
-## Configuration and integrations
+1. CLI accepts exactly one task origin: `--trello-card`, `--github-issue`, or `--task-id`.
+   `--task-id` uses configured `task.provider`; GitHub task loading requires `--repository`.
+   Trello/GitHub clients normalize input into `DevelopmentTask` before configuration is resolved.
+2. Resolve the project configuration and derive the GitHub slug from `origin`. Create configured
+   planner/implementer/reviewer instances; a named provider shared by roles is instantiated once.
+3. Generate one structured `RepositorySpec` from the base checkout/base branch. A blocking spec
+   ambiguity ends the execution as `NEEDS_HUMAN` before any branch or worktree is created.
+4. Build a unique, non-protected working branch name from configured prefix, task identity/title,
+   UTC timestamp, and execution ID. Create a linked worktree from freshly fetched
+   `origin/<base_branch>`; do not switch, clean, stash, reset, or otherwise mutate the control
+   checkout.
+5. Bind mutable Git, GitHub, command, and implementation operations to that worktree. The initial
+   implementation agent may edit it, but is instructed never to commit, push, create a PR, or
+   merge. A reported successful implementation with no Git changes is a failure.
+6. Run validation in the worktree. On success: commit, push, create PR, then run the reviewer
+   against the PR data, validation result, and `base...HEAD` diff. The workflow never auto-merges
+   or submits a formal GitHub review.
 
-- Global `orchestrator.yml` defaults merge with a repository registry entry, then target
-  `.orchestrator.yml`; later values take precedence. Explicit CLI task/repository inputs override
-  inferred values where supported. Credentials come from environment/`.env`, not versioned files.
-- Agent roles (`planner`, `implementer`, `reviewer`) name configured provider instances. Providers
-  are `jules`, `codex-cli`, or `gemini-vertex`; roles may share instances. Jules is remote
-  read-only for planning/review, Codex runs locally with its configured sandbox, and Gemini Vertex
-  is request/response via ADC without local filesystem or shell access.
-- GitHub interaction uses authenticated `gh`; Trello is HTTP; Jules uses its official sessions API.
-  Validation uses configured commands or conservative project-type auto-detection. With required
-  tests, no detected commands is a workflow failure.
+## Worktree and Git invariants
 
-## Conventions and limitations
+- Worktree root is configurable. The default is a sibling `orchestrator-workspaces` directory;
+  configured roots may not resolve inside the control checkout. Existing target paths are errors.
+- Worktrees are intentionally retained; there is no automatic cleanup on success, failure, or
+  human intervention. Failure/human paths log the preserved workspace explicitly.
+- Commit/push refuse protected branches and refuse if the current checkout is not the workflow
+  branch. Commit stages **all** worktree changes and fails if nothing is staged. Push is only
+  `git push --set-upstream origin <working-branch>`.
+- PR creation occurs only after a successful push. `gh pr create` must yield a URL, then `gh pr
+  view` supplies the persisted PR fields. A later failure never rolls back a commit, push, PR, or
+  worktree.
 
-- Preserve provider neutrality above adapters; avoid embedding provider-specific behavior in role
-  services. Treat task text as authoritative and repository behavior as authoritative over stale
-  semantic context.
-- Protect configured base branches; direct merge is rejected by V1. The orchestrator owns commits,
-  push, PR creation, and final workflow persistence; implementation agents must not perform those
-  operations.
-- V1 does not resume interrupted workflows or sessions, auto-merge, post formal GitHub reviews, or
-  rerun planning after validation failures. It does not provide repository search/RAG.
+## Validation and correction loop
 
-Keep this file compact and semantic. Update it only for durable changes to the architecture,
-workflow, domain rules, configuration, persistence, integrations, decisions, or limitations.
+- Validation starts with configured commands, then appends conservative auto-detected commands.
+  Exact duplicates are skipped; any explicit mypy command suppresses auto-detected `mypy .`.
+  All selected commands run, so the result contains every check rather than stopping at first
+  failure.
+- With `require_tests: true`, absence of a recognizable test command is itself a validation
+  failure. Empty validation is allowed only when tests are not required.
+- `max_validation_retries` defaults to `2` and must be non-negative. A failed validation records
+  its result, then—while budget remains—asks the same implementer to correct the **same worktree**.
+  The correction prompt includes failed commands, exit codes, and redacted/truncated output.
+- Planning, execution ID, branch, and worktree are never recreated during corrections. A passing
+  retry continues to commit/push/PR/review. Exhaustion or correction failure ends as `FAILED` and
+  preserves the worktree.
+
+## Structured agents and integrations
+
+- Planner and reviewer require structured objects. Provider-native structured output is preferred;
+  textual output accepts plain JSON, one fenced JSON object, or exactly one safely extractable
+  object with surrounding prose. Ambiguous/malformed data is rejected, never guessed.
+- Invalid review output is converted conservatively to `NEEDS_HUMAN`; contradictory decisions
+  (for example, approval with blocking findings) are also unsafe. Final review maps only to
+  `APPROVED`, `CHANGES_REQUESTED`, or `NEEDS_HUMAN`.
+- Jules uses official asynchronous REST sessions: create → persist identity/URL → poll session
+  state → fetch paged activities. It uses configurable poll interval, overall timeout, and bounded
+  exponential retries only for transient polling/result requests. It never creates a replacement
+  session after creation. `FAILED`, `CANCELLED`, timeout, or human-intervention states surface
+  with the original session ID.
+- Jules plan/review requests explicitly disable publishing automation and prompt for read-only
+  behavior. Codex uses configured argument lists via the generic command client; it may edit only
+  its assigned local workspace. Gemini Vertex uses ADC and has no local shell/filesystem access.
+- Jules credentials come from `JULES_API_KEY` or `ORCHESTRATOR_JULES_API_KEY`; GitHub uses the
+  authenticated `gh` CLI. Do not put credentials in YAML or tracked files.
+
+## Configuration precedence
+
+- Global `orchestrator.yml` contains top-level task selection and `defaults`; project settings at
+  global top level are rejected. For a repository, merge in order: `defaults` → matching
+  `repositories.<key>` entry → target repository `.orchestrator.yml` (later wins).
+- Repository selection comes from explicit CLI override when supplied, otherwise normalized task
+  repository metadata. A registered entry supplies its local path; an unregistered override is
+  interpreted as a repository path.
+- Modern configuration is an all-or-nothing pair: both `agents` and `providers` must be present,
+  and all three roles must be assigned. Its roles are authoritative; legacy `roles` plus
+  `integrations.jules/codex` are normalized only when modern configuration is absent. Never add a
+  silent provider fallback.
+- Safety defaults: direct merge is rejected, protected branches include main/master/develop unless
+  changed, and tests are required unless deliberately disabled. Local `orchestrator.yml` may hold
+  machine-specific paths and stays untracked; keep the example generic.
+
+## Failure semantics
+
+- Configuration errors and explicit `AgentNeedsHumanError` end as `NEEDS_HUMAN`; all other stage,
+  provider, Git, command, or persistence errors end as `FAILED`. The triggering step is persisted
+  as failed with its error and the execution retains its last recorded snapshots.
+- No compensation is attempted after external side effects. Inspect persisted execution ID,
+  workspace, branch, session reference, and PR/commit fields rather than assuming a clean retry.
+- A successful review sets `current_stage=COMPLETED`; terminal failed/human executions retain the
+  stage that failed or stopped them.
+
+## `debug` is diagnostics, not resume
+
+- `debug` runs exactly one selected boundary (`task-loading`, `spec-generation`, `implementation`,
+  `validation`, or `review`) and never mutates the referenced execution, creates workflow steps,
+  branches, commits, pushes, or PRs.
+- `--from-execution` is read-only input fallback (task/spec/validation/PR/branch metadata), not a
+  request to restore its workspace or Git state. Explicit files/options override historical data.
+- Non-dry implementation debug uses the currently configured repository checkout, not the original
+  working branch/worktree; it can therefore edit that selected checkout. Use `--dry-run` for
+  input/configuration validation without creating clients, fetching tasks, or invoking providers.
+- Inputs: task loading needs a task source/ID; spec needs task + repository; implementation needs
+  prompt or task+spec; validation needs repository configuration; review needs task, spec,
+  validation, PR, feature branch, and diff (explicit or current workspace).
+
+## Agent maintenance rules
+
+- Keep this file compact, behavioral, and durable. Update it only when architecture, lifecycle,
+  invariants, persistence, configuration precedence, safety policy, or supported operational flow
+  changes.
+- Do not turn this into a source-file inventory or duplicate code. Keep provider details below the
+  provider boundary and preserve the existing safety/ownership split.
