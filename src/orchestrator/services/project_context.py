@@ -11,7 +11,7 @@ def load_project_context(repository_path: Path) -> str | None:
     path = repository_path / PROJECT_CONTEXT_FILE
     try:
         content = path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
+    except OSError:
         return None
     return content or None
 

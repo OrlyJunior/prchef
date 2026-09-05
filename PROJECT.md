@@ -45,8 +45,10 @@
    Trello/GitHub clients normalize input into `DevelopmentTask` before configuration is resolved.
 2. Resolve the project configuration and derive the GitHub slug from `origin`. Create configured
    planner/implementer/reviewer instances; a named provider shared by roles is instantiated once.
-3. Generate one structured `RepositorySpec` from the base checkout/base branch. A blocking spec
-   ambiguity ends the execution as `NEEDS_HUMAN` before any branch or worktree is created.
+3. Generate one structured `RepositorySpec` from the base checkout/base branch. Planning receives
+   a bounded, read-only local repository overview and task-matched code excerpts, alongside
+   `PROJECT.md` when present. A blocking spec ambiguity ends the execution as `NEEDS_HUMAN` before
+   any branch or worktree is created.
 4. Build a unique, non-protected working branch name from configured prefix, task identity/title,
    UTC timestamp, and execution ID. Create a linked worktree from freshly fetched
    `origin/<base_branch>`; do not switch, clean, stash, reset, or otherwise mutate the control
