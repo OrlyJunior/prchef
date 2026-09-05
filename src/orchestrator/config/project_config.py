@@ -56,6 +56,7 @@ class ValidationSettings(BaseModel):
     auto_detect: bool = True
     commands: list[list[str]] = Field(default_factory=list)
     timeout_seconds: int = 900
+    max_validation_retries: int = Field(default=2, ge=0)
 
 
 class WorkspaceSettings(BaseModel):

@@ -336,6 +336,11 @@ Python (`pytest`, Ruff, mypy), Node (`npm test`, lint, typecheck), Maven e Gradl
 `require_tests` estiver ativo e nenhum comando for encontrado, o fluxo encerra em falha antes
 de qualquer commit.
 
+Quando uma validacao falha, `max_validation_retries` (default `2`) controla quantas vezes o
+implementador pode corrigir a mesma implementacao antes da falha final. Cada tentativa reutiliza
+a mesma execucao, branch e worktree; o planejamento nao e executado novamente. Ao esgotar o
+limite, o worktree e preservado para inspecao.
+
 ```bash
 ruff check .
 mypy src/orchestrator
