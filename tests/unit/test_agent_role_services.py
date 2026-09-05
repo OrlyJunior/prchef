@@ -17,7 +17,7 @@ from orchestrator.models import (
     ValidationResult,
 )
 from orchestrator.services.implementation_service import ImplementationService
-from orchestrator.services.review_service import ReviewService
+from orchestrator.services.review_service import ReviewService, format_pull_request_review
 from orchestrator.services.spec_service import SpecService
 
 
@@ -287,6 +287,37 @@ def test_reviewer_approves_suggestions_without_blocking_findings(
     assert review.result is ReviewDecision.APPROVED
     assert review.blocking_findings == []
     assert review.suggestions == ["Avoid rebuilding unchanged prompt context."]
+
+
+def test_pull_request_review_formatter_keeps_suggestions_non_blocking() -> None:
+    body = format_pull_request_review(
+        CodeReview(
+            result=ReviewDecision.APPROVED,
+            summary="Correct and safe.",
+            suggestions=["Avoid rebuilding unchanged prompt context."],
+        )
+    )
+
+    assert body.startswith("## Automated review: APPROVED")
+    assert "### Blocking findings" not in body
+    assert "### Non-blocking suggestions" in body
+    assert "- Avoid rebuilding unchanged prompt context." in body
+
+
+def test_pull_request_review_formatter_includes_blocking_findings() -> None:
+    body = format_pull_request_review(
+        CodeReview(
+            result=ReviewDecision.CHANGES_REQUESTED,
+            summary="The retry can duplicate writes after a timeout.",
+            blocking_findings=["Retry is not idempotent."],
+            suggestions=["Add a regression test."],
+        )
+    )
+
+    assert body.startswith("## Automated review: CHANGES_REQUESTED")
+    assert "### Blocking findings" in body
+    assert "- Retry is not idempotent." in body
+    assert "### Non-blocking suggestions" in body
 
 
 def test_reviewer_requests_changes_for_concrete_blocking_findings(

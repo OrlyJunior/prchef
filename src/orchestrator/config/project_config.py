@@ -76,6 +76,60 @@ class CommandIntegrationSettings(BaseModel):
     timeout_seconds: int = 1800
 
 
+class GitHubAppSettings(BaseModel):
+    """Credentials used to mint short-lived GitHub App installation tokens."""
+
+    app_id: int | None = Field(default=None, gt=0)
+    installation_id: int | None = Field(default=None, gt=0)
+    private_key_path: Path | None = None
+    private_key_env: str | None = None
+    api_url: str = "https://api.github.com"
+
+    @field_validator("private_key_env")
+    @classmethod
+    def validate_private_key_env(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("GitHub App private_key_env must be a non-empty string")
+        return normalized
+
+    @field_validator("api_url")
+    @classmethod
+    def validate_api_url(cls, value: str) -> str:
+        normalized = value.rstrip("/")
+        if not normalized.startswith(("https://", "http://")):
+            raise ValueError("GitHub App api_url must be an HTTP(S) URL")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_complete_credentials(self) -> GitHubAppSettings:
+        configured = [
+            self.app_id is not None,
+            self.installation_id is not None,
+            self.private_key_path is not None or self.private_key_env is not None,
+        ]
+        if any(configured) and not all(configured):
+            raise ValueError(
+                "GitHub App configuration requires app_id, installation_id, and a private key"
+            )
+        if self.private_key_path is not None and self.private_key_env is not None:
+            raise ValueError(
+                "GitHub App private key must use either private_key_path or "
+                "private_key_env, not both"
+            )
+        return self
+
+    @property
+    def is_configured(self) -> bool:
+        return self.app_id is not None
+
+
+class GitHubIntegrationSettings(CommandIntegrationSettings):
+    app: GitHubAppSettings = Field(default_factory=GitHubAppSettings)
+
+
 class CodexIntegrationSettings(CommandIntegrationSettings):
     """Codex-specific controls layered over the generic command settings."""
 
@@ -259,8 +313,8 @@ class IntegrationsSettings(BaseModel):
             timeout_seconds=3600,
         )
     )
-    github: CommandIntegrationSettings = Field(
-        default_factory=lambda: CommandIntegrationSettings(command=["gh"], timeout_seconds=120)
+    github: GitHubIntegrationSettings = Field(
+        default_factory=lambda: GitHubIntegrationSettings(command=["gh"], timeout_seconds=120)
     )
 
 

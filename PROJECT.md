@@ -3,7 +3,7 @@
 ## Purpose and boundaries
 
 - Python 3.11+ CLI that turns one Trello card or GitHub issue into a guarded change: plan →
-  isolated implementation → validation → commit/push → GitHub PR → read-only review.
+  isolated implementation → validation → commit/push → GitHub PR → review publication.
 - It coordinates providers, Git, GitHub, and persistence. It is **not** a merge bot, a generic
   repository browser/RAG service, or a workflow-resume system.
 - `PROJECT.md` is injected as supporting context into planning and review prompts (capped at
@@ -55,8 +55,9 @@
    implementation agent may edit it, but is instructed never to commit, push, create a PR, or
    merge. A reported successful implementation with no Git changes is a failure.
 6. Run validation in the worktree. On success: commit, push, create PR, then run the reviewer
-   against the PR data, validation result, and `base...HEAD` diff. The workflow never auto-merges
-   or submits a formal GitHub review.
+   against the PR data, validation result, and `base...HEAD` diff. Each review loop is published by
+   the GitHub integration as `APPROVE`, `REQUEST_CHANGES`, or a neutral comment for `NEEDS_HUMAN`.
+   The workflow never auto-merges.
 
 ## Worktree and Git invariants
 
@@ -96,6 +97,9 @@
   PR creation attempt; the reviewer receives a fresh base...HEAD diff in a newly persisted
   `REVIEW` step. Repeated requested changes after the budget is exhausted finish as
   `CHANGES_REQUESTED`; approval finishes as `APPROVED`.
+- A GitHub review-publication failure is logged and recorded without changing the structured
+  reviewer decision or its terminal status. GitHub App credentials, when configured, mint
+  short-lived installation tokens only for review publication; see `docs/github_app.md`.
 
 ## Structured agents and integrations
 
@@ -120,8 +124,10 @@
   fixtures. A structured failure after an exit-0 run still inspects Git status so persisted results
   retain any files changed before the failure. Codex may edit only its assigned local workspace.
   Gemini Vertex uses ADC and has no local shell/filesystem access.
-- Jules credentials come from `JULES_API_KEY` or `ORCHESTRATOR_JULES_API_KEY`; GitHub uses the
-  authenticated `gh` CLI. Do not put credentials in YAML or tracked files.
+- Jules credentials come from `JULES_API_KEY` or `ORCHESTRATOR_JULES_API_KEY`; GitHub PR creation
+  uses the authenticated `gh` CLI. Formal review publication may use a configured GitHub App
+  installation token, otherwise it uses `gh` authentication. Do not put credentials in YAML or
+  tracked files.
 
 ## Configuration precedence
 
