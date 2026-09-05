@@ -57,6 +57,16 @@ def test_default_codex_config_keeps_workspace_write_sandbox(tmp_path: Path) -> N
     assert "--approve-for-me" not in config.integrations.codex.command
 
 
+def test_workspace_root_is_configurable(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {"path": tmp_path, "workspace": {"root": "C:/Git/orchestrator-workspaces"}}
+    )
+
+    assert str(config.workspace.root).replace("\\", "/").endswith(
+        "C:/Git/orchestrator-workspaces"
+    )
+
+
 def test_codex_approval_policy_accepts_approve_for_me(tmp_path: Path) -> None:
     config = _config(tmp_path, {"approval_policy": "approve-for-me"})
 

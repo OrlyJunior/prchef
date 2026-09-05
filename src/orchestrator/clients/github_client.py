@@ -25,6 +25,14 @@ class GitHubClient:
         self._command = list(command)
         self._timeout_seconds = timeout_seconds
 
+    def at_path(self, repository_path: Path) -> GitHubClient:
+        return GitHubClient(
+            self._commands,
+            repository_path,
+            self._command,
+            self._timeout_seconds,
+        )
+
     def create_pull_request(
         self,
         *,

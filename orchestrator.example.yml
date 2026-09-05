@@ -4,6 +4,9 @@ task:
   provider: github
 
 defaults:
+  workspace:
+    # Worktrees are created outside the configured repository checkout.
+    root: C:/Git/orchestrator-workspaces
   repository:
     base_branch: develop
     protected_branches: [main, master, develop]

@@ -15,6 +15,9 @@ class GitClient:
         self._commands = command_client
         self._path = repository_path
 
+    def at_path(self, repository_path: Path) -> GitClient:
+        return GitClient(self._commands, repository_path)
+
     def ensure_clean(self) -> None:
         result = self._git("status", "--porcelain")
         if result.stdout.strip():
@@ -37,6 +40,29 @@ class GitClient:
         if current != working_branch:
             raise GitClientError(f"Expected branch {working_branch}, got {current}")
         logger.info("[git] Working branch ready: %s", working_branch)
+
+    def create_worktree(
+        self,
+        workspace_path: Path,
+        base_branch: str,
+        working_branch: str,
+        protected_branches: list[str],
+    ) -> None:
+        """Create an isolated workflow branch from the freshly fetched remote base ref.
+
+        This intentionally performs no checkout, clean, stash, reset, or branch switch in
+        the control checkout.  Git records the linked worktree in its shared metadata while
+        the actual branch checkout happens only at ``workspace_path``.
+        """
+        self._assert_safe_working_branch(working_branch, protected_branches)
+        if workspace_path.exists():
+            raise GitClientError(f"Workspace path already exists: {workspace_path}")
+        logger.info("[git] Fetching base branch: origin/%s", base_branch)
+        self._git("fetch", "origin", base_branch)
+        base_ref = f"origin/{base_branch}"
+        self._git("rev-parse", "--verify", f"{base_ref}^{{commit}}")
+        logger.info("[git] Creating worktree branch %s from %s", working_branch, base_ref)
+        self._git("worktree", "add", "-b", working_branch, str(workspace_path), base_ref)
 
     def current_branch(self) -> str:
         return self._git("branch", "--show-current").stdout.strip()

@@ -38,6 +38,7 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     )
     repository.update_task(execution.id, task)
     repository.update_project(execution.id, "/repos/api", "develop")
+    repository.record_workspace(execution.id, "/workspaces/api/execution-1")
     repository.update_status(execution.id, WorkflowStatus.RUNNING)
     repository.update_stage(execution.id, WorkflowStage.GENERATE_SPEC)
     repository.record_spec_jules_session(execution.id, "spec-1", "https://jules.example/spec-1")
@@ -56,6 +57,7 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     assert persisted.task_snapshot is not None
     assert persisted.task_snapshot["description"] == "Original description"
     assert persisted.repository == "/repos/api"
+    assert persisted.workspace_path == "/workspaces/api/execution-1"
     assert persisted.spec_jules_session_id == "spec-1"
     assert persisted.spec_jules_session_url == "https://jules.example/spec-1"
     assert persisted.status is WorkflowStatus.FAILED

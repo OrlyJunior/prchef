@@ -81,6 +81,12 @@ class WorkflowRepository:
 
         self._mutate(execution_id, mutate)
 
+    def record_workspace(self, execution_id: str, workspace_path: str) -> None:
+        self._mutate(
+            execution_id,
+            lambda entity: setattr(entity, "workspace_path", workspace_path),
+        )
+
     def update_stage(self, execution_id: str, stage: WorkflowStage) -> None:
         self._mutate(execution_id, lambda entity: setattr(entity, "current_stage", stage.value))
 
@@ -228,6 +234,7 @@ class WorkflowRepository:
             trello_card_url=entity.trello_card_url,
             repository=entity.repository,
             base_branch=entity.base_branch,
+            workspace_path=entity.workspace_path,
             working_branch=entity.working_branch,
             commit_sha=entity.commit_sha,
             pr_url=entity.pr_url,

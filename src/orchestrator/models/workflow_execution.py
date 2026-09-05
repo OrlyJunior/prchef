@@ -15,6 +15,7 @@ class WorkflowExecution:
     trello_card_url: str = ""
     repository: str = ""
     base_branch: str = ""
+    workspace_path: str | None = None
     working_branch: str | None = None
     commit_sha: str | None = None
     pr_url: str | None = None
