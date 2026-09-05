@@ -240,7 +240,7 @@ def test_codex_client_delegates_its_configured_command_to_command_client(tmp_pat
     client.implement("private prompt", tmp_path)
 
     command, kwargs = commands.calls[0]
-    assert command[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
+    assert command[:5] == ["codex", "exec", "--json", "--sandbox", "workspace-write"]
     assert command[-1] == "-"
     assert "--approve-for-me" not in command
     assert kwargs["input_text"] == "private prompt"
@@ -287,7 +287,8 @@ def test_codex_client_passes_configured_model_and_reasoning_effort(tmp_path: Pat
     client.implement("private prompt", tmp_path)
 
     command, _ = commands.calls[0]
-    assert command[2:6] == [
+    assert command[2:7] == [
+        "--json",
         "--model",
         "model-one",
         "--config",
@@ -311,7 +312,7 @@ def test_codex_client_changes_only_the_selected_model_argument(
     result = client.implement("private prompt", tmp_path)
 
     assert not result.success
-    assert commands.calls[0][0][2:4] == ["--model", model]
+    assert commands.calls[0][0][3:5] == ["--model", model]
     assert len(commands.calls) == 1
 
 
@@ -396,10 +397,11 @@ def test_codex_client_approve_for_me_preserves_model_and_reasoning(tmp_path: Pat
     client.implement("private prompt", tmp_path)
 
     command, _ = commands.calls[0]
-    assert command[:7] == [
+    assert command[:8] == [
         "codex",
         "exec",
         "--approve-for-me",
+        "--json",
         "--model",
         "model-one",
         "--config",
@@ -418,10 +420,7 @@ def test_codex_runtime_settings_do_not_embed_a_hard_coded_model_or_leak_to_servi
         assert "reasoning_effort" not in source
 
 
-def test_codex_client_surfaces_windows_sandbox_write_denial(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(codex_client, "_is_windows", lambda: True)
+def test_codex_client_ignores_sandbox_fixture_text_in_free_form_output(tmp_path: Path) -> None:
     commands = RecordingCommandClient(
         stdout="Creation failed because sandbox access to the requested file path was denied."
     )
@@ -433,24 +432,74 @@ def test_codex_client_surfaces_windows_sandbox_write_denial(
 
     result = client.implement("private prompt", tmp_path)
 
-    assert not result.success
+    assert result.success
     assert result.summary == (
         "Creation failed because sandbox access to the requested file path was denied."
     )
-    assert result.error_message is not None
-    assert "Codex Windows sandbox could not modify workspace files" in result.error_message
-    assert f"repository: {tmp_path.resolve()}" in result.error_message
-    assert "sandbox: workspace-write" in result.error_message
-    assert "codex exec --sandbox workspace-write -" in result.error_message
+    assert result.error_message is None
     assert "danger-full-access" not in commands.calls[0][0]
 
 
-def test_codex_client_surfaces_non_windows_sandbox_write_denial(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_codex_client_ignores_policy_denied_text_in_successful_command_output(
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(codex_client, "_is_windows", lambda: False)
+    stdout = "\n".join(
+        (
+            '{"type":"item.completed","item":{"type":"command_execution",'
+            '"status":"completed","stdout":"codex_sandboxing policy_denied: '
+            'Failed to write file output.txt"}}',
+            '{"type":"item.completed","item":{"type":"file_change","status":"completed"}}',
+            '{"type":"item.completed","item":{"type":"agent_message",'
+            '"text":"Implementation completed."}}',
+            '{"type":"turn.completed"}',
+        )
+    )
+    commands = RecordingCommandClient(stdout=stdout)
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    result = client.implement("private prompt", tmp_path)
+
+    assert result.success
+    assert result.summary == "Implementation completed."
+    assert result.error_message is None
+    assert not result.workspace_changes_may_exist
+
+
+def test_codex_client_surfaces_structured_sandbox_denial(tmp_path: Path) -> None:
+    stdout = (
+        '{"type":"item.failed","item":{"type":"command_execution",'
+        '"status":"failed","error":{"code":"policy_denied",'
+        '"message":"write access was denied","operation":"file-write-create",'
+        '"path":"C:/restricted/output.txt"}}}'
+    )
+    commands = RecordingCommandClient(stdout=stdout)
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    result = client.implement("private prompt", tmp_path)
+
+    assert not result.success
+    assert result.workspace_changes_may_exist
+    assert result.error_message is not None
+    assert "structured sandbox denial" in result.error_message
+    assert "operation=file-write-create" in result.error_message
+    assert "path=C:/restricted/output.txt" in result.error_message
+    assert "exit 0" in result.error_message
+
+
+def test_codex_client_surfaces_structured_terminal_failure(tmp_path: Path) -> None:
     commands = RecordingCommandClient(
-        stdout="Creation failed because sandbox access to the requested file path was denied."
+        stdout=(
+            '{"type":"turn.failed","error":{"code":"execution_error",'
+            '"message":"The requested implementation could not be completed."}}'
+        )
     )
     client = CodexClient(
         commands,  # type: ignore[arg-type]
@@ -461,18 +510,27 @@ def test_codex_client_surfaces_non_windows_sandbox_write_denial(
     result = client.implement("private prompt", tmp_path)
 
     assert not result.success
+    assert result.workspace_changes_may_exist
     assert result.error_message is not None
-    assert "Codex sandbox could not modify workspace files" in result.error_message
-    assert "Windows" not in result.error_message
+    assert "structured execution failure" in result.error_message
+    assert "execution_error" in result.error_message
 
 
-def test_codex_client_recognizes_policy_denied_sandbox_write_errors(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(codex_client, "_is_windows", lambda: True)
-    commands = RecordingCommandClient(
-        stdout="codex_sandboxing policy_denied: Failed to write file output.txt"
+def test_codex_client_does_not_add_json_twice(tmp_path: Path) -> None:
+    commands = RecordingCommandClient()
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--json", "{output_file}", "-"],
+        timeout_seconds=30,
     )
+
+    client.implement("private prompt", tmp_path)
+
+    assert commands.calls[0][0].count("--json") == 1
+
+
+def test_codex_client_preserves_non_sandbox_execution_errors(tmp_path: Path) -> None:
+    commands = RecordingCommandClient(exit_code=1, stderr="permission denied: output.txt")
     client = CodexClient(
         commands,  # type: ignore[arg-type]
         ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
@@ -482,5 +540,5 @@ def test_codex_client_recognizes_policy_denied_sandbox_write_errors(
     result = client.implement("private prompt", tmp_path)
 
     assert not result.success
-    assert result.error_message is not None
-    assert "Codex Windows sandbox" in result.error_message
+    assert not result.workspace_changes_may_exist
+    assert result.error_message == "permission denied: output.txt"

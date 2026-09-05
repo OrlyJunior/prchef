@@ -47,5 +47,6 @@ class AgentResult:
     success: bool = True
     structured_output: Mapping[str, Any] | None = None
     error_message: str | None = None
+    workspace_changes_may_exist: bool = False
     execution: AgentExecutionReference | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)

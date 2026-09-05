@@ -8,4 +8,4 @@ class ImplementationResult:
     changed_files: list[str] = field(default_factory=list)
     session_id: str | None = None
     error_message: str | None = None
-
+    workspace_changes_may_exist: bool = False

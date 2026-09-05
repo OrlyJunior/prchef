@@ -143,9 +143,13 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
             success=agent_result.success,
             summary=agent_result.output,
             error_message=agent_result.error_message,
+            workspace_changes_may_exist=agent_result.workspace_changes_may_exist,
         )
-        if result.success:
+        if result.success or result.workspace_changes_may_exist:
             result.changed_files = self._git.changed_files()
+        if result.workspace_changes_may_exist and not result.success:
+            return result
+        if result.success:
             if not result.changed_files:
                 result.success = False
                 result.error_message = "Implementation provider completed without changing files"
