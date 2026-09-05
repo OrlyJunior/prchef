@@ -2,8 +2,9 @@
 
 ## Purpose and boundaries
 
-- Python 3.11+ CLI that turns one Trello card or GitHub issue into a guarded change: plan →
-  isolated implementation → validation → commit/push → GitHub PR → review publication.
+- Python 3.11+ CLI and Textual terminal UI that turn one Trello card or GitHub issue into a
+  guarded change: plan → isolated implementation → validation → commit/push → GitHub PR →
+  review publication.
 - It coordinates providers, Git, GitHub, and persistence. It is **not** a merge bot, a generic
   repository browser/RAG service, or a workflow-resume system.
 - `PROJECT.md` is injected as supporting context into planning and review prompts (capped at
@@ -14,7 +15,9 @@
 - `models`: infrastructure-free domain data. `services`: workflow policy, prompts, parsing,
   validation, and debug orchestration. `providers`: role-neutral agent adapter boundary.
 - `clients`: transport/subprocess/Git details. `repositories`: the only SQLAlchemy persistence
-  boundary. `cli`: dependency composition and stdout/stderr contract.
+  boundary. `cli`: dependency composition and stdout/stderr contract. `tui`: a Textual
+  presentation/controller layer over configuration, task providers, the workflow service, and
+  persisted execution reads; it must not implement workflow policy or a second state machine.
 - Provider-specific commands, polling, credentials, or API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Planner/implementer/reviewer services stay provider
   neutral.
@@ -23,9 +26,9 @@
 
 ## Runtime and persistence contract
 
-- `run` applies pending Alembic migrations before opening the workflow repository. `show`, and
-  `debug --from-execution`, do the same before database access; a migration failure aborts with a
-  clear error. Keep `alembic upgrade head` usable for manual operations.
+- `run` and `tui` apply pending Alembic migrations before opening the workflow repository. `show`,
+  and `debug --from-execution`, do the same before database access; a migration failure aborts with
+  a clear error. Keep `alembic upgrade head` usable for manual operations.
 - Runtime logs are UTC ISO-8601 timestamps on stderr. Final `run` execution JSON and all `debug`
   result JSON stay on stdout. Redact secrets before logging.
 - An execution is created as `PENDING`, immediately marked `RUNNING`, and records every entered
@@ -37,6 +40,8 @@
 - Provider startup references during spec/review are persisted immediately in legacy-named
   `spec_jules_session_*` / `review_jules_session_*` fields. Preserve those fields for later human
   inspection; no automatic session/workflow resume exists.
+- Workflow observer events are emitted only after persisted status/step transitions. They are for
+  live terminal presentation and listeners may never change workflow semantics or make a run fail.
 
 ## Normal `run` behavior
 

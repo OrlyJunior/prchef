@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +19,11 @@ from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationResult
+from orchestrator.models.workflow_event import (
+    WorkflowEvent,
+    WorkflowEventKind,
+    WorkflowEventListener,
+)
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
     ReviewDecision,
@@ -78,12 +83,35 @@ class WorkflowService:
         self._client_factory = client_factory
         self._verbose = verbose
         self._notification_service = notification_service or NotificationService()
+        self._event_listener: WorkflowEventListener | None = None
 
-    def run(self, task_id: str, repository_override: str | None = None) -> WorkflowExecution:
+    def run(
+        self,
+        task_id: str,
+        repository_override: str | None = None,
+        *,
+        agent_providers: Mapping[AgentRole, str] | None = None,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> WorkflowExecution:
+        """Run a workflow using the same persisted transitions used by the CLI.
+
+        ``event_listener`` is an observational hook for interactive clients. It
+        is called after the corresponding repository update and failures in the
+        listener are isolated from workflow execution.
+        """
+
+        self._event_listener = event_listener
         execution = self._repository.create_execution(
             task_id, task_source=self._task_provider.source
         )
+        self._emit(
+            execution.id,
+            WorkflowEventKind.EXECUTION_CREATED,
+            stage=execution.current_stage,
+            status=execution.status,
+        )
         self._repository.update_status(execution.id, WorkflowStatus.RUNNING)
+        self._emit(execution.id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.RUNNING)
         workspace_path: Path | None = None
         config: ProjectConfig | None = None
         try:
@@ -96,6 +124,10 @@ class WorkflowService:
 
             with self._step(execution.id, WorkflowStage.LOAD_CONFIG):
                 config = self._config_loader.load(task, repository_override)
+                if agent_providers:
+                    config = config.with_agent_providers(
+                        {role.value: provider for role, provider in agent_providers.items()}
+                    )
                 self._repository.update_project(
                     execution.id, str(config.path), config.repository.base_branch
                 )
@@ -303,6 +335,12 @@ class WorkflowService:
     ) -> WorkflowExecution:
         self._repository.finish(execution_id, status)
         execution = self._repository.get_execution(execution_id)
+        self._emit(
+            execution_id,
+            WorkflowEventKind.WORKFLOW_FINISHED,
+            stage=execution.current_stage,
+            status=status,
+        )
         if config is not None:
             self._notification_service.notify_outcome(config.notifications, execution)
         return execution
@@ -313,15 +351,63 @@ class WorkflowService:
         logger.info("[workflow] Entering %s", label)
         self._repository.update_stage(execution_id, stage)
         step_id = self._repository.start_step(execution_id, stage)
+        self._emit(
+            execution_id,
+            WorkflowEventKind.STAGE_STARTED,
+            stage=stage,
+            step_status=StepStatus.RUNNING,
+        )
         try:
             yield
         except Exception as exc:
             self._repository.finish_step(step_id, StepStatus.FAILED, str(exc))
+            self._emit(
+                execution_id,
+                WorkflowEventKind.STAGE_FAILED,
+                stage=stage,
+                step_status=StepStatus.FAILED,
+                message=redact_text(str(exc)),
+            )
             logger.error("[workflow] %s failed: %s", label, redact_text(str(exc)))
             raise
         else:
             self._repository.finish_step(step_id, StepStatus.SUCCEEDED)
+            self._emit(
+                execution_id,
+                WorkflowEventKind.STAGE_FINISHED,
+                stage=stage,
+                step_status=StepStatus.SUCCEEDED,
+            )
             logger.info("[workflow] Completed %s", label)
+
+    def _emit(
+        self,
+        execution_id: str,
+        kind: WorkflowEventKind,
+        *,
+        stage: WorkflowStage | None = None,
+        status: WorkflowStatus | None = None,
+        step_status: StepStatus | None = None,
+        message: str | None = None,
+    ) -> None:
+        listener = self._event_listener
+        if listener is None:
+            return
+        try:
+            listener(
+                WorkflowEvent(
+                    execution_id=execution_id,
+                    kind=kind,
+                    stage=stage,
+                    status=status,
+                    step_status=step_status,
+                    message=message,
+                )
+            )
+        except Exception:
+            # A presentation observer is never allowed to change workflow
+            # semantics or make a successfully persisted transition fail.
+            logger.warning("[workflow] Event listener failed")
 
     def _validate_with_corrections(
         self,

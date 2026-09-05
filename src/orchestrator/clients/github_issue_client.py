@@ -28,11 +28,7 @@ class GitHubIssueClient:
         self._cwd = (cwd or Path.cwd()).resolve()
 
     def get_issue(self, repository: str, issue_number: str) -> dict[str, Any]:
-        normalized_repository = repository.strip()
-        if not self._REPOSITORY_PATTERN.fullmatch(normalized_repository):
-            raise GitHubClientError(
-                "Invalid GitHub repository; expected the form 'owner/repository'"
-            )
+        normalized_repository = self._normalize_repository(repository)
         try:
             normalized_number = int(issue_number)
         except ValueError as exc:
@@ -56,6 +52,40 @@ class GitHubIssueClient:
         if not isinstance(payload, dict):
             raise GitHubClientError("GitHub CLI issue response must be a JSON object")
         return payload
+
+    def list_issues(self, repository: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return open issues from a repository for interactive task selection."""
+
+        normalized_repository = self._normalize_repository(repository)
+        if limit <= 0:
+            raise GitHubClientError("GitHub issue list limit must be positive")
+        result = self._run(
+            "issue",
+            "list",
+            "--repo",
+            normalized_repository,
+            "--state",
+            "open",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,title,body,url,labels,state,author,milestone",
+        )
+        try:
+            payload = json.loads(result.stdout)
+        except (ValueError, TypeError) as exc:
+            raise GitHubClientError("GitHub CLI returned invalid issue list JSON") from exc
+        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+            raise GitHubClientError("GitHub CLI issue list response must be a JSON array")
+        return payload
+
+    def _normalize_repository(self, repository: str) -> str:
+        normalized_repository = repository.strip()
+        if not self._REPOSITORY_PATTERN.fullmatch(normalized_repository):
+            raise GitHubClientError(
+                "Invalid GitHub repository; expected the form 'owner/repository'"
+            )
+        return normalized_repository
 
     def _run(self, *arguments: str) -> CommandResult:
         result = self._commands.run(

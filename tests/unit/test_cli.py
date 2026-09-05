@@ -285,6 +285,26 @@ def test_cli_runs_trello_provider(monkeypatch: Any) -> None:
     assert StubWorkflowService.calls == [("trello", "card-1", None)]
 
 
+def test_cli_launches_textual_tui_after_migrations(monkeypatch: Any) -> None:
+    _stub_runtime(monkeypatch)
+    launched = False
+
+    class TuiApp:
+        def __init__(self, controller: Any) -> None:
+            assert controller is not None
+
+        def run(self) -> None:
+            nonlocal launched
+            launched = True
+
+    monkeypatch.setattr(main, "OrchestratorApp", TuiApp)
+
+    result = runner.invoke(main.app, ["tui"])
+
+    assert result.exit_code == 0, result.output
+    assert launched
+
+
 def test_cli_keeps_json_on_stdout_and_emits_final_summary_on_stderr(monkeypatch: Any) -> None:
     _stub_runtime(monkeypatch)
 

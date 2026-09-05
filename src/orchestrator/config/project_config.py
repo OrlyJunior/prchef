@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,6 +23,19 @@ _CONFIG_ENVIRONMENT_VARIABLES = (
     "ORCHESTRATOR_CONFIG_PATH",
     "ORCHESTRATOR_CONFIG_FILE",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ConfiguredRepository:
+    """A repository registered by the global configuration.
+
+    This intentionally contains only discovery information. Resolving the full
+    project configuration, including local overrides, remains the responsibility
+    of :class:`ProjectConfigLoader.load`.
+    """
+
+    key: str
+    path: Path
 
 
 class RepositorySettings(BaseModel):
@@ -422,6 +436,35 @@ class ProjectConfig(BaseModel):
             raise ValueError("allow_direct_merge=true is not supported by V1")
         return self
 
+    def with_agent_providers(self, overrides: Mapping[str, str]) -> ProjectConfig:
+        """Return an in-memory configuration with selected configured providers.
+
+        Interactive clients may select a different named provider for a role,
+        but selections never alter YAML and cannot introduce an unconfigured
+        provider. Keeping this operation on the configuration model gives all
+        entry points the same validation boundary.
+        """
+
+        selected = self.model_copy(deep=True)
+        role_settings = {
+            "planner": selected.agents.planner,
+            "implementer": selected.agents.implementer,
+            "reviewer": selected.agents.reviewer,
+        }
+        for role, provider_name in overrides.items():
+            setting = role_settings.get(role)
+            if setting is None:
+                raise ConfigurationError(f"Unknown agent role: {role}")
+            normalized = provider_name.strip()
+            if not normalized:
+                raise ConfigurationError(f"Agent provider for {role} must be non-empty")
+            if normalized not in selected.providers:
+                raise ConfigurationError(
+                    f"Agent provider {normalized!r} selected for {role} is not configured"
+                )
+            setting.provider = normalized
+        return selected
+
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(base)
@@ -537,6 +580,35 @@ class ProjectConfigLoader:
             return ProjectConfig.model_validate(configuration)
         except ValueError as exc:
             raise ConfigurationError(f"Invalid project configuration: {exc}") from exc
+
+    def list_repositories(self) -> list[ConfiguredRepository]:
+        """List registered repositories without resolving their local configuration.
+
+        This is deliberately a discovery API: it does not open a repository or
+        merge its ``.orchestrator.yml``. Callers must still use :meth:`load`
+        before an operation needs a resolved project configuration.
+        """
+
+        global_config = _load_yaml(self._config_file, required=True)
+        self._reject_misplaced_project_settings(global_config)
+        registered = global_config.get("repositories", {})
+        if not isinstance(registered, dict):
+            raise ConfigurationError("'repositories' must be a mapping")
+
+        repositories: list[ConfiguredRepository] = []
+        for key, raw_entry in registered.items():
+            if not isinstance(raw_entry, dict):
+                raise ConfigurationError(f"Repository entry '{key}' must be a mapping")
+            raw_path = raw_entry.get("path")
+            if raw_path is None:
+                raise ConfigurationError(f"Repository entry '{key}' has no path")
+            path = Path(str(raw_path)).expanduser()
+            if not path.is_absolute():
+                path = (self._config_file.parent / path).resolve()
+            else:
+                path = path.resolve()
+            repositories.append(ConfiguredRepository(key=str(key), path=path))
+        return repositories
 
     def load(self, task: DevelopmentTask, repository_override: str | None = None) -> ProjectConfig:
         global_config = _load_yaml(self._config_file, required=True)
