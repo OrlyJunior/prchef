@@ -299,6 +299,7 @@ def run(
         task_provider=provider,
         config_loader=config_loader,
         client_factory=ClientFactory(settings.jules_api_key),
+        verbose=verbose,
     )
     try:
         execution = service.run(selected_id, repository)

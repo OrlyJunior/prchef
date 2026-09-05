@@ -4,13 +4,17 @@ from pathlib import Path
 import pytest
 
 from orchestrator.models import (
+    CodeReview,
     DevelopmentTask,
+    RepositorySpec,
+    ReviewDecision,
     StepStatus,
     ValidationResult,
     WorkflowStage,
     WorkflowStatus,
 )
 from orchestrator.providers.agent_provider import AgentNeedsHumanError
+from orchestrator.runtime_logging import log_review_summary, log_spec_summary
 from orchestrator.services.task_provider import GitHubIssueTaskProvider, TrelloTaskProvider
 from orchestrator.services.workflow_service import WorkflowService
 from tests.unit.fakes import (
@@ -296,6 +300,121 @@ def test_workflow_logs_stage_entry_and_completion(
     assert "[workflow] Entering task loading" in messages
     assert "[workflow] Completed task loading" in messages
     assert "[workflow] Repository resolved:" in " ".join(messages)
+
+
+def test_verbose_workflow_logs_parsed_spec_and_review_summaries(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    repository = FakeWorkflowRepository()
+    service = WorkflowService(
+        repository,
+        TrelloTaskProvider(FakeTrelloClient()),
+        FakeConfigLoader(tmp_path),
+        FakeClientFactory(),
+        verbose=True,
+    )
+    target_logger = logging.getLogger("orchestrator.services.workflow_service")
+    target_logger.addHandler(caplog.handler)
+    previous_propagation = target_logger.propagate
+    target_logger.propagate = False
+    try:
+        with caplog.at_level(logging.DEBUG, logger=target_logger.name):
+            service.run("card-verbose-logs")
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.propagate = previous_propagation
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[spec] safe_to_implement=true" in messages
+    assert "[spec] proposal: Write audit record transactionally" in messages
+    assert "[spec] artifacts: 1" in messages
+    assert "[spec] acceptance_criteria: 1" in messages
+    assert "[spec] expected_tests: 1" in messages
+    assert "[spec] ambiguities: 0" in messages
+    assert "[review] result=APPROVED" in messages
+    assert "[review] summary: Looks good" in messages
+    assert "[review] blocking_findings: 0" in messages
+    assert "[review] suggestions: 0" in messages
+    assert '{"technical_context"' not in caplog.text
+    assert '"decision"' not in caplog.text
+
+
+def test_non_verbose_workflow_does_not_log_agent_summaries(
+    workflow, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _, _, _ = workflow
+    target_logger = logging.getLogger("orchestrator.services.workflow_service")
+    target_logger.addHandler(caplog.handler)
+    previous_propagation = target_logger.propagate
+    target_logger.propagate = False
+    try:
+        with caplog.at_level(logging.DEBUG, logger=target_logger.name):
+            service.run("card-no-verbose-logs")
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.propagate = previous_propagation
+
+    assert "[spec]" not in caplog.text
+    assert "[review]" not in caplog.text
+
+
+def test_structured_summaries_are_bounded_and_redact_sensitive_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    target_logger = logging.getLogger("orchestrator.services.workflow_service")
+    target_logger.addHandler(caplog.handler)
+    previous_propagation = target_logger.propagate
+    target_logger.propagate = False
+    try:
+        with caplog.at_level(logging.DEBUG, logger=target_logger.name):
+            log_spec_summary(
+                target_logger,
+                RepositorySpec(
+                    technical_context="context",
+                    current_behavior="behavior",
+                    involved_artifacts=["a.py", "b.py"],
+                    implementation_proposal=("P" * 260) + " GEMINI_API_KEY=spec-secret",
+                    acceptance_criteria=["one", "two"],
+                    expected_tests=["test one", "test two", "test three"],
+                    ambiguities=["Needs owner decision"],
+                    safe_to_implement=False,
+                    raw_text='{"provider_payload": "raw-spec-secret"}',
+                ),
+            )
+            log_review_summary(
+                target_logger,
+                CodeReview(
+                    result=ReviewDecision.CHANGES_REQUESTED,
+                    summary=(
+                        "Address API_KEY=review-secret and "
+                        "Authorization: Bearer review-header-secret before merging"
+                    ),
+                    blocking_findings=["Missing authorization test"],
+                    suggestions=["Consider clearer naming"],
+                    raw_text='{"provider_payload": "raw-review-secret"}',
+                ),
+            )
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.propagate = previous_propagation
+
+    assert "[spec] safe_to_implement=false" in caplog.text
+    assert "[spec] artifacts: 2" in caplog.text
+    assert "[spec] acceptance_criteria: 2" in caplog.text
+    assert "[spec] expected_tests: 3" in caplog.text
+    assert "[spec] ambiguities: 1" in caplog.text
+    assert "[spec] ambiguity: Needs owner decision" in caplog.text
+    assert "[review] result=CHANGES_REQUESTED" in caplog.text
+    assert "[review] blocking_findings: 1" in caplog.text
+    assert "[review] suggestions: 1" in caplog.text
+    assert "[review] blocking_finding: Missing authorization test" in caplog.text
+    assert "[review] suggestion: Consider clearer naming" in caplog.text
+    assert "..." in caplog.text
+    assert "spec-secret" not in caplog.text
+    assert "review-secret" not in caplog.text
+    assert "review-header-secret" not in caplog.text
+    assert "raw-spec-secret" not in caplog.text
+    assert "raw-review-secret" not in caplog.text
 
 
 def test_pull_request_closes_github_issue_in_same_repository() -> None:

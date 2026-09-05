@@ -38,6 +38,7 @@ packages = ["src/orchestrator"]
 [tool.pytest.ini_options]
 addopts = "-q --basetemp=.pytest-tmp/run"
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100
