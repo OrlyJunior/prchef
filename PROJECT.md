@@ -114,8 +114,12 @@
   session after creation. `FAILED`, `CANCELLED`, timeout, or human-intervention states surface
   with the original session ID.
 - Jules plan/review requests explicitly disable publishing automation and prompt for read-only
-  behavior. Codex uses configured argument lists via the generic command client; it may edit only
-  its assigned local workspace. Gemini Vertex uses ADC and has no local shell/filesystem access.
+  behavior. Codex uses configured argument lists via the generic command client and forces
+  `codex exec --json`: only structured `error`, `turn.failed`, or failed-item events can classify
+  a sandbox/execution failure. Never infer a failure from free-form command output, diffs, or test
+  fixtures. A structured failure after an exit-0 run still inspects Git status so persisted results
+  retain any files changed before the failure. Codex may edit only its assigned local workspace.
+  Gemini Vertex uses ADC and has no local shell/filesystem access.
 - Jules credentials come from `JULES_API_KEY` or `ORCHESTRATOR_JULES_API_KEY`; GitHub uses the
   authenticated `gh` CLI. Do not put credentials in YAML or tracked files.
 
