@@ -223,15 +223,52 @@ def test_pull_request_failure_is_terminal(workflow) -> None:
     assert result.pr_url is None
 
 
-def test_jules_changes_requested_is_final_status(workflow) -> None:
+def test_review_correction_revalidates_updates_existing_pr_and_can_be_approved(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.changes_requested = True
+    factory.jules.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
 
     result = service.run("card-9")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert result.review_snapshot is not None
+    assert result.review_snapshot["result"] == "APPROVED"
+    assert len(factory.codex.requests) == 2
+    assert factory.codex.requests[1].workspace_path == factory.codex.requests[0].workspace_path
+    assert "REVIEWER CHANGE REQUESTS" in factory.codex.requests[1].instructions
+    assert factory.commands.working_directories[-1] == factory.codex.requests[0].workspace_path
+    assert factory.git.commit_calls == 2
+    assert factory.git.push_calls == 2
+    assert factory.git.diff_calls == 2
+    assert factory.github.create_calls == 1
+
+
+def test_review_correction_limit_finishes_changes_requested(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.changes_requested = True
+
+    result = service.run("card-review-exhausted")
 
     assert result.status is WorkflowStatus.CHANGES_REQUESTED
     assert result.review_snapshot is not None
     assert result.review_snapshot["result"] == "CHANGES_REQUESTED"
+    assert factory.jules.review_calls == 2
+    assert len(factory.codex.requests) == 2
+    assert repository.stage_changes.count(WorkflowStage.REVIEW) == 2
+    assert factory.github.create_calls == 1
+
+
+def test_review_correction_uses_validation_retry_handling(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
+    factory.commands.failure_sequence = [False, True, False]
+
+    result = service.run("card-review-validation-retry")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert len(factory.codex.requests) == 3
+    assert repository.stage_changes.count(WorkflowStage.IMPLEMENT) == 3
+    assert repository.stage_changes.count(WorkflowStage.VALIDATE) == 3
+    assert factory.github.create_calls == 1
 
 
 def test_malformed_jules_review_requires_human_instead_of_assuming_approval(workflow) -> None:

@@ -77,6 +77,16 @@ def test_max_validation_retries_defaults_to_two_and_rejects_negative_values(tmp_
         )
 
 
+def test_max_review_retries_defaults_to_one_and_rejects_negative_values(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate({"path": tmp_path})
+
+    assert config.review.max_review_retries == 1
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        ProjectConfig.model_validate(
+            {"path": tmp_path, "review": {"max_review_retries": -1}}
+        )
+
+
 def test_codex_approval_policy_accepts_approve_for_me(tmp_path: Path) -> None:
     config = _config(tmp_path, {"approval_policy": "approve-for-me"})
 

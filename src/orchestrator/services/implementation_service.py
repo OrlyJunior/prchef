@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 
 from orchestrator.clients.git_client import GitClient
 from orchestrator.models.agent import AgentRequest
+from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.repository_spec import RepositorySpec
@@ -87,6 +89,44 @@ Do not update it for trivial details; current repository behavior is authoritati
 
 Correct the existing implementation in this workspace to address the validation failures.
 Do not start over or revert unrelated existing changes.
+Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+"""
+        return self._run_prompt(prompt, repository_path)
+
+    def correct_review_findings(
+        self,
+        task: DevelopmentTask,
+        spec: RepositorySpec,
+        review: CodeReview,
+        repository_path: Path,
+    ) -> ImplementationResult:
+        """Ask the implementer to address a review in the existing workspace."""
+        feedback = json.dumps(
+            {
+                "summary": review.summary,
+                "findings": review.findings,
+                "blocking_findings": review.blocking_findings,
+                "suggestions": review.suggestions,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        prompt = f"""ORIGINAL TASK:
+{task.as_original_prompt()}
+
+REPOSITORY SPEC:
+{spec.as_prompt_context()}
+
+REVIEWER CHANGE REQUESTS FOR THE CURRENT IMPLEMENTATION:
+{feedback}
+
+{project_context_prompt(repository_path)}Keep PROJECT.md accurate if addressing these findings also
+changes durable project knowledge.
+Do not update it for trivial details; current repository behavior is authoritative.
+
+Correct the existing implementation in this workspace to address every blocking review finding.
+Use the findings, blocking findings, and suggestions above as review feedback; do not start over
+or revert unrelated existing changes.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
         return self._run_prompt(prompt, repository_path)
