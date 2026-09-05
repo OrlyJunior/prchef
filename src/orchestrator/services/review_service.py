@@ -16,6 +16,7 @@ from orchestrator.models.validation_result import ValidationResult
 from orchestrator.models.workflow_status import ReviewDecision
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.services.exceptions import StructuredOutputError
+from orchestrator.services.project_context import project_context_prompt
 from orchestrator.services.structured_output import parse_json_object, string_list
 
 _REVIEW_OUTPUT = StructuredOutputExpectation(
@@ -72,6 +73,7 @@ ORIGINAL TASK:
 REPOSITORY SPEC:
 {spec.as_prompt_context()}
 
+{project_context_prompt(repository_path)}
 PULL REQUEST:
 {json.dumps(asdict(pull_request), ensure_ascii=False, indent=2)}
 

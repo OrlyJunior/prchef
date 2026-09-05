@@ -10,6 +10,7 @@ from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.services.exceptions import StructuredOutputError
+from orchestrator.services.project_context import project_context_prompt
 from orchestrator.services.structured_output import parse_json_object, string_list
 
 _SPEC_OUTPUT = StructuredOutputExpectation(
@@ -55,7 +56,7 @@ class SpecService:
         base_branch: str,
         on_execution_started: Callable[[AgentExecutionReference], None],
     ) -> RepositorySpec:
-        prompt = self._build_prompt(task)
+        prompt = self._build_prompt(task, repository_path)
         result = self._provider.execute(
             AgentRequest(
                 instructions=prompt,
@@ -104,7 +105,7 @@ class SpecService:
         )
 
     @staticmethod
-    def _build_prompt(task: DevelopmentTask) -> str:
+    def _build_prompt(task: DevelopmentTask, repository_path: Path) -> str:
         return f"""You are the read-only technical specification role.
 Analyze the repository and the original task below.
 
@@ -115,6 +116,11 @@ STRICT SAFETY RULES:
 
 ORIGINAL TASK (preserve as authoritative):
 {task.as_original_prompt()}
+
+{project_context_prompt(repository_path)}When writing implementation_proposal, explicitly direct
+the implementation agent to keep
+PROJECT.md accurate when the change affects durable project knowledge (architecture, workflows,
+domain behavior, invariants, configuration, persistence, integrations, or design decisions).
 
 Return exactly one JSON object with this shape:
 {{
