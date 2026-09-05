@@ -12,6 +12,8 @@ class TaskProvider(Protocol):
 
     def get_task(self, task_id: str) -> DevelopmentTask: ...
 
+    def list_tasks(self, *, limit: int = 50) -> list[DevelopmentTask]: ...
+
     def pull_request_reference(
         self, task: DevelopmentTask, target_repository: str
     ) -> str: ...
@@ -25,6 +27,14 @@ class TrelloTaskProvider:
 
     def get_task(self, task_id: str) -> DevelopmentTask:
         return self._client.get_card(task_id)
+
+    def list_tasks(self, *, limit: int = 50) -> list[DevelopmentTask]:
+        # The configured task contract does not identify a Trello board/list.
+        # A card ID is therefore entered directly in the TUI until that optional
+        # configuration exists; returning no browseable tasks is explicit rather
+        # than guessing a board from credentials.
+        del limit
+        return []
 
     def pull_request_reference(
         self, task: DevelopmentTask, target_repository: str
@@ -41,11 +51,20 @@ class GitHubIssueTaskProvider:
 
     def get_task(self, task_id: str) -> DevelopmentTask:
         issue = self._client.get_issue(self._repository, task_id)
+        return self._to_task(issue, fallback_id=task_id)
+
+    def list_tasks(self, *, limit: int = 50) -> list[DevelopmentTask]:
+        return [
+            self._to_task(issue, fallback_id=str(issue.get("number", "")))
+            for issue in self._client.list_issues(self._repository, limit=limit)
+        ]
+
+    def _to_task(self, issue: dict[str, Any], *, fallback_id: str) -> DevelopmentTask:
         labels = self._label_names(issue.get("labels"))
         author = issue.get("author")
         milestone = issue.get("milestone")
         return DevelopmentTask(
-            id=str(issue.get("number", task_id)),
+            id=str(issue.get("number", fallback_id)),
             source=self.source,
             title=str(issue.get("title") or ""),
             description=str(issue.get("body") or ""),

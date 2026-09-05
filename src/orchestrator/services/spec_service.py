@@ -118,9 +118,9 @@ STRICT SAFETY RULES:
 ORIGINAL TASK (preserve as authoritative):
 {task.as_original_prompt()}
 
-{project_context_prompt(repository_path)}When writing implementation_proposal, explicitly direct
-{repository_context_prompt(repository_path, task)}When writing implementation_proposal, explicitly
-direct
+{project_context_prompt(repository_path)}
+{repository_context_prompt(repository_path, task)}
+When writing implementation_proposal, explicitly direct
 the implementation agent to keep
 PROJECT.md accurate when the change affects durable project knowledge (architecture, workflows,
 domain behavior, invariants, configuration, persistence, integrations, or design decisions).
