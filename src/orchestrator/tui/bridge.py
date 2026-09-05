@@ -149,7 +149,7 @@ class WorkflowController:
                     execution.id,
                     execution.task_id,
                     execution.task_source,
-                    execution.repository,
+                    execution.repository or "",
                     execution.status.value,
                     execution.current_stage.value,
                     str((execution.task_snapshot or {}).get("title", "")),
