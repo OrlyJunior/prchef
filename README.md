@@ -233,12 +233,17 @@ o PR, o diff e os resultados das validações. O resultado deve ser um JSON com 
 `suggestions`. Resposta malformada ou contraditória vira `NEEDS_HUMAN`; o orquestrador nunca infere
 aprovação de texto livre. `CHANGES_REQUESTED` não inicia uma nova rodada do Codex nesta V1.
 
-`APPROVED` e `CHANGES_REQUESTED` são estados internos do orquestrador, não GitHub Pull Request
-Reviews formais. A V1 não chama APIs de approve/request-changes, não usa bot/GitHub App e não faz
-auto-merge. O PR é criado pela identidade autenticada no `gh`. Para um ruleset inicial, recomenda-se:
-PR obrigatório para merge, 0 approvals obrigatórios, bloquear deleções e force pushes, exigir
-resolução de conversas, sem bypass de IA/bot e sem status checks obrigatórios por enquanto. Uma
-integração com GitHub App para reviews formais é evolução posterior.
+Após cada resultado estruturado, a integração GitHub publica uma review formal no mesmo PR:
+`APPROVED` envia `APPROVE`, `CHANGES_REQUESTED` envia `REQUEST_CHANGES` com os achados bloqueantes,
+e `NEEDS_HUMAN` deixa um comentário neutro. Sugestões não bloqueantes acompanham uma aprovação sem
+alterar a decisão. Falhas ao publicar são registradas, mas não mudam a decisão do reviewer nem o
+status final do workflow. O orquestrador nunca faz auto-merge.
+
+O PR continua sendo criado pela identidade autenticada no `gh`. Para reviews formais confiáveis,
+configure um GitHub App instalado no repositório: [guia de configuração](docs/github_app.md).
+O App gera tokens de instalação curtos somente para a chamada de publicação; sem essa configuração,
+o `gh` usa sua autenticação ambiente. GitHub pode impedir uma identidade de aprovar ou solicitar
+mudanças no próprio PR, então use uma identidade de App separada quando necessário.
 
 ## Configuracao por repositorio
 

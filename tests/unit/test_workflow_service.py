@@ -55,6 +55,15 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
     assert result.review_jules_session_url == "https://jules.example/review-123"
     assert factory.jules.spec_starting_branch == "develop"
     assert factory.jules.review_starting_branch == result.working_branch
+    assert factory.github.review_calls == [
+        {
+            "repository": "example/api",
+            "pull_request_number": 42,
+            "event": "APPROVE",
+            "body": "## Automated review: APPROVED\n\n**Summary:** Looks good\n\n"
+            "No blocking findings or non-blocking suggestions.",
+        }
+    ]
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
 
 
@@ -240,6 +249,24 @@ def test_review_correction_revalidates_updates_existing_pr_and_can_be_approved(w
     assert factory.git.push_calls == 2
     assert factory.git.diff_calls == 2
     assert factory.github.create_calls == 1
+    assert [call["event"] for call in factory.github.review_calls] == [
+        "REQUEST_CHANGES",
+        "APPROVE",
+    ]
+    assert "### Blocking findings" in factory.github.review_calls[0]["body"]
+
+
+def test_review_publication_failure_preserves_reviewer_decision(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.github.review_error = RuntimeError("GitHub unavailable")
+
+    result = service.run("card-review-publish-failure")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert result.review_snapshot is not None
+    assert result.review_snapshot["result"] == "APPROVED"
+    assert result.error_message == "GitHub review publication failed: GitHub unavailable"
+    assert len(factory.github.review_calls) == 1
 
 
 def test_review_correction_limit_finishes_changes_requested(workflow) -> None:
@@ -282,6 +309,7 @@ def test_malformed_jules_review_requires_human_instead_of_assuming_approval(work
     assert result.review_snapshot["result"] == "NEEDS_HUMAN"
     assert "could not be interpreted safely" in result.review_snapshot["summary"]
     assert "could not be interpreted safely" in (result.error_message or "")
+    assert factory.github.review_calls[0]["event"] == "COMMENT"
 
 
 def test_jules_human_intervention_stops_workflow_and_keeps_session_reference(workflow) -> None:
@@ -452,6 +480,14 @@ def test_structured_summaries_are_bounded_and_redact_sensitive_text(
     assert "review-header-secret" not in caplog.text
     assert "raw-spec-secret" not in caplog.text
     assert "raw-review-secret" not in caplog.text
+
+
+def test_command_logging_redacts_github_api_review_body() -> None:
+    from orchestrator.runtime_logging import format_command
+
+    assert format_command(["gh", "api", "-f", "body=GITHUB_TOKEN=secret"]) == (
+        "gh api -f body=[REDACTED]"
+    )
 
 
 def test_pull_request_closes_github_issue_in_same_repository() -> None:

@@ -77,5 +77,6 @@ class ClientFactory:
                 config.path,
                 config.integrations.github.command,
                 config.integrations.github.timeout_seconds,
+                app=config.integrations.github.app,
             ),
         )
