@@ -68,6 +68,33 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
 
 
+def test_workflow_events_follow_persisted_transitions_and_do_not_control_execution(
+    workflow,
+) -> None:
+    service, _, _, _ = workflow
+    events = []
+
+    result = service.run("card-events", event_listener=events.append)
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert events[0].kind.value == "EXECUTION_CREATED"
+    assert events[1].kind.value == "STATUS_CHANGED"
+    assert any(event.kind.value == "STAGE_STARTED" for event in events)
+    assert any(event.kind.value == "STAGE_FINISHED" for event in events)
+    assert events[-1].kind.value == "WORKFLOW_FINISHED"
+
+
+def test_workflow_event_listener_failures_do_not_control_execution(workflow) -> None:
+    service, _, _, _ = workflow
+
+    def broken_listener(*_args) -> None:
+        raise RuntimeError("rendering unavailable")
+
+    assert service.run("card-events-listener-error", event_listener=broken_listener).status is (
+        WorkflowStatus.APPROVED
+    )
+
+
 class _RecordingNotifier:
     def __init__(self) -> None:
         self.events = []

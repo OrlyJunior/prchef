@@ -40,6 +40,10 @@ class StubIssueClient:
             "milestone": {"title": "V2"},
         }
 
+    def list_issues(self, repository: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        assert limit == 50
+        return [self.get_issue(repository, "42")]
+
 
 def test_trello_task_is_resolved_through_provider() -> None:
     task = TrelloTaskProvider(FakeTrelloClient()).get_task("card-1")
@@ -70,6 +74,15 @@ def test_github_issue_is_mapped_to_common_task_with_labels() -> None:
             "milestone": "V2",
         },
     )
+
+
+def test_github_issues_can_be_browsed_as_common_tasks() -> None:
+    provider = GitHubIssueTaskProvider(StubIssueClient(), "owner/api")  # type: ignore[arg-type]
+
+    tasks = provider.list_tasks()
+
+    assert [task.id for task in tasks] == ["42"]
+    assert tasks[0].title == "Add audit log"
 
 
 def test_github_issue_client_uses_gh_and_reports_missing_issue(tmp_path: Path) -> None:
@@ -125,6 +138,37 @@ def test_github_issue_client_returns_structured_issue(tmp_path: Path) -> None:
 
     assert issue["number"] == 42
     assert issue["labels"] == [{"name": "backend"}]
+
+
+def test_github_issue_client_lists_open_issues_for_task_browser(tmp_path: Path) -> None:
+    commands = StubCommands(
+        CommandResult(
+            command=[],
+            exit_code=0,
+            stdout=json.dumps([{"number": 7, "title": "Interactive task", "labels": []}]),
+            stderr="",
+            duration_seconds=0.1,
+        )
+    )
+
+    issues = GitHubIssueClient(commands, cwd=tmp_path).list_issues("owner/api", limit=25)  # type: ignore[arg-type]
+
+    assert issues == [{"number": 7, "title": "Interactive task", "labels": []}]
+    assert commands.calls == [
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            "owner/api",
+            "--state",
+            "open",
+            "--limit",
+            "25",
+            "--json",
+            "number,title,body,url,labels,state,author,milestone",
+        ]
+    ]
 
 
 @pytest.mark.parametrize("repository", ["owner", "https://github.com/owner/api", "owner/api/x"])

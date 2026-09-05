@@ -5,6 +5,7 @@ from orchestrator.models.jules_session import JulesOperationResult, JulesSession
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationCheck, ValidationResult
+from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
     ReviewDecision,
@@ -33,6 +34,8 @@ __all__ = [
     "ValidationCheck",
     "ValidationResult",
     "WorkflowExecution",
+    "WorkflowEvent",
+    "WorkflowEventKind",
     "WorkflowStage",
     "WorkflowStatus",
     "WorkflowStep",

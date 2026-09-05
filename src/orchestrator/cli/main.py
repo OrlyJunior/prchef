@@ -42,7 +42,19 @@ from orchestrator.services.task_provider import (
 )
 from orchestrator.services.workflow_service import WorkflowService
 from orchestrator.services.workspace_cleaner import WorkspaceCleanupService
+from orchestrator.tui.bridge import WorkflowController
 from orchestrator.workspace.manager import WorkspaceManager
+
+# Keep non-interactive commands independent from the terminal UI at import
+# time. Textual is still a required project dependency, but this prevents an
+# incomplete environment from breaking commands such as ``--version`` before
+# the user has asked to launch the UI.
+OrchestratorApp: type[Any] | None = None
+
+
+class TextualDependencyError(RuntimeError):
+    """Raised when the interactive UI dependency is unavailable."""
+
 
 app = typer.Typer(
     name="orchestrator",
@@ -194,6 +206,56 @@ def _debug_task_provider(
     raise ConfigurationError(f"Unsupported task provider: {source}")
 
 
+def _tui_task_provider(
+    settings: Settings,
+    config_loader: ProjectConfigLoader,
+    source: str,
+    repository: str,
+) -> TaskProvider:
+    """Build a task provider for a selected configured repository.
+
+    GitHub's issue API needs an ``owner/repository`` slug, which remains an
+    integration detail derived from the selected repository's existing Git
+    client rather than a UI-specific configuration field.
+    """
+
+    normalized = source.casefold()
+    if normalized == "trello":
+        return TrelloTaskProvider(TrelloClient(settings.trello_api_key, settings.trello_token))
+    if normalized != "github":
+        raise ConfigurationError(f"Unsupported task provider: {source}")
+    selection = DevelopmentTask(
+        id="tui-selection",
+        source="system",
+        title="Interactive workflow selection",
+        description="Resolve the selected repository for GitHub issue browsing.",
+        url="",
+        repository=repository,
+    )
+    project_config = config_loader.load(selection, repository)
+    repository_slug = GitClient(CommandClient(), project_config.path).github_repository()
+    return GitHubIssueTaskProvider(GitHubIssueClient(CommandClient()), repository_slug)
+
+
+def _orchestrator_app_type() -> type[Any]:
+    """Load the Textual application only when the interactive command runs."""
+
+    global OrchestratorApp
+    if OrchestratorApp is not None:
+        return OrchestratorApp
+    try:
+        from orchestrator.tui.app import OrchestratorApp as textual_app
+    except ModuleNotFoundError as exc:
+        if exc.name != "textual":
+            raise
+        raise TextualDependencyError(
+            "The terminal UI requires the Textual dependency. "
+            "Reinstall the project dependencies and try again."
+        ) from exc
+    OrchestratorApp = textual_app
+    return OrchestratorApp
+
+
 def _read_debug_text(path: Path, label: str) -> str:
     try:
         value = path.read_text(encoding="utf-8")
@@ -264,6 +326,40 @@ def providers(
 
     for name, provider in project_config.providers.items():
         typer.echo(f"{name}  {provider.type}")
+
+
+@app.command()
+def tui(
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Global YAML configuration")
+    ] = None,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show additional runtime details")
+    ] = False,
+) -> None:
+    """Launch the interactive terminal UI for workflow control."""
+
+    settings = Settings()
+    if config is not None:
+        settings.config_file = config
+    configure_logging(verbose=verbose, configured_level=settings.log_level)
+    try:
+        application_type = _orchestrator_app_type()
+    except TextualDependencyError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    workflow_repository = _migrated_repository(settings)
+    config_loader = _config_loader(settings.config_file)
+    controller = WorkflowController(
+        workflow_repository=workflow_repository,
+        config_loader=config_loader,
+        client_factory=ClientFactory(settings.jules_api_key),
+        task_provider_factory=lambda source, repository: _tui_task_provider(
+            settings, config_loader, source, repository
+        ),
+        verbose=verbose,
+    )
+    application_type(controller).run()
 
 
 @app.command()

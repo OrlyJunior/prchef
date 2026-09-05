@@ -121,11 +121,21 @@ alembic upgrade head
 ```bash
 orchestrator --version
 orchestrator providers
+orchestrator tui
 orchestrator run --trello-card CARD_ID
 orchestrator run --github-issue 42 --repository owner/repository
 ```
 
 Use `orchestrator --version` para exibir a versao atual do pacote.
+
+### Interface interativa
+
+`orchestrator tui` abre uma interface Textual para selecionar repositorios configurados, provider
+de task, issues GitHub (ou um ID de card Trello), providers dos papeis planner/implementer/reviewer,
+e iniciar o mesmo workflow usado por `run`. Ela mostra as transicoes persistidas ao vivo e permite
+filtrar execucoes anteriores, inspecionar snapshots/steps e abrir links de task, PR e sessoes Jules.
+As selecoes de providers valem apenas para a execucao iniciada e nunca alteram o YAML. Os comandos
+CLI nao interativos continuam disponiveis para automacao.
 
 Para listar as instancias de agent provider configuradas nos defaults globais, use:
 
