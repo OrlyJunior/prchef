@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.clients.git_client import GitClient
@@ -24,6 +25,15 @@ class WorkflowClients:
             return self.agents[role]
         except KeyError as exc:
             raise RuntimeError(f"Agent provider for role {role.value!r} was not created") from exc
+
+    def at_path(self, repository_path: Path) -> "WorkflowClients":
+        """Bind mutable CLI operations to an execution worktree."""
+        return WorkflowClients(
+            commands=self.commands,
+            agents=self.agents,
+            git=self.git.at_path(repository_path),
+            github=self.github.at_path(repository_path),
+        )
 
 
 class ClientFactory:

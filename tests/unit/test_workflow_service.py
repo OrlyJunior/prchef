@@ -86,6 +86,46 @@ def test_codex_failure_stops_before_validation(workflow) -> None:
     assert result.status is WorkflowStatus.FAILED
     assert result.error_message == "codex exploded"
     assert WorkflowStage.VALIDATE not in repository.stage_changes
+    assert result.workspace_path is not None
+    assert Path(result.workspace_path).is_dir()
+
+
+def test_failed_implementation_preserves_execution_workspace_and_artifacts(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.codex.fail = True
+    factory.codex.leave_artifact_on_failure = True
+
+    result = service.run("card-preserve-workspace")
+
+    workspace = Path(result.workspace_path or "")
+    assert result.status is WorkflowStatus.FAILED
+    assert (workspace / "partial-implementation.txt").read_text(encoding="utf-8") == "unfinished"
+
+
+def test_mutable_workflow_stages_use_the_execution_workspace(workflow) -> None:
+    service, repository, _, factory = workflow
+
+    result = service.run("card-workspace")
+
+    workspace = Path(result.workspace_path or "")
+    assert workspace.is_dir()
+    assert factory.codex.workspace_path == workspace
+    assert factory.commands.working_directories == [workspace]
+    assert factory.git.workspace_path == workspace
+    assert factory.git.operation_paths == [workspace, workspace, workspace, workspace]
+    assert result.repository != str(workspace)
+    assert repository.execution is not None
+
+
+def test_workspace_branch_name_contains_execution_id_and_is_not_protected(workflow) -> None:
+    service, _, _, _ = workflow
+
+    result = service.run("card-branch")
+
+    assert result.working_branch is not None
+    assert result.working_branch.startswith("orchestrator/")
+    assert result.working_branch != "develop"
+    assert result.working_branch.endswith("execution-1")
 
 
 def test_validation_failure_stops_before_commit(workflow) -> None:

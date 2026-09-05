@@ -63,6 +63,9 @@ class FakeWorkflowRepository:
         execution.repository = repository
         execution.base_branch = base_branch
 
+    def record_workspace(self, execution_id: str, workspace_path: str) -> None:
+        self._execution().workspace_path = workspace_path
+
     def update_stage(self, execution_id: str, stage: WorkflowStage) -> None:
         self._execution().current_stage = stage
         self.stage_changes.append(stage)
@@ -247,11 +250,18 @@ class FakeJulesClient:
 class FakeCodexClient:
     def __init__(self) -> None:
         self.fail = False
+        self.leave_artifact_on_failure = False
+        self.workspace_path: Path | None = None
 
     def execute(
         self, request: AgentRequest, *, on_started: Any = None
     ) -> AgentResult:
-        del request, on_started
+        del on_started
+        self.workspace_path = request.workspace_path
+        if self.fail and self.leave_artifact_on_failure and self.workspace_path is not None:
+            (self.workspace_path / "partial-implementation.txt").write_text(
+                "unfinished", encoding="utf-8"
+            )
         return AgentResult(
             success=not self.fail,
             output="implemented" if not self.fail else "",
@@ -264,6 +274,9 @@ class FakeGitClient:
         self.branch_error: Exception | None = None
         self.push_error: Exception | None = None
         self.branch: str | None = None
+        self.workspace_path: Path | None = None
+        self.control_path: Path | None = None
+        self.operation_paths: list[Path | None] = []
 
     def create_branch(
         self, base_branch: str, working_branch: str, protected_branches: list[str]
@@ -272,20 +285,43 @@ class FakeGitClient:
             raise self.branch_error
         self.branch = working_branch
 
+    def create_worktree(
+        self,
+        workspace_path: Path,
+        base_branch: str,
+        working_branch: str,
+        protected_branches: list[str],
+    ) -> None:
+        del base_branch, protected_branches
+        if self.branch_error:
+            raise self.branch_error
+        workspace_path.mkdir(parents=True, exist_ok=False)
+        self.workspace_path = workspace_path
+        self.branch = working_branch
+
+    def at_path(self, repository_path: Path) -> FakeGitClient:
+        self.control_path = self.control_path or repository_path
+        self.workspace_path = repository_path
+        return self
+
     def changed_files(self) -> list[str]:
+        self.operation_paths.append(self.workspace_path)
         return ["src/audit.py", "tests/test_audit.py"]
 
     def github_repository(self) -> str:
         return "example/api"
 
     def commit_all(self, message: str, working_branch: str, protected_branches: list[str]) -> str:
+        self.operation_paths.append(self.workspace_path)
         return "a" * 40
 
     def push(self, working_branch: str, protected_branches: list[str]) -> None:
+        self.operation_paths.append(self.workspace_path)
         if self.push_error:
             raise self.push_error
 
     def diff(self, base_branch: str) -> str:
+        self.operation_paths.append(self.workspace_path)
         return "diff --git a/src/audit.py b/src/audit.py"
 
 
@@ -306,12 +342,20 @@ class FakeGitHubClient:
             head_branch=str(kwargs["head_branch"]),
         )
 
+    def at_path(self, repository_path: Path) -> FakeGitHubClient:
+        del repository_path
+        return self
+
 
 class FakeCommandClient:
     def __init__(self) -> None:
         self.fail = False
+        self.working_directories: list[Path] = []
 
     def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+        cwd = kwargs.get("cwd")
+        if isinstance(cwd, Path):
+            self.working_directories.append(cwd)
         return CommandResult(
             command=command,
             exit_code=1 if self.fail else 0,
@@ -346,9 +390,16 @@ class FakeClientFactory:
             role: provider_by_name[role_names[role]]
             for role in selected
         }
-        return SimpleNamespace(
+        clients = SimpleNamespace(
             agent=lambda role: agents[role],
             git=self.git,
             github=self.github,
             commands=self.commands,
         )
+        clients.at_path = lambda path: SimpleNamespace(
+            agent=lambda role: agents[role],
+            git=self.git.at_path(path),
+            github=self.github.at_path(path),
+            commands=self.commands,
+        )
+        return clients

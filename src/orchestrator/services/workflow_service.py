@@ -6,6 +6,7 @@ import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import ConfigurationError, ProjectConfigLoader
@@ -28,6 +29,7 @@ from orchestrator.services.review_service import ReviewService
 from orchestrator.services.spec_service import SpecService
 from orchestrator.services.task_provider import TaskProvider
 from orchestrator.services.validation_service import ValidationService
+from orchestrator.workspace.manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,7 @@ class WorkflowService:
             task_id, task_source=self._task_provider.source
         )
         self._repository.update_status(execution.id, WorkflowStatus.RUNNING)
+        workspace_path: Path | None = None
         try:
             logger.info(
                 "[workflow] Loading %s task %s", self._task_provider.source, task_id
@@ -103,20 +106,29 @@ class WorkflowService:
                 return self._repository.get_execution(execution.id)
 
             working_branch = self._branch_name(
-                config.repository.branch_prefix, task.id, task.title
+                config.repository.branch_prefix, task.id, task.title, execution.id
             )
+            workspace_manager = WorkspaceManager(clients.git, config.path, config.workspace)
             with self._step(execution.id, WorkflowStage.PREPARE_BRANCH):
-                clients.git.create_branch(
+                workspace_path = workspace_manager.workspace_path(execution.id)
+                self._repository.record_workspace(execution.id, str(workspace_path))
+                logger.info("[workspace] Base repository: %s", config.path)
+                logger.info("[workspace] Base ref: origin/%s", config.repository.base_branch)
+                logger.info("[workspace] Branch: %s", working_branch)
+                logger.info("[workspace] Path: %s", workspace_path)
+                workspace_path = workspace_manager.create(
+                    execution.id,
                     config.repository.base_branch,
                     working_branch,
                     config.repository.protected_branches,
                 )
                 self._repository.record_branch(execution.id, working_branch)
+            execution_clients = clients.at_path(workspace_path)
 
             with self._step(execution.id, WorkflowStage.IMPLEMENT):
                 implementation = ImplementationService(
-                    clients.agent(AgentRole.IMPLEMENTER), clients.git
-                ).implement(task, spec, config.path)
+                    execution_clients.agent(AgentRole.IMPLEMENTER), execution_clients.git
+                ).implement(task, spec, workspace_path)
                 self._repository.record_implementation(execution.id, implementation)
                 if not implementation.success:
                     raise WorkflowError(
@@ -124,8 +136,8 @@ class WorkflowService:
                     )
 
             with self._step(execution.id, WorkflowStage.VALIDATE):
-                validation = ValidationService(clients.commands).validate(
-                    config.path,
+                validation = ValidationService(execution_clients.commands).validate(
+                    workspace_path,
                     config.validation,
                     require_tests=config.safety.require_tests,
                 )
@@ -134,7 +146,7 @@ class WorkflowService:
                     raise WorkflowError(validation.error_message or "Validation failed")
 
             with self._step(execution.id, WorkflowStage.COMMIT):
-                commit_sha = clients.git.commit_all(
+                commit_sha = execution_clients.git.commit_all(
                     self._commit_message(task),
                     working_branch,
                     config.repository.protected_branches,
@@ -142,10 +154,10 @@ class WorkflowService:
                 self._repository.record_commit(execution.id, commit_sha)
 
             with self._step(execution.id, WorkflowStage.PUSH):
-                clients.git.push(working_branch, config.repository.protected_branches)
+                execution_clients.git.push(working_branch, config.repository.protected_branches)
 
             with self._step(execution.id, WorkflowStage.CREATE_PR):
-                pull_request = clients.github.create_pull_request(
+                pull_request = execution_clients.github.create_pull_request(
                     title=task.title,
                     body=self._pull_request_body(
                         task,
@@ -162,9 +174,9 @@ class WorkflowService:
                     task=task,
                     spec=spec,
                     pull_request=pull_request,
-                    diff=clients.git.diff(config.repository.base_branch),
+                    diff=execution_clients.git.diff(config.repository.base_branch),
                     validation=validation,
-                    repository_path=config.path,
+                    repository_path=workspace_path,
                     repository_slug=repository_slug,
                     base_branch=config.repository.base_branch,
                     feature_branch=working_branch,
@@ -190,9 +202,18 @@ class WorkflowService:
         except AgentNeedsHumanError as exc:
             self._repository.record_error(execution.id, str(exc))
             self._repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+            if workspace_path is not None:
+                logger.error(
+                    "[workspace] Workflow needs human input; preserving workspace: %s",
+                    workspace_path,
+                )
         except Exception as exc:
             self._repository.record_error(execution.id, str(exc))
             self._repository.finish(execution.id, WorkflowStatus.FAILED)
+            if workspace_path is not None:
+                logger.error(
+                    "[workspace] Workflow failed; preserving workspace: %s", workspace_path
+                )
         return self._repository.get_execution(execution.id)
 
     @contextmanager
@@ -212,14 +233,15 @@ class WorkflowService:
             logger.info("[workflow] Completed %s", label)
 
     @staticmethod
-    def _branch_name(prefix: str, card_id: str, title: str) -> str:
+    def _branch_name(prefix: str, card_id: str, title: str, execution_id: str) -> str:
         normalized = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", normalized).strip("-").lower()[:48]
         safe_card_id = re.sub(r"[^a-zA-Z0-9._-]", "-", card_id)[:32]
         timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
         safe_prefix = prefix.strip("/") or "orchestrator"
         suffix = f"-{slug}" if slug else ""
-        return f"{safe_prefix}/{safe_card_id}{suffix}-{timestamp}"
+        safe_execution_id = re.sub(r"[^a-zA-Z0-9._-]", "-", execution_id)[:12]
+        return f"{safe_prefix}/{safe_card_id}{suffix}-{timestamp}-{safe_execution_id}"
 
     @staticmethod
     def _commit_message(task: DevelopmentTask) -> str:
