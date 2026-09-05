@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from orchestrator.models import (
     AgentRequest,
@@ -166,6 +169,118 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     )
 
     assert review.result == "APPROVED"
+    assert review.findings == []
+    assert review.blocking_findings == []
+    assert review.suggestions == []
     assert provider.requests[0].structured_output is not None
     assert provider.requests[0].structured_output.name == "code-review"
+    review_schema = provider.requests[0].structured_output.schema
+    assert "blocking" in review_schema["properties"]["blocking_findings"]["description"]
+    assert "Non-blocking" in review_schema["properties"]["suggestions"]["description"]
     assert "Stable architecture rule." in provider.requests[0].instructions
+    assert "adversarial, evidence-based risk analysis" in provider.requests[0].instructions
+    assert "concurrency and races" in provider.requests[0].instructions
+    assert (
+        "idempotency, duplicate execution, and partial-failure recovery"
+        in provider.requests[0].instructions
+    )
+    assert "token and prompt efficiency" in provider.requests[0].instructions
+    assert (
+        "provider coupling, quota/rate-limit handling" in provider.requests[0].instructions
+    )
+    assert (
+        "only blocking issues in `blocking_findings`"
+        in provider.requests[0].instructions
+    )
+    assert "may accompany APPROVED" in provider.requests[0].instructions
+
+
+def _review_with_output(tmp_path: Path, output: str) -> CodeReview:
+    provider = RecordingProvider(AgentResult(output=output))
+
+    return ReviewService(provider).review(
+        task=_task(),
+        spec=_spec(),
+        pull_request=PullRequest(
+            number=5,
+            url="https://github.example/pull/5",
+            title="Provider contracts",
+            base_branch="develop",
+            head_branch="feature/provider-contracts",
+        ),
+        diff="diff --git a/a b/a",
+        validation=ValidationResult(success=True),
+        repository_path=tmp_path,
+        repository_slug="owner/repo",
+        base_branch="develop",
+        feature_branch="feature/provider-contracts",
+        on_execution_started=lambda reference: None,
+    )
+
+
+def test_reviewer_approves_suggestions_without_blocking_findings(
+    tmp_path: Path,
+) -> None:
+    _write_project_context(tmp_path)
+
+    review = _review_with_output(
+        tmp_path,
+        """{
+            "decision": "APPROVED",
+            "summary": "Correct and safe.",
+            "findings": [],
+            "blocking_findings": [],
+            "suggestions": ["Avoid rebuilding unchanged prompt context."]
+        }""",
+    )
+
+    assert review.result is ReviewDecision.APPROVED
+    assert review.blocking_findings == []
+    assert review.suggestions == ["Avoid rebuilding unchanged prompt context."]
+
+
+def test_reviewer_requests_changes_for_concrete_blocking_findings(
+    tmp_path: Path,
+) -> None:
+    _write_project_context(tmp_path)
+
+    review = _review_with_output(
+        tmp_path,
+        """{
+            "decision": "CHANGES_REQUESTED",
+            "summary": "The retry can duplicate writes after a timeout.",
+            "findings": ["Retry is not idempotent."],
+            "blocking_findings": ["Retry is not idempotent."],
+            "suggestions": []
+        }""",
+    )
+
+    assert review.result is ReviewDecision.CHANGES_REQUESTED
+    assert review.blocking_findings == ["Retry is not idempotent."]
+
+
+@pytest.mark.parametrize(
+    "decision, blocking_findings",
+    [
+        ("APPROVED", ["Concurrent writes can corrupt the persisted state."]),
+        ("CHANGES_REQUESTED", []),
+    ],
+)
+def test_reviewer_maps_contradictory_decisions_to_needs_human(
+    tmp_path: Path, decision: str, blocking_findings: list[str]
+) -> None:
+    _write_project_context(tmp_path)
+    output = json.dumps(
+        {
+            "decision": decision,
+            "summary": "Review result.",
+            "findings": blocking_findings,
+            "blocking_findings": blocking_findings,
+            "suggestions": [],
+        }
+    )
+
+    review = _review_with_output(tmp_path, output)
+
+    assert review.result is ReviewDecision.NEEDS_HUMAN
+    assert "could not be interpreted safely" in review.summary

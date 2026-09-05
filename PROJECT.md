@@ -102,9 +102,12 @@
 - Planner and reviewer require structured objects. Provider-native structured output is preferred;
   textual output accepts plain JSON, one fenced JSON object, or exactly one safely extractable
   object with surrounding prose. Ambiguous/malformed data is rejected, never guessed.
-- Invalid review output is converted conservatively to `NEEDS_HUMAN`; contradictory decisions
-  (for example, approval with blocking findings) are also unsafe. Final review maps only to
-  `APPROVED`, `CHANGES_REQUESTED`, or `NEEDS_HUMAN`.
+- Review is adversarial and evidence-based: beyond task/spec compliance, it considers relevant
+  operational, architectural, reliability, efficiency, and regression risks. Structured reviews
+  separate concrete blocking findings from non-blocking suggestions; suggestions may accompany
+  approval. Invalid output is converted conservatively to `NEEDS_HUMAN`; contradictory decisions
+  (for example, approval with blocking findings or change requests with none) are also unsafe.
+  Final review maps only to `APPROVED`, `CHANGES_REQUESTED`, or `NEEDS_HUMAN`.
 - Jules uses official asynchronous REST sessions: create → persist identity/URL → poll session
   state → fetch paged activities. It uses configurable poll interval, overall timeout, and bounded
   exponential retries only for transient polling/result requests. It never creates a replacement
