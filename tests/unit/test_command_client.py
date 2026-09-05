@@ -491,7 +491,52 @@ def test_codex_client_surfaces_structured_sandbox_denial(tmp_path: Path) -> None
     assert "structured sandbox denial" in result.error_message
     assert "operation=file-write-create" in result.error_message
     assert "path=C:/restricted/output.txt" in result.error_message
+    assert "workspace write denial" not in result.error_message
     assert "exit 0" in result.error_message
+
+
+def test_codex_client_surfaces_structured_sandbox_denial_for_command(
+    tmp_path: Path,
+) -> None:
+    stdout = (
+        '{"type":"turn.failed","error":{"code":"policy_denied",'
+        '"details":{"operation":"process-exec","command":["git", "push", "origin", "main"]}}}'
+    )
+    commands = RecordingCommandClient(stdout=stdout)
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    result = client.implement("private prompt", tmp_path)
+
+    assert not result.success
+    assert result.error_message is not None
+    assert (
+        "sandbox denial for operation=process-exec, command=git push origin main"
+        in result.error_message
+    )
+    assert "workspace write denial" not in result.error_message
+
+
+def test_codex_client_uses_workspace_message_for_general_structured_sandbox_denial(
+    tmp_path: Path,
+) -> None:
+    commands = RecordingCommandClient(
+        stdout='{"type":"error","error":{"code":"policy_denied","message":"write denied"}}'
+    )
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--sandbox", "workspace-write", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    result = client.implement("private prompt", tmp_path)
+
+    assert not result.success
+    assert result.error_message is not None
+    assert "structured workspace write denial" in result.error_message
 
 
 def test_codex_client_surfaces_structured_terminal_failure(tmp_path: Path) -> None:
