@@ -29,6 +29,8 @@ defaults:
     auto_detect: true
     # `python -m pytest` usa .pytest-tmp/run automaticamente via pyproject.toml.
     commands: []
+    # Tentativas de correcao no mesmo worktree apos uma validacao falhar.
+    max_validation_retries: 2
   providers:
     jules:
       type: jules

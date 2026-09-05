@@ -5,7 +5,12 @@ from orchestrator.models.agent import AgentRequest
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.repository_spec import RepositorySpec
+from orchestrator.models.validation_result import ValidationResult
 from orchestrator.providers.agent_provider import AgentProvider
+from orchestrator.runtime_logging import format_command, redact_text
+
+_CORRECTION_OUTPUT_LIMIT = 4_000
+
 
 
 class ImplementationService:
@@ -46,6 +51,30 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
 """
         return self._run_prompt(safe_prompt, repository_path)
 
+    def correct_validation_failures(
+        self,
+        task: DevelopmentTask,
+        spec: RepositorySpec,
+        validation: ValidationResult,
+        repository_path: Path,
+    ) -> ImplementationResult:
+        """Ask the implementer to repair the existing workspace after validation failed."""
+        failures = self._render_validation_failures(validation)
+        prompt = f"""ORIGINAL TASK:
+{task.as_original_prompt()}
+
+REPOSITORY SPEC:
+{spec.as_prompt_context()}
+
+VALIDATION FAILURES FROM THE CURRENT IMPLEMENTATION:
+{failures}
+
+Correct the existing implementation in this workspace to address the validation failures.
+Do not start over or revert unrelated existing changes.
+Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+"""
+        return self._run_prompt(prompt, repository_path)
+
     def _run_prompt(self, prompt: str, repository_path: Path) -> ImplementationResult:
         agent_result = self._provider.execute(
             AgentRequest(
@@ -65,3 +94,22 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
                 result.success = False
                 result.error_message = "Implementation provider completed without changing files"
         return result
+
+    @staticmethod
+    def _render_validation_failures(validation: ValidationResult) -> str:
+        rendered: list[str] = []
+        for check in validation.checks:
+            if check.success:
+                continue
+            output = check.stderr or check.stdout or "no output"
+            rendered.append(
+                "\n".join(
+                    (
+                        f"Command: {format_command(check.command)}",
+                        f"Exit code: {check.exit_code}",
+                        "Output:",
+                        redact_text(output)[:_CORRECTION_OUTPUT_LIMIT],
+                    )
+                )
+            )
+        return "\n\n".join(rendered) or (validation.error_message or "Validation failed")

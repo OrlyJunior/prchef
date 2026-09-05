@@ -34,6 +34,12 @@ from orchestrator.workspace.manager import WorkspaceManager
 logger = logging.getLogger(__name__)
 
 
+class _ValidationFailed(WorkflowError):
+    def __init__(self, validation: ValidationResult) -> None:
+        super().__init__(validation.error_message or "Validation failed")
+        self.validation = validation
+
+
 _STAGE_LABELS = {
     WorkflowStage.LOAD_TASK: "task loading",
     WorkflowStage.LOAD_CONFIG: "repository/config resolution",
@@ -125,25 +131,50 @@ class WorkflowService:
                 self._repository.record_branch(execution.id, working_branch)
             execution_clients = clients.at_path(workspace_path)
 
+            implementation_service = ImplementationService(
+                execution_clients.agent(AgentRole.IMPLEMENTER), execution_clients.git
+            )
             with self._step(execution.id, WorkflowStage.IMPLEMENT):
-                implementation = ImplementationService(
-                    execution_clients.agent(AgentRole.IMPLEMENTER), execution_clients.git
-                ).implement(task, spec, workspace_path)
+                implementation = implementation_service.implement(task, spec, workspace_path)
                 self._repository.record_implementation(execution.id, implementation)
                 if not implementation.success:
                     raise WorkflowError(
                         implementation.error_message or "Implementation provider failed"
                     )
 
-            with self._step(execution.id, WorkflowStage.VALIDATE):
-                validation = ValidationService(execution_clients.commands).validate(
-                    workspace_path,
-                    config.validation,
-                    require_tests=config.safety.require_tests,
-                )
-                self._repository.record_validation(execution.id, validation)
-                if not validation.success:
-                    raise WorkflowError(validation.error_message or "Validation failed")
+            validation_attempt = 0
+            while True:
+                try:
+                    with self._step(execution.id, WorkflowStage.VALIDATE):
+                        validation = ValidationService(execution_clients.commands).validate(
+                            workspace_path,
+                            config.validation,
+                            require_tests=config.safety.require_tests,
+                        )
+                        self._repository.record_validation(execution.id, validation)
+                        if not validation.success:
+                            raise _ValidationFailed(validation)
+                except _ValidationFailed as exc:
+                    if validation_attempt >= config.validation.max_validation_retries:
+                        raise WorkflowError(str(exc)) from exc
+                    validation_attempt += 1
+                    logger.info(
+                        "[workflow] Validation failed; requesting implementation correction %s/%s",
+                        validation_attempt,
+                        config.validation.max_validation_retries,
+                    )
+                    with self._step(execution.id, WorkflowStage.IMPLEMENT):
+                        implementation = implementation_service.correct_validation_failures(
+                            task, spec, exc.validation, workspace_path
+                        )
+                        self._repository.record_implementation(execution.id, implementation)
+                        if not implementation.success:
+                            raise WorkflowError(
+                                implementation.error_message
+                                or "Implementation correction provider failed"
+                            ) from exc
+                    continue
+                break
 
             with self._step(execution.id, WorkflowStage.COMMIT):
                 commit_sha = execution_clients.git.commit_all(
