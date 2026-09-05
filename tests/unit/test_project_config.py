@@ -11,6 +11,7 @@ from orchestrator.config.project_config import (
     GitHubAppSettings,
     ProjectConfig,
     ProjectConfigLoader,
+    resolve_global_config,
 )
 from orchestrator.models.development_task import DevelopmentTask
 
@@ -346,3 +347,88 @@ def test_loader_rejects_project_settings_misplaced_at_global_top_level(tmp_path:
 
     with pytest.raises(ConfigurationError, match="Project settings at the top level"):
         ProjectConfigLoader(config_file).load(task)
+
+
+def test_global_config_discovery_walks_up_from_the_working_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text("defaults: {}\n", encoding="utf-8")
+    nested_working_directory = tmp_path / "one" / "two"
+    nested_working_directory.mkdir(parents=True)
+    monkeypatch.chdir(nested_working_directory)
+
+    assert ProjectConfigLoader().load_defaults().path == tmp_path
+
+
+def test_explicit_global_config_takes_precedence_over_environment_and_discovery(
+    tmp_path: Path,
+) -> None:
+    explicit = tmp_path / "explicit.yml"
+    from_environment = tmp_path / "environment.yml"
+    discovered = tmp_path / "orchestrator.yml"
+    for config_file in (explicit, from_environment, discovered):
+        config_file.write_text("defaults: {}\n", encoding="utf-8")
+
+    assert (
+        resolve_global_config(
+            explicit,
+            environ={"ORCHESTRATOR_CONFIG": str(from_environment)},
+            cwd=tmp_path,
+        )
+        == explicit.resolve()
+    )
+
+
+def test_environment_global_config_takes_precedence_over_cwd_discovery(tmp_path: Path) -> None:
+    from_environment = tmp_path / "environment.yml"
+    discovered = tmp_path / "orchestrator.yml"
+    from_environment.write_text("defaults: {}\n", encoding="utf-8")
+    discovered.write_text("defaults: {}\n", encoding="utf-8")
+
+    assert (
+        resolve_global_config(
+            environ={"ORCHESTRATOR_CONFIG_PATH": str(from_environment)}, cwd=tmp_path
+        )
+        == from_environment.resolve()
+    )
+
+
+def test_global_config_discovery_uses_user_config_locations(tmp_path: Path) -> None:
+    user_config = (
+        tmp_path / "home" / ".config" / "orchestrator" / "orchestrator.yml"
+    )
+    user_config.parent.mkdir(parents=True)
+    user_config.write_text("defaults: {}\n", encoding="utf-8")
+    working_directory = tmp_path / "isolated"
+    working_directory.mkdir()
+
+    assert (
+        resolve_global_config(
+            environ={},
+            cwd=working_directory,
+            home=tmp_path / "home",
+            installation_dir=tmp_path / "installation",
+        )
+        == user_config.resolve()
+    )
+
+
+def test_global_config_discovery_reports_every_searched_location(tmp_path: Path) -> None:
+    working_directory = tmp_path / "isolated" / "nested"
+    working_directory.mkdir(parents=True)
+
+    with pytest.raises(ConfigurationError, match="Global configuration not found") as exc_info:
+        resolve_global_config(
+            environ={},
+            cwd=working_directory,
+            home=tmp_path / "home",
+            installation_dir=tmp_path / "installation",
+        )
+
+    message = str(exc_info.value)
+    assert str(working_directory / "orchestrator.yml") in message
+    assert (
+        str(tmp_path / "home" / ".config" / "orchestrator" / "orchestrator.yml")
+        in message
+    )

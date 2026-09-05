@@ -134,6 +134,11 @@
 - Global `orchestrator.yml` contains top-level task selection and `defaults`; project settings at
   global top level are rejected. For a repository, merge in order: `defaults` → matching
   `repositories.<key>` entry → target repository `.orchestrator.yml` (later wins).
+- Global configuration discovery is ordered: explicit `--config`; `ORCHESTRATOR_CONFIG`,
+  `ORCHESTRATOR_CONFIG_PATH`, or legacy `ORCHESTRATOR_CONFIG_FILE`; `orchestrator.yml` in the
+  current directory and its parents; `~/.config/orchestrator/orchestrator.yml`; then
+  `~/.orchestrator/orchestrator.yml` and the installed source checkout. An explicitly selected or
+  environment-selected missing file is an error; a failed implicit search reports every path tried.
 - Repository selection comes from explicit CLI override when supplied, otherwise normalized task
   repository metadata. A registered entry supplies its local path; an unregistered override is
   interpreted as a repository path.

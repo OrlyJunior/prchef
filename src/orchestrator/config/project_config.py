@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +14,14 @@ from orchestrator.models.development_task import DevelopmentTask
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+GLOBAL_CONFIG_FILENAME = "orchestrator.yml"
+_CONFIG_ENVIRONMENT_VARIABLES = (
+    "ORCHESTRATOR_CONFIG",
+    "ORCHESTRATOR_CONFIG_PATH",
+    "ORCHESTRATOR_CONFIG_FILE",
+)
 
 
 class RepositorySettings(BaseModel):
@@ -437,9 +447,81 @@ def _load_yaml(path: Path, *, required: bool) -> dict[str, Any]:
     return content
 
 
+def resolve_global_config(
+    config_file: Path | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+    home: Path | None = None,
+    installation_dir: Path | None = None,
+) -> Path:
+    """Resolve the global configuration using the CLI's documented precedence."""
+    working_directory = (cwd or Path.cwd()).expanduser().resolve()
+    environment = os.environ if environ is None else environ
+
+    def resolve_candidate(path: Path) -> Path:
+        expanded = path.expanduser()
+        if expanded.is_absolute():
+            return expanded.resolve()
+        return (working_directory / expanded).resolve()
+
+    if config_file is not None:
+        explicit_path = resolve_candidate(config_file)
+        if explicit_path.is_file():
+            return explicit_path
+        raise ConfigurationError(f"Explicit configuration file not found: {explicit_path}")
+
+    for variable in _CONFIG_ENVIRONMENT_VARIABLES:
+        configured = environment.get(variable)
+        if not configured:
+            continue
+        environment_path = resolve_candidate(Path(configured))
+        if environment_path.is_file():
+            return environment_path
+        raise ConfigurationError(
+            f"Configuration file from {variable} not found: {environment_path}"
+        )
+
+    candidates = [
+        directory / GLOBAL_CONFIG_FILENAME
+        for directory in (working_directory, *working_directory.parents)
+    ]
+    user_home = (home or Path.home()).expanduser()
+    candidates.extend(
+        [
+            user_home / ".config" / "orchestrator" / GLOBAL_CONFIG_FILENAME,
+            user_home / ".orchestrator" / GLOBAL_CONFIG_FILENAME,
+        ]
+    )
+    package_root = installation_dir or Path(__file__).resolve().parents[3]
+    candidates.append(package_root / GLOBAL_CONFIG_FILENAME)
+
+    searched: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in searched:
+            continue
+        searched.append(resolved)
+        if resolved.is_file():
+            return resolved
+
+    rendered = "\n  - ".join(str(path) for path in searched)
+    raise ConfigurationError(f"Global configuration not found. Searched:\n  - {rendered}")
+
+
 class ProjectConfigLoader:
-    def __init__(self, config_file: Path) -> None:
-        self._config_file = config_file.resolve()
+    def __init__(self, config_file: Path | None = None) -> None:
+        # Debug commands can construct a loader for stages that do not need any
+        # project configuration. Resolve only when configuration is requested so
+        # those paths retain that behavior while all actual loads share discovery.
+        self._requested_config_file = config_file
+        self._resolved_config_file: Path | None = None
+
+    @property
+    def _config_file(self) -> Path:
+        if self._resolved_config_file is None:
+            self._resolved_config_file = resolve_global_config(self._requested_config_file)
+        return self._resolved_config_file
 
     def load_defaults(self) -> ProjectConfig:
         """Load the global default project configuration without selecting a repository."""
