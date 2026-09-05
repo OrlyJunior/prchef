@@ -123,6 +123,8 @@ class GitHubAppSettings(BaseModel):
     private_key_path: Path | None = None
     private_key_env: str | None = None
     api_url: str = "https://api.github.com"
+    bot_name: str | None = None
+    bot_user_id: int | None = Field(default=None, gt=0)
 
     @field_validator("private_key_env")
     @classmethod
@@ -142,6 +144,16 @@ class GitHubAppSettings(BaseModel):
             raise ValueError("GitHub App api_url must be an HTTP(S) URL")
         return normalized
 
+    @field_validator("bot_name")
+    @classmethod
+    def validate_bot_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("GitHub App bot_name must be a non-empty string")
+        return normalized
+
     @model_validator(mode="after")
     def validate_complete_credentials(self) -> GitHubAppSettings:
         configured = [
@@ -158,6 +170,10 @@ class GitHubAppSettings(BaseModel):
                 "GitHub App private key must use either private_key_path or "
                 "private_key_env, not both"
             )
+        if (self.bot_name is None) != (self.bot_user_id is None):
+            raise ValueError(
+                "GitHub App bot_name and bot_user_id must be configured together"
+            )
         return self
 
     @property
@@ -166,7 +182,16 @@ class GitHubAppSettings(BaseModel):
 
 
 class GitHubIntegrationSettings(CommandIntegrationSettings):
+    """GitHub CLI integration identities.
+
+    ``app`` remains the reviewer identity for backwards compatibility. The
+    implementer identity is deliberately separate from review credentials.
+    """
+
+    command: list[str] = Field(default_factory=lambda: ["gh"])
+    timeout_seconds: int = 120
     app: GitHubAppSettings = Field(default_factory=GitHubAppSettings)
+    implementer_app: GitHubAppSettings = Field(default_factory=GitHubAppSettings)
 
 
 class CodexIntegrationSettings(CommandIntegrationSettings):
@@ -662,6 +687,43 @@ class ProjectConfigLoader:
             return ProjectConfig.model_validate(merged)
         except ValueError as exc:
             raise ConfigurationError(f"Invalid project configuration: {exc}") from exc
+
+    def save_github_app_settings(
+        self,
+        repository_path: Path,
+        *,
+        implementer_app: GitHubAppSettings,
+        reviewer_app: GitHubAppSettings,
+    ) -> Path:
+        """Persist App *references* in the repository-local configuration.
+
+        The TUI only writes App IDs, installation IDs, and key file/environment
+        references. Private key contents and installation tokens are neither
+        accepted nor serialized here.
+        """
+        local_path = repository_path / ".orchestrator.yml"
+        configuration = _load_yaml(local_path, required=False)
+        integrations = configuration.setdefault("integrations", {})
+        if not isinstance(integrations, dict):
+            raise ConfigurationError("'integrations' must be a mapping")
+        github = integrations.setdefault("github", {})
+        if not isinstance(github, dict):
+            raise ConfigurationError("'integrations.github' must be a mapping")
+
+        for key, settings in (("implementer_app", implementer_app), ("app", reviewer_app)):
+            if settings.is_configured:
+                github[key] = settings.model_dump(mode="json", exclude_none=True)
+            else:
+                github.pop(key, None)
+
+        try:
+            serialized = yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False)
+            temporary_path = local_path.with_suffix(".yml.tmp")
+            temporary_path.write_text(serialized, encoding="utf-8")
+            temporary_path.replace(local_path)
+        except OSError as exc:
+            raise ConfigurationError(f"Cannot write configuration {local_path}: {exc}") from exc
+        return local_path
 
     @staticmethod
     def _repository_ref_from_task(task: DevelopmentTask) -> str | None:

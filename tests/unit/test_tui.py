@@ -5,7 +5,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from orchestrator.config.project_config import ConfiguredRepository, ProjectConfig
+from orchestrator.config.project_config import (
+    ConfiguredRepository,
+    GitHubAppSettings,
+    ProjectConfig,
+)
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.workflow_execution import WorkflowExecution
@@ -14,6 +18,7 @@ from orchestrator.tui.app import OrchestratorApp
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
 from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
 from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
+from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 from orchestrator.tui.screens.workflow_runner import WorkflowRunnerScreen
 
 
@@ -37,6 +42,7 @@ class _Repository:
 class _ConfigLoader:
     def __init__(self, path: Path) -> None:
         self._path = path
+        self.saved_github_apps: tuple[Path, GitHubAppSettings, GitHubAppSettings] | None = None
         self.config = ProjectConfig.model_validate(
             {
                 "path": path,
@@ -63,6 +69,16 @@ class _ConfigLoader:
     def load(self, task: DevelopmentTask, repository: str | None = None) -> ProjectConfig:
         assert task.repository == repository == "example"
         return self.config
+
+    def save_github_app_settings(
+        self,
+        repository_path: Path,
+        *,
+        implementer_app: GitHubAppSettings,
+        reviewer_app: GitHubAppSettings,
+    ) -> Path:
+        self.saved_github_apps = (repository_path, implementer_app, reviewer_app)
+        return repository_path / ".orchestrator.yml"
 
 
 class _TaskProvider:
@@ -165,6 +181,28 @@ def test_textual_app_navigates_to_workflow_runner(tmp_path: Path) -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
             assert isinstance(application.screen, WorkflowRunnerScreen)
+
+    asyncio.run(drive())
+
+
+def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("c")
+            assert isinstance(application.screen, GitHubAppSettingsScreen)
+            repository = application.screen.query_one("#github-app-repository")
+            repository.value = "example"
+            await pilot.pause()
+            application.screen.query_one("#implementer-app-id").value = "123"
+            application.screen.query_one("#implementer-installation-id").value = "456"
+            application.screen.query_one("#implementer-key-env").value = "IMPLEMENTER_KEY"
+            await pilot.click("#save-github-apps")
+            assert "Saved App references" in str(
+                application.screen.query_one("#github-app-status").renderable
+            )
 
     asyncio.run(drive())
 

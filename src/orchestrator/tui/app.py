@@ -11,6 +11,7 @@ from textual.widgets import Button, Footer, Header, Static
 
 from orchestrator.tui.bridge import WorkflowController
 from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
+from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 from orchestrator.tui.screens.workflow_runner import WorkflowRunnerScreen
 
 
@@ -28,6 +29,8 @@ class OrchestratorApp(App[None]):
     .screen-title { text-style: bold; margin-bottom: 1; }
     .field-label { margin-top: 1; }
     .workflow-form { max-width: 100; }
+    .github-app-roles { width: 100%; }
+    .github-app-role { width: 1fr; margin-right: 1; }
     .screen-actions { margin-top: 1; height: auto; }
     .screen-actions Button { margin-right: 1; }
     #workflow-progress { margin-top: 2; text-style: bold; }
@@ -37,6 +40,7 @@ class OrchestratorApp(App[None]):
     BINDINGS = [
         Binding("n", "new_workflow", "New workflow"),
         Binding("h", "history", "History"),
+        Binding("c", "github_apps", "GitHub Apps"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -55,6 +59,7 @@ class OrchestratorApp(App[None]):
             with Horizontal(classes="screen-actions"):
                 yield Button("Start workflow", variant="success", id="new-workflow")
                 yield Button("Execution history", id="history")
+                yield Button("GitHub Apps", id="github-apps")
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -62,9 +67,14 @@ class OrchestratorApp(App[None]):
             self.action_new_workflow()
         elif event.button.id == "history":
             self.action_history()
+        elif event.button.id == "github-apps":
+            self.action_github_apps()
 
     def action_new_workflow(self) -> None:
         self.push_screen(WorkflowRunnerScreen())
 
     def action_history(self) -> None:
         self.push_screen(ExecutionHistoryScreen())
+
+    def action_github_apps(self) -> None:
+        self.push_screen(GitHubAppSettingsScreen())

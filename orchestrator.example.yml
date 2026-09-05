@@ -76,8 +76,12 @@ defaults:
     github:
       command: [gh]
       timeout_seconds: 120
-      # Configure an installed GitHub App for formal PR reviews; see docs/github_app.md.
+      # Configure independent App identities for implementation and review; see docs/github_app.md.
       # Never version the private key.
+      # implementer_app:
+      #   app_id: 123456
+      #   installation_id: 987654
+      #   private_key_path: C:/secure/implementer-github-app-private-key.pem
       # app:
       #   app_id: 123456
       #   installation_id: 987654

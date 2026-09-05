@@ -52,7 +52,7 @@ except ModuleNotFoundError:
 
 
 class GitHubAppAuthenticator:
-    """Mints and caches a GitHub App installation token for ``gh`` API calls."""
+    """Mints and caches a GitHub App installation token and bot metadata."""
 
     def __init__(
         self,
@@ -66,6 +66,7 @@ class GitHubAppAuthenticator:
         self._now = now or (lambda: datetime.now(UTC))
         self._token: str | None = None
         self._token_expires_at: datetime | None = None
+        self._bot_identity: tuple[str, str] | None = None
 
     def token(self) -> str:
         now = self._now()
@@ -103,6 +104,39 @@ class GitHubAppAuthenticator:
         self._token = token
         self._token_expires_at = parsed_expiry.astimezone(UTC)
         return token
+
+    def bot_identity(self) -> tuple[str, str]:
+        """Return the App bot name and noreply address for Git commit metadata."""
+        if self._bot_identity is not None:
+            return self._bot_identity
+        if self._settings.bot_name is not None and self._settings.bot_user_id is not None:
+            self._bot_identity = (
+                self._settings.bot_name,
+                f"{self._settings.bot_user_id}+{self._settings.bot_name}@users.noreply.github.com",
+            )
+            return self._bot_identity
+
+        now = self._now()
+        try:
+            response = self._http.get(
+                f"{self._settings.api_url}/app",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {self._app_jwt(now)}",
+                    "X-GitHub-Api-Version": _GITHUB_API_VERSION,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            slug = payload["slug"]
+            app_id = payload["id"]
+            if not isinstance(slug, str) or not slug or not isinstance(app_id, int):
+                raise ValueError("response App identity is missing")
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise GitHubClientError("Could not resolve GitHub App bot identity") from exc
+        bot_name = f"{slug}[bot]"
+        self._bot_identity = (bot_name, f"{app_id}+{bot_name}@users.noreply.github.com")
+        return self._bot_identity
 
     def _app_jwt(self, now: datetime) -> str:
         assert self._settings.app_id is not None
@@ -145,14 +179,23 @@ class GitHubClient:
         timeout_seconds: int,
         *,
         app: GitHubAppSettings | None = None,
+        implementer_app: GitHubAppSettings | None = None,
+        review_authenticator: GitHubAppAuthenticator | None = None,
+        implementer_authenticator: GitHubAppAuthenticator | None = None,
     ) -> None:
         self._commands = command_client
         self._path = repository_path
         self._command = list(command)
         self._timeout_seconds = timeout_seconds
         self._app = app or GitHubAppSettings()
-        self._app_authenticator = (
+        self._implementer_app = implementer_app or GitHubAppSettings()
+        self._app_authenticator = review_authenticator or (
             GitHubAppAuthenticator(self._app) if self._app.is_configured else None
+        )
+        self._implementer_authenticator = implementer_authenticator or (
+            GitHubAppAuthenticator(self._implementer_app)
+            if self._implementer_app.is_configured
+            else None
         )
 
     def at_path(self, repository_path: Path) -> GitHubClient:
@@ -162,6 +205,9 @@ class GitHubClient:
             self._command,
             self._timeout_seconds,
             app=self._app,
+            implementer_app=self._implementer_app,
+            review_authenticator=self._app_authenticator,
+            implementer_authenticator=self._implementer_authenticator,
         )
 
     def create_pull_request(
@@ -184,6 +230,7 @@ class GitHubClient:
             base_branch,
             "--head",
             head_branch,
+            env=self._implementer_auth_environment(),
         )
         url = next(
             (
@@ -201,6 +248,7 @@ class GitHubClient:
             url,
             "--json",
             "number,url,title,baseRefName,headRefName",
+            env=self._implementer_auth_environment(),
         )
         try:
             data = json.loads(viewed.stdout)
@@ -255,10 +303,19 @@ class GitHubClient:
         )
 
     def _review_auth_environment(self) -> dict[str, str] | None:
-        if self._app_authenticator is None:
+        return self._authentication_environment(self._app_authenticator)
+
+    def _implementer_auth_environment(self) -> dict[str, str] | None:
+        return self._authentication_environment(self._implementer_authenticator)
+
+    @staticmethod
+    def _authentication_environment(
+        authenticator: GitHubAppAuthenticator | None,
+    ) -> dict[str, str] | None:
+        if authenticator is None:
             return None
         environment = dict(os.environ)
-        environment["GH_TOKEN"] = self._app_authenticator.token()
+        environment["GH_TOKEN"] = authenticator.token()
         return environment
 
     def _run(self, *arguments: str, env: dict[str, str] | None = None) -> CommandResult:
