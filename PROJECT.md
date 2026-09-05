@@ -62,8 +62,12 @@
 
 - Worktree root is configurable. The default is a sibling `orchestrator-workspaces` directory;
   configured roots may not resolve inside the control checkout. Existing target paths are errors.
-- Worktrees are intentionally retained; there is no automatic cleanup on success, failure, or
-  human intervention. Failure/human paths log the preserved workspace explicitly.
+- Worktrees are retained automatically on success, failure, and human intervention so they remain
+  available for inspection and recovery. `cleanup-workspaces --repository <key-or-path> --dry-run`
+  lists their retention decisions; without `--dry-run` it removes successful (`APPROVED` or
+  `CHANGES_REQUESTED`) worktrees and prunes Git metadata. `FAILED`/`NEEDS_HUMAN` worktrees require
+  `--include-failed` (or `--all`); `PENDING`, `RUNNING`, unmanaged, and out-of-root paths are never
+  removed by this command.
 - Commit/push refuse protected branches and refuse if the current checkout is not the workflow
   branch. Commit stages **all** worktree changes and fails if nothing is staged. Push is only
   `git push --set-upstream origin <working-branch>`.

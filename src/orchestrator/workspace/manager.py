@@ -40,7 +40,7 @@ class WorkspaceManager:
     def workspace_path(self, execution_id: str) -> Path:
         safe_execution_id = self._safe_component(execution_id, "execution id")
         repository_name = self._safe_component(self._control_repository.name, "repository name")
-        root = self._workspace_root()
+        root = self.workspace_root()
         workspace = (root / repository_name / safe_execution_id).resolve()
         if self._is_within(workspace, self._control_repository):
             raise ValueError(
@@ -48,6 +48,16 @@ class WorkspaceManager:
                 "repository"
             )
         return workspace
+
+    def workspace_root(self) -> Path:
+        """Return the resolved workspace root after applying control-checkout safety."""
+        root = self._workspace_root()
+        if self._is_within(root, self._control_repository):
+            raise ValueError(
+                "Workspace root must not create execution worktrees inside the configured "
+                "repository"
+            )
+        return root
 
     def _workspace_root(self) -> Path:
         configured = self._settings.root
