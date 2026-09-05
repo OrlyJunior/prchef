@@ -22,7 +22,7 @@ from orchestrator.models.workflow_status import (
 )
 from orchestrator.providers.agent_provider import AgentNeedsHumanError
 from orchestrator.repositories.workflow_repository import WorkflowRepository
-from orchestrator.runtime_logging import redact_text
+from orchestrator.runtime_logging import log_review_summary, log_spec_summary, redact_text
 from orchestrator.services.exceptions import WorkflowError
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.review_service import ReviewService
@@ -61,11 +61,14 @@ class WorkflowService:
         task_provider: TaskProvider,
         config_loader: ProjectConfigLoader,
         client_factory: ClientFactory,
+        *,
+        verbose: bool = False,
     ) -> None:
         self._repository = workflow_repository
         self._task_provider = task_provider
         self._config_loader = config_loader
         self._client_factory = client_factory
+        self._verbose = verbose
 
     def run(self, task_id: str, repository_override: str | None = None) -> WorkflowExecution:
         execution = self._repository.create_execution(
@@ -105,6 +108,8 @@ class WorkflowService:
                     ),
                 )
                 self._repository.record_spec(execution.id, spec)
+                if self._verbose:
+                    log_spec_summary(logger, spec)
             if spec.has_blocking_ambiguity:
                 message = "; ".join(spec.ambiguities) or "Planner reported blocking ambiguity"
                 self._repository.record_error(execution.id, message)
@@ -218,6 +223,8 @@ class WorkflowService:
                     ),
                 )
                 self._repository.record_review(execution.id, review)
+                if self._verbose:
+                    log_review_summary(logger, review)
                 if review.result is ReviewDecision.NEEDS_HUMAN:
                     self._repository.record_error(execution.id, review.summary)
 
