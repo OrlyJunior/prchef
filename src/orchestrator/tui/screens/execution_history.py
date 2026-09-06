@@ -79,7 +79,11 @@ class ExecutionHistoryScreen(Screen[None]):
             (
                 " | ".join(
                     [
-                        execution.status.value,
+                        (
+                            "AWAITING HUMAN"
+                            if execution.status.value == "NEEDS_HUMAN"
+                            else execution.status.value
+                        ),
                         execution.current_stage.value,
                         f"{execution.task_source}:{execution.task_id}",
                         execution.repository or "repository pending",

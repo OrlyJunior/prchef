@@ -58,6 +58,22 @@ class OrchestratorApp(App[None]):
     .workflow-log-actions { height: auto; margin-top: 1; }
     .workflow-log-actions Button { width: auto; }
     #workflow-raw-events { display: none; margin-top: 1; color: $text-muted; }
+    #human-input-panel {
+        display: none;
+        height: auto;
+        margin-top: 1;
+        padding: 1;
+        border: round $warning;
+    }
+    #human-input-prompt { margin-bottom: 1; }
+    #human-response { height: 7; }
+    #execution-human-title,
+    #execution-human-prompt,
+    #execution-human-response,
+    #execution-human-actions {
+        display: none;
+    }
+    #execution-human-response { height: 7; }
     #execution-content { width: 100%; }
     """
     BINDINGS = [

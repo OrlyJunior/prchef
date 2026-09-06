@@ -5,8 +5,9 @@
 - Python 3.11+ CLI and Textual terminal UI that turn one Trello card or GitHub issue into a
   guarded change: plan → isolated implementation → validation → commit/push → GitHub PR →
   review publication.
-- It coordinates providers, Git, GitHub, and persistence. It is **not** a merge bot, a generic
-  repository browser/RAG service, or a workflow-resume system.
+- It coordinates providers, Git, GitHub, and persistence. It is **not** a merge bot or a generic
+  repository browser/RAG service. Human-blocked executions are resumable using their persisted
+  workflow state; this is not a provider-session resume system.
 - `PROJECT.md` is injected as supporting context into planning and review prompts (capped at
   12,000 characters). Current task text and repository state win over this file.
 
@@ -58,9 +59,14 @@
 - An execution is created as `PENDING`, immediately marked `RUNNING`, and records every entered
   stage as a separately persisted step. Repeated validation/correction attempts create repeated
   `VALIDATE`/`IMPLEMENT` steps.
-- Persist: normalized task, resolved repository/base branch, worktree path, branch, latest
+- Persist: normalized task, resolved repository/base branch and configured repository reference,
+  worktree path, branch, latest
   implementation and validation snapshots, commit, PR, review, status/error, and timestamps.
   The implementation/validation snapshots are latest-attempt snapshots, not an attempt history.
+- A `NEEDS_HUMAN` transition creates an append-only human-interaction record containing the
+  requesting stage, exact blocking prompt, request/response timestamps, and the response. `respond`
+  and the TUI resume the same execution ID; planner responses rerun planning before any workspace is
+  created, while review responses reuse the persisted worktree, branch, PR, and snapshots.
 - Provider startup references during spec/review are persisted immediately in legacy-named
   `spec_jules_session_*` / `review_jules_session_*` fields. Preserve those fields for later human
   inspection; no automatic session/workflow resume exists.

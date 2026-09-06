@@ -287,6 +287,52 @@ def test_cli_runs_trello_provider(monkeypatch: Any) -> None:
     assert StubWorkflowService.calls == [("trello", "card-1", None)]
 
 
+def test_cli_respond_uses_same_execution_and_service_logic(monkeypatch: Any) -> None:
+    execution = WorkflowExecution(
+        id="execution-human",
+        task_source="trello",
+        task_id="card-1",
+        status=WorkflowStatus.NEEDS_HUMAN,
+        task_snapshot={
+            "id": "card-1",
+            "source": "trello",
+            "title": "Task",
+            "description": "",
+            "url": "https://trello.example/card-1",
+            "repository": "example",
+            "metadata": {},
+        },
+    )
+
+    class Repository:
+        def get_execution(self, execution_id: str) -> WorkflowExecution:
+            assert execution_id == execution.id
+            return execution
+
+    calls: list[tuple[str, str]] = []
+
+    class RespondService:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def respond_and_resume(self, execution_id: str, message: str) -> WorkflowExecution:
+            calls.append((execution_id, message))
+            return WorkflowExecution(id=execution_id, status=WorkflowStatus.APPROVED)
+
+    monkeypatch.setattr(main, "_migrated_repository", lambda settings: Repository())
+    monkeypatch.setattr(main, "_config_loader", lambda path: object())
+    monkeypatch.setattr(main, "WorkflowService", RespondService)
+    monkeypatch.setattr(main, "ClientFactory", lambda api_key: object())
+
+    result = runner.invoke(
+        main.app,
+        ["respond", "execution-human", "--message", "Use the configured default."],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("execution-human", "Use the configured default.")]
+
+
 def test_cli_launches_textual_tui_after_migrations(monkeypatch: Any) -> None:
     _stub_runtime(monkeypatch)
     launched = False

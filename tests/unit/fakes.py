@@ -16,6 +16,7 @@ from orchestrator.models import (
     AgentRole,
     CodeReview,
     DevelopmentTask,
+    HumanInteraction,
     ImplementationResult,
     PullRequest,
     RepositorySpec,
@@ -58,10 +59,17 @@ class FakeWorkflowRepository:
             execution.trello_card_url = task.url
         execution.task_snapshot = asdict(task)
 
-    def update_project(self, execution_id: str, repository: str, base_branch: str) -> None:
+    def update_project(
+        self,
+        execution_id: str,
+        repository: str,
+        base_branch: str,
+        repository_ref: str = "",
+    ) -> None:
         execution = self._execution()
         execution.repository = repository
         execution.base_branch = base_branch
+        execution.repository_ref = repository_ref
 
     def record_workspace(self, execution_id: str, workspace_path: str) -> None:
         self._execution().workspace_path = workspace_path
@@ -112,6 +120,34 @@ class FakeWorkflowRepository:
 
     def record_error(self, execution_id: str, message: str) -> None:
         self._execution().error_message = message
+
+    def request_human_input(
+        self, execution_id: str, stage: WorkflowStage, prompt: str
+    ) -> HumanInteraction:
+        execution = self._execution()
+        interaction = HumanInteraction(
+            id=len(execution.human_interactions) + 1,
+            workflow_execution_id=execution_id,
+            requesting_stage=stage,
+            prompt=prompt,
+            requested_at=datetime.now(UTC),
+        )
+        execution.human_interactions.append(interaction)
+        return interaction
+
+    def respond_to_human_input(self, execution_id: str, response: str) -> HumanInteraction:
+        interaction = next(
+            item for item in reversed(self._execution().human_interactions) if item.response is None
+        )
+        interaction.response = response.strip()
+        interaction.responded_at = datetime.now(UTC)
+        return interaction
+
+    def resume_execution(self, execution_id: str) -> None:
+        execution = self._execution()
+        execution.status = WorkflowStatus.RUNNING
+        execution.error_message = None
+        execution.finished_at = None
 
     def finish(self, execution_id: str, status: WorkflowStatus) -> None:
         execution = self._execution()
