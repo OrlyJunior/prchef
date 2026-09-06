@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from textual.containers import VerticalScroll
-from textual.widgets import Button, Input, Select
+from textual.widgets import Button, Input, Select, Static
 
 from orchestrator.config.project_config import (
     ConfiguredRepository,
@@ -16,8 +16,9 @@ from orchestrator.config.project_config import (
 )
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import WorkflowStatus
+from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.tui.app import OrchestratorApp
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
 from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
@@ -262,6 +263,125 @@ def test_textual_app_navigates_to_workflow_runner(tmp_path: Path) -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
             assert isinstance(application.screen, WorkflowRunnerScreen)
+
+    asyncio.run(drive())
+
+
+def test_tui_buttons_activate_on_initial_click(tmp_path: Path) -> None:
+    """A pointer click should activate an action without a focus-setting click first."""
+
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            await pilot.click("#new-workflow")
+            assert isinstance(application.screen, WorkflowRunnerScreen)
+            await pilot.pause()
+            await pilot.click("#workflow-history")
+            assert isinstance(application.screen, ExecutionHistoryScreen)
+
+    asyncio.run(drive())
+
+
+def test_select_opens_on_first_click_and_restores_focus_when_closed(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            screen = application.screen
+            select = screen.query_one("#repository", Select)
+            await pilot.click("#repository")
+            assert select.expanded is True
+            await pilot.press("escape")
+            assert select.expanded is False
+            assert screen.focused is select
+
+    asyncio.run(drive())
+
+
+def test_select_focus_scrolls_the_control_into_view_on_small_terminals(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 20)) as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            screen = application.screen
+            screen.query_one("#planner-configure", Button).press()
+            await pilot.pause()
+            select = screen.query_one("#planner-provider", Select)
+            select.focus()
+            await pilot.pause()
+            content = screen.query_one("#workflow-runner", VerticalScroll)
+            assert content.scroll_y > 0
+            await pilot.press("enter")
+            await pilot.pause()
+            overlay = select.query_one("SelectOverlay")
+            assert overlay.region.y >= screen.region.y
+            assert overlay.region.bottom <= screen.region.bottom
+
+    asyncio.run(drive())
+
+
+def test_github_app_compact_summary_hides_identifiers() -> None:
+    configured = GitHubAppSettings(
+        app_id=12,
+        installation_id=34,
+        private_key_env="APP_KEY",
+    )
+    unconfigured = GitHubAppSettings()
+
+    assert WorkflowRunnerScreen.github_app_summary(configured, configured) == (
+        "GitHub Apps: Implementer ✓ · Reviewer ✓"
+    )
+    assert WorkflowRunnerScreen.github_app_summary(configured, unconfigured) == (
+        "GitHub Apps: Implementer ✓ · Reviewer —"
+    )
+    assert "12" not in WorkflowRunnerScreen.github_app_summary(configured, unconfigured)
+
+
+def test_workflow_runner_maps_live_events_to_timeline_and_keeps_raw_logs_optional(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await pilot.pause()
+            screen = application.screen
+            started = WorkflowEvent(
+                execution_id="execution-1",
+                kind=WorkflowEventKind.STAGE_STARTED,
+                stage=WorkflowStage.IMPLEMENT,
+                step_status=StepStatus.RUNNING,
+            )
+            finished = WorkflowEvent(
+                execution_id="execution-1",
+                kind=WorkflowEventKind.STAGE_FINISHED,
+                stage=WorkflowStage.IMPLEMENT,
+                step_status=StepStatus.SUCCEEDED,
+            )
+            screen._render_workflow_event(started)
+            screen._render_workflow_event(finished)
+
+            timeline = str(screen.query_one("#workflow-events", Static).renderable)
+            assert "✓ Changes implemented" in timeline
+            assert "STAGE_STARTED" not in timeline
+            assert "STAGE_FINISHED" not in timeline
+
+            screen.query_one("#toggle-workflow-logs", Button).press()
+            await pilot.pause()
+            raw_events = screen.query_one("#workflow-raw-events", Static)
+            assert raw_events.display is True
+            assert "STAGE_STARTED" in str(raw_events.renderable)
+            assert "STAGE_FINISHED" in str(raw_events.renderable)
 
     asyncio.run(drive())
 

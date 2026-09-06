@@ -13,8 +13,9 @@ from textual.widgets import Button, Input, Select, Static
 
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.models.workflow_event import WorkflowEvent
+from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
+from orchestrator.models.workflow_status import WorkflowStage, WorkflowStatus
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
 from orchestrator.tui.screens.task_selector import TaskSelector
 
@@ -30,6 +31,10 @@ class WorkflowRunnerScreen(Screen[None]):
     def __init__(self) -> None:
         super().__init__()
         self._event_lines: list[str] = []
+        self._raw_event_lines: list[str] = []
+        self._active_timeline_stages: dict[WorkflowStage, int] = {}
+        self._stage_attempts: dict[WorkflowStage, int] = {}
+        self._show_raw_events = False
         self._role_providers: dict[AgentRole, str] = {}
         self._role_default_providers: dict[AgentRole, str] = {}
         self._runtime_inputs: dict[tuple[AgentRole, str], dict[str, Any]] = {}
@@ -48,6 +53,13 @@ class WorkflowRunnerScreen(Screen[None]):
                 yield Static("Task provider", classes="field-label")
                 yield Select([], prompt="Task provider", id="task-provider")
                 yield TaskSelector(id="task-selector")
+                yield Static("", id="github-app-summary")
+                # Launch and navigation remain usable before the optional role
+                # configuration sections, even on a short terminal.
+                with Horizontal(classes="screen-actions"):
+                    yield Button("Start workflow", variant="success", id="start-workflow")
+                    yield Button("Execution history", id="workflow-history")
+                    yield Button("GitHub App settings", id="workflow-github-apps")
                 yield Static(
                     "Agent settings are temporary for this run; "
                     "Provider/YAML defaults are unchanged.",
@@ -112,13 +124,11 @@ class WorkflowRunnerScreen(Screen[None]):
                                             classes="default-indicator",
                                             id=f"{prefix}-max-output-tokens-source",
                                         )
-                yield Static("", id="github-app-summary")
-                with Horizontal(classes="screen-actions"):
-                    yield Button("Start workflow", variant="success", id="start-workflow")
-                    yield Button("Execution history", id="workflow-history")
-                    yield Button("GitHub App settings", id="workflow-github-apps")
             yield Static("No workflow running.", id="workflow-progress")
             yield Static("", id="workflow-events")
+            with Horizontal(classes="workflow-log-actions"):
+                yield Button("Show detailed logs", id="toggle-workflow-logs")
+            yield Static("", id="workflow-raw-events")
 
     @property
     def controller(self) -> WorkflowController:
@@ -154,6 +164,13 @@ class WorkflowRunnerScreen(Screen[None]):
         self.set_class(width > 80, "-wide")
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
+        # A mouse press focuses a button before Textual dispatches its matching
+        # release/click. Scrolling here can move that button out from under the
+        # pointer, which turns the first click into a focus-only click. Selects
+        # and inputs still scroll into view so their overlays and keyboard
+        # interaction remain usable on short terminals.
+        if isinstance(event.widget, Button):
+            return
         self.query_one("#workflow-runner", VerticalScroll).scroll_to_widget(
             event.widget, animate=False, top=True
         )
@@ -377,17 +394,17 @@ class WorkflowRunnerScreen(Screen[None]):
             )
             return
 
-        def status(settings: Any) -> str:
-            return (
-                f"configured (App ID {settings.app_id})"
-                if settings.is_configured
-                else "not configured"
-            )
-
         self.query_one("#github-app-summary", Static).update(
-            "GitHub App defaults (persisted separately): "
-            f"Implementer {status(implementer)}; Reviewer {status(reviewer)}."
+            self.github_app_summary(implementer, reviewer)
         )
+
+    @staticmethod
+    def github_app_summary(implementer: Any, reviewer: Any) -> str:
+        """Return a launcher-safe summary without exposing App identifiers."""
+
+        implementer_status = "✓" if implementer.is_configured else "—"
+        reviewer_status = "✓" if reviewer.is_configured else "—"
+        return f"GitHub Apps: Implementer {implementer_status} · Reviewer {reviewer_status}"
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "refresh-tasks":
@@ -405,6 +422,13 @@ class WorkflowRunnerScreen(Screen[None]):
             from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 
             self.app.push_screen(GitHubAppSettingsScreen())
+        elif event.button.id == "toggle-workflow-logs":
+            self._show_raw_events = not self._show_raw_events
+            raw_events = self.query_one("#workflow-raw-events", Static)
+            raw_events.display = self._show_raw_events
+            event.button.label = (
+                "Hide detailed logs" if self._show_raw_events else "Show detailed logs"
+            )
         else:
             for role, prefix in self._role_fields():
                 if event.button.id == f"{prefix}-configure":
@@ -483,7 +507,11 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#start-workflow", Button).disabled = True
         self.query_one("#workflow-progress", Static).update("Starting workflow…")
         self._event_lines.clear()
+        self._raw_event_lines.clear()
+        self._active_timeline_stages.clear()
+        self._stage_attempts.clear()
         self.query_one("#workflow-events", Static).update("")
+        self.query_one("#workflow-raw-events", Static).update("")
         self._run_workflow(launch)
 
     @work(thread=True, exclusive=True)
@@ -501,20 +529,156 @@ class WorkflowRunnerScreen(Screen[None]):
         self.app.call_from_thread(self._render_workflow_event, event)
 
     def _render_workflow_event(self, event: WorkflowEvent) -> None:
-        stage = event.stage.value.replace("_", " ").title() if event.stage else ""
-        message = event.message or event.status or event.step_status or ""
-        self.query_one("#workflow-progress", Static).update(
-            f"Execution {event.execution_id}: {stage or event.kind.value} {message}".strip()
+        self._append_raw_event(event)
+        message = self._timeline_message(event)
+        if message is None:
+            return
+        self.query_one("#workflow-progress", Static).update(message)
+
+        if event.kind == WorkflowEventKind.STAGE_STARTED and event.stage is not None:
+            self._stage_attempts[event.stage] = self._stage_attempts.get(event.stage, 0) + 1
+            self._active_timeline_stages[event.stage] = len(self._event_lines)
+            self._event_lines.append(message)
+        elif event.kind in {
+            WorkflowEventKind.STAGE_FINISHED,
+            WorkflowEventKind.STAGE_FAILED,
+        } and event.stage is not None:
+            active_line = self._active_timeline_stages.pop(event.stage, None)
+            if active_line is None:
+                self._event_lines.append(message)
+            else:
+                self._event_lines[active_line] = message
+        elif event.kind == WorkflowEventKind.WORKFLOW_FINISHED:
+            self._event_lines.append(message)
+
+        self.query_one("#workflow-events", Static).update("\n".join(self._event_lines[-10:]))
+
+    def _append_raw_event(self, event: WorkflowEvent) -> None:
+        """Retain observer diagnostics without putting them in the primary timeline."""
+
+        details = [event.kind.value]
+        if event.stage is not None:
+            details.append(f"stage={event.stage.value}")
+        if event.status is not None:
+            details.append(f"status={event.status.value}")
+        if event.step_status is not None:
+            details.append(f"step={event.step_status.value}")
+        if event.message:
+            details.append(event.message)
+        self._raw_event_lines.append(" | ".join(details))
+        self.query_one("#workflow-raw-events", Static).update(
+            "\n".join(self._raw_event_lines[-30:])
         )
-        self._event_lines.append(f"{event.kind.value}: {stage or message}")
-        self.query_one("#workflow-events", Static).update("\n".join(self._event_lines[-8:]))
+
+    def _timeline_message(self, event: WorkflowEvent) -> str | None:
+        """Translate persisted observer events into concise, user-facing progress."""
+
+        if event.kind == WorkflowEventKind.EXECUTION_CREATED:
+            return "Preparing workflow…"
+        if event.kind == WorkflowEventKind.STATUS_CHANGED:
+            return self._status_message(event.status)
+        if event.kind == WorkflowEventKind.WORKFLOW_FINISHED:
+            return self._status_message(event.status)
+        if event.stage is None:
+            return None
+
+        stage = event.stage
+        attempt = self._stage_attempts.get(stage, 0) + (
+            1 if event.kind == WorkflowEventKind.STAGE_STARTED else 0
+        )
+        if event.kind == WorkflowEventKind.STAGE_STARTED:
+            return f"● {self._stage_activity(stage, attempt)}{self._agent_stage_context(stage)}…"
+        if event.kind == WorkflowEventKind.STAGE_FINISHED:
+            return f"✓ {self._stage_complete(stage)}"
+        if event.kind == WorkflowEventKind.STAGE_FAILED:
+            detail = f": {event.message}" if event.message else ""
+            return f"✗ {self._stage_activity(stage, attempt)} failed{detail}"
+        return None
+
+    def _agent_stage_context(self, stage: WorkflowStage) -> str:
+        """Add selected agent runtime context only where an agent is active."""
+
+        roles = {
+            WorkflowStage.GENERATE_SPEC: AgentRole.PLANNER,
+            WorkflowStage.IMPLEMENT: AgentRole.IMPLEMENTER,
+            WorkflowStage.POLISH: AgentRole.IMPLEMENTER,
+            WorkflowStage.REVIEW: AgentRole.REVIEWER,
+        }
+        role = roles.get(stage)
+        if role is None:
+            return ""
+        provider = self._role_providers.get(role)
+        if provider is None:
+            return ""
+        prefix = dict(self._role_fields())[role]
+        model = self.query_one(f"#{prefix}-model", Input).value.strip()
+        details = [provider]
+        if model:
+            details.append(model)
+        return f" ({' · '.join(details)})"
+
+    @staticmethod
+    def _status_message(status: WorkflowStatus | None) -> str:
+        if status is None:
+            return "Workflow status updated"
+        messages: dict[WorkflowStatus, str] = {
+            WorkflowStatus.PENDING: "Preparing workflow…",
+            WorkflowStatus.RUNNING: "Workflow running…",
+            WorkflowStatus.APPROVED: "✓ Workflow approved",
+            WorkflowStatus.CHANGES_REQUESTED: "• Review changes requested",
+            WorkflowStatus.NEEDS_HUMAN: "! Waiting for human input",
+            WorkflowStatus.FAILED: "✗ Workflow failed",
+        }
+        return messages.get(status, "Workflow status updated")
+
+    @staticmethod
+    def _stage_activity(stage: WorkflowStage, attempt: int) -> str:
+        retry_labels = {
+            WorkflowStage.IMPLEMENT: "Implementing corrections",
+            WorkflowStage.VALIDATE: "Re-validating changes",
+            WorkflowStage.REVIEW: "Reviewing corrections",
+        }
+        activities = {
+            WorkflowStage.LOAD_TASK: "Loading task",
+            WorkflowStage.LOAD_CONFIG: "Configuring repository",
+            WorkflowStage.GENERATE_SPEC: "Generating specification",
+            WorkflowStage.PREPARE_BRANCH: "Preparing branch",
+            WorkflowStage.IMPLEMENT: "Implementing changes",
+            WorkflowStage.POLISH: "Applying polish suggestions",
+            WorkflowStage.VALIDATE: "Validating changes",
+            WorkflowStage.COMMIT: "Committing changes",
+            WorkflowStage.PUSH: "Pushing branch",
+            WorkflowStage.CREATE_PR: "Creating pull request",
+            WorkflowStage.REVIEW: "Reviewing pull request",
+            WorkflowStage.COMPLETED: "Completing workflow",
+        }
+        if attempt > 1:
+            return retry_labels.get(stage, activities[stage])
+        return activities[stage]
+
+    @staticmethod
+    def _stage_complete(stage: WorkflowStage) -> str:
+        return {
+            WorkflowStage.LOAD_TASK: "Task loaded",
+            WorkflowStage.LOAD_CONFIG: "Repository configured",
+            WorkflowStage.GENERATE_SPEC: "Specification generated",
+            WorkflowStage.PREPARE_BRANCH: "Branch prepared",
+            WorkflowStage.IMPLEMENT: "Changes implemented",
+            WorkflowStage.POLISH: "Polish pass completed",
+            WorkflowStage.VALIDATE: "Validation passed",
+            WorkflowStage.COMMIT: "Changes committed",
+            WorkflowStage.PUSH: "Branch pushed",
+            WorkflowStage.CREATE_PR: "Pull request created",
+            WorkflowStage.REVIEW: "Review completed",
+            WorkflowStage.COMPLETED: "Workflow completed",
+        }[stage]
 
     def _workflow_finished(self, execution: WorkflowExecution) -> None:
         self.query_one("#start-workflow", Button).disabled = False
         self.query_one("#workflow-progress", Static).update(
-            f"Finished {execution.id}: {execution.status.value} ({execution.current_stage.value})"
+            self._status_message(execution.status)
         )
-        self.notify(f"Workflow finished: {execution.status.value}")
+        self.notify(self._status_message(execution.status))
 
     def _workflow_failed(self, message: str) -> None:
         self.query_one("#start-workflow", Button).disabled = False
