@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from orchestrator.models.human_interaction import HumanInteraction
 from orchestrator.models.workflow_status import WorkflowStage, WorkflowStatus
 
 
@@ -14,6 +15,7 @@ class WorkflowExecution:
     trello_card_id: str = ""
     trello_card_url: str = ""
     repository: str = ""
+    repository_ref: str = ""
     base_branch: str = ""
     workspace_path: str | None = None
     working_branch: str | None = None
@@ -35,3 +37,4 @@ class WorkflowExecution:
     review_jules_session_id: str | None = None
     review_jules_session_url: str | None = None
     review_snapshot: dict[str, Any] | None = None
+    human_interactions: list[HumanInteraction] = field(default_factory=list)

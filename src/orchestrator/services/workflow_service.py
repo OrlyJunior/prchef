@@ -5,6 +5,7 @@ import re
 import unicodedata
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,8 +18,9 @@ from orchestrator.config.project_config import (
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
-from orchestrator.models.validation_result import ValidationResult
+from orchestrator.models.validation_result import ValidationCheck, ValidationResult
 from orchestrator.models.workflow_event import (
     WorkflowEvent,
     WorkflowEventKind,
@@ -138,7 +140,10 @@ class WorkflowService:
                         },
                     )
                 self._repository.update_project(
-                    execution.id, str(config.path), config.repository.base_branch
+                    execution.id,
+                    str(config.path),
+                    config.repository.base_branch,
+                    repository_override or task.repository or str(config.path),
                 )
                 logger.info(
                     "[workflow] Repository resolved: %s (base: %s)",
@@ -162,9 +167,12 @@ class WorkflowService:
                 if self._verbose:
                     log_spec_summary(logger, spec)
             if spec.has_blocking_ambiguity:
-                message = "; ".join(spec.ambiguities) or "Planner reported blocking ambiguity"
-                self._repository.record_error(execution.id, message)
-                return self._finish(execution.id, WorkflowStatus.NEEDS_HUMAN, config)
+                return self._pause_for_human(
+                    execution.id,
+                    WorkflowStage.GENERATE_SPEC,
+                    self._planner_prompt(spec),
+                    config,
+                )
 
             working_branch = self._branch_name(
                 config.repository.branch_prefix, task.id, task.title, execution.id
@@ -255,7 +263,7 @@ class WorkflowService:
                     if self._verbose:
                         log_review_summary(logger, review)
                     if review.result is ReviewDecision.NEEDS_HUMAN:
-                        self._repository.record_error(execution.id, review.summary)
+                        self._repository.record_error(execution.id, self._review_prompt(review))
                     self._publish_review(
                         execution_id=execution.id,
                         execution_clients=execution_clients,
@@ -361,13 +369,21 @@ class WorkflowService:
                 ReviewDecision.CHANGES_REQUESTED: WorkflowStatus.CHANGES_REQUESTED,
                 ReviewDecision.NEEDS_HUMAN: WorkflowStatus.NEEDS_HUMAN,
             }[review.result]
+            if final_status is WorkflowStatus.NEEDS_HUMAN:
+                self._repository.request_human_input(
+                    execution.id, WorkflowStage.REVIEW, self._review_prompt(review)
+                )
             return self._finish(execution.id, final_status, config)
         except ConfigurationError as exc:
-            self._repository.record_error(execution.id, str(exc))
-            return self._finish(execution.id, WorkflowStatus.NEEDS_HUMAN, config)
+            return self._pause_for_human(
+                execution.id,
+                self._repository.get_execution(execution.id).current_stage,
+                str(exc),
+                config,
+            )
         except AgentNeedsHumanError as exc:
-            self._repository.record_error(execution.id, str(exc))
-            result = self._finish(execution.id, WorkflowStatus.NEEDS_HUMAN, config)
+            stage = self._repository.get_execution(execution.id).current_stage
+            result = self._pause_for_human(execution.id, stage, str(exc), config)
             if workspace_path is not None:
                 logger.error(
                     "[workspace] Workflow needs human input; preserving workspace: %s",
@@ -382,6 +398,341 @@ class WorkflowService:
                     "[workspace] Workflow failed; preserving workspace: %s", workspace_path
                 )
             return result
+
+    def respond_and_resume(
+        self,
+        execution_id: str,
+        response: str,
+        *,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> WorkflowExecution:
+        """Persist a response and continue the same execution at its blocked stage.
+
+        Provider sessions are deliberately not required for this operation. The
+        next provider request receives the persisted task/spec/review context
+        plus the human answer, which makes the workflow-level behaviour
+        provider agnostic and restart-safe.
+        """
+        self._event_listener = event_listener
+        execution = self._repository.get_execution(execution_id)
+        if execution.status is not WorkflowStatus.NEEDS_HUMAN:
+            raise ValueError(f"Execution {execution_id} is not awaiting human input")
+        interaction = self._repository.respond_to_human_input(execution_id, response)
+        self._repository.resume_execution(execution_id)
+        self._emit(
+            execution_id,
+            WorkflowEventKind.STATUS_CHANGED,
+            status=WorkflowStatus.RUNNING,
+        )
+        config: ProjectConfig | None = None
+        try:
+            task = self._task_from_snapshot(execution)
+            config = self._config_loader.load(
+                task, execution.repository_ref or execution.repository or None
+            )
+            clients = self._client_factory.create(config)
+            repository_slug = clients.git.github_repository()
+            previous_responses = [
+                (item.prompt, item.response)
+                for item in execution.human_interactions
+                if item.id != interaction.id and item.response
+            ]
+            clarified_task = self._task_with_responses(
+                task,
+                [
+                    *previous_responses,
+                    (interaction.prompt, interaction.response or response.strip()),
+                ],
+            )
+            if interaction.requesting_stage is WorkflowStage.GENERATE_SPEC:
+                return self._resume_planning(
+                    execution, clarified_task, config, clients, repository_slug
+                )
+            if interaction.requesting_stage is WorkflowStage.REVIEW:
+                return self._resume_review(
+                    execution, clarified_task, config, clients, repository_slug
+                )
+            raise WorkflowError(
+                f"Cannot resume human input requested during {interaction.requesting_stage.value}"
+            )
+        except AgentNeedsHumanError as exc:
+            return self._pause_for_human(
+                execution_id, interaction.requesting_stage, str(exc), config
+            )
+        except Exception as exc:
+            self._repository.record_error(execution_id, str(exc))
+            return self._finish(execution_id, WorkflowStatus.FAILED, config)
+
+    def _resume_planning(
+        self,
+        execution: WorkflowExecution,
+        task: DevelopmentTask,
+        config: ProjectConfig,
+        clients: WorkflowClients,
+        repository_slug: str,
+    ) -> WorkflowExecution:
+        """Repeat only planning, then continue through a newly safe workspace."""
+        with self._step(execution.id, WorkflowStage.GENERATE_SPEC):
+            spec = SpecService(clients.agent(AgentRole.PLANNER)).generate(
+                task,
+                config.path,
+                repository_slug,
+                config.repository.base_branch,
+                lambda reference: self._repository.record_spec_jules_session(
+                    execution.id, reference.external_id, reference.url
+                ),
+            )
+            self._repository.record_spec(execution.id, spec)
+        if spec.has_blocking_ambiguity:
+            return self._pause_for_human(
+                execution.id, WorkflowStage.GENERATE_SPEC, self._planner_prompt(spec), config
+            )
+
+        working_branch = self._branch_name(
+            config.repository.branch_prefix, task.id, task.title, execution.id
+        )
+        workspace_manager = WorkspaceManager(clients.git, config.path, config.workspace)
+        with self._step(execution.id, WorkflowStage.PREPARE_BRANCH):
+            workspace_path = workspace_manager.workspace_path(execution.id)
+            self._repository.record_workspace(execution.id, str(workspace_path))
+            workspace_path = workspace_manager.create(
+                execution.id,
+                config.repository.base_branch,
+                working_branch,
+                config.repository.protected_branches,
+            )
+            self._repository.record_branch(execution.id, working_branch)
+        return self._implement_and_review(
+            execution.id,
+            task,
+            spec,
+            config,
+            clients,
+            repository_slug,
+            workspace_path,
+            working_branch,
+        )
+
+    def _resume_review(
+        self,
+        execution: WorkflowExecution,
+        task: DevelopmentTask,
+        config: ProjectConfig,
+        clients: WorkflowClients,
+        repository_slug: str,
+    ) -> WorkflowExecution:
+        if not execution.workspace_path or not execution.working_branch:
+            raise WorkflowError(
+                "Cannot resume review: the persisted workspace or branch is missing"
+            )
+        workspace_path = Path(execution.workspace_path)
+        if not workspace_path.is_dir():
+            raise WorkflowError(
+                f"Cannot resume review: workspace is unavailable: {workspace_path}"
+            )
+        if not execution.spec_snapshot or not execution.pull_request_snapshot:
+            raise WorkflowError("Cannot resume review: persisted spec or pull request is missing")
+        spec = RepositorySpec(**execution.spec_snapshot)
+        pull_request = PullRequest(**execution.pull_request_snapshot)
+        validation = self._validation_from_snapshot(execution.validation_snapshot)
+        execution_clients = clients.at_path(workspace_path)
+        with self._step(execution.id, WorkflowStage.REVIEW):
+            review = ReviewService(clients.agent(AgentRole.REVIEWER)).review(
+                task=task,
+                spec=spec,
+                pull_request=pull_request,
+                diff=execution_clients.git.diff(config.repository.base_branch),
+                validation=validation,
+                repository_path=workspace_path,
+                repository_slug=repository_slug,
+                base_branch=config.repository.base_branch,
+                feature_branch=execution.working_branch,
+                on_execution_started=lambda reference: self._repository.record_review_jules_session(
+                    execution.id, reference.external_id, reference.url
+                ),
+            )
+            self._repository.record_review(execution.id, review)
+            self._publish_review(
+                execution_id=execution.id,
+                execution_clients=execution_clients,
+                repository_slug=repository_slug,
+                pull_request_number=pull_request.number,
+                review=review,
+            )
+        status = {
+            ReviewDecision.APPROVED: WorkflowStatus.APPROVED,
+            ReviewDecision.CHANGES_REQUESTED: WorkflowStatus.CHANGES_REQUESTED,
+            ReviewDecision.NEEDS_HUMAN: WorkflowStatus.NEEDS_HUMAN,
+        }[review.result]
+        if status is WorkflowStatus.NEEDS_HUMAN:
+            self._repository.request_human_input(
+                execution.id, WorkflowStage.REVIEW, self._review_prompt(review)
+            )
+        return self._finish(execution.id, status, config)
+
+    def _implement_and_review(
+        self,
+        execution_id: str,
+        task: DevelopmentTask,
+        spec: RepositorySpec,
+        config: ProjectConfig,
+        clients: WorkflowClients,
+        repository_slug: str,
+        workspace_path: Path,
+        working_branch: str,
+    ) -> WorkflowExecution:
+        """Continue a resumed planning execution without creating another execution."""
+        execution_clients = clients.at_path(workspace_path)
+        implementation_service = ImplementationService(
+            execution_clients.agent(AgentRole.IMPLEMENTER), execution_clients.git
+        )
+        try:
+            with self._step(execution_id, WorkflowStage.IMPLEMENT):
+                implementation = implementation_service.implement(task, spec, workspace_path)
+                self._repository.record_implementation(execution_id, implementation)
+                if not implementation.success:
+                    raise WorkflowError(
+                        implementation.error_message or "Implementation provider failed"
+                    )
+            validation = self._validate_with_corrections(
+                execution_id=execution_id,
+                execution_clients=execution_clients,
+                implementation_service=implementation_service,
+                task=task,
+                spec=spec,
+                workspace_path=workspace_path,
+                config=config,
+            )
+            with self._step(execution_id, WorkflowStage.COMMIT):
+                commit_sha = execution_clients.git.commit_all(
+                    self._commit_message(task),
+                    working_branch,
+                    config.repository.protected_branches,
+                )
+                self._repository.record_commit(execution_id, commit_sha)
+            with self._step(execution_id, WorkflowStage.PUSH):
+                execution_clients.git.push(
+                    working_branch, config.repository.protected_branches
+                )
+            with self._step(execution_id, WorkflowStage.CREATE_PR):
+                pull_request = execution_clients.github.create_pull_request(
+                    title=task.title,
+                    body=self._pull_request_body(
+                        task,
+                        validation,
+                        self._task_provider.pull_request_reference(task, repository_slug),
+                    ),
+                    base_branch=config.repository.base_branch,
+                    head_branch=working_branch,
+                )
+                self._repository.record_pull_request(execution_id, pull_request)
+            with self._step(execution_id, WorkflowStage.REVIEW):
+                review = ReviewService(clients.agent(AgentRole.REVIEWER)).review(
+                    task=task,
+                    spec=spec,
+                    pull_request=pull_request,
+                    diff=execution_clients.git.diff(config.repository.base_branch),
+                    validation=validation,
+                    repository_path=workspace_path,
+                    repository_slug=repository_slug,
+                    base_branch=config.repository.base_branch,
+                    feature_branch=working_branch,
+                    on_execution_started=lambda reference: (
+                        self._repository.record_review_jules_session(
+                            execution_id, reference.external_id, reference.url
+                        )
+                    ),
+                )
+                self._repository.record_review(execution_id, review)
+                self._publish_review(
+                    execution_id=execution_id,
+                    execution_clients=execution_clients,
+                    repository_slug=repository_slug,
+                    pull_request_number=pull_request.number,
+                    review=review,
+                )
+            status = {
+                ReviewDecision.APPROVED: WorkflowStatus.APPROVED,
+                ReviewDecision.CHANGES_REQUESTED: WorkflowStatus.CHANGES_REQUESTED,
+                ReviewDecision.NEEDS_HUMAN: WorkflowStatus.NEEDS_HUMAN,
+            }[review.result]
+            if status is WorkflowStatus.NEEDS_HUMAN:
+                self._repository.request_human_input(
+                    execution_id, WorkflowStage.REVIEW, self._review_prompt(review)
+                )
+            return self._finish(execution_id, status, config)
+        except AgentNeedsHumanError as exc:
+            return self._pause_for_human(
+                execution_id, WorkflowStage.IMPLEMENT, str(exc), config
+            )
+        except Exception as exc:
+            self._repository.record_error(execution_id, str(exc))
+            return self._finish(execution_id, WorkflowStatus.FAILED, config)
+
+    def _pause_for_human(
+        self,
+        execution_id: str,
+        stage: WorkflowStage,
+        prompt: str,
+        config: ProjectConfig | None,
+    ) -> WorkflowExecution:
+        self._repository.record_error(execution_id, prompt)
+        self._repository.request_human_input(execution_id, stage, prompt)
+        return self._finish(execution_id, WorkflowStatus.NEEDS_HUMAN, config)
+
+    @staticmethod
+    def _planner_prompt(spec: RepositorySpec) -> str:
+        questions = "\n".join(f"- {question}" for question in spec.ambiguities)
+        return questions or "Planner reported blocking ambiguity"
+
+    @staticmethod
+    def _review_prompt(review: CodeReview) -> str:
+        findings = review.blocking_findings or review.findings
+        details = "\n".join(f"- {finding}" for finding in findings)
+        return (
+            "\n".join(part for part in [review.summary, details] if part)
+            or "Reviewer needs clarification"
+        )
+
+    @staticmethod
+    def _task_from_snapshot(execution: WorkflowExecution) -> DevelopmentTask:
+        if not execution.task_snapshot:
+            raise WorkflowError("Cannot resume: the original task was not persisted")
+        return DevelopmentTask(**execution.task_snapshot)
+
+    @staticmethod
+    def _task_with_responses(
+        task: DevelopmentTask, interactions: list[tuple[str, str]]
+    ) -> DevelopmentTask:
+        clarification = "\n\n".join(
+            f"Question/context:\n{prompt}\n\nResponse:\n{response}"
+            for prompt, response in interactions
+        )
+        return DevelopmentTask(
+            **{
+                **asdict(task),
+                "description": (
+                    f"{task.description}\n\nHUMAN CLARIFICATION FOR THIS EXECUTION:\n"
+                    f"{clarification}"
+                ),
+            }
+        )
+
+    @staticmethod
+    def _validation_from_snapshot(snapshot: dict[str, object] | None) -> ValidationResult:
+        if not snapshot:
+            raise WorkflowError("Cannot resume review: persisted validation is missing")
+        raw_checks = snapshot.get("checks", [])
+        if not isinstance(raw_checks, list):
+            raise WorkflowError("Cannot resume review: persisted validation is invalid")
+        raw_error_message = snapshot.get("error_message")
+        return ValidationResult(
+            success=bool(snapshot.get("success")),
+            checks=[
+                ValidationCheck(**check) for check in raw_checks if isinstance(check, dict)
+            ],
+            error_message=raw_error_message if isinstance(raw_error_message, str) else None,
+        )
 
     def _finish(
         self,

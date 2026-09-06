@@ -57,6 +57,7 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     assert persisted.task_snapshot is not None
     assert persisted.task_snapshot["description"] == "Original description"
     assert persisted.repository == "/repos/api"
+    assert persisted.repository_ref == ""
     assert persisted.workspace_path == "/workspaces/api/execution-1"
     assert persisted.spec_jules_session_id == "spec-1"
     assert persisted.spec_jules_session_url == "https://jules.example/spec-1"
@@ -93,6 +94,33 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     assert [(step.stage, step.status) for step in polish_steps] == [
         (WorkflowStage.POLISH, StepStatus.SUCCEEDED)
     ]
+
+
+def test_human_interactions_persist_response_and_resume_state(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    execution = repository.create_execution("card-human")
+    repository.update_stage(execution.id, WorkflowStage.GENERATE_SPEC)
+    repository.record_error(execution.id, "Which retention policy should apply?")
+    interaction = repository.request_human_input(
+        execution.id, WorkflowStage.GENERATE_SPEC, "Which retention policy should apply?"
+    )
+    repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+    repository.respond_to_human_input(execution.id, "Use 30 days.")
+    repository.resume_execution(execution.id)
+
+    persisted = repository.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.RUNNING
+    assert persisted.finished_at is None
+    assert persisted.human_interactions[0].id == interaction.id
+    assert persisted.human_interactions[0].prompt == "Which retention policy should apply?"
+    assert persisted.human_interactions[0].response == "Use 30 days."
+    assert persisted.human_interactions[0].responded_at is not None
 
 
 def test_migration_backfills_common_identity_for_existing_trello_execution(

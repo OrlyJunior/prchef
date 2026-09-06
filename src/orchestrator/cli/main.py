@@ -429,6 +429,70 @@ def run(
 
 
 @app.command()
+def respond(
+    execution_id: str,
+    message: Annotated[
+        str, typer.Option("--message", "-m", help="Human clarification")
+    ],
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Global YAML configuration")
+    ] = None,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show additional subprocess and retry details")
+    ] = False,
+) -> None:
+    """Persist a clarification and resume an existing human-blocked execution."""
+    if not message.strip():
+        raise typer.BadParameter("--message must not be empty")
+    settings = Settings()
+    if config is not None:
+        settings.config_file = config
+    configure_logging(verbose=verbose, configured_level=settings.log_level)
+    workflow_repository = _migrated_repository(settings)
+    try:
+        execution = workflow_repository.get_execution(execution_id)
+    except KeyError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    if execution.status is not WorkflowStatus.NEEDS_HUMAN:
+        raise typer.BadParameter(f"Execution {execution_id} is not awaiting human input")
+    if not execution.task_snapshot:
+        raise typer.BadParameter(
+            "Execution has no persisted task snapshot and cannot be resumed"
+        )
+    task = DevelopmentTask(**execution.task_snapshot)
+    config_loader = _config_loader(settings.config_file)
+    if execution.task_source == "trello":
+        provider: TaskProvider = TrelloTaskProvider(
+            TrelloClient(settings.trello_api_key, settings.trello_token)
+        )
+    elif execution.task_source == "github":
+        project_config = config_loader.load(
+            task, execution.repository_ref or execution.repository or None
+        )
+        repository_slug = GitClient(CommandClient(), project_config.path).github_repository()
+        provider = GitHubIssueTaskProvider(
+            GitHubIssueClient(CommandClient()), repository_slug
+        )
+    else:
+        raise typer.BadParameter(
+            f"Unsupported persisted task provider: {execution.task_source}"
+        )
+    service = WorkflowService(
+        workflow_repository=workflow_repository,
+        task_provider=provider,
+        config_loader=config_loader,
+        client_factory=ClientFactory(settings.jules_api_key),
+        verbose=verbose,
+    )
+    result = service.respond_and_resume(execution_id, message)
+    _print_execution(result)
+    _print_final_summary(result)
+    if result.status not in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def debug(
     stage: Annotated[
         str,

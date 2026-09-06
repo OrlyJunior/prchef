@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.human_interaction import HumanInteraction
 from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
@@ -19,7 +20,11 @@ from orchestrator.models.validation_result import ValidationResult
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.models.workflow_step import WorkflowStep
-from orchestrator.repositories.orm_models import WorkflowExecutionEntity, WorkflowStepEntity
+from orchestrator.repositories.orm_models import (
+    HumanInteractionEntity,
+    WorkflowExecutionEntity,
+    WorkflowStepEntity,
+)
 
 
 def _utcnow() -> datetime:
@@ -52,6 +57,7 @@ class WorkflowRepository:
             trello_card_id=legacy_trello_id,
             trello_card_url="",
             repository="",
+            repository_ref="",
             base_branch="",
             current_stage=WorkflowStage.LOAD_TASK.value,
             status=WorkflowStatus.PENDING.value,
@@ -60,7 +66,11 @@ class WorkflowRepository:
         )
         with self._sessions() as session, session.begin():
             session.add(entity)
-        return self._to_domain(entity)
+            # Build the detached domain object while the session is still
+            # available.  The execution's interactions relationship is lazy
+            # loaded and a newly committed entity is expired on session exit.
+            session.flush()
+            return self._to_domain(entity)
 
     def update_task(self, execution_id: str, task: DevelopmentTask) -> None:
         def mutate(entity: WorkflowExecutionEntity) -> None:
@@ -74,10 +84,17 @@ class WorkflowRepository:
 
         self._mutate(execution_id, mutate)
 
-    def update_project(self, execution_id: str, repository: str, base_branch: str) -> None:
+    def update_project(
+        self,
+        execution_id: str,
+        repository: str,
+        base_branch: str,
+        repository_ref: str = "",
+    ) -> None:
         def mutate(entity: WorkflowExecutionEntity) -> None:
             entity.repository = repository
             entity.base_branch = base_branch
+            entity.repository_ref = repository_ref
 
         self._mutate(execution_id, mutate)
 
@@ -147,6 +164,59 @@ class WorkflowRepository:
 
     def record_error(self, execution_id: str, message: str) -> None:
         self._mutate(execution_id, lambda entity: setattr(entity, "error_message", message))
+
+    def request_human_input(
+        self, execution_id: str, stage: WorkflowStage, prompt: str
+    ) -> HumanInteraction:
+        entity = HumanInteractionEntity(
+            workflow_execution_id=execution_id,
+            requesting_stage=stage.value,
+            prompt=prompt,
+            requested_at=_utcnow(),
+        )
+        with self._sessions() as session, session.begin():
+            session.add(entity)
+        return self._interaction_to_domain(entity)
+
+    def respond_to_human_input(self, execution_id: str, response: str) -> HumanInteraction:
+        response = response.strip()
+        if not response:
+            raise ValueError("Human response must not be empty")
+        with self._sessions() as session, session.begin():
+            entity = session.scalars(
+                select(HumanInteractionEntity)
+                .where(
+                    HumanInteractionEntity.workflow_execution_id == execution_id,
+                    HumanInteractionEntity.response.is_(None),
+                )
+                .order_by(HumanInteractionEntity.id.desc())
+            ).first()
+            if entity is None:
+                raise ValueError(f"Execution {execution_id} is not awaiting human input")
+            entity.response = response
+            entity.responded_at = _utcnow()
+            execution = session.get(WorkflowExecutionEntity, execution_id)
+            if execution is None:
+                raise KeyError(f"Workflow execution not found: {execution_id}")
+            execution.updated_at = _utcnow()
+            return self._interaction_to_domain(entity)
+
+    def resume_execution(self, execution_id: str) -> None:
+        def mutate(entity: WorkflowExecutionEntity) -> None:
+            entity.status = WorkflowStatus.RUNNING.value
+            entity.error_message = None
+            entity.finished_at = None
+
+        self._mutate(execution_id, mutate)
+
+    def list_human_interactions(self, execution_id: str) -> list[HumanInteraction]:
+        with self._sessions() as session:
+            entities = session.scalars(
+                select(HumanInteractionEntity)
+                .where(HumanInteractionEntity.workflow_execution_id == execution_id)
+                .order_by(HumanInteractionEntity.id)
+            ).all()
+            return [self._interaction_to_domain(entity) for entity in entities]
 
     def finish(self, execution_id: str, status: WorkflowStatus) -> None:
         def mutate(entity: WorkflowExecutionEntity) -> None:
@@ -241,6 +311,7 @@ class WorkflowRepository:
             trello_card_id=entity.trello_card_id,
             trello_card_url=entity.trello_card_url,
             repository=entity.repository,
+            repository_ref=entity.repository_ref,
             base_branch=entity.base_branch,
             workspace_path=entity.workspace_path,
             working_branch=entity.working_branch,
@@ -262,4 +333,20 @@ class WorkflowRepository:
             review_jules_session_id=entity.review_jules_session_id,
             review_jules_session_url=entity.review_jules_session_url,
             review_snapshot=_load(entity.review_snapshot_json),
+            human_interactions=[
+                WorkflowRepository._interaction_to_domain(interaction)
+                for interaction in entity.human_interactions
+            ],
+        )
+
+    @staticmethod
+    def _interaction_to_domain(entity: HumanInteractionEntity) -> HumanInteraction:
+        return HumanInteraction(
+            id=entity.id,
+            workflow_execution_id=entity.workflow_execution_id,
+            requesting_stage=WorkflowStage(entity.requesting_stage),
+            prompt=entity.prompt,
+            response=entity.response,
+            requested_at=entity.requested_at,
+            responded_at=entity.responded_at,
         )
