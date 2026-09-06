@@ -166,12 +166,14 @@ def test_notifications_are_disabled_by_default_and_normalize_the_channel(tmp_pat
     assert ProjectConfig.model_validate({"path": tmp_path}).notifications.enabled is False
 
 
-def test_notification_configuration_uses_repository_and_local_overrides(tmp_path: Path) -> None:
+def test_repository_configuration_ignores_legacy_local_override_and_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
     (repository / ".orchestrator.yml").write_text(
-        "notifications:\n  channel: desktop\n",
+        "notifications:\n  enabled: false\n  channel: ignored\n",
         encoding="utf-8",
     )
     config_file = tmp_path / "orchestrator.yml"
@@ -202,6 +204,7 @@ repositories:
 
     assert config.notifications.enabled is True
     assert config.notifications.channel == "desktop"
+    assert "Repository-local .orchestrator.yml is no longer supported and is ignored" in caplog.text
 
 
 def test_github_app_configuration_accepts_exactly_one_private_key_source(tmp_path: Path) -> None:
@@ -259,14 +262,32 @@ def test_implementer_and_reviewer_github_apps_are_independent(tmp_path: Path) ->
     )
 
 
-def test_tui_configuration_writer_persists_only_app_references(tmp_path: Path) -> None:
+def test_tui_configuration_writer_updates_resolved_global_config_and_preserves_other_content(
+    tmp_path: Path,
+) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
-    loader = ProjectConfigLoader(tmp_path / "orchestrator.yml")
-    (tmp_path / "orchestrator.yml").write_text("defaults: {}\n", encoding="utf-8")
+    (repository / ".git").mkdir()
+    config_file = tmp_path / "alternate-orchestrator.yml"
+    loader = ProjectConfigLoader(config_file)
+    config_file.write_text(
+        """unrelated:
+  keep: this value
+defaults:
+  notifications:
+    enabled: false
+repositories:
+  example:
+    path: repository
+    existing: value
+  other:
+    path: another-repository
+""",
+        encoding="utf-8",
+    )
 
     saved = loader.save_github_app_settings(
-        repository,
+        "example",
         implementer_app=GitHubAppSettings(
             app_id=789,
             installation_id=987,
@@ -275,13 +296,20 @@ def test_tui_configuration_writer_persists_only_app_references(tmp_path: Path) -
         reviewer_app=GitHubAppSettings(),
     )
 
-    assert saved == repository / ".orchestrator.yml"
+    assert saved == config_file
+    assert not (repository / ".orchestrator.yml").exists()
     content = saved.read_text(encoding="utf-8")
     assert "implementer_app:" in content
     assert "IMPLEMENTER_APP_KEY" in content
     assert "private_key:" not in content
-    resolved = ProjectConfig.model_validate(
-        {"path": repository, **yaml.safe_load(content)}
+    persisted = yaml.safe_load(content)
+    assert persisted["unrelated"] == {"keep": "this value"}
+    assert persisted["repositories"]["example"]["existing"] == "value"
+    assert persisted["repositories"]["other"] == {"path": "another-repository"}
+    resolved = ProjectConfigLoader(config_file).load(
+        DevelopmentTask(
+            "1", "trello", "Task", "", "https://example.test/1", repository="example"
+        )
     )
     assert resolved.integrations.github.implementer_app.app_id == 789
 

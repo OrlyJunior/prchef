@@ -257,51 +257,37 @@ mudanças no próprio PR, então use uma identidade de App separada quando neces
 
 ## Configuracao por repositorio
 
-Os defaults e a entrada do registro global sao mesclados com `.orchestrator.yml` no repositorio
-alvo; o arquivo local tem maior precedencia. Exemplo:
+O `orchestrator.yml` e a unica fonte persistente de configuracao. Os defaults sao mesclados com a
+entrada correspondente em `repositories.<owner/repository>`; `.orchestrator.yml` no repositorio e
+ignorado com um aviso. Exemplo:
 
 ```yaml
 task:
   provider: github  # usado apenas com --task-id; opções explícitas têm precedência
 
-repository:
-  base_branch: develop
-  protected_branches: [main, master, develop, release]
-agents:
-  planner:
-    provider: jules
-  implementer:
-    provider: codex
-  reviewer:
-    provider: jules
-providers:
-  jules:
-    type: jules
-    poll_interval_seconds: 15
-    timeout_seconds: 1800
-  codex:
-    type: codex-cli
-    # Exemplos: substitua por opcoes suportadas pela sua CLI/conta.
-    model: <your-supported-codex-model>
-    reasoning_effort: <your-supported-reasoning-effort>
-    command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
-    timeout_seconds: 3600
-  vertex-gemini:
-    type: gemini-vertex
-    project: my-gcp-project
-    location: global
-    model: gemini-2.5-flash
-    timeout_seconds: 900
-    generation:
-      temperature: 0.2
-      # max_output_tokens: 8192
-safety:
-  allow_direct_merge: false
-  require_tests: true
-validation:
-  auto_detect: true
-  commands:
-    - [python, -m, pytest]
+defaults:
+  agents:
+    planner: {provider: jules}
+    implementer: {provider: codex}
+    reviewer: {provider: jules}
+  providers:
+    jules: {type: jules}
+    codex:
+      type: codex-cli
+      command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
+  safety:
+    allow_direct_merge: false
+    require_tests: true
+repositories:
+  owner/repository:
+    path: C:/Git/repository
+    repository:
+      base_branch: develop
+      protected_branches: [main, master, develop, release]
+    validation:
+      auto_detect: true
+      commands:
+        - [python, -m, pytest]
 ```
 
 Task providers suportados:

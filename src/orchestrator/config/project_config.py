@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from copy import deepcopy
@@ -11,6 +12,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from orchestrator.models.development_task import DevelopmentTask
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigurationError(RuntimeError):
@@ -30,8 +33,7 @@ class ConfiguredRepository:
     """A repository registered by the global configuration.
 
     This intentionally contains only discovery information. Resolving the full
-    project configuration, including local overrides, remains the responsibility
-    of :class:`ProjectConfigLoader.load`.
+    project configuration remains the responsibility of :class:`ProjectConfigLoader.load`.
     """
 
     key: str
@@ -747,10 +749,9 @@ class ProjectConfigLoader:
             raise ConfigurationError(f"Invalid project configuration: {exc}") from exc
 
     def list_repositories(self) -> list[ConfiguredRepository]:
-        """List registered repositories without resolving their local configuration.
+        """List registered repositories without resolving project settings.
 
-        This is deliberately a discovery API: it does not open a repository or
-        merge its ``.orchestrator.yml``. Callers must still use :meth:`load`
+        This is deliberately a discovery API. Callers must still use :meth:`load`
         before an operation needs a resolved project configuration.
         """
 
@@ -814,9 +815,13 @@ class ProjectConfigLoader:
         defaults = global_config.get("defaults", {})
         if not isinstance(defaults, dict):
             raise ConfigurationError("'defaults' must be a mapping")
-        local = _load_yaml(repository_path / ".orchestrator.yml", required=False)
+        legacy_local_config = repository_path / ".orchestrator.yml"
+        if legacy_local_config.is_file():
+            logger.warning(
+                "Repository-local .orchestrator.yml is no longer supported and is ignored: %s",
+                legacy_local_config,
+            )
         merged = _deep_merge(defaults, entry)
-        merged = _deep_merge(merged, local)
         merged["path"] = repository_path
         repository_settings = merged.setdefault("repository", {})
         if not isinstance(repository_settings, dict):
@@ -830,20 +835,26 @@ class ProjectConfigLoader:
 
     def save_github_app_settings(
         self,
-        repository_path: Path,
+        repository_key: str,
         *,
         implementer_app: GitHubAppSettings,
         reviewer_app: GitHubAppSettings,
     ) -> Path:
-        """Persist App *references* in the repository-local configuration.
+        """Persist App *references* in the resolved global configuration.
 
         The TUI only writes App IDs, installation IDs, and key file/environment
         references. Private key contents and installation tokens are neither
         accepted nor serialized here.
         """
-        local_path = repository_path / ".orchestrator.yml"
-        configuration = _load_yaml(local_path, required=False)
-        integrations = configuration.setdefault("integrations", {})
+        configuration = _load_yaml(self._config_file, required=True)
+        self._reject_misplaced_project_settings(configuration)
+        repositories = configuration.setdefault("repositories", {})
+        if not isinstance(repositories, dict):
+            raise ConfigurationError("'repositories' must be a mapping")
+        repository = repositories.get(repository_key)
+        if not isinstance(repository, dict):
+            raise ConfigurationError(f"Repository entry '{repository_key}' must be a mapping")
+        integrations = repository.setdefault("integrations", {})
         if not isinstance(integrations, dict):
             raise ConfigurationError("'integrations' must be a mapping")
         github = integrations.setdefault("github", {})
@@ -858,12 +869,14 @@ class ProjectConfigLoader:
 
         try:
             serialized = yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False)
-            temporary_path = local_path.with_suffix(".yml.tmp")
+            temporary_path = self._config_file.with_suffix(".yml.tmp")
             temporary_path.write_text(serialized, encoding="utf-8")
-            temporary_path.replace(local_path)
+            temporary_path.replace(self._config_file)
         except OSError as exc:
-            raise ConfigurationError(f"Cannot write configuration {local_path}: {exc}") from exc
-        return local_path
+            raise ConfigurationError(
+                f"Cannot write configuration {self._config_file}: {exc}"
+            ) from exc
+        return self._config_file
 
     @staticmethod
     def _repository_ref_from_task(task: DevelopmentTask) -> str | None:
@@ -917,6 +930,5 @@ class ProjectConfigLoader:
             rendered = ", ".join(misplaced)
             raise ConfigurationError(
                 f"Project settings at the top level are not applied: {rendered}. "
-                "Place them in 'defaults', a 'repositories.<name>' entry, or the target "
-                "repository's .orchestrator.yml."
+                "Place them in 'defaults' or a 'repositories.<name>' entry."
             )

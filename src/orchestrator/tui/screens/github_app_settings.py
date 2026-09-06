@@ -1,4 +1,4 @@
-"""Repository-local GitHub App configuration screen."""
+"""GitHub App configuration screen."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ class GitHubAppSettingsScreen(Screen[None]):
                             )
                 with Horizontal(classes="screen-actions"):
                     yield Button(
-                        "Save local configuration",
+                        "Save configuration",
                         variant="success",
                         id="save-github-apps",
                     )
@@ -87,7 +87,7 @@ class GitHubAppSettingsScreen(Screen[None]):
                 return
             self._populate("implementer", implementer)
             self._populate("reviewer", reviewer)
-            self._status("Edit App references, then save to the repository .orchestrator.yml.")
+            self._status("Edit App references, then save to orchestrator.yml.")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "save-github-apps":
@@ -97,7 +97,7 @@ class GitHubAppSettingsScreen(Screen[None]):
             self._status("Choose a repository first.")
             return
         try:
-            local_path = self.controller.save_github_app_settings(
+            config_path = self.controller.save_github_app_settings(
                 repository,
                 implementer_app=self._settings("implementer"),
                 reviewer_app=self._settings("reviewer"),
@@ -105,7 +105,7 @@ class GitHubAppSettingsScreen(Screen[None]):
         except Exception as exc:
             self._status(f"Cannot save GitHub App configuration: {exc}")
             return
-        self._status(f"Saved App references to {local_path}.")
+        self._status(f"Saved App references to {config_path}.")
 
     def _populate(self, role: str, settings: GitHubAppSettings) -> None:
         self.query_one(f"#{role}-app-id", Input).value = str(settings.app_id or "")

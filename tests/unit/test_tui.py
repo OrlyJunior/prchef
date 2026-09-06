@@ -47,7 +47,7 @@ class _Repository:
 class _ConfigLoader:
     def __init__(self, path: Path) -> None:
         self._path = path
-        self.saved_github_apps: tuple[Path, GitHubAppSettings, GitHubAppSettings] | None = None
+        self.saved_github_apps: tuple[str, GitHubAppSettings, GitHubAppSettings] | None = None
         self.config = ProjectConfig.model_validate(
             {
                 "path": path,
@@ -91,13 +91,14 @@ class _ConfigLoader:
 
     def save_github_app_settings(
         self,
-        repository_path: Path,
+        repository_key: str,
         *,
         implementer_app: GitHubAppSettings,
         reviewer_app: GitHubAppSettings,
     ) -> Path:
-        self.saved_github_apps = (repository_path, implementer_app, reviewer_app)
-        return repository_path / ".orchestrator.yml"
+        assert repository_key == "example"
+        self.saved_github_apps = (repository_key, implementer_app, reviewer_app)
+        return self._path / "orchestrator.yml"
 
 
 class _TaskProvider:
