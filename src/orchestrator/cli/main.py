@@ -17,7 +17,7 @@ from orchestrator.clients.factory import ClientFactory
 from orchestrator.clients.git_client import GitClient
 from orchestrator.clients.github_issue_client import GitHubIssueClient
 from orchestrator.clients.trello_client import TrelloClient
-from orchestrator.config.database import build_engine, build_session_factory
+from orchestrator.config.database import build_engine, build_session_factory, resolve_database_url
 from orchestrator.config.project_config import ConfigurationError, ProjectConfigLoader
 from orchestrator.config.settings import Settings
 from orchestrator.models.development_task import DevelopmentTask
@@ -105,7 +105,7 @@ def _print_final_summary(execution: WorkflowExecution) -> None:
 
 
 def _repository(settings: Settings) -> WorkflowRepository:
-    engine = build_engine(settings.database_url)
+    engine = build_engine(_database_url(settings))
     return WorkflowRepository(build_session_factory(engine))
 
 
@@ -113,12 +113,20 @@ class MigrationError(RuntimeError):
     pass
 
 
+def _database_url(settings: Settings) -> str:
+    return resolve_database_url(
+        database_url=settings.database_url,
+        database_path=settings.database_path,
+        config_file=settings.config_file,
+    )
+
+
 def _apply_pending_migrations(settings: Settings) -> None:
-    project_root = Path(__file__).resolve().parents[3]
-    alembic_config = Config(str(project_root / "alembic.ini"))
-    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
-    alembic_config.set_main_option("sqlalchemy.url", settings.database_url)
     try:
+        project_root = Path(__file__).resolve().parents[3]
+        alembic_config = Config(str(project_root / "alembic.ini"))
+        alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+        alembic_config.set_main_option("sqlalchemy.url", _database_url(settings))
         command.upgrade(alembic_config, "head")
     except Exception as exc:
         raise MigrationError(f"Could not apply pending database migrations: {exc}") from exc

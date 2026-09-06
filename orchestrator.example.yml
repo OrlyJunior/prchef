@@ -4,6 +4,10 @@ task:
   provider: github
 
 defaults:
+  # Persistent execution state is global, never repository-local. Relative paths
+  # are resolved from this global configuration file.
+  # persistence:
+  #   database_path: state/orchestrator.db
   workspace:
     # Worktrees are created outside the configured repository checkout.
     root: C:/Git/orchestrator-workspaces

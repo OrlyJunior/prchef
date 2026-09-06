@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import inspect
 from typer.testing import CliRunner
 
@@ -393,6 +395,32 @@ def test_pending_migrations_are_applied_to_configured_database(tmp_path: Path) -
     main._apply_pending_migrations(Settings(database_url=database_url))
 
     engine = build_engine(database_url)
+    assert "workflow_executions" in inspect(engine).get_table_names()
+    engine.dispose()
+
+
+def test_manual_alembic_upgrade_uses_global_persistence_configuration_outside_cwd(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    config = tmp_path / "config" / "orchestrator.yml"
+    config.parent.mkdir()
+    database = tmp_path / "state" / "workflow.db"
+    config.write_text(
+        "defaults:\n  persistence:\n    database_path: ../state/workflow.db\n",
+        encoding="utf-8",
+    )
+    arbitrary_cwd = tmp_path / "arbitrary-working-directory"
+    arbitrary_cwd.mkdir()
+    monkeypatch.chdir(arbitrary_cwd)
+    monkeypatch.setenv("ORCHESTRATOR_CONFIG", str(config))
+    monkeypatch.delenv("ORCHESTRATOR_DATABASE_URL", raising=False)
+    monkeypatch.delenv("ORCHESTRATOR_DATABASE_PATH", raising=False)
+
+    project_root = Path(__file__).resolve().parents[2]
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    command.upgrade(alembic_config, "head")
+
+    engine = build_engine(f"sqlite:///{database.as_posix()}")
     assert "workflow_executions" in inspect(engine).get_table_names()
     engine.dispose()
 
