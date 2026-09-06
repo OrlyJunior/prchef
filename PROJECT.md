@@ -160,7 +160,8 @@
 
 - Global `orchestrator.yml` contains top-level task selection and `defaults`; project settings at
   global top level are rejected. For a repository, merge in order: `defaults` → matching
-  `repositories.<key>` entry → target repository `.orchestrator.yml` (later wins).
+  `repositories.<key>` entry (later wins). Repository-local `.orchestrator.yml` files are ignored
+  with a warning and are never created or updated.
 - Global configuration discovery is ordered: explicit `--config`; `ORCHESTRATOR_CONFIG`,
   `ORCHESTRATOR_CONFIG_PATH`, or legacy `ORCHESTRATOR_CONFIG_FILE`; `orchestrator.yml` in the
   current directory and its parents; `~/.config/orchestrator/orchestrator.yml`; then
@@ -174,8 +175,9 @@
   `integrations.jules/codex` are normalized only when modern configuration is absent. Never add a
   silent provider fallback.
 - Safety defaults: direct merge is rejected, protected branches include main/master/develop unless
-  changed, and tests are required unless deliberately disabled. Local `orchestrator.yml` may hold
-  machine-specific paths and stays untracked; keep the example generic.
+  changed, and tests are required unless deliberately disabled. Repository-specific settings,
+  including TUI edits, are stored in the corresponding `repositories.<key>` entry of the resolved
+  global configuration; keep examples generic.
 - Notifications are opt-in per resolved project configuration through `notifications.enabled`
   (default `false`) and `notifications.channel` (currently `desktop`). Workflow policy emits one
   best-effort alert only for terminal `APPROVED`, `FAILED`, `NEEDS_HUMAN`, or exhausted-review
