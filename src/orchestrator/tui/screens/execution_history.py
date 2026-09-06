@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from textual.app import ComposeResult
-from textual.containers import Container, Horizontal
+from textual.containers import Horizontal, VerticalScroll
+from textual.events import DescendantFocus
 from textual.screen import Screen
 from textual.widgets import Button, Input, Select, Static
 
@@ -22,7 +23,7 @@ class ExecutionHistoryScreen(Screen[None]):
     BINDINGS = [("escape", "app.pop_screen", "Back"), ("r", "refresh", "Refresh")]
 
     def compose(self) -> ComposeResult:
-        with Container(id="execution-history"):
+        with VerticalScroll(id="execution-history"):
             yield Static("Execution history", classes="screen-title")
             yield Input(
                 placeholder="Filter by task, repository, stage, or status",
@@ -40,6 +41,11 @@ class ExecutionHistoryScreen(Screen[None]):
 
     def on_mount(self) -> None:
         self.refresh_history()
+
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
+        self.query_one("#execution-history", VerticalScroll).scroll_to_widget(
+            event.widget, animate=False
+        )
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "history-filter":

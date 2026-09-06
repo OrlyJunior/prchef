@@ -8,7 +8,8 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, cast
 
 from textual.app import ComposeResult
-from textual.containers import Container, Horizontal, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
+from textual.events import DescendantFocus
 from textual.screen import Screen
 from textual.widgets import Button, Static
 
@@ -31,15 +32,14 @@ class ExecutionDetailScreen(Screen[None]):
         self._links: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
-        with Container(id="execution-detail"):
+        with VerticalScroll(id="execution-detail"):
             yield Static("Execution detail", classes="screen-title")
             with Horizontal(classes="screen-actions"):
                 yield Button("Open task", id="open-task")
                 yield Button("Open PR", id="open-pr")
                 yield Button("Open planner session", id="open-spec-session")
                 yield Button("Open review session", id="open-review-session")
-            with VerticalScroll():
-                yield Static("Loading execution…", id="execution-content")
+            yield Static("Loading execution…", id="execution-content")
 
     @property
     def controller(self) -> WorkflowController:
@@ -54,6 +54,11 @@ class ExecutionDetailScreen(Screen[None]):
             )
             return
         self._render_execution(execution, steps)
+
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
+        self.query_one("#execution-detail", VerticalScroll).scroll_to_widget(
+            event.widget, animate=False
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         url = self._links.get(event.button.id or "")

@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from textual.app import ComposeResult
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import DescendantFocus
 from textual.screen import Screen
 from textual.widgets import Button, Input, Select, Static
 
@@ -22,7 +23,7 @@ class GitHubAppSettingsScreen(Screen[None]):
     BINDINGS = [("escape", "app.pop_screen", "Back")]
 
     def compose(self) -> ComposeResult:
-        with Container(id="github-app-settings"):
+        with VerticalScroll(id="github-app-settings"):
             yield Static("GitHub App identities", classes="screen-title")
             yield Static(
                 "Only App IDs and private-key references are stored. "
@@ -54,7 +55,9 @@ class GitHubAppSettingsScreen(Screen[None]):
                         variant="success",
                         id="save-github-apps",
                     )
-        yield Static("Select a repository to inspect its App identities.", id="github-app-status")
+            yield Static(
+                "Select a repository to inspect its App identities.", id="github-app-status"
+            )
 
     @property
     def controller(self) -> WorkflowController:
@@ -68,6 +71,11 @@ class GitHubAppSettingsScreen(Screen[None]):
             return
         self.query_one("#github-app-repository", Select).set_options(
             [(item.key, item.key) for item in repositories]
+        )
+
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
+        self.query_one("#github-app-settings", VerticalScroll).scroll_to_widget(
+            event.widget, animate=False
         )
 
     def on_select_changed(self, event: Select.Changed) -> None:
