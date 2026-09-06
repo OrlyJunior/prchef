@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from textual import work
 from textual.app import ComposeResult
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import DescendantFocus
 from textual.screen import Screen
 from textual.widgets import Button, Input, Select, Static
 
@@ -33,7 +34,9 @@ class WorkflowRunnerScreen(Screen[None]):
         self._runtime_inputs: dict[tuple[AgentRole, str], dict[str, Any]] = {}
 
     def compose(self) -> ComposeResult:
-        with Container(id="workflow-runner"):
+        # Textual scrolls focused children into view within this one launcher
+        # scroll context, keeping keyboard-only flows usable in short terminals.
+        with VerticalScroll(id="workflow-runner"):
             yield Static("Start workflow", classes="screen-title")
             with Vertical(classes="workflow-form"):
                 yield Static("Repository", classes="field-label")
@@ -87,6 +90,13 @@ class WorkflowRunnerScreen(Screen[None]):
                 "No repositories are configured. Add entries under repositories "
                 "in orchestrator.yml."
             )
+
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
+        """Keep keyboard navigation visible when the form exceeds the viewport."""
+
+        self.query_one("#workflow-runner", VerticalScroll).scroll_to_widget(
+            event.widget, animate=False
+        )
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "repository" and isinstance(event.value, str):

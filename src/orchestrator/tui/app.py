@@ -23,14 +23,18 @@ class OrchestratorApp(App[None]):
     CSS = """
     #home, #workflow-runner, #execution-history, #execution-detail, #github-app-settings {
         width: 100%;
-        height: 100%;
+        height: 1fr;
         padding: 1 2;
+    }
+    #workflow-runner, #execution-history, #execution-detail, #github-app-settings {
+        overflow-y: auto;
     }
     .screen-title { text-style: bold; margin-bottom: 1; }
     .field-label { margin-top: 1; }
-    .workflow-form { max-width: 100; }
+    .workflow-form { max-width: 100; height: auto; }
+    #task-selector { height: auto; }
     .github-app-roles { width: 100%; }
-    .github-app-role { width: 1fr; margin-right: 1; }
+    .github-app-role { width: 1fr; height: auto; margin-right: 1; }
     .screen-actions { margin-top: 1; height: auto; }
     .screen-actions Button { margin-right: 1; }
     #workflow-progress { margin-top: 2; text-style: bold; }
