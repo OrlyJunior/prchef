@@ -12,6 +12,7 @@ from textual.widgets import Button, Select
 from orchestrator.config.project_config import (
     ConfiguredRepository,
     GitHubAppSettings,
+    GitHubAppSettingsDestination,
     ProjectConfig,
 )
 from orchestrator.models.agent import AgentRole
@@ -47,10 +48,14 @@ class _Repository:
 class _ConfigLoader:
     def __init__(self, path: Path) -> None:
         self._path = path
-        self.saved_github_apps: tuple[Path, GitHubAppSettings, GitHubAppSettings] | None = None
+        self.saved_github_apps: (
+            tuple[GitHubAppSettingsDestination, GitHubAppSettings, GitHubAppSettings] | None
+        ) = None
         self.config = ProjectConfig.model_validate(
             {
                 "path": path,
+                "configuration_source": path / "orchestrator.yml",
+                "repository_key": "example",
                 "providers": {
                     "planner": {"type": "jules"},
                     "implementer": {
@@ -91,13 +96,26 @@ class _ConfigLoader:
 
     def save_github_app_settings(
         self,
-        repository_path: Path,
+        destination: GitHubAppSettingsDestination,
         *,
+        repository_key: str | None,
         implementer_app: GitHubAppSettings,
         reviewer_app: GitHubAppSettings,
     ) -> Path:
-        self.saved_github_apps = (repository_path, implementer_app, reviewer_app)
-        return repository_path / ".orchestrator.yml"
+        assert repository_key == "example"
+        self.saved_github_apps = (destination, implementer_app, reviewer_app)
+        return destination.path
+
+    def github_app_settings_destinations(
+        self, config: ProjectConfig
+    ) -> list[GitHubAppSettingsDestination]:
+        assert config is self.config
+        return [
+            GitHubAppSettingsDestination("global", self._path / "orchestrator.yml"),
+            GitHubAppSettingsDestination(
+                "repository-local", self._path / ".orchestrator.yml"
+            ),
+        ]
 
 
 class _TaskProvider:
@@ -419,6 +437,8 @@ def test_workflow_runner_displays_inline_task_load_error(tmp_path: Path) -> None
 
 def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
+    config_loader = controller._config_loader
+    assert isinstance(config_loader, _ConfigLoader)
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
@@ -430,6 +450,9 @@ def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path
             await pilot.pause()
             assert application.screen.query_one("#implementer-app-id").value == "56"
             assert application.screen.query_one("#reviewer-app-id").value == "12"
+            assert str(tmp_path / "orchestrator.yml") in str(
+                application.screen.query_one("#github-app-destination-path").renderable
+            )
             application.screen.query_one("#implementer-app-id").value = "123"
             application.screen.query_one("#implementer-installation-id").value = "456"
             application.screen.query_one("#implementer-key-env").value = "IMPLEMENTER_KEY"
@@ -439,6 +462,33 @@ def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path
             assert "Saved App references" in str(
                 application.screen.query_one("#github-app-status").renderable
             )
+            assert config_loader.saved_github_apps is not None
+            assert config_loader.saved_github_apps[0].key == "global"
+
+    asyncio.run(drive())
+
+
+def test_tui_requires_destination_selection_for_composed_configuration(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config_loader = controller._config_loader
+    assert isinstance(config_loader, _ConfigLoader)
+    config_loader.config.local_override_path = tmp_path / ".orchestrator.yml"
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("c")
+            repository = application.screen.query_one("#github-app-repository", Select)
+            repository.value = "example"
+            await pilot.pause()
+            assert "choose a save destination" in str(
+                application.screen.query_one("#github-app-status").renderable
+            ).casefold()
+            application.screen.query_one("#save-github-apps", Button).focus()
+            await pilot.press("enter")
+            assert "choose the configuration file" in str(
+                application.screen.query_one("#github-app-status").renderable
+            ).casefold()
 
     asyncio.run(drive())
 
