@@ -91,6 +91,7 @@ class WorkflowService:
         repository_override: str | None = None,
         *,
         agent_providers: Mapping[AgentRole, str] | None = None,
+        agent_runtime_options: Mapping[AgentRole, Mapping[str, object]] | None = None,
         event_listener: WorkflowEventListener | None = None,
     ) -> WorkflowExecution:
         """Run a workflow using the same persisted transitions used by the CLI.
@@ -124,9 +125,16 @@ class WorkflowService:
 
             with self._step(execution.id, WorkflowStage.LOAD_CONFIG):
                 config = self._config_loader.load(task, repository_override)
-                if agent_providers:
-                    config = config.with_agent_providers(
-                        {role.value: provider for role, provider in agent_providers.items()}
+                if agent_providers or agent_runtime_options:
+                    config = config.with_agent_runtime_overrides(
+                        {
+                            role.value: provider
+                            for role, provider in (agent_providers or {}).items()
+                        },
+                        {
+                            role.value: options
+                            for role, options in (agent_runtime_options or {}).items()
+                        },
                     )
                 self._repository.update_project(
                     execution.id, str(config.path), config.repository.base_branch

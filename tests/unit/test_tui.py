@@ -5,6 +5,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from orchestrator.config.project_config import (
     ConfiguredRepository,
     GitHubAppSettings,
@@ -60,6 +62,20 @@ class _ConfigLoader:
                     "reviewer": {"provider": "reviewer"},
                 },
                 "task": {"provider": "github"},
+                "integrations": {
+                    "github": {
+                        "app": {
+                            "app_id": 12,
+                            "installation_id": 34,
+                            "private_key_env": "REVIEWER_APP_KEY",
+                        },
+                        "implementer_app": {
+                            "app_id": 56,
+                            "installation_id": 78,
+                            "private_key_env": "IMPLEMENTER_APP_KEY",
+                        },
+                    }
+                },
             }
         )
 
@@ -106,7 +122,7 @@ class _TaskProvider:
 
 class _WorkflowService:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str | None, dict[AgentRole, str]]] = []
+        self.calls: list[tuple[str, str | None, dict[AgentRole, str], dict[AgentRole, Any]]] = []
 
     def run(
         self,
@@ -114,9 +130,10 @@ class _WorkflowService:
         repository: str | None,
         *,
         agent_providers: dict[AgentRole, str],
+        agent_runtime_options: dict[AgentRole, Any],
         event_listener: Callable[..., None] | None,
     ) -> WorkflowExecution:
-        self.calls.append((task_id, repository, agent_providers))
+        self.calls.append((task_id, repository, agent_providers, agent_runtime_options))
         del event_listener
         return WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED)
 
@@ -169,8 +186,62 @@ def test_controller_browses_selections_and_delegates_workflow_start(tmp_path: Pa
                 AgentRole.IMPLEMENTER: "implementer",
                 AgentRole.REVIEWER: "planner",
             },
+            {},
         )
     ]
+
+
+def test_controller_passes_validated_role_runtime_overrides_without_mutating_defaults(
+    tmp_path: Path,
+) -> None:
+    controller, service, _ = _controller(tmp_path)
+
+    controller.start_workflow(
+        WorkflowLaunch(
+            repository="example",
+            task_provider="github",
+            task_id="12",
+            agent_providers={
+                AgentRole.PLANNER: "planner",
+                AgentRole.IMPLEMENTER: "implementer",
+                AgentRole.REVIEWER: "reviewer",
+            },
+            agent_runtime_options={
+                AgentRole.IMPLEMENTER: {
+                    "model": "any-codex-model",
+                    "reasoning_effort": "high",
+                }
+            },
+        )
+    )
+
+    assert service.calls[0][3] == {
+        AgentRole.IMPLEMENTER: {
+            "model": "any-codex-model",
+            "reasoning_effort": "high",
+        }
+    }
+
+
+def test_controller_rejects_runtime_options_not_supported_by_selected_provider(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+
+    with pytest.raises(Exception, match="does not support runtime option"):
+        controller.start_workflow(
+            WorkflowLaunch(
+                repository="example",
+                task_provider="github",
+                task_id="12",
+                agent_providers={
+                    AgentRole.PLANNER: "planner",
+                    AgentRole.IMPLEMENTER: "implementer",
+                    AgentRole.REVIEWER: "reviewer",
+                },
+                agent_runtime_options={AgentRole.PLANNER: {"model": "not-supported"}},
+            )
+        )
 
 
 def test_textual_app_navigates_to_workflow_runner(tmp_path: Path) -> None:
@@ -181,6 +252,31 @@ def test_textual_app_navigates_to_workflow_runner(tmp_path: Path) -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
             assert isinstance(application.screen, WorkflowRunnerScreen)
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            screen = application.screen
+            repository = screen.query_one("#repository")
+            repository.value = "example"
+            await pilot.pause()
+            assert screen.query_one("#planner-provider").value == "planner"
+            assert screen.query_one("#planner-model").display is False
+            assert screen.query_one("#implementer-model").display is True
+            assert screen.query_one("#implementer-reasoning").display is True
+            assert screen.query_one("#implementer-model").value == ""
+
+            screen.query_one("#planner-provider").value = "implementer"
+            await pilot.pause()
+            assert screen.query_one("#planner-model").display is True
+            assert screen.query_one("#planner-reasoning").display is True
 
     asyncio.run(drive())
 
@@ -196,6 +292,8 @@ def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path
             repository = application.screen.query_one("#github-app-repository")
             repository.value = "example"
             await pilot.pause()
+            assert application.screen.query_one("#implementer-app-id").value == "56"
+            assert application.screen.query_one("#reviewer-app-id").value == "12"
             application.screen.query_one("#implementer-app-id").value = "123"
             application.screen.query_one("#implementer-installation-id").value = "456"
             application.screen.query_one("#implementer-key-env").value = "IMPLEMENTER_KEY"

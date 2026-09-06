@@ -327,6 +327,20 @@ class AgentProviderSettings(BaseModel):
     type: str
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderRuntimeCapabilities:
+    """User-facing runtime controls exposed by one configured provider.
+
+    This is deliberately a capability description, not a model catalogue.  The
+    provider settings schemas remain the validation authority and model values
+    are always entered as free-form identifiers when a provider accepts them.
+    """
+
+    supports_model: bool = False
+    supports_reasoning_effort: bool = False
+    supports_generation: bool = False
+
+
 class JulesProviderSettings(JulesIntegrationSettings):
     model_config = ConfigDict(extra="forbid")
 
@@ -359,6 +373,28 @@ class GeminiVertexProviderSettings(BaseModel):
     model: str = Field(min_length=1)
     timeout_seconds: int = Field(default=900, gt=0)
     generation: GeminiGenerationSettings = Field(default_factory=GeminiGenerationSettings)
+
+
+def _validate_provider_settings(
+    values: Mapping[str, Any], provider_name: str
+) -> JulesProviderSettings | CodexCliProviderSettings | GeminiVertexProviderSettings:
+    """Validate a runtime-adjusted provider through its existing schema."""
+
+    provider_type = values.get("type")
+    try:
+        if provider_type == "jules":
+            return JulesProviderSettings.model_validate(values)
+        if provider_type == "codex-cli":
+            return CodexCliProviderSettings.model_validate(values)
+        if provider_type == "gemini-vertex":
+            return GeminiVertexProviderSettings.model_validate(values)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"Invalid runtime configuration for agent provider {provider_name!r}: {exc}"
+        ) from exc
+    raise ConfigurationError(
+        f"Unknown agent provider type {provider_type!r} for provider {provider_name!r}"
+    )
 
 
 class IntegrationsSettings(BaseModel):
@@ -488,6 +524,110 @@ class ProjectConfig(BaseModel):
                     f"Agent provider {normalized!r} selected for {role} is not configured"
                 )
             setting.provider = normalized
+        return selected
+
+    def provider_runtime_capabilities(self, provider_name: str) -> ProviderRuntimeCapabilities:
+        """Return the interactive runtime controls supported by a provider.
+
+        Keep this information beside the provider configuration schemas so
+        presentation layers do not need to know provider implementation
+        details or maintain a model allowlist.
+        """
+
+        settings = self.providers.get(provider_name)
+        if settings is None:
+            raise ConfigurationError(f"Agent provider {provider_name!r} is not configured")
+        if settings.type == "codex-cli":
+            return ProviderRuntimeCapabilities(
+                supports_model=True, supports_reasoning_effort=True
+            )
+        if settings.type == "gemini-vertex":
+            return ProviderRuntimeCapabilities(supports_model=True, supports_generation=True)
+        return ProviderRuntimeCapabilities()
+
+    def provider_runtime_values(self, provider_name: str) -> dict[str, Any]:
+        """Return current user-facing runtime values for a configured provider."""
+
+        settings = self.providers.get(provider_name)
+        if settings is None:
+            raise ConfigurationError(f"Agent provider {provider_name!r} is not configured")
+        if settings.type == "codex-cli":
+            codex = CodexCliProviderSettings.model_validate(settings.model_dump())
+            return {
+                "model": codex.model,
+                "reasoning_effort": codex.reasoning_effort,
+            }
+        if settings.type == "gemini-vertex":
+            vertex = GeminiVertexProviderSettings.model_validate(settings.model_dump())
+            return {
+                "model": vertex.model,
+                "generation": vertex.generation.model_dump(),
+            }
+        return {}
+
+    def with_agent_runtime_overrides(
+        self,
+        provider_overrides: Mapping[str, str],
+        runtime_overrides: Mapping[str, Mapping[str, Any]],
+    ) -> ProjectConfig:
+        """Apply role-local provider settings without changing persisted YAML.
+
+        A named provider can serve more than one role.  Role-local options are
+        therefore materialized under private in-memory names, allowing (for
+        example) planner and implementer to use different Codex models in the
+        same workflow.  The normal registry still constructs and validates the
+        resulting provider configurations.
+        """
+
+        selected = self.with_agent_providers(provider_overrides)
+        role_settings = {
+            "planner": selected.agents.planner,
+            "implementer": selected.agents.implementer,
+            "reviewer": selected.agents.reviewer,
+        }
+        for role, overrides in runtime_overrides.items():
+            setting = role_settings.get(role)
+            if setting is None:
+                raise ConfigurationError(f"Unknown agent role: {role}")
+            if not isinstance(overrides, Mapping):
+                raise ConfigurationError(f"Runtime options for {role} must be a mapping")
+            provider_name = setting.provider
+            base = selected.providers[provider_name]
+            capability = selected.provider_runtime_capabilities(provider_name)
+            allowed = {"model"} if capability.supports_model else set()
+            if capability.supports_reasoning_effort:
+                allowed.add("reasoning_effort")
+            if capability.supports_generation:
+                allowed.add("generation")
+            unsupported = sorted(set(overrides) - allowed)
+            if unsupported:
+                raise ConfigurationError(
+                    f"Provider {provider_name!r} does not support runtime option(s): "
+                    f"{', '.join(unsupported)}"
+                )
+
+            values = base.model_dump()
+            for key, value in overrides.items():
+                if key == "generation":
+                    if not isinstance(value, Mapping):
+                        raise ConfigurationError("Gemini generation options must be a mapping")
+                    generation = values.get("generation", {})
+                    if not isinstance(generation, dict):
+                        generation = {}
+                    generation.update(value)
+                    values["generation"] = generation
+                else:
+                    values[key] = value
+            validated = _validate_provider_settings(values, provider_name)
+            runtime_name = f"__tui_runtime_{role}"
+            suffix = 2
+            while runtime_name in selected.providers:
+                runtime_name = f"__tui_runtime_{role}_{suffix}"
+                suffix += 1
+            selected.providers[runtime_name] = AgentProviderSettings.model_validate(
+                validated.model_dump()
+            )
+            setting.provider = runtime_name
         return selected
 
 
