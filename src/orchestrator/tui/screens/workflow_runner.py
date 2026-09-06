@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import DescendantFocus
+from textual.events import DescendantFocus, Resize
 from textual.screen import Screen
 from textual.widgets import Button, Input, Select, Static
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 class WorkflowRunnerScreen(Screen[None]):
-    """Collect launch selections and observe the existing workflow service."""
+    """Collect compact launch selections and observe the workflow service."""
 
     BINDINGS = [("escape", "app.pop_screen", "Back")]
 
@@ -31,13 +31,15 @@ class WorkflowRunnerScreen(Screen[None]):
         super().__init__()
         self._event_lines: list[str] = []
         self._role_providers: dict[AgentRole, str] = {}
+        self._role_default_providers: dict[AgentRole, str] = {}
         self._runtime_inputs: dict[tuple[AgentRole, str], dict[str, Any]] = {}
+        self._runtime_defaults: dict[tuple[AgentRole, str], dict[str, Any]] = {}
+        self._advanced_open: dict[AgentRole, bool] = {}
         self._task_load_token = 0
         self._suppressed_task_provider_change: tuple[str, str] | None = None
 
     def compose(self) -> ComposeResult:
-        # Textual scrolls focused children into view within this one launcher
-        # scroll context, keeping keyboard-only flows usable in short terminals.
+        # One scroll context keeps a keyboard-focused control visible on small terminals.
         with VerticalScroll(id="workflow-runner"):
             yield Static("Start workflow", classes="screen-title")
             with Vertical(classes="workflow-form"):
@@ -47,24 +49,69 @@ class WorkflowRunnerScreen(Screen[None]):
                 yield Select([], prompt="Task provider", id="task-provider")
                 yield TaskSelector(id="task-selector")
                 yield Static(
-                    "Agent settings — temporary for this run; YAML defaults are unchanged.",
+                    "Agent settings are temporary for this run; "
+                    "Provider/YAML defaults are unchanged.",
                     id="runtime-settings-note",
                 )
                 for role, prefix in self._role_fields():
-                    yield Static(role.value.title(), classes="field-label", id=f"{prefix}-title")
-                    yield Static("Provider", id=f"{prefix}-provider-label")
-                    yield Select(
-                        [], prompt=f"{role.value.title()} provider", id=f"{prefix}-provider"
-                    )
-                    yield Static("Model (free-form)", id=f"{prefix}-model-label")
-                    yield Input(placeholder="Model identifier", id=f"{prefix}-model")
-                    yield Static("Reasoning effort", id=f"{prefix}-reasoning-label")
-                    yield Input(placeholder="Reasoning effort", id=f"{prefix}-reasoning")
-                    yield Static("Temperature", id=f"{prefix}-temperature-label")
-                    yield Input(placeholder="0.0–2.0", id=f"{prefix}-temperature")
-                    yield Static("Max output tokens", id=f"{prefix}-max-output-tokens-label")
-                    yield Input(placeholder="Provider default", id=f"{prefix}-max-output-tokens")
-                    yield Static("", id=f"{prefix}-effective")
+                    with Vertical(classes="role-section", id=f"{prefix}-section"):
+                        yield Static(role.value.title(), classes="role-title", id=f"{prefix}-title")
+                        with Horizontal(classes="role-summary-row"):
+                            yield Static("", id=f"{prefix}-summary")
+                            yield Button("Configure", id=f"{prefix}-configure")
+                        with Vertical(classes="role-config", id=f"{prefix}-config"):
+                            with Horizontal(classes="role-config-row"):
+                                with Vertical(classes="role-field"):
+                                    yield Static("Provider", id=f"{prefix}-provider-label")
+                                    yield Select(
+                                        [],
+                                        prompt=f"{role.value.title()} provider",
+                                        id=f"{prefix}-provider",
+                                    )
+                                with Vertical(classes="role-field"):
+                                    yield Static("Model (free-form)", id=f"{prefix}-model-label")
+                                    yield Input(
+                                        placeholder="Provider/YAML default",
+                                        id=f"{prefix}-model",
+                                    )
+                            with Horizontal(classes="role-config-row"):
+                                with Vertical(classes="role-field"):
+                                    yield Static("Reasoning effort", id=f"{prefix}-reasoning-label")
+                                    yield Input(
+                                        placeholder="Provider/YAML default",
+                                        id=f"{prefix}-reasoning",
+                                    )
+                                with Vertical(classes="role-field role-advanced-action"):
+                                    yield Button("Advanced ▸", id=f"{prefix}-advanced-toggle")
+                            with Vertical(classes="role-advanced", id=f"{prefix}-advanced"):
+                                with Horizontal(classes="role-config-row"):
+                                    with Vertical(classes="role-field"):
+                                        yield Static(
+                                            "Temperature", id=f"{prefix}-temperature-label"
+                                        )
+                                        yield Input(
+                                            placeholder="Provider default",
+                                            id=f"{prefix}-temperature",
+                                        )
+                                        yield Static(
+                                            "",
+                                            classes="default-indicator",
+                                            id=f"{prefix}-temperature-source",
+                                        )
+                                    with Vertical(classes="role-field"):
+                                        yield Static(
+                                            "Max output tokens",
+                                            id=f"{prefix}-max-output-tokens-label",
+                                        )
+                                        yield Input(
+                                            placeholder="Provider default",
+                                            id=f"{prefix}-max-output-tokens",
+                                        )
+                                        yield Static(
+                                            "",
+                                            classes="default-indicator",
+                                            id=f"{prefix}-max-output-tokens-source",
+                                        )
                 yield Static("", id="github-app-summary")
                 with Horizontal(classes="screen-actions"):
                     yield Button("Start workflow", variant="success", id="start-workflow")
@@ -78,6 +125,7 @@ class WorkflowRunnerScreen(Screen[None]):
         return cast("OrchestratorApp", self.app).controller
 
     def on_mount(self) -> None:
+        self._set_layout_mode(self.size.width)
         try:
             repositories = self.controller.repositories()
         except Exception as exc:
@@ -85,9 +133,10 @@ class WorkflowRunnerScreen(Screen[None]):
                 f"Cannot load configured repositories: {exc}"
             )
             return
-        options = [(f"{item.key} — {item.path}", item.key) for item in repositories]
         repository_select = self.query_one("#repository", Select)
-        repository_select.set_options(options)
+        repository_select.set_options(
+            [(f"{item.key} — {item.path}", item.key) for item in repositories]
+        )
         repository_select.focus()
         if repositories:
             repository_select.value = repositories[0].key
@@ -97,9 +146,14 @@ class WorkflowRunnerScreen(Screen[None]):
                 "in orchestrator.yml."
             )
 
-    def on_descendant_focus(self, event: DescendantFocus) -> None:
-        """Keep keyboard navigation visible when the form exceeds the viewport."""
+    def on_resize(self, event: Resize) -> None:
+        self._set_layout_mode(event.size.width)
 
+    def _set_layout_mode(self, width: int) -> None:
+        self.set_class(width <= 80, "-narrow")
+        self.set_class(width > 80, "-wide")
+
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
         self.query_one("#workflow-runner", VerticalScroll).scroll_to_widget(
             event.widget, animate=False, top=True
         )
@@ -124,7 +178,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 return
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Keep the effective temporary-override summary current while typing."""
+        """Keep the compact summary and advanced override indicators current."""
 
         input_id = event.input.id
         for role, prefix in self._role_fields():
@@ -138,13 +192,9 @@ class WorkflowRunnerScreen(Screen[None]):
                 capabilities = self.controller.provider_runtime_capabilities(repository, provider)
             except Exception:
                 return
-            self._update_effective_summary(
-                role,
-                prefix,
-                provider,
-                self._runtime_values_from_controls(prefix),
-                capabilities.supports_generation,
-            )
+            values = self._runtime_values_from_controls(prefix)
+            self._update_role_summary(role, prefix, provider, values, capabilities)
+            self._update_advanced_indicators(role, prefix, provider, values)
             return
 
     def _load_repository_options(self, repository: str) -> None:
@@ -155,7 +205,6 @@ class WorkflowRunnerScreen(Screen[None]):
         except Exception as exc:
             self.notify(f"Could not resolve repository configuration: {exc}", severity="error")
             return
-
         if not providers:
             self.query_one("#task-selector", TaskSelector).clear_tasks()
             return
@@ -165,7 +214,10 @@ class WorkflowRunnerScreen(Screen[None]):
         task_provider_select.value = providers[0]
         self.query_one("#task-selector", TaskSelector).clear_tasks()
         self._role_providers.clear()
+        self._role_default_providers = selected_agents.copy()
         self._runtime_inputs.clear()
+        self._runtime_defaults.clear()
+        self._advanced_open.clear()
         for role, prefix in self._role_fields():
             select = self.query_one(f"#{prefix}-provider", Select)
             select.set_options([(provider, provider) for provider in configured_agents])
@@ -198,6 +250,7 @@ class WorkflowRunnerScreen(Screen[None]):
             self.notify(f"Could not load provider runtime settings: {exc}", severity="error")
             return
         self._role_providers[role] = provider
+        self._runtime_defaults.setdefault((role, provider), self._copy_runtime_values(values))
         self._set_runtime_control(prefix, "model", capabilities.supports_model, values.get("model"))
         self._set_runtime_control(
             prefix,
@@ -206,8 +259,7 @@ class WorkflowRunnerScreen(Screen[None]):
             values.get("reasoning_effort"),
         )
         generation = values.get("generation", {})
-        if not isinstance(generation, dict):
-            generation = {}
+        generation = generation if isinstance(generation, dict) else {}
         self._set_runtime_control(
             prefix, "temperature", capabilities.supports_generation, generation.get("temperature")
         )
@@ -217,18 +269,29 @@ class WorkflowRunnerScreen(Screen[None]):
             capabilities.supports_generation,
             generation.get("max_output_tokens"),
         )
-        self._update_effective_summary(
-            role, prefix, provider, values, capabilities.supports_generation
+        self.query_one(f"#{prefix}-advanced-toggle", Button).display = (
+            capabilities.supports_generation
         )
+        self._set_advanced_visibility(role, prefix, capabilities.supports_generation)
+        control_values = self._runtime_values_from_controls(prefix)
+        self._update_role_summary(role, prefix, provider, control_values, capabilities)
+        self._update_advanced_indicators(role, prefix, provider, control_values)
 
-    def _set_runtime_control(
-        self, prefix: str, name: str, visible: bool, value: Any
-    ) -> None:
+    def _set_runtime_control(self, prefix: str, name: str, visible: bool, value: Any) -> None:
         self.query_one(f"#{prefix}-{name}-label", Static).display = visible
         input_widget = self.query_one(f"#{prefix}-{name}", Input)
         input_widget.display = visible
         if visible:
             input_widget.value = "" if value is None else str(value)
+
+    @staticmethod
+    def _copy_runtime_values(values: dict[str, Any]) -> dict[str, Any]:
+        generation = values.get("generation", {})
+        return {
+            "model": values.get("model"),
+            "reasoning_effort": values.get("reasoning_effort"),
+            "generation": dict(generation) if isinstance(generation, dict) else {},
+        }
 
     def _runtime_values_from_controls(self, prefix: str) -> dict[str, Any]:
         return {
@@ -260,27 +323,50 @@ class WorkflowRunnerScreen(Screen[None]):
             options["generation"] = values["generation"]
         return options
 
-    def _update_effective_summary(
-        self,
-        role: AgentRole,
-        prefix: str,
-        provider: str,
-        values: dict[str, Any],
-        has_generation: bool,
+    def _update_role_summary(
+        self, role: AgentRole, prefix: str, provider: str, values: dict[str, Any], capabilities: Any
     ) -> None:
-        lines = [f"{role.value.title()} — this run only", f"Provider: {provider}"]
-        if "model" in values:
-            lines.append(f"Model: {values['model'] or 'provider default'}")
-        if "reasoning_effort" in values:
-            lines.append(f"Reasoning: {values['reasoning_effort'] or 'provider default'}")
-        if has_generation and isinstance(values.get("generation"), dict):
-            generation = values["generation"]
-            lines.append(f"Temperature: {generation.get('temperature', 'provider default')}")
-            lines.append(
-                "Max output tokens: "
-                f"{generation.get('max_output_tokens') or 'provider default'}"
+        provider_note = (
+            "Provider/YAML default"
+            if self._role_default_providers.get(role) == provider
+            else "this-run provider override"
+        )
+        parts = [f"{provider} ({provider_note})"]
+        if capabilities.supports_model:
+            parts.append(str(values.get("model") or "Provider default"))
+        if capabilities.supports_reasoning_effort:
+            parts.append(str(values.get("reasoning_effort") or "Provider default"))
+        self.query_one(f"#{prefix}-summary", Static).update(" · ".join(parts))
+
+    def _update_advanced_indicators(
+        self, role: AgentRole, prefix: str, provider: str, values: dict[str, Any]
+    ) -> None:
+        defaults = self._runtime_defaults.get((role, provider), {})
+        default_generation = defaults.get("generation", {})
+        generation = values.get("generation", {})
+        if not isinstance(default_generation, dict) or not isinstance(generation, dict):
+            return
+        for name, control_name in (
+            ("temperature", "temperature"),
+            ("max_output_tokens", "max-output-tokens"),
+        ):
+            current = generation.get(name)
+            configured = default_generation.get(name)
+            source = "Provider/YAML default"
+            is_default = (current is None and configured is None) or (
+                current is not None and configured is not None and str(current) == str(configured)
             )
-        self.query_one(f"#{prefix}-effective", Static).update("\n".join(lines))
+            if not is_default:
+                default_text = configured if configured is not None else "Provider default"
+                source = f"This-run override (default: {default_text})"
+            self.query_one(f"#{prefix}-{control_name}-source", Static).update(source)
+
+    def _set_advanced_visibility(self, role: AgentRole, prefix: str, supported: bool) -> None:
+        advanced = self.query_one(f"#{prefix}-advanced", Vertical)
+        expanded = supported and self._advanced_open.get(role, False)
+        advanced.display = expanded
+        toggle = self.query_one(f"#{prefix}-advanced-toggle", Button)
+        toggle.label = "Advanced ▾" if expanded else "Advanced ▸"
 
     def _load_github_app_summary(self, repository: str) -> None:
         try:
@@ -290,12 +376,14 @@ class WorkflowRunnerScreen(Screen[None]):
                 f"GitHub Apps: could not inspect configured defaults ({exc})"
             )
             return
+
         def status(settings: Any) -> str:
             return (
                 f"configured (App ID {settings.app_id})"
                 if settings.is_configured
                 else "not configured"
             )
+
         self.query_one("#github-app-summary", Static).update(
             "GitHub App defaults (persisted separately): "
             f"Implementer {status(implementer)}; Reviewer {status(reviewer)}."
@@ -317,6 +405,25 @@ class WorkflowRunnerScreen(Screen[None]):
             from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 
             self.app.push_screen(GitHubAppSettingsScreen())
+        else:
+            for role, prefix in self._role_fields():
+                if event.button.id == f"{prefix}-configure":
+                    config = self.query_one(f"#{prefix}-config", Vertical)
+                    config.display = not config.display
+                    event.button.label = "Hide configuration" if config.display else "Configure"
+                    return
+                if event.button.id == f"{prefix}-advanced-toggle":
+                    self._advanced_open[role] = not self._advanced_open.get(role, False)
+                    provider = self._selected(f"#{prefix}-provider")
+                    repository = self._selected("#repository")
+                    if provider is not None and repository is not None:
+                        capabilities = self.controller.provider_runtime_capabilities(
+                            repository, provider
+                        )
+                        self._set_advanced_visibility(
+                            role, prefix, capabilities.supports_generation
+                        )
+                    return
 
     def _show_history(self) -> None:
         from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
@@ -338,17 +445,13 @@ class WorkflowRunnerScreen(Screen[None]):
             return
         self.app.call_from_thread(self._set_available_tasks, tasks, provider, token)
 
-    def _set_available_tasks(
-        self, tasks: list[DevelopmentTask], provider: str, token: int
-    ) -> None:
-        if token != self._task_load_token:
-            return
-        self.query_one("#task-selector", TaskSelector).set_tasks(tasks, provider=provider)
+    def _set_available_tasks(self, tasks: list[DevelopmentTask], provider: str, token: int) -> None:
+        if token == self._task_load_token:
+            self.query_one("#task-selector", TaskSelector).set_tasks(tasks, provider=provider)
 
     def _task_loading_failed(self, message: str, token: int) -> None:
-        if token != self._task_load_token:
-            return
-        self.query_one("#task-selector", TaskSelector).set_error(message)
+        if token == self._task_load_token:
+            self.query_one("#task-selector", TaskSelector).set_error(message)
 
     def _start_selected_workflow(self) -> None:
         repository = self._selected("#repository")
