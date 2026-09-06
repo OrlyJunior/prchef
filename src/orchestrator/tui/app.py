@@ -55,6 +55,9 @@ class OrchestratorApp(App[None]):
     .screen-actions Button { margin-right: 1; }
     #workflow-progress { margin-top: 2; text-style: bold; }
     #workflow-events { margin-top: 1; color: $text-muted; }
+    .workflow-log-actions { height: auto; margin-top: 1; }
+    .workflow-log-actions Button { width: auto; }
+    #workflow-raw-events { display: none; margin-top: 1; color: $text-muted; }
     #execution-content { width: 100%; }
     """
     BINDINGS = [
