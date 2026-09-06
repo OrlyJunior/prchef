@@ -1,5 +1,6 @@
 from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.human_interaction import HumanInteraction
 from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.jules_session import JulesOperationResult, JulesSession, JulesSessionState
 from orchestrator.models.pull_request import PullRequest
@@ -23,6 +24,7 @@ __all__ = [
     "CodeReview",
     "DevelopmentTask",
     "ImplementationResult",
+    "HumanInteraction",
     "JulesOperationResult",
     "JulesSession",
     "JulesSessionState",

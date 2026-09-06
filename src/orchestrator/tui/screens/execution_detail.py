@@ -7,11 +7,12 @@ import webbrowser
 from dataclasses import asdict
 from typing import TYPE_CHECKING, cast
 
+from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.events import DescendantFocus
 from textual.screen import Screen
-from textual.widgets import Button, Static
+from textual.widgets import Button, Static, TextArea
 
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_step import WorkflowStep
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 
 
 class ExecutionDetailScreen(Screen[None]):
-    """Render all persisted execution snapshots without re-running workflow logic."""
+    """Render persisted execution details and resume a pending human response."""
 
     BINDINGS = [("escape", "app.pop_screen", "Back")]
 
@@ -39,6 +40,16 @@ class ExecutionDetailScreen(Screen[None]):
                 yield Button("Open PR", id="open-pr")
                 yield Button("Open planner session", id="open-spec-session")
                 yield Button("Open review session", id="open-review-session")
+            yield Static("", id="execution-human-title")
+            yield Static("", id="execution-human-prompt")
+            yield TextArea("", id="execution-human-response")
+            with Horizontal(classes="screen-actions", id="execution-human-actions"):
+                yield Button(
+                    "Resume workflow",
+                    variant="primary",
+                    id="execution-resume",
+                    disabled=True,
+                )
             yield Static("Loading execution…", id="execution-content")
 
     @property
@@ -61,12 +72,34 @@ class ExecutionDetailScreen(Screen[None]):
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "execution-resume":
+            response = self.query_one("#execution-human-response", TextArea).text.strip()
+            if response:
+                event.button.disabled = True
+                self._resume_execution(response)
+            return
         url = self._links.get(event.button.id or "")
         if not url:
             self.notify("No related link was persisted for this execution.", severity="warning")
             return
         webbrowser.open(url)
         self.notify("Opened related resource in the default browser.")
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id == "execution-human-response":
+            self.query_one("#execution-resume", Button).disabled = not event.text_area.text.strip()
+
+    @work(thread=True, exclusive=True)
+    def _resume_execution(self, response: str) -> None:
+        try:
+            execution = self.controller.respond_and_resume(self.execution_id, response)
+            _, steps = self.controller.execution_detail(self.execution_id)
+        except Exception as exc:
+            self.app.call_from_thread(
+                self.notify, f"Could not resume workflow: {exc}", severity="error"
+            )
+            return
+        self.app.call_from_thread(self._render_execution, execution, steps)
 
     def _render_execution(self, execution: WorkflowExecution, steps: list[WorkflowStep]) -> None:
         self._links = {
@@ -77,6 +110,32 @@ class ExecutionDetailScreen(Screen[None]):
         }
         for button_id, url in self._links.items():
             self.query_one(f"#{button_id}", Button).disabled = not bool(url)
+
+        interaction = next(
+            (item for item in reversed(execution.human_interactions) if item.awaiting_response),
+            None,
+        )
+        for widget_id in (
+            "execution-human-title",
+            "execution-human-prompt",
+            "execution-human-response",
+            "execution-human-actions",
+        ):
+            self.query_one(f"#{widget_id}").display = interaction is not None
+        if interaction is not None:
+            role = {
+                "GENERATE_SPEC": "Planner",
+                "REVIEW": "Reviewer",
+            }.get(
+                interaction.requesting_stage.value, interaction.requesting_stage.value.title()
+            )
+            self.query_one("#execution-human-title", Static).update(
+                f"{role} needs clarification"
+            )
+            self.query_one("#execution-human-prompt", Static).update(interaction.prompt)
+            response = self.query_one("#execution-human-response", TextArea)
+            response.text = ""
+            self.query_one("#execution-resume", Button).disabled = True
 
         details = {
             "execution": asdict(execution),

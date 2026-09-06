@@ -9,7 +9,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus, Resize
 from textual.screen import Screen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, Static, TextArea
 
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
@@ -43,6 +43,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._advanced_open: dict[AgentRole, bool] = {}
         self._task_load_token = 0
         self._suppressed_task_provider_change: tuple[str, str] | None = None
+        self._active_execution_id: str | None = None
 
     def compose(self) -> ComposeResult:
         # One scroll context keeps a keyboard-focused control visible on small terminals.
@@ -126,6 +127,18 @@ class WorkflowRunnerScreen(Screen[None]):
                                             id=f"{prefix}-max-output-tokens-source",
                                         )
             yield Static("No workflow running.", id="workflow-progress")
+            with Vertical(id="human-input-panel"):
+                yield Static("Human input required", id="human-input-title")
+                yield Static("", id="human-input-prompt")
+                yield TextArea("", id="human-response")
+                with Horizontal(classes="screen-actions"):
+                    yield Button(
+                        "Resume workflow",
+                        variant="primary",
+                        id="resume-workflow",
+                        disabled=True,
+                    )
+                    yield Button("Return later", id="return-later")
             yield Static("", id="workflow-events")
             with Horizontal(classes="workflow-log-actions"):
                 yield Button("Show detailed logs", id="toggle-workflow-logs")
@@ -214,6 +227,10 @@ class WorkflowRunnerScreen(Screen[None]):
             self._update_role_summary(role, prefix, provider, values, capabilities)
             self._update_advanced_indicators(role, prefix, provider, values)
             return
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id == "human-response":
+            self.query_one("#resume-workflow", Button).disabled = not event.text_area.text.strip()
 
     def _load_repository_options(self, repository: str) -> None:
         try:
@@ -417,6 +434,11 @@ class WorkflowRunnerScreen(Screen[None]):
             self._request_task_load(repository, provider)
         elif event.button.id == "start-workflow":
             self._start_selected_workflow()
+        elif event.button.id == "resume-workflow":
+            self._resume_active_workflow()
+        elif event.button.id == "return-later":
+            self._hide_human_panel()
+            self.notify("The execution remains available in execution history.")
         elif event.button.id == "workflow-history":
             self._show_history()
         elif event.button.id == "workflow-github-apps":
@@ -513,6 +535,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._stage_attempts.clear()
         self.query_one("#workflow-events", Static).update("")
         self.query_one("#workflow-raw-events", Static).update("")
+        self._hide_human_panel()
         self._run_workflow(launch)
 
     @work(thread=True, exclusive=True)
@@ -675,11 +698,62 @@ class WorkflowRunnerScreen(Screen[None]):
         }[stage]
 
     def _workflow_finished(self, execution: WorkflowExecution) -> None:
+        self._active_execution_id = execution.id
         self.query_one("#start-workflow", Button).disabled = False
         self.query_one("#workflow-progress", Static).update(
             self._status_message(execution.status)
         )
         self.notify(self._status_message(execution.status))
+        if execution.status is WorkflowStatus.NEEDS_HUMAN:
+            self._show_human_panel(execution)
+        else:
+            self._hide_human_panel()
+
+    def _show_human_panel(self, execution: WorkflowExecution) -> None:
+        interaction = next(
+            (item for item in reversed(execution.human_interactions) if item.awaiting_response),
+            None,
+        )
+        if interaction is None:
+            return
+        role = {
+            WorkflowStage.GENERATE_SPEC: "Planner",
+            WorkflowStage.REVIEW: "Reviewer",
+        }.get(
+            interaction.requesting_stage,
+            interaction.requesting_stage.value.replace("_", " ").title(),
+        )
+        self.query_one("#human-input-title", Static).update(f"{role} needs clarification")
+        self.query_one("#human-input-prompt", Static).update(interaction.prompt)
+        response = self.query_one("#human-response", TextArea)
+        response.text = ""
+        self.query_one("#resume-workflow", Button).disabled = True
+        self.query_one("#human-input-panel", Vertical).display = True
+        response.focus()
+
+    def _hide_human_panel(self) -> None:
+        self.query_one("#human-input-panel", Vertical).display = False
+
+    def _resume_active_workflow(self) -> None:
+        if self._active_execution_id is None:
+            return
+        response = self.query_one("#human-response", TextArea).text.strip()
+        if not response:
+            return
+        self.query_one("#resume-workflow", Button).disabled = True
+        self.query_one("#workflow-progress", Static).update("Resuming workflow…")
+        self._resume_workflow(self._active_execution_id, response)
+
+    @work(thread=True, exclusive=True)
+    def _resume_workflow(self, execution_id: str, response: str) -> None:
+        try:
+            execution = self.controller.respond_and_resume(
+                execution_id, response, event_listener=self._on_workflow_event
+            )
+        except Exception as exc:
+            self.app.call_from_thread(self._workflow_failed, str(exc))
+            return
+        self.app.call_from_thread(self._workflow_finished, execution)
 
     def _workflow_failed(self, message: str) -> None:
         self.query_one("#start-workflow", Button).disabled = False

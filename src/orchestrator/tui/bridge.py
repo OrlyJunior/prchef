@@ -198,3 +198,29 @@ class WorkflowController:
             self._repository.get_execution(execution_id),
             self._repository.list_steps(execution_id),
         )
+
+    def respond_and_resume(
+        self,
+        execution_id: str,
+        response: str,
+        *,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> WorkflowExecution:
+        execution = self._repository.get_execution(execution_id)
+        provider = self._task_provider_factory(
+            execution.task_source, execution.repository_ref or execution.repository
+        )
+        service = (
+            self._workflow_service_factory(provider)
+            if self._workflow_service_factory is not None
+            else WorkflowService(
+                workflow_repository=self._repository,
+                task_provider=provider,
+                config_loader=self._config_loader,
+                client_factory=self._client_factory,
+                verbose=self._verbose,
+            )
+        )
+        return service.respond_and_resume(
+            execution_id, response, event_listener=event_listener
+        )

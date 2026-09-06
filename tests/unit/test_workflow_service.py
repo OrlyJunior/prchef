@@ -177,6 +177,67 @@ def test_blocking_jules_ambiguity_stops_for_human_before_branch(workflow) -> Non
     assert result.status is WorkflowStatus.NEEDS_HUMAN
     assert result.working_branch is None
     assert "retention" in (result.error_message or "").lower()
+    assert result.human_interactions[-1].requesting_stage is WorkflowStage.GENERATE_SPEC
+    assert "retention" in result.human_interactions[-1].prompt.lower()
+
+
+def test_planner_human_response_resumes_same_execution_without_prior_workspace(
+    workflow,
+) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.ambiguous = True
+
+    paused = service.run("card-planner-resume")
+    assert paused.workspace_path is None
+    factory.jules.ambiguous = False
+
+    resumed = service.respond_and_resume(paused.id, "Use a configurable retention period.")
+
+    assert resumed.id == paused.id
+    assert resumed.status is WorkflowStatus.APPROVED
+    assert resumed.human_interactions[-1].response == "Use a configurable retention period."
+    assert factory.jules.spec_calls == 2
+    assert resumed.working_branch is not None
+    assert repository.stage_changes.count(WorkflowStage.PREPARE_BRANCH) == 1
+
+
+def test_reviewer_human_response_reuses_existing_workspace_branch_and_pr(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.malformed_review = True
+
+    paused = service.run("card-review-resume")
+    workspace = paused.workspace_path
+    branch = paused.working_branch
+    assert paused.status is WorkflowStatus.NEEDS_HUMAN
+    assert paused.human_interactions[-1].requesting_stage is WorkflowStage.REVIEW
+    factory.jules.malformed_review = False
+
+    resumed = service.respond_and_resume(paused.id, "The expected behavior is intentional.")
+
+    assert resumed.id == paused.id
+    assert resumed.status is WorkflowStatus.APPROVED
+    assert resumed.workspace_path == workspace
+    assert resumed.working_branch == branch
+    assert factory.github.create_calls == 1
+
+
+def test_execution_can_pause_for_multiple_human_input_cycles(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.ambiguous = True
+
+    first_pause = service.run("card-multiple-human")
+    second_pause = service.respond_and_resume(first_pause.id, "First clarification.")
+    assert second_pause.status is WorkflowStatus.NEEDS_HUMAN
+
+    factory.jules.ambiguous = False
+    completed = service.respond_and_resume(second_pause.id, "Second clarification.")
+
+    assert completed.status is WorkflowStatus.APPROVED
+    assert completed.id == first_pause.id
+    assert [item.response for item in completed.human_interactions] == [
+        "First clarification.",
+        "Second clarification.",
+    ]
 
 
 def test_codex_failure_stops_before_validation(workflow) -> None:

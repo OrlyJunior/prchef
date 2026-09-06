@@ -16,6 +16,7 @@ class WorkflowExecutionEntity(Base):
     trello_card_id: Mapped[str] = mapped_column(String(128), nullable=False)
     trello_card_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     repository: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    repository_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
     base_branch: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     workspace_path: Mapped[str | None] = mapped_column(Text)
     working_branch: Mapped[str | None] = mapped_column(String(255))
@@ -40,6 +41,11 @@ class WorkflowExecutionEntity(Base):
 
     steps: Mapped[list["WorkflowStepEntity"]] = relationship(
         back_populates="execution", cascade="all, delete-orphan"
+    )
+    human_interactions: Mapped[list["HumanInteractionEntity"]] = relationship(
+        back_populates="execution",
+        cascade="all, delete-orphan",
+        order_by="HumanInteractionEntity.id",
     )
 
     __table_args__ = (
@@ -70,4 +76,27 @@ class WorkflowStepEntity(Base):
     __table_args__ = (
         Index("ix_workflow_steps_execution_id", "workflow_execution_id"),
         Index("ix_workflow_steps_stage_status", "stage", "status"),
+    )
+
+
+class HumanInteractionEntity(Base):
+    __tablename__ = "human_interactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_execution_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("workflow_executions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    requesting_stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    response: Mapped[str | None] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    execution: Mapped[WorkflowExecutionEntity] = relationship(back_populates="human_interactions")
+
+    __table_args__ = (
+        Index("ix_human_interactions_execution_id", "workflow_execution_id"),
+        Index("ix_human_interactions_response", "workflow_execution_id", "response"),
     )
