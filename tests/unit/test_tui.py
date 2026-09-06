@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from textual.containers import VerticalScroll
-from textual.widgets import Button, Select
+from textual.widgets import Button, Input, Select
 
 from orchestrator.config.project_config import (
     ConfiguredRepository,
@@ -58,6 +58,12 @@ class _ConfigLoader:
                         "command": ["codex", "exec"],
                     },
                     "reviewer": {"type": "jules"},
+                    "vertex": {
+                        "type": "gemini-vertex",
+                        "project": "example-project",
+                        "model": "gemini-configured-model",
+                        "generation": {"temperature": 0.2},
+                    },
                 },
                 "agents": {
                     "planner": {"provider": "planner"},
@@ -271,6 +277,11 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
             repository = screen.query_one("#repository")
             repository.value = "example"
             await pilot.pause()
+            assert screen.query_one("#planner-config").display is False
+            assert screen.query_one("#planner-advanced").display is False
+            assert "planner (Provider/YAML default)" in str(
+                screen.query_one("#planner-summary").renderable
+            )
             assert screen.query_one("#planner-provider").value == "planner"
             assert screen.query_one("#planner-model").display is False
             assert screen.query_one("#implementer-model").display is True
@@ -281,6 +292,98 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
             await pilot.pause()
             assert screen.query_one("#planner-model").display is True
             assert screen.query_one("#planner-reasoning").display is True
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_expands_advanced_controls_and_preserves_overrides(
+    tmp_path: Path,
+) -> None:
+    controller, service, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            screen = application.screen
+            configure = screen.query_one("#planner-configure", Button)
+            configure.focus()
+            await pilot.press("enter")
+            assert screen.query_one("#planner-config").display is True
+
+            screen.query_one("#planner-provider", Select).value = "vertex"
+            await pilot.pause()
+            assert "vertex (this-run provider override)" in str(
+                screen.query_one("#planner-summary").renderable
+            )
+            assert screen.query_one("#planner-advanced-toggle", Button).display is True
+            assert screen.query_one("#planner-advanced").display is False
+
+            advanced = screen.query_one("#planner-advanced-toggle", Button)
+            advanced.press()
+            await pilot.pause()
+            assert screen.query_one("#planner-advanced").display is True
+            assert screen.query_one("#planner-temperature", Input).value == "0.2"
+            assert "Provider/YAML default" in str(
+                screen.query_one("#planner-temperature-source").renderable
+            )
+            assert "Provider/YAML default" in str(
+                screen.query_one("#planner-max-output-tokens-source").renderable
+            )
+
+            screen.query_one("#planner-temperature", Input).value = "0.8"
+            screen.query_one("#planner-max-output-tokens", Input).value = "512"
+            await pilot.pause()
+            assert "This-run override" in str(
+                screen.query_one("#planner-temperature-source").renderable
+            )
+
+            advanced.press()
+            await pilot.pause()
+            assert screen.query_one("#planner-advanced").display is False
+            assert screen.query_one("#planner-temperature", Input).value == "0.8"
+
+            screen.query_one("#available-tasks", Select).value = "12"
+            await pilot.pause()
+            screen.query_one("#start-workflow", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause(delay=0.1)
+            assert service.calls[0][3][AgentRole.PLANNER]["generation"] == {
+                "temperature": "0.8",
+                "max_output_tokens": "512",
+            }
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_role_configuration_uses_responsive_rows(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+
+    async def drive() -> None:
+        narrow_application = OrchestratorApp(controller)
+        async with narrow_application.run_test(size=(70, 50)) as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            screen = narrow_application.screen
+            screen.query_one("#implementer-configure", Button).focus()
+            await pilot.press("enter")
+            row = next(iter(screen.query(".role-config-row")))
+            content = screen.query_one("#workflow-runner", VerticalScroll)
+            assert screen.has_class("-narrow")
+            assert row.size.width <= screen.size.width
+            assert content.max_scroll_x == 0
+
+        wide_application = OrchestratorApp(controller)
+        async with wide_application.run_test(size=(120, 50)) as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            screen = wide_application.screen
+            screen.query_one("#implementer-configure", Button).focus()
+            await pilot.press("enter")
+            row = next(iter(screen.query(".role-config-row")))
+            assert screen.has_class("-wide")
+            assert row.size.width <= screen.size.width
 
     asyncio.run(drive())
 
