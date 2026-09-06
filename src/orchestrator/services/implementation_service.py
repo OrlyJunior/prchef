@@ -6,6 +6,7 @@ from orchestrator.models.agent import AgentRequest
 from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.implementation_result import ImplementationResult
+from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationResult
 from orchestrator.providers.agent_provider import AgentProvider
@@ -131,7 +132,54 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
 """
         return self._run_prompt(prompt, repository_path)
 
-    def _run_prompt(self, prompt: str, repository_path: Path) -> ImplementationResult:
+    def run_polish_pass(
+        self,
+        task: DevelopmentTask,
+        spec: RepositorySpec,
+        suggestions: list[str],
+        repository_path: Path,
+        pull_request: PullRequest,
+    ) -> ImplementationResult:
+        """Offer approved-review suggestions as one optional, scoped polish pass."""
+        feedback = json.dumps(suggestions, ensure_ascii=False, indent=2)
+        pull_request_context = json.dumps(
+            {
+                "url": pull_request.url,
+                "title": pull_request.title,
+                "base_branch": pull_request.base_branch,
+                "head_branch": pull_request.head_branch,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        prompt = f"""ORIGINAL TASK:
+{task.as_original_prompt()}
+
+REPOSITORY SPEC:
+{spec.as_prompt_context()}
+
+CURRENT PULL REQUEST:
+{pull_request_context}
+
+NON-BLOCKING REVIEW SUGGESTIONS:
+{feedback}
+
+{project_context_prompt(repository_path)}The review is already APPROVED. Evaluate every suggestion
+against the current implementation in this workspace, but apply only small, safe, clearly
+actionable improvements that remain within the original task
+scope. Decline or skip any suggestion that is outside the original task scope, disproportionately
+large, requires an architectural redesign, is unrelated cleanup, or is otherwise not worthwhile.
+If none should be applied,
+make no modifications. These suggestions are non-blocking and must never be treated as required.
+
+Keep PROJECT.md accurate only if an applied change meaningfully changes durable project knowledge.
+Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+"""
+        return self._run_prompt(prompt, repository_path, allow_no_changes=True)
+
+    def _run_prompt(
+        self, prompt: str, repository_path: Path, *, allow_no_changes: bool = False
+    ) -> ImplementationResult:
         agent_result = self._provider.execute(
             AgentRequest(
                 instructions=prompt,
@@ -149,7 +197,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
             result.changed_files = self._git.changed_files()
         if result.workspace_changes_may_exist and not result.success:
             return result
-        if result.success:
+        if result.success and not allow_no_changes:
             if not result.changed_files:
                 result.success = False
                 result.error_message = "Implementation provider completed without changing files"

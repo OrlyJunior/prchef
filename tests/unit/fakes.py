@@ -177,6 +177,7 @@ class FakeJulesClient:
         self.ambiguous = False
         self.changes_requested = False
         self.review_decisions: list[str] = []
+        self.review_suggestions: list[list[str]] = []
         self.malformed_review = False
         self.spec_error: Exception | None = None
         self.review_error: Exception | None = None
@@ -236,6 +237,7 @@ class FakeJulesClient:
             else ("CHANGES_REQUESTED" if self.changes_requested else "APPROVED")
         )
         changes_requested = decision == "CHANGES_REQUESTED"
+        suggestions = self.review_suggestions.pop(0) if self.review_suggestions else []
         return AgentResult(
             output=json.dumps(
                 {
@@ -249,7 +251,7 @@ class FakeJulesClient:
                     "blocking_findings": (
                         ["Missing edge case"] if changes_requested else []
                     ),
-                    "suggestions": [],
+                    "suggestions": suggestions,
                 }
             ),
             execution=reference,
@@ -291,6 +293,8 @@ class FakeGitClient:
         self.commit_calls = 0
         self.push_calls = 0
         self.diff_calls = 0
+        self.discard_calls = 0
+        self.changed_files_results: list[list[str]] = []
 
     def create_branch(
         self, base_branch: str, working_branch: str, protected_branches: list[str]
@@ -320,7 +324,12 @@ class FakeGitClient:
 
     def changed_files(self) -> list[str]:
         self.operation_paths.append(self.workspace_path)
+        if self.changed_files_results:
+            return self.changed_files_results.pop(0)
         return ["src/audit.py", "tests/test_audit.py"]
+
+    def discard_uncommitted_changes(self) -> None:
+        self.discard_calls += 1
 
     def github_repository(self) -> str:
         return "example/api"

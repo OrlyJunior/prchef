@@ -190,6 +190,39 @@ def test_review_correction_prompt_includes_structured_review_feedback(tmp_path: 
     assert "Add a focused unit test" in prompt
 
 
+def test_polish_prompt_offers_non_blocking_suggestions_without_requiring_changes(
+    tmp_path: Path,
+) -> None:
+    _write_project_context(tmp_path)
+    provider = RecordingProvider(AgentResult(output="No polish changes needed"))
+
+    result = ImplementationService(
+        provider, RecordingGit([])  # type: ignore[arg-type]
+    ).run_polish_pass(
+        _task(),
+        _spec(),
+        ["Add a focused regression test", "Consider clearer naming"],
+        tmp_path,
+        PullRequest(
+            number=5,
+            url="https://github.example/pull/5",
+            title="Provider contracts",
+            base_branch="develop",
+            head_branch="feature/provider-contracts",
+        ),
+    )
+
+    assert result.success
+    assert result.changed_files == []
+    prompt = provider.requests[0].instructions
+    assert "NON-BLOCKING REVIEW SUGGESTIONS" in prompt
+    assert "Add a focused regression test" in prompt
+    assert "outside the original task scope" in prompt
+    assert "architectural redesign" in prompt
+    assert "If none should be applied,\nmake no modifications" in prompt
+    assert "Do not commit, push" in prompt
+
+
 def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     _write_project_context(tmp_path)
     provider = RecordingProvider(

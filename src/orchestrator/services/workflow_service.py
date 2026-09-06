@@ -58,6 +58,7 @@ _STAGE_LABELS = {
     WorkflowStage.GENERATE_SPEC: "spec generation",
     WorkflowStage.PREPARE_BRANCH: "branch preparation",
     WorkflowStage.IMPLEMENT: "implementation",
+    WorkflowStage.POLISH: "optional implementation polish",
     WorkflowStage.VALIDATE: "local validation",
     WorkflowStage.COMMIT: "commit",
     WorkflowStage.PUSH: "push",
@@ -231,6 +232,7 @@ class WorkflowService:
                 self._repository.record_pull_request(execution.id, pull_request)
 
             review_attempt = 0
+            polish_attempted = False
             while True:
                 with self._step(execution.id, WorkflowStage.REVIEW):
                     review = ReviewService(clients.agent(AgentRole.REVIEWER)).review(
@@ -261,6 +263,52 @@ class WorkflowService:
                         pull_request_number=pull_request.number,
                         review=review,
                     )
+
+                if (
+                    review.result is ReviewDecision.APPROVED
+                    and review.suggestions
+                    and not polish_attempted
+                ):
+                    polish_attempted = True
+                    with self._step(execution.id, WorkflowStage.POLISH):
+                        implementation = implementation_service.run_polish_pass(
+                            task, spec, review.suggestions, workspace_path, pull_request
+                        )
+                        self._repository.record_implementation(execution.id, implementation)
+
+                    if not implementation.success:
+                        logger.warning(
+                            "[workflow] Optional polish did not complete; retaining approved review"
+                        )
+                        self._discard_polish_changes(execution_clients)
+                        break
+                    if not implementation.changed_files:
+                        logger.info("[workflow] Implementer declined optional polish suggestions")
+                        break
+
+                    polish_validation = self._validate_polish_changes(
+                        execution_id=execution.id,
+                        execution_clients=execution_clients,
+                        workspace_path=workspace_path,
+                        config=config,
+                    )
+                    if polish_validation is None:
+                        break
+                    validation = polish_validation
+
+                    with self._step(execution.id, WorkflowStage.COMMIT):
+                        commit_sha = execution_clients.git.commit_all(
+                            self._commit_message(task),
+                            working_branch,
+                            config.repository.protected_branches,
+                        )
+                        self._repository.record_commit(execution.id, commit_sha)
+
+                    with self._step(execution.id, WorkflowStage.PUSH):
+                        execution_clients.git.push(
+                            working_branch, config.repository.protected_branches
+                        )
+                    continue
 
                 if review.result is not ReviewDecision.CHANGES_REQUESTED:
                     break
@@ -461,6 +509,38 @@ class WorkflowService:
                         ) from exc
                 continue
             return validation
+
+    def _validate_polish_changes(
+        self,
+        *,
+        execution_id: str,
+        execution_clients: WorkflowClients,
+        workspace_path: Path,
+        config: ProjectConfig,
+    ) -> ValidationResult | None:
+        """Validate optional changes once and discard them if they are not safe to push."""
+        try:
+            with self._step(execution_id, WorkflowStage.VALIDATE):
+                validation = ValidationService(execution_clients.commands).validate(
+                    workspace_path,
+                    config.validation,
+                    require_tests=config.safety.require_tests,
+                )
+                self._repository.record_validation(execution_id, validation)
+                if not validation.success:
+                    raise _ValidationFailed(validation)
+        except _ValidationFailed:
+            logger.warning(
+                "[workflow] Optional polish failed validation; discarding polish changes"
+            )
+            self._discard_polish_changes(execution_clients)
+            return None
+
+        return validation
+
+    @staticmethod
+    def _discard_polish_changes(execution_clients: WorkflowClients) -> None:
+        execution_clients.git.discard_uncommitted_changes()
 
     def _publish_review(
         self,
