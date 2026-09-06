@@ -15,7 +15,8 @@
 1. A CLI seleciona exatamente um `TaskProvider`: Trello ou GitHub Issues.
 2. O workflow cria um registro minimo e solicita ao provider um `DevelopmentTask` comum.
 3. `task.repository` ou o custom field Trello `Repository` resolve uma entrada do registro global.
-4. Defaults, configuracao registrada e `.orchestrator.yml` do alvo sao mesclados.
+4. Defaults e a configuracao registrada em `repositories.<key>` do `orchestrator.yml` sao
+   mesclados. Um `.orchestrator.yml` no alvo e ignorado com aviso.
 5. O provider associado a `agents.planner` recebe um `AgentRequest`. Com Jules, o adaptador cria
    uma sessao remota read-only com `AUTOMATION_MODE_UNSPECIFIED`; seu ID e URL sao persistidos antes
    do polling. Com `gemini-vertex`, o adaptador faz uma chamada Vertex AI request/response usando

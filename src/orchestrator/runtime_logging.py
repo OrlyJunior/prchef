@@ -5,7 +5,7 @@ import re
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 
 if TYPE_CHECKING:
     from orchestrator.models.code_review import CodeReview
@@ -30,6 +30,19 @@ class UtcTimestampFormatter(logging.Formatter):
         del datefmt
         timestamp = datetime.fromtimestamp(record.created, UTC)
         return timestamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+class CurrentStderrHandler(logging.StreamHandler[TextIO]):
+    """Write to the stderr stream that is active when the record is emitted.
+
+    Test runners and CLI adapters can temporarily replace and then close
+    ``sys.stderr``. Holding their former stream would make later configuration
+    warnings fail to emit, even though stderr is available again.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.stream = sys.stderr
+        super().emit(record)
 
 
 def redact_text(value: str) -> str:
@@ -139,7 +152,7 @@ def configure_logging(*, verbose: bool = False, configured_level: str = "INFO") 
         handler.close()
         handler = None
     if handler is None:
-        handler = logging.StreamHandler(sys.stderr)
+        handler = CurrentStderrHandler(sys.stderr)
         handler._orchestrator_handler = True  # type: ignore[attr-defined]
         handler.setFormatter(UtcTimestampFormatter("%(asctime)s %(message)s"))
         logger.addHandler(handler)
@@ -149,6 +162,9 @@ def configure_logging(*, verbose: bool = False, configured_level: str = "INFO") 
     )
     logger.setLevel(level)
     logger.disabled = False
-    logger.propagate = False
+    # Keep records observable by standard logging handlers (including callers
+    # that surface configuration warnings) while retaining the CLI stderr
+    # handler above.
+    logger.propagate = True
     # Alembic's migration details are not workflow progress and obscure the CLI output.
     logging.getLogger("alembic").setLevel(logging.WARNING)

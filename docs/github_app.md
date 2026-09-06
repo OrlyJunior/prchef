@@ -56,8 +56,9 @@ pushes receive a process-local `http.extraHeader`; SSH and unsupported transport
 ambient push authentication. Reviewer publication independently uses the reviewer `app` token.
 
 The Textual TUI exposes the two roles under **GitHub Apps** (or `c`). It writes only App IDs,
-installation IDs, and private-key references to the selected repository's `.orchestrator.yml`; it
-never accepts or writes private key contents or tokens.
+installation IDs, and private-key references to the selected repository's
+`repositories.<key>` entry in the resolved `orchestrator.yml`; it never accepts or writes private
+key contents or tokens.
 
 ## Review behavior
 

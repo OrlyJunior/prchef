@@ -120,9 +120,8 @@ class WorkflowController:
         implementer_app: GitHubAppSettings,
         reviewer_app: GitHubAppSettings,
     ) -> Path:
-        config = self.project_config(repository)
         return self._config_loader.save_github_app_settings(
-            config.path,
+            repository,
             implementer_app=implementer_app,
             reviewer_app=reviewer_app,
         )
