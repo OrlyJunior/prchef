@@ -38,14 +38,6 @@ class ConfiguredRepository:
     path: Path
 
 
-@dataclass(frozen=True, slots=True)
-class GitHubAppSettingsDestination:
-    """A configuration layer the TUI may explicitly update."""
-
-    key: Literal["global", "repository-local"]
-    path: Path
-
-
 class RepositorySettings(BaseModel):
     name: str = ""
     base_branch: str = "develop"
@@ -428,12 +420,6 @@ class IntegrationsSettings(BaseModel):
 
 class ProjectConfig(BaseModel):
     path: Path
-    # Resolution metadata is kept out of serialized runtime configuration. It
-    # lets interactive clients save to a known source without inventing a new
-    # repository-local override.
-    configuration_source: Path | None = Field(default=None, exclude=True)
-    repository_key: str | None = Field(default=None, exclude=True)
-    local_override_path: Path | None = Field(default=None, exclude=True)
     task: TaskSettings = Field(default_factory=TaskSettings)
     repository: RepositorySettings = Field(default_factory=RepositorySettings)
     roles: RolesSettings = Field(default_factory=RolesSettings)
@@ -755,7 +741,6 @@ class ProjectConfigLoader:
 
         configuration = deepcopy(defaults)
         configuration["path"] = self._config_file.parent
-        configuration["configuration_source"] = self._config_file
         try:
             return ProjectConfig.model_validate(configuration)
         except ValueError as exc:
@@ -829,15 +814,10 @@ class ProjectConfigLoader:
         defaults = global_config.get("defaults", {})
         if not isinstance(defaults, dict):
             raise ConfigurationError("'defaults' must be a mapping")
-        local_path = repository_path / ".orchestrator.yml"
-        local = _load_yaml(local_path, required=False)
+        local = _load_yaml(repository_path / ".orchestrator.yml", required=False)
         merged = _deep_merge(defaults, entry)
         merged = _deep_merge(merged, local)
         merged["path"] = repository_path
-        merged["configuration_source"] = self._config_file
-        merged["repository_key"] = repository_ref if repository_ref in registered else None
-        if local_path.exists():
-            merged["local_override_path"] = local_path
         repository_settings = merged.setdefault("repository", {})
         if not isinstance(repository_settings, dict):
             raise ConfigurationError("'repository' must be a mapping")
@@ -850,40 +830,20 @@ class ProjectConfigLoader:
 
     def save_github_app_settings(
         self,
-        destination: GitHubAppSettingsDestination,
+        repository_path: Path,
         *,
-        repository_key: str | None,
         implementer_app: GitHubAppSettings,
         reviewer_app: GitHubAppSettings,
     ) -> Path:
-        """Persist App *references* to an explicitly selected configuration layer.
+        """Persist App *references* in the repository-local configuration.
 
         The TUI only writes App IDs, installation IDs, and key file/environment
         references. Private key contents and installation tokens are neither
         accepted nor serialized here.
         """
-        if destination.key == "global":
-            if not repository_key:
-                raise ConfigurationError(
-                    "The active configuration has no registered repository entry to update"
-                )
-            configuration = _load_yaml(destination.path, required=True)
-            repositories = configuration.get("repositories")
-            if not isinstance(repositories, dict):
-                raise ConfigurationError("'repositories' must be a mapping")
-            entry = repositories.get(repository_key)
-            if not isinstance(entry, dict):
-                raise ConfigurationError(
-                    f"Repository entry '{repository_key}' must be a mapping"
-                )
-            target = entry
-        elif destination.key == "repository-local":
-            configuration = _load_yaml(destination.path, required=False)
-            target = configuration
-        else:  # Defensive check for callers outside the typed TUI boundary.
-            raise ConfigurationError(f"Unsupported configuration destination: {destination.key}")
-
-        integrations = target.setdefault("integrations", {})
+        local_path = repository_path / ".orchestrator.yml"
+        configuration = _load_yaml(local_path, required=False)
+        integrations = configuration.setdefault("integrations", {})
         if not isinstance(integrations, dict):
             raise ConfigurationError("'integrations' must be a mapping")
         github = integrations.setdefault("github", {})
@@ -898,43 +858,12 @@ class ProjectConfigLoader:
 
         try:
             serialized = yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False)
-            temporary_path = destination.path.with_suffix(".yml.tmp")
+            temporary_path = local_path.with_suffix(".yml.tmp")
             temporary_path.write_text(serialized, encoding="utf-8")
-            temporary_path.replace(destination.path)
+            temporary_path.replace(local_path)
         except OSError as exc:
-            raise ConfigurationError(
-                f"Cannot write configuration {destination.path}: {exc}"
-            ) from exc
-        return destination.path
-
-    def github_app_settings_destinations(
-        self, config: ProjectConfig
-    ) -> list[GitHubAppSettingsDestination]:
-        """Return the exact layers available for a TUI GitHub App edit.
-
-        A resolved local override means the effective settings are composed
-        from two files. The caller must choose one of these entries rather than
-        allowing the save path to be inferred from the merged values.
-        """
-        if config.configuration_source is None:
-            raise ConfigurationError("The active configuration source is unknown")
-        destinations = [
-            GitHubAppSettingsDestination("global", config.configuration_source)
-        ]
-        if config.local_override_path is not None:
-            destinations.append(
-                GitHubAppSettingsDestination(
-                    "repository-local", config.local_override_path
-                )
-            )
-        else:
-            # Offer creation of a local override only as an explicit choice.
-            destinations.append(
-                GitHubAppSettingsDestination(
-                    "repository-local", config.path / ".orchestrator.yml"
-                )
-            )
-        return destinations
+            raise ConfigurationError(f"Cannot write configuration {local_path}: {exc}") from exc
+        return local_path
 
     @staticmethod
     def _repository_ref_from_task(task: DevelopmentTask) -> str | None:
