@@ -38,6 +38,13 @@
 - `run` and `tui` apply pending Alembic migrations before opening the workflow repository. `show`,
   and `debug --from-execution`, do the same before database access; a migration failure aborts with
   a clear error. Keep `alembic upgrade head` usable for manual operations.
+- Persistent state is global rather than repository- or cwd-scoped. Database resolution prefers
+  `ORCHESTRATOR_DATABASE_URL`/`ORCHESTRATOR_DATABASE_PATH`, then global
+  `defaults.persistence.database_url`/`database_path`, then an existing `orchestrator.db` beside
+  the discovered global configuration, and finally `~/.orchestrator/orchestrator.db`. Relative
+  explicit SQLite locations are anchored to the global configuration directory (or the user state
+  directory if no configuration is discovered). Runtime and manual Alembic migrations share this
+  resolver; repository-local configuration never selects persistence.
 - Runtime logs are UTC ISO-8601 timestamps on stderr. Final `run` execution JSON and all `debug`
   result JSON stay on stdout. Redact secrets before logging.
 - An execution is created as `PENDING`, immediately marked `RUNNING`, and records every entered

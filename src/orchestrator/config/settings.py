@@ -17,7 +17,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("ORCHESTRATOR_JULES_API_KEY", "JULES_API_KEY"),
     )
-    database_url: str = "sqlite:///./orchestrator.db"
+    # Resolution lives in config.database so the runtime and Alembic use the
+    # same stable, cwd-independent location.
+    database_url: str | None = None
+    database_path: Path | None = None
     # Environment-based configuration selection is intentionally handled by
     # resolve_global_config(), which preserves its documented precedence. The
     # private validation alias keeps BaseSettings from consuming a public
