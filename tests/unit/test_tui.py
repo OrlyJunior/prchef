@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from textual.containers import VerticalScroll
-from textual.widgets import Button, Input
+from textual.widgets import Button, Select
 
 from orchestrator.config.project_config import (
     ConfiguredRepository,
@@ -23,6 +23,7 @@ from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
 from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
 from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
+from orchestrator.tui.screens.task_selector import TaskSelector
 from orchestrator.tui.screens.workflow_runner import WorkflowRunnerScreen
 
 
@@ -283,6 +284,139 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
     asyncio.run(drive())
 
 
+def test_workflow_runner_auto_loads_tasks_on_mount(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    task_loads: list[tuple[str, str]] = []
+
+    def list_tasks(*, repository: str, task_provider: str) -> list[DevelopmentTask]:
+        task_loads.append((repository, task_provider))
+        return [DevelopmentTask("42", task_provider, "Automatically loaded", "", "")]
+
+    controller.list_tasks = list_tasks  # type: ignore[method-assign]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause(delay=0.1)
+            screen = application.screen
+            assert task_loads == [("example", "github")]
+            assert screen.query_one("#available-tasks", Select).value == Select.BLANK
+            assert "1 open github tasks available." in str(
+                screen.query_one("#task-hint").renderable
+            )
+            assert len(screen.query("#task-id")) == 0
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    task_loads: list[tuple[str, str]] = []
+    capabilities = {
+        provider: controller.provider_runtime_capabilities("example", provider)
+        for provider in ("planner", "implementer", "reviewer")
+    }
+    runtime_values = {
+        provider: controller.provider_runtime_values("example", provider)
+        for provider in ("planner", "implementer", "reviewer")
+    }
+    github_settings = controller.github_app_settings("example")
+    agent_providers = controller.agent_providers("example")
+
+    controller.repositories = lambda: [  # type: ignore[method-assign]
+        ConfiguredRepository("example", tmp_path),
+        ConfiguredRepository("other", tmp_path),
+    ]
+    controller.task_providers = (  # type: ignore[method-assign]
+        lambda repository: ["github", "trello"]
+    )
+    controller.configured_agent_providers = (  # type: ignore[method-assign]
+        lambda repository: list(capabilities)
+    )
+    controller.agent_providers = lambda repository: agent_providers  # type: ignore[method-assign]
+    controller.provider_runtime_capabilities = (  # type: ignore[method-assign]
+        lambda repository, provider: capabilities[provider]
+    )
+    controller.provider_runtime_values = (  # type: ignore[method-assign]
+        lambda repository, provider: runtime_values[provider]
+    )
+    controller.github_app_settings = (  # type: ignore[method-assign]
+        lambda repository: github_settings
+    )
+
+    def list_tasks(*, repository: str, task_provider: str) -> list[DevelopmentTask]:
+        task_loads.append((repository, task_provider))
+        return []
+
+    controller.list_tasks = list_tasks  # type: ignore[method-assign]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause(delay=0.1)
+            screen = application.screen
+            screen.query_one("#task-provider", Select).value = "trello"
+            await pilot.pause(delay=0.1)
+            screen.query_one("#repository", Select).value = "other"
+            await pilot.pause(delay=0.1)
+            assert task_loads == [
+                ("example", "github"),
+                ("example", "trello"),
+                ("other", "github"),
+            ]
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_manual_refresh_tasks(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    task_loads: list[tuple[str, str]] = []
+
+    def list_tasks(*, repository: str, task_provider: str) -> list[DevelopmentTask]:
+        task_loads.append((repository, task_provider))
+        return []
+
+    controller.list_tasks = list_tasks  # type: ignore[method-assign]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause(delay=0.1)
+            screen = application.screen
+            screen.query_one("#refresh-tasks", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause(delay=0.1)
+            assert task_loads == [("example", "github"), ("example", "github")]
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_displays_inline_task_load_error(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+
+    def list_tasks(*, repository: str, task_provider: str) -> list[DevelopmentTask]:
+        del repository, task_provider
+        raise RuntimeError("credentials rejected")
+
+    controller.list_tasks = list_tasks  # type: ignore[method-assign]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause(delay=0.1)
+            screen = application.screen
+            assert "credentials rejected" in str(
+                screen.query_one("#task-error").renderable
+            )
+            assert screen.query_one("#refresh-tasks", Button).disabled is False
+
+    asyncio.run(drive())
+
+
 def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     application = OrchestratorApp(controller)
@@ -360,7 +494,7 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
     asyncio.run(drive())
 
 
-def test_workflow_runner_scrolls_focused_actions_into_view_in_a_small_terminal(
+def test_workflow_runner_submits_selected_task_id_in_workflow_launch(
     tmp_path: Path,
 ) -> None:
     controller, service, _ = _controller(tmp_path)
@@ -373,9 +507,10 @@ def test_workflow_runner_scrolls_focused_actions_into_view_in_a_small_terminal(
             content = screen.query_one("#workflow-runner", VerticalScroll)
             assert content.max_scroll_y > 0
 
-            screen.query_one("#repository").value = "example"
+            await pilot.pause(delay=0.1)
+            screen.query_one("#available-tasks", Select).value = "12"
             await pilot.pause()
-            screen.query_one("#task-id", Input).value = "12"
+            assert screen.query_one("#task-selector", TaskSelector).selected_task_id == "12"
             screen.query_one("#start-workflow", Button).focus()
             await pilot.pause()
             assert content.scroll_y > 0

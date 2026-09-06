@@ -141,7 +141,7 @@ class WorkflowController:
     ) -> WorkflowExecution:
         task_id = launch.task_id.strip()
         if not task_id:
-            raise ValueError("Select a task or enter its ID before starting a workflow")
+            raise ValueError("Select a task before starting a workflow")
         if launch.task_provider not in self.task_providers(launch.repository):
             raise ValueError(f"Unsupported task provider: {launch.task_provider}")
 

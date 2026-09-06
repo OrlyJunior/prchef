@@ -23,6 +23,10 @@
   schema-validated in memory, never alter YAML defaults, and may give roles sharing a configured
   provider independent runtime settings. GitHub App identities remain separately persisted,
   inspectable configuration.
+- The TUI launcher automatically browses tasks for its selected repository and task provider.
+  Users choose a displayed task; its provider-specific identifier remains internal to the launch
+  data. The interactive selector exposes refresh, loading, and inline-error states, while explicit
+  CLI task identifiers remain supported.
 - Provider-specific commands, polling, credentials, or API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Planner/implementer/reviewer services stay provider
   neutral.
