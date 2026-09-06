@@ -10,7 +10,7 @@ from textual.events import DescendantFocus
 from textual.screen import Screen
 from textual.widgets import Button, Input, Select, Static
 
-from orchestrator.config.project_config import GitHubAppSettings, GitHubAppSettingsDestination
+from orchestrator.config.project_config import GitHubAppSettings
 from orchestrator.tui.bridge import WorkflowController
 
 if TYPE_CHECKING:
@@ -18,13 +18,9 @@ if TYPE_CHECKING:
 
 
 class GitHubAppSettingsScreen(Screen[None]):
-    """Edit GitHub App references in an explicitly selected configuration layer."""
+    """Edit key references for the selected repository without handling secrets."""
 
     BINDINGS = [("escape", "app.pop_screen", "Back")]
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._destinations: dict[str, GitHubAppSettingsDestination] = {}
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="github-app-settings"):
@@ -35,11 +31,6 @@ class GitHubAppSettingsScreen(Screen[None]):
             )
             with Vertical(classes="workflow-form"):
                 yield Select([], prompt="Configured repository", id="github-app-repository")
-                yield Select([], prompt="Save destination", id="github-app-destination")
-                yield Static(
-                    "Save destination: select a repository.",
-                    id="github-app-destination-path",
-                )
                 with Horizontal(classes="github-app-roles"):
                     for role in ("implementer", "reviewer"):
                         with Vertical(classes="github-app-role"):
@@ -60,7 +51,7 @@ class GitHubAppSettingsScreen(Screen[None]):
                             )
                 with Horizontal(classes="screen-actions"):
                     yield Button(
-                        "Save configuration",
+                        "Save local configuration",
                         variant="success",
                         id="save-github-apps",
                     )
@@ -87,59 +78,16 @@ class GitHubAppSettingsScreen(Screen[None]):
             event.widget, animate=False, top=True
         )
 
-    def _set_destinations(self, repository: str) -> None:
-        destinations = self.controller.github_app_settings_destinations(repository)
-        self._destinations = {destination.key: destination for destination in destinations}
-        destination_select = self.query_one("#github-app-destination", Select)
-        destination_select.set_options(
-            [
-                (
-                    f"{self._destination_label(destination)} - {destination.path}",
-                    destination.key,
-                )
-                for destination in destinations
-            ]
-        )
-        config = self.controller.project_config(repository)
-        if config.local_override_path is None:
-            # There is one active source. A local override remains available,
-            # but can only be created by intentionally changing this selector.
-            destination_select.value = "global"
-            self._show_destination("global")
-            self._status(f"Edits will be saved to {self._destinations['global'].path}.")
-        else:
-            destination_select.value = Select.BLANK
-            self.query_one("#github-app-destination-path", Static).update(
-                "Save destination: choose the global configuration or repository-local override."
-            )
-            self._status("Settings are composed from two files; choose a save destination.")
-
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "github-app-destination" and isinstance(event.value, str):
-            self._show_destination(event.value)
-            return
-        if event.select.id != "github-app-repository" or not isinstance(event.value, str):
-            return
-        try:
-            implementer, reviewer = self.controller.github_app_settings(event.value)
+        if event.select.id == "github-app-repository" and isinstance(event.value, str):
+            try:
+                implementer, reviewer = self.controller.github_app_settings(event.value)
+            except Exception as exc:
+                self._status(f"Cannot load GitHub App configuration: {exc}")
+                return
             self._populate("implementer", implementer)
             self._populate("reviewer", reviewer)
-            self._set_destinations(event.value)
-        except Exception as exc:
-            self._status(f"Cannot load GitHub App configuration: {exc}")
-
-    @staticmethod
-    def _destination_label(destination: GitHubAppSettingsDestination) -> str:
-        if destination.key == "global":
-            return "Active configuration"
-        return "Repository-local override"
-
-    def _show_destination(self, key: str) -> None:
-        destination = self._destinations.get(key)
-        if destination is not None:
-            self.query_one("#github-app-destination-path", Static).update(
-                f"Save destination: {destination.path}"
-            )
+            self._status("Edit App references, then save to the repository .orchestrator.yml.")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "save-github-apps":
@@ -148,21 +96,16 @@ class GitHubAppSettingsScreen(Screen[None]):
         if not isinstance(repository, str):
             self._status("Choose a repository first.")
             return
-        destination_key = self.query_one("#github-app-destination", Select).value
-        if not isinstance(destination_key, str) or destination_key not in self._destinations:
-            self._status("Choose the configuration file to update before saving.")
-            return
         try:
-            saved_path = self.controller.save_github_app_settings(
+            local_path = self.controller.save_github_app_settings(
                 repository,
-                destination=self._destinations[destination_key],
                 implementer_app=self._settings("implementer"),
                 reviewer_app=self._settings("reviewer"),
             )
         except Exception as exc:
             self._status(f"Cannot save GitHub App configuration: {exc}")
             return
-        self._status(f"Saved App references to {saved_path}.")
+        self._status(f"Saved App references to {local_path}.")
 
     def _populate(self, role: str, settings: GitHubAppSettings) -> None:
         self.query_one(f"#{role}-app-id", Input).value = str(settings.app_id or "")
