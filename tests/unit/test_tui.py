@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.containers import VerticalScroll
+from textual.widgets import Button, Input
 
 from orchestrator.config.project_config import (
     ConfiguredRepository,
@@ -297,7 +299,9 @@ def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path
             application.screen.query_one("#implementer-app-id").value = "123"
             application.screen.query_one("#implementer-installation-id").value = "456"
             application.screen.query_one("#implementer-key-env").value = "IMPLEMENTER_KEY"
-            await pilot.click("#save-github-apps")
+            application.screen.query_one("#save-github-apps", Button).focus()
+            await pilot.pause()
+            await pilot.press("enter")
             assert "Saved App references" in str(
                 application.screen.query_one("#github-app-status").renderable
             )
@@ -352,5 +356,80 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
             assert '"review_snapshot": {' in rendered
             assert '"pr": "https://example/pull/34"' in rendered
             assert '"spec-session": "https://example/sessions/planner"' in rendered
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_scrolls_focused_actions_into_view_in_a_small_terminal(
+    tmp_path: Path,
+) -> None:
+    controller, service, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 20)) as pilot:
+            await pilot.press("n")
+            screen = application.screen
+            content = screen.query_one("#workflow-runner", VerticalScroll)
+            assert content.max_scroll_y > 0
+
+            screen.query_one("#repository").value = "example"
+            await pilot.pause()
+            screen.query_one("#task-id", Input).value = "12"
+            screen.query_one("#start-workflow", Button).focus()
+            await pilot.pause()
+            assert content.scroll_y > 0
+            await pilot.press("enter")
+            await pilot.pause(delay=0.1)
+            assert service.calls[0][0:2] == ("12", "example")
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_does_not_need_to_scroll_in_a_tall_terminal(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 200)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await pilot.pause()
+            content = application.screen.query_one("#workflow-runner", VerticalScroll)
+            assert content.max_scroll_y == 0
+
+    asyncio.run(drive())
+
+
+def test_secondary_screens_keep_content_in_scrollable_regions_in_small_terminals(
+    tmp_path: Path,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.validation_snapshot = {
+        f"check_{number}": "passed" for number in range(40)
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 20)) as pilot:
+            application.push_screen(ExecutionHistoryScreen())
+            await pilot.pause()
+            assert isinstance(application.screen.query_one("#execution-history"), VerticalScroll)
+
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await pilot.pause()
+            detail = application.screen.query_one("#execution-detail", VerticalScroll)
+            assert detail.max_scroll_y > 0
+            detail.scroll_end(animate=False)
+            await pilot.pause()
+            assert detail.scroll_y > 0
+
+            await pilot.press("escape")
+            application.push_screen(GitHubAppSettingsScreen())
+            await pilot.pause()
+            settings = application.screen.query_one("#github-app-settings", VerticalScroll)
+            assert settings.max_scroll_y > 0
+            application.screen.query_one("#save-github-apps", Button).focus()
+            await pilot.pause()
+            assert settings.scroll_y > 0
 
     asyncio.run(drive())
