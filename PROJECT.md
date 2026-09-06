@@ -122,6 +122,10 @@
   PR creation attempt; the reviewer receives a fresh base...HEAD diff in a newly persisted
   `REVIEW` step. Repeated requested changes after the budget is exhausted finish as
   `CHANGES_REQUESTED`; approval finishes as `APPROVED`.
+- An `APPROVED` review with non-blocking suggestions gets at most one optional `POLISH` stage per
+  execution. The implementer may decline every suggestion; that preserves the approval. Applied
+  scoped polish is validated, committed, and pushed to the existing branch before a fresh review;
+  failed polish validation is discarded and never turns the prior approval into a change request.
 - A GitHub review-publication failure is logged and recorded without changing the structured
   reviewer decision or its terminal status. GitHub App credentials use separate optional reviewer
   (`integrations.github.app`) and implementer (`integrations.github.implementer_app`) identities.

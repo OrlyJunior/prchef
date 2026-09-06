@@ -86,6 +86,14 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     assert persisted_github.task_url == github_task.url
     assert persisted_github.trello_card_id == ""
 
+    polish_step_id = repository.start_step(github_execution.id, WorkflowStage.POLISH)
+    repository.finish_step(polish_step_id, StepStatus.SUCCEEDED)
+
+    polish_steps = repository.list_steps(github_execution.id)
+    assert [(step.stage, step.status) for step in polish_steps] == [
+        (WorkflowStage.POLISH, StepStatus.SUCCEEDED)
+    ]
+
 
 def test_migration_backfills_common_identity_for_existing_trello_execution(
     tmp_path: Path,

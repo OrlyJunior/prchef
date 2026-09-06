@@ -118,6 +118,11 @@ class GitClient:
         lines = self._git("status", "--porcelain").stdout.splitlines()
         return [line[3:].strip() for line in lines if len(line) > 3]
 
+    def discard_uncommitted_changes(self) -> None:
+        """Return this workflow worktree to HEAD after an optional polish attempt fails."""
+        self._git("reset", "--hard", "HEAD")
+        self._git("clean", "-fd")
+
     def github_repository(self) -> str:
         remote = self._git("remote", "get-url", "origin").stdout.strip()
         match = re.search(r"github\.com[/:]([^/]+)/([^/]+?)(?:\.git)?$", remote)
