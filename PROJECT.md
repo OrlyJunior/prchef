@@ -21,8 +21,10 @@
 - The TUI launcher may select configured provider instances and role-local runtime settings
   (model, reasoning, and exposed provider generation options) for one run. These overrides are
   schema-validated in memory, never alter YAML defaults, and may give roles sharing a configured
-  provider independent runtime settings. GitHub App identities remain separately persisted,
-  inspectable configuration.
+  provider independent runtime settings. Its default launcher view presents compact per-role
+  provider/model/runtime summaries; role configuration and generation controls are progressive,
+  and generation fields identify Provider/YAML defaults versus temporary overrides. GitHub App
+  identities remain separately persisted, inspectable configuration.
 - The TUI launcher automatically browses tasks for its selected repository and task provider.
   Users choose a displayed task; its provider-specific identifier remains internal to the launch
   data. The interactive selector exposes refresh, loading, and inline-error states, while explicit

@@ -32,6 +32,22 @@ class OrchestratorApp(App[None]):
     .screen-title { text-style: bold; margin-bottom: 1; }
     .field-label { margin-top: 1; }
     .workflow-form { max-width: 100; height: auto; }
+    #runtime-settings-note { margin-top: 1; color: $text-muted; }
+    .role-section { height: auto; margin-top: 1; padding: 0 1 1 1; border: round $primary; }
+    .role-title { text-style: bold; }
+    .role-summary-row { height: auto; align: center middle; }
+    .role-summary-row Static { width: 1fr; color: $text-muted; }
+    .role-summary-row Button { width: auto; }
+    .role-config { height: auto; display: none; margin-top: 1; }
+    .role-config-row { height: auto; width: 100%; }
+    .role-field { width: 1fr; height: auto; margin-right: 1; }
+    .role-field:last-of-type { margin-right: 0; }
+    .role-advanced-action { align: left bottom; }
+    .role-advanced-action Button { width: auto; }
+    .role-advanced { height: auto; display: none; margin-top: 1; }
+    .default-indicator { color: $text-muted; }
+    WorkflowRunnerScreen.-narrow .role-config-row { layout: vertical; }
+    WorkflowRunnerScreen.-narrow .role-field { width: 100%; margin-right: 0; }
     #task-selector { height: auto; }
     .github-app-roles { width: 100%; }
     .github-app-role { width: 1fr; height: auto; margin-right: 1; }
