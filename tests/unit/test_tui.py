@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Button, Input, Select, Static
 
@@ -26,6 +27,35 @@ from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 from orchestrator.tui.screens.task_selector import TaskSelector
 from orchestrator.tui.screens.workflow_runner import WorkflowRunnerScreen
+from orchestrator.tui.widgets import OrchestratorSelect
+
+
+class _ScrollableSelectApp(App[None]):
+    """Small viewport used to exercise the Select/VerticalScroll interaction."""
+
+    CSS = """
+    VerticalScroll {
+        height: 8;
+    }
+
+    #select-after {
+        height: 8;
+    }
+
+    #select-before {
+        height: 5;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="select-viewport"):
+            yield Static("", id="select-before")
+            yield OrchestratorSelect(
+                [("One", "one"), ("Two", "two"), ("Three", "three")],
+                prompt="Choose a value",
+                id="viewport-select",
+            )
+            yield Static("", id="select-after")
 
 
 class _Repository:
@@ -303,6 +333,42 @@ def test_select_opens_on_first_click_and_restores_focus_when_closed(tmp_path: Pa
     asyncio.run(drive())
 
 
+def test_orchestrator_select_keeps_overlay_visible_in_scrolled_viewport() -> None:
+    """A click or key press must reserve room for an overlay near a viewport edge."""
+
+    application = _ScrollableSelectApp()
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 10)) as pilot:
+            content = application.query_one("#select-viewport", VerticalScroll)
+            select = application.query_one("#viewport-select", OrchestratorSelect)
+            await pilot.pause()
+            assert content.max_scroll_y > 0
+
+            before_open = content.scroll_y
+            await pilot.click("#viewport-select")
+            await pilot.pause(delay=0.1)
+            overlay = select.query_one("SelectOverlay")
+            assert select.expanded is True
+            assert content.scroll_y >= before_open
+            assert overlay.region.y >= content.content_region.y
+            assert overlay.region.bottom <= content.content_region.bottom
+
+            opened_scroll = content.scroll_y
+            await pilot.press("escape")
+            await pilot.pause()
+            assert select.expanded is False
+            assert application.screen.focused is select
+            assert content.scroll_y == opened_scroll
+
+            await pilot.press("enter", "down", "enter")
+            await pilot.pause()
+            assert select.value == "one"
+            assert application.screen.focused is select
+
+    asyncio.run(drive())
+
+
 def test_select_focus_scrolls_the_control_into_view_on_small_terminals(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     application = OrchestratorApp(controller)
@@ -318,10 +384,10 @@ def test_select_focus_scrolls_the_control_into_view_on_small_terminals(tmp_path:
             select.focus()
             await pilot.pause()
             content = screen.query_one("#workflow-runner", VerticalScroll)
-            assert content.scroll_y > 0
             await pilot.press("enter")
             await pilot.pause()
             overlay = select.query_one("SelectOverlay")
+            assert content.scroll_y > 0
             assert overlay.region.y >= screen.region.y
             assert overlay.region.bottom <= screen.region.bottom
 
@@ -736,7 +802,7 @@ def test_workflow_runner_submits_selected_task_id_in_workflow_launch(
             await pilot.pause()
             assert screen.query_one("#task-selector", TaskSelector).selected_task_id == "12"
             screen.query_one("#start-workflow", Button).focus()
-            await pilot.pause()
+            await pilot.pause(delay=0.1)
             assert content.scroll_y > 0
             await pilot.press("enter")
             await pilot.pause(delay=0.1)
@@ -788,7 +854,7 @@ def test_secondary_screens_keep_content_in_scrollable_regions_in_small_terminals
             settings = application.screen.query_one("#github-app-settings", VerticalScroll)
             assert settings.max_scroll_y > 0
             application.screen.query_one("#save-github-apps", Button).focus()
-            await pilot.pause()
+            await pilot.pause(delay=0.1)
             assert settings.scroll_y > 0
 
     asyncio.run(drive())

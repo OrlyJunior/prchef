@@ -21,6 +21,9 @@
 - The TUI presents workflow observer events as a concise user-facing stage timeline by default.
   Raw observer-event diagnostics are available only through its detailed-log toggle; this does
   not alter the CLI's verbose logging contract or workflow observer semantics.
+- TUI screens use `OrchestratorSelect` for Select controls in vertical scroll regions. It reserves
+  visible overlay space after mouse or keyboard activation and restores focus without triggering
+  parent-scroll jumps.
 - The TUI launcher may select configured provider instances and role-local runtime settings
   (model, reasoning, and exposed provider generation options) for one run. These overrides are
   schema-validated in memory, never alter YAML defaults, and may give roles sharing a configured

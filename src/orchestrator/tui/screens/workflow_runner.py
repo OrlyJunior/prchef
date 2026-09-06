@@ -9,7 +9,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus, Resize
 from textual.screen import Screen
-from textual.widgets import Button, Input, Select, Static
+from textual.widgets import Button, Input, Static
 
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
@@ -18,6 +18,7 @@ from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import WorkflowStage, WorkflowStatus
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
 from orchestrator.tui.screens.task_selector import TaskSelector
+from orchestrator.tui.widgets import OrchestratorSelect, is_orchestrator_select_widget
 
 if TYPE_CHECKING:
     from orchestrator.tui.app import OrchestratorApp
@@ -49,9 +50,9 @@ class WorkflowRunnerScreen(Screen[None]):
             yield Static("Start workflow", classes="screen-title")
             with Vertical(classes="workflow-form"):
                 yield Static("Repository", classes="field-label")
-                yield Select([], prompt="Configured repository", id="repository")
+                yield OrchestratorSelect([], prompt="Configured repository", id="repository")
                 yield Static("Task provider", classes="field-label")
-                yield Select([], prompt="Task provider", id="task-provider")
+                yield OrchestratorSelect([], prompt="Task provider", id="task-provider")
                 yield TaskSelector(id="task-selector")
                 yield Static("", id="github-app-summary")
                 # Launch and navigation remain usable before the optional role
@@ -75,7 +76,7 @@ class WorkflowRunnerScreen(Screen[None]):
                             with Horizontal(classes="role-config-row"):
                                 with Vertical(classes="role-field"):
                                     yield Static("Provider", id=f"{prefix}-provider-label")
-                                    yield Select(
+                                    yield OrchestratorSelect(
                                         [],
                                         prompt=f"{role.value.title()} provider",
                                         id=f"{prefix}-provider",
@@ -143,7 +144,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 f"Cannot load configured repositories: {exc}"
             )
             return
-        repository_select = self.query_one("#repository", Select)
+        repository_select = self.query_one("#repository", OrchestratorSelect)
         repository_select.set_options(
             [(f"{item.key} — {item.path}", item.key) for item in repositories]
         )
@@ -167,15 +168,15 @@ class WorkflowRunnerScreen(Screen[None]):
         # A mouse press focuses a button before Textual dispatches its matching
         # release/click. Scrolling here can move that button out from under the
         # pointer, which turns the first click into a focus-only click. Selects
-        # and inputs still scroll into view so their overlays and keyboard
+        # and inputs still scroll into view so their keyboard
         # interaction remain usable on short terminals.
-        if isinstance(event.widget, Button):
+        if isinstance(event.widget, Button) or is_orchestrator_select_widget(event.widget):
             return
         self.query_one("#workflow-runner", VerticalScroll).scroll_to_widget(
             event.widget, animate=False, top=True
         )
 
-    def on_select_changed(self, event: Select.Changed) -> None:
+    def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
         if event.select.id == "repository" and isinstance(event.value, str):
             self._load_repository_options(event.value)
             return
@@ -225,7 +226,7 @@ class WorkflowRunnerScreen(Screen[None]):
         if not providers:
             self.query_one("#task-selector", TaskSelector).clear_tasks()
             return
-        task_provider_select = self.query_one("#task-provider", Select)
+        task_provider_select = self.query_one("#task-provider", OrchestratorSelect)
         task_provider_select.set_options([(provider, provider) for provider in providers])
         self._suppressed_task_provider_change = (repository, providers[0])
         task_provider_select.value = providers[0]
@@ -236,7 +237,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._runtime_defaults.clear()
         self._advanced_open.clear()
         for role, prefix in self._role_fields():
-            select = self.query_one(f"#{prefix}-provider", Select)
+            select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
             select.set_options([(provider, provider) for provider in configured_agents])
             select.value = selected_agents[role]
             self._load_role_runtime_controls(role, prefix, selected_agents[role])
@@ -686,5 +687,5 @@ class WorkflowRunnerScreen(Screen[None]):
         self.notify(f"Could not start workflow: {message}", severity="error")
 
     def _selected(self, selector: str) -> str | None:
-        value = self.query_one(selector, Select).value
+        value = self.query_one(selector, OrchestratorSelect).value
         return value if isinstance(value, str) else None

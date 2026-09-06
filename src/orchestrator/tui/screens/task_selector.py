@@ -6,9 +6,10 @@ from collections.abc import Iterable
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.widgets import Button, Select, Static
+from textual.widgets import Button, Static
 
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.tui.widgets import OrchestratorSelect
 
 
 class TaskSelector(Vertical):
@@ -19,7 +20,7 @@ class TaskSelector(Vertical):
     def compose(self) -> ComposeResult:
         yield Static("Task", classes="field-label")
         yield Button("Refresh tasks", id="refresh-tasks")
-        yield Select([], prompt="Available tasks", id="available-tasks")
+        yield OrchestratorSelect([], prompt="Available tasks", id="available-tasks")
         yield Static("Choose a provider and load tasks to browse it.", id="task-hint")
         yield Static("", id="task-error")
 
@@ -27,7 +28,7 @@ class TaskSelector(Vertical):
         task_list = list(tasks)
         self.selected_task_id = None
         options = [(f"{task.id}: {task.title or '(untitled)'}", task.id) for task in task_list]
-        select = self.query_one("#available-tasks", Select)
+        select = self.query_one("#available-tasks", OrchestratorSelect)
         select.disabled = False
         select.set_options(options)
         self.query_one("#refresh-tasks", Button).disabled = False
@@ -40,8 +41,8 @@ class TaskSelector(Vertical):
 
     def clear_tasks(self) -> None:
         self.selected_task_id = None
-        self.query_one("#available-tasks", Select).set_options([])
-        self.query_one("#available-tasks", Select).disabled = False
+        self.query_one("#available-tasks", OrchestratorSelect).set_options([])
+        self.query_one("#available-tasks", OrchestratorSelect).disabled = False
         self.query_one("#refresh-tasks", Button).disabled = False
         self.query_one("#task-error", Static).update("")
         self.query_one("#task-hint", Static).update(
@@ -52,7 +53,7 @@ class TaskSelector(Vertical):
         """Render an inline busy state while the runner fetches tasks."""
 
         self.selected_task_id = None
-        select = self.query_one("#available-tasks", Select)
+        select = self.query_one("#available-tasks", OrchestratorSelect)
         select.set_options([])
         select.disabled = True
         self.query_one("#refresh-tasks", Button).disabled = True
@@ -63,12 +64,12 @@ class TaskSelector(Vertical):
         """Display a task-loading failure without interrupting the launcher."""
 
         self.selected_task_id = None
-        self.query_one("#available-tasks", Select).disabled = False
+        self.query_one("#available-tasks", OrchestratorSelect).disabled = False
         self.query_one("#refresh-tasks", Button).disabled = False
         self.query_one("#task-hint", Static).update("Tasks could not be loaded. Try refreshing.")
         self.query_one("#task-error", Static).update(f"Could not load tasks: {message}")
 
-    def on_select_changed(self, event: Select.Changed) -> None:
+    def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
         if event.select.id != "available-tasks" or not isinstance(event.value, str):
             return
         self.selected_task_id = event.value
