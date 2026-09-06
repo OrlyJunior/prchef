@@ -32,6 +32,8 @@ class WorkflowRunnerScreen(Screen[None]):
         self._event_lines: list[str] = []
         self._role_providers: dict[AgentRole, str] = {}
         self._runtime_inputs: dict[tuple[AgentRole, str], dict[str, Any]] = {}
+        self._task_load_token = 0
+        self._suppressed_task_provider_change: tuple[str, str] | None = None
 
     def compose(self) -> ComposeResult:
         # Textual scrolls focused children into view within this one launcher
@@ -84,8 +86,12 @@ class WorkflowRunnerScreen(Screen[None]):
             )
             return
         options = [(f"{item.key} — {item.path}", item.key) for item in repositories]
-        self.query_one("#repository", Select).set_options(options)
-        if not repositories:
+        repository_select = self.query_one("#repository", Select)
+        repository_select.set_options(options)
+        repository_select.focus()
+        if repositories:
+            repository_select.value = repositories[0].key
+        else:
             self.query_one("#workflow-progress", Static).update(
                 "No repositories are configured. Add entries under repositories "
                 "in orchestrator.yml."
@@ -95,12 +101,22 @@ class WorkflowRunnerScreen(Screen[None]):
         """Keep keyboard navigation visible when the form exceeds the viewport."""
 
         self.query_one("#workflow-runner", VerticalScroll).scroll_to_widget(
-            event.widget, animate=False
+            event.widget, animate=False, top=True
         )
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "repository" and isinstance(event.value, str):
             self._load_repository_options(event.value)
+            return
+        if event.select.id == "task-provider" and isinstance(event.value, str):
+            repository = self._selected("#repository")
+            if self._suppressed_task_provider_change is not None:
+                suppressed_change = self._suppressed_task_provider_change
+                self._suppressed_task_provider_change = None
+                if suppressed_change == (repository, event.value):
+                    return
+            if repository is not None:
+                self._request_task_load(repository, event.value)
             return
         for role, prefix in self._role_fields():
             if event.select.id == f"{prefix}-provider" and isinstance(event.value, str):
@@ -140,10 +156,13 @@ class WorkflowRunnerScreen(Screen[None]):
             self.notify(f"Could not resolve repository configuration: {exc}", severity="error")
             return
 
-        self.query_one("#task-provider", Select).set_options(
-            [(provider, provider) for provider in providers]
-        )
-        self.query_one("#task-provider", Select).value = providers[0]
+        if not providers:
+            self.query_one("#task-selector", TaskSelector).clear_tasks()
+            return
+        task_provider_select = self.query_one("#task-provider", Select)
+        task_provider_select.set_options([(provider, provider) for provider in providers])
+        self._suppressed_task_provider_change = (repository, providers[0])
+        task_provider_select.value = providers[0]
         self.query_one("#task-selector", TaskSelector).clear_tasks()
         self._role_providers.clear()
         self._runtime_inputs.clear()
@@ -153,6 +172,7 @@ class WorkflowRunnerScreen(Screen[None]):
             select.value = selected_agents[role]
             self._load_role_runtime_controls(role, prefix, selected_agents[role])
         self._load_github_app_summary(repository)
+        self._request_task_load(repository, providers[0])
 
     @staticmethod
     def _role_fields() -> tuple[tuple[AgentRole, str], ...]:
@@ -282,13 +302,13 @@ class WorkflowRunnerScreen(Screen[None]):
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "load-tasks":
+        if event.button.id == "refresh-tasks":
             repository = self._selected("#repository")
             provider = self._selected("#task-provider")
             if repository is None or provider is None:
                 self.notify("Choose a repository and task provider first.", severity="warning")
                 return
-            self._load_tasks(repository, provider)
+            self._request_task_load(repository, provider)
         elif event.button.id == "start-workflow":
             self._start_selected_workflow()
         elif event.button.id == "workflow-history":
@@ -303,29 +323,41 @@ class WorkflowRunnerScreen(Screen[None]):
 
         self.app.push_screen(ExecutionHistoryScreen())
 
+    def _request_task_load(self, repository: str, provider: str) -> None:
+        self._task_load_token += 1
+        token = self._task_load_token
+        self.query_one("#task-selector", TaskSelector).set_tasks_loading(provider=provider)
+        self._load_tasks(repository, provider, token)
+
     @work(thread=True, exclusive=True)
-    def _load_tasks(self, repository: str, provider: str) -> None:
+    def _load_tasks(self, repository: str, provider: str, token: int) -> None:
         try:
             tasks = self.controller.list_tasks(repository=repository, task_provider=provider)
         except Exception as exc:
-            self.app.call_from_thread(self._task_loading_failed, str(exc))
+            self.app.call_from_thread(self._task_loading_failed, str(exc), token)
             return
-        self.app.call_from_thread(self._set_available_tasks, tasks, provider)
+        self.app.call_from_thread(self._set_available_tasks, tasks, provider, token)
 
-    def _set_available_tasks(self, tasks: list[DevelopmentTask], provider: str) -> None:
+    def _set_available_tasks(
+        self, tasks: list[DevelopmentTask], provider: str, token: int
+    ) -> None:
+        if token != self._task_load_token:
+            return
         self.query_one("#task-selector", TaskSelector).set_tasks(tasks, provider=provider)
 
-    def _task_loading_failed(self, message: str) -> None:
-        self.notify(f"Could not load tasks: {message}", severity="error")
+    def _task_loading_failed(self, message: str, token: int) -> None:
+        if token != self._task_load_token:
+            return
+        self.query_one("#task-selector", TaskSelector).set_error(message)
 
     def _start_selected_workflow(self) -> None:
         repository = self._selected("#repository")
         task_provider = self._selected("#task-provider")
-        task_id = self.query_one("#task-id", Input).value
+        task_id = self.query_one("#task-selector", TaskSelector).selected_task_id
         provider_selections = {
             role: self._selected(f"#{prefix}-provider") for role, prefix in self._role_fields()
         }
-        if repository is None or task_provider is None or not task_id.strip():
+        if repository is None or task_provider is None or task_id is None:
             self.notify(
                 "Select a repository, provider, and task before starting.", severity="warning"
             )

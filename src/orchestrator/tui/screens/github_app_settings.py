@@ -69,13 +69,13 @@ class GitHubAppSettingsScreen(Screen[None]):
         except Exception as exc:
             self._status(f"Cannot load configured repositories: {exc}")
             return
-        self.query_one("#github-app-repository", Select).set_options(
-            [(item.key, item.key) for item in repositories]
-        )
+        repository_select = self.query_one("#github-app-repository", Select)
+        repository_select.set_options([(item.key, item.key) for item in repositories])
+        repository_select.focus()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         self.query_one("#github-app-settings", VerticalScroll).scroll_to_widget(
-            event.widget, animate=False
+            event.widget, animate=False, top=True
         )
 
     def on_select_changed(self, event: Select.Changed) -> None:
