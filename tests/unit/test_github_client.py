@@ -181,3 +181,27 @@ def test_create_pull_request_uses_implementer_app_token(tmp_path: Path) -> None:
 
     assert pull_request.number == 42
     assert all(call["env"]["GH_TOKEN"] == "ghs_implementer" for call in commands.calls)
+
+
+def test_comment_pull_request_uses_implementer_app_token(tmp_path: Path) -> None:
+    commands = RecordingCommands()
+    client = GitHubClient(commands, tmp_path, ["gh"], 120)
+
+    class Authenticator:
+        def token(self) -> str:
+            return "ghs_implementer"
+
+    client._implementer_authenticator = Authenticator()  # type: ignore[assignment]
+    client.comment_pull_request(42, "Suggestions were reviewed and skipped.")
+
+    call = commands.calls[0]
+    assert call["command"] == [
+        "gh",
+        "pr",
+        "comment",
+        "42",
+        "--body",
+        "Suggestions were reviewed and skipped.",
+    ]
+    assert call["env"] is not None
+    assert call["env"]["GH_TOKEN"] == "ghs_implementer"

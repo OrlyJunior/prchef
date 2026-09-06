@@ -394,6 +394,8 @@ class FakeGitHubClient:
         self.last_pull_request_body: str | None = None
         self.create_calls = 0
         self.review_calls: list[dict[str, Any]] = []
+        self.comment_error: Exception | None = None
+        self.comment_calls: list[dict[str, Any]] = []
 
     def create_pull_request(self, **kwargs: Any) -> PullRequest:
         self.create_calls += 1
@@ -412,6 +414,11 @@ class FakeGitHubClient:
         self.review_calls.append(kwargs)
         if self.review_error:
             raise self.review_error
+
+    def comment_pull_request(self, **kwargs: Any) -> None:
+        self.comment_calls.append(kwargs)
+        if self.comment_error:
+            raise self.comment_error
 
     def at_path(self, repository_path: Path) -> FakeGitHubClient:
         del repository_path
