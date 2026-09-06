@@ -21,7 +21,7 @@ class OrchestratorApp(App[None]):
     TITLE = "Orchestrator"
     SUB_TITLE = "Interactive workflow control"
     CSS = """
-    #home, #workflow-runner, #execution-history, #execution-detail {
+    #home, #workflow-runner, #execution-history, #execution-detail, #github-app-settings {
         width: 100%;
         height: 100%;
         padding: 1 2;

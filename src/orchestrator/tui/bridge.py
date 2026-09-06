@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import (
@@ -12,6 +13,7 @@ from orchestrator.config.project_config import (
     GitHubAppSettings,
     ProjectConfig,
     ProjectConfigLoader,
+    ProviderRuntimeCapabilities,
 )
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
@@ -34,6 +36,9 @@ class WorkflowLaunch:
     task_provider: str
     task_id: str
     agent_providers: Mapping[AgentRole, str]
+    # These values affect this invocation only. They are never written through
+    # ProjectConfigLoader and are validated by ProjectConfig before execution.
+    agent_runtime_options: Mapping[AgentRole, Mapping[str, Any]] = field(default_factory=dict)
 
 
 class WorkflowController:
@@ -94,6 +99,14 @@ class WorkflowController:
     def configured_agent_providers(self, repository: str) -> list[str]:
         return list(self.project_config(repository).providers)
 
+    def provider_runtime_capabilities(
+        self, repository: str, provider: str
+    ) -> ProviderRuntimeCapabilities:
+        return self.project_config(repository).provider_runtime_capabilities(provider)
+
+    def provider_runtime_values(self, repository: str, provider: str) -> dict[str, Any]:
+        return self.project_config(repository).provider_runtime_values(provider)
+
     def github_app_settings(
         self, repository: str
     ) -> tuple[GitHubAppSettings, GitHubAppSettings]:
@@ -135,8 +148,9 @@ class WorkflowController:
         # Validate selections through the core configuration model before a
         # potentially long-running workflow begins. WorkflowService resolves
         # the configuration again as part of its normal persisted pipeline.
-        self.project_config(launch.repository).with_agent_providers(
-            {role.value: provider for role, provider in launch.agent_providers.items()}
+        self.project_config(launch.repository).with_agent_runtime_overrides(
+            {role.value: provider for role, provider in launch.agent_providers.items()},
+            {role.value: options for role, options in launch.agent_runtime_options.items()},
         )
         provider = self._task_provider_factory(launch.task_provider, launch.repository)
         service = (
@@ -154,6 +168,7 @@ class WorkflowController:
             task_id,
             launch.repository,
             agent_providers=launch.agent_providers,
+            agent_runtime_options=launch.agent_runtime_options,
             event_listener=event_listener,
         )
 

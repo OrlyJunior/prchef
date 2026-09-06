@@ -18,6 +18,11 @@
   boundary. `cli`: dependency composition and stdout/stderr contract. `tui`: a Textual
   presentation/controller layer over configuration, task providers, the workflow service, and
   persisted execution reads; it must not implement workflow policy or a second state machine.
+- The TUI launcher may select configured provider instances and role-local runtime settings
+  (model, reasoning, and exposed provider generation options) for one run. These overrides are
+  schema-validated in memory, never alter YAML defaults, and may give roles sharing a configured
+  provider independent runtime settings. GitHub App identities remain separately persisted,
+  inspectable configuration.
 - Provider-specific commands, polling, credentials, or API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Planner/implementer/reviewer services stay provider
   neutral.
