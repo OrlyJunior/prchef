@@ -345,6 +345,98 @@ def test_review_correction_revalidates_updates_existing_pr_and_can_be_approved(w
     assert "### Blocking findings" in factory.github.review_calls[0]["body"]
 
 
+def test_approved_review_suggestions_can_be_declined_without_changing_approval(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.git.changed_files_results = [["src/audit.py"], []]
+
+    result = service.run("card-polish-declined")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert repository.stage_changes.count(WorkflowStage.POLISH) == 1
+    assert factory.jules.review_calls == 1
+    assert factory.git.commit_calls == 1
+    assert factory.git.push_calls == 1
+    assert len(factory.codex.requests) == 2
+    assert "NON-BLOCKING REVIEW SUGGESTIONS" in factory.codex.requests[1].instructions
+    assert factory.commands.working_directories == [factory.codex.requests[0].workspace_path]
+
+
+def test_applied_polish_is_validated_pushed_to_existing_pr_and_re_reviewed(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.review_decisions = ["APPROVED", "APPROVED"]
+    factory.jules.review_suggestions = [["Add a focused regression test"]]
+
+    result = service.run("card-polish-applied")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert repository.stage_changes.count(WorkflowStage.POLISH) == 1
+    assert repository.stage_changes.count(WorkflowStage.REVIEW) == 2
+    assert repository.stage_changes.count(WorkflowStage.VALIDATE) == 2
+    assert factory.git.commit_calls == 2
+    assert factory.git.push_calls == 2
+    assert factory.git.diff_calls == 2
+    assert factory.github.create_calls == 1
+    assert factory.jules.review_calls == 2
+
+
+def test_fresh_approved_review_does_not_trigger_a_second_polish_pass(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.review_decisions = ["APPROVED", "APPROVED"]
+    factory.jules.review_suggestions = [
+        ["Add a focused regression test"],
+        ["Consider clearer naming"],
+    ]
+
+    result = service.run("card-polish-once")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert repository.stage_changes.count(WorkflowStage.POLISH) == 1
+    assert factory.jules.review_calls == 2
+    assert len(factory.codex.requests) == 2
+
+
+def test_invalid_optional_polish_is_discarded_without_downgrading_approval(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.commands.failure_sequence = [False, True]
+
+    result = service.run("card-polish-invalid")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert repository.stage_changes.count(WorkflowStage.POLISH) == 1
+    assert repository.stage_changes.count(WorkflowStage.VALIDATE) == 2
+    assert factory.git.discard_calls == 1
+    assert factory.git.commit_calls == 1
+    assert factory.git.push_calls == 1
+    assert factory.jules.review_calls == 1
+
+
+def test_changes_requested_after_polish_uses_mandatory_correction_loop(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.review_decisions = ["APPROVED", "CHANGES_REQUESTED", "APPROVED"]
+    factory.jules.review_suggestions = [["Add a focused regression test"]]
+
+    result = service.run("card-polish-changes-requested")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert repository.stage_changes.count(WorkflowStage.POLISH) == 1
+    assert repository.stage_changes.count(WorkflowStage.IMPLEMENT) == 2
+    assert repository.stage_changes.count(WorkflowStage.REVIEW) == 3
+    assert factory.git.commit_calls == 3
+    assert factory.git.push_calls == 3
+    assert factory.github.create_calls == 1
+
+
+def test_approved_review_without_suggestions_does_not_enter_polish_stage(workflow) -> None:
+    service, repository, _, _ = workflow
+
+    result = service.run("card-no-polish")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert WorkflowStage.POLISH not in repository.stage_changes
+
+
 def test_review_publication_failure_preserves_reviewer_decision(workflow) -> None:
     service, _, _, factory = workflow
     factory.github.review_error = RuntimeError("GitHub unavailable")
