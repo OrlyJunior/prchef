@@ -8,10 +8,11 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.events import DescendantFocus
 from textual.screen import Screen
-from textual.widgets import Button, Input, Select, Static
+from textual.widgets import Button, Input, Static
 
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.tui.bridge import WorkflowController
+from orchestrator.tui.widgets import OrchestratorSelect, is_orchestrator_select_widget
 
 if TYPE_CHECKING:
     from orchestrator.tui.app import OrchestratorApp
@@ -29,7 +30,7 @@ class ExecutionHistoryScreen(Screen[None]):
                 placeholder="Filter by task, repository, stage, or status",
                 id="history-filter",
             )
-            yield Select([], prompt="Select an execution", id="execution-picker")
+            yield OrchestratorSelect([], prompt="Select an execution", id="execution-picker")
             with Horizontal(classes="screen-actions"):
                 yield Button("Inspect", variant="primary", id="inspect-execution")
                 yield Button("Refresh", id="refresh-history")
@@ -43,6 +44,8 @@ class ExecutionHistoryScreen(Screen[None]):
         self.refresh_history()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
+        if is_orchestrator_select_widget(event.widget):
+            return
         self.query_one("#execution-history", VerticalScroll).scroll_to_widget(
             event.widget, animate=False
         )
@@ -87,13 +90,13 @@ class ExecutionHistoryScreen(Screen[None]):
             )
             for execution in executions
         ]
-        self.query_one("#execution-picker", Select).set_options(options)
+        self.query_one("#execution-picker", OrchestratorSelect).set_options(options)
         self.query_one("#history-summary", Static).update(
             f"{len(executions)} persisted workflow execution(s)."
         )
 
     def _inspect_selected(self) -> None:
-        execution_id = self.query_one("#execution-picker", Select).value
+        execution_id = self.query_one("#execution-picker", OrchestratorSelect).value
         if not isinstance(execution_id, str):
             self.notify("Select an execution to inspect.", severity="warning")
             return
