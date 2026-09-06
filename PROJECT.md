@@ -169,6 +169,11 @@
 - Repository selection comes from explicit CLI override when supplied, otherwise normalized task
   repository metadata. A registered entry supplies its local path; an unregistered override is
   interpreted as a repository path.
+- The TUI GitHub App settings screen shows the exact configuration file it will modify. With no
+  repository-local override it defaults to the discovered global configuration and updates that
+  repository's entry; creating `.orchestrator.yml` requires explicitly selecting the local
+  destination. When global and local layers are both present, the TUI requires a destination
+  selection before saving.
 - Modern configuration is an all-or-nothing pair: both `agents` and `providers` must be present,
   and all three roles must be assigned. Its roles are authoritative; legacy `roles` plus
   `integrations.jules/codex` are normalized only when modern configuration is absent. Never add a

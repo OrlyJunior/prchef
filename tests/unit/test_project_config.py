@@ -11,6 +11,7 @@ from orchestrator.config.project_config import (
     CodexCliProviderSettings,
     ConfigurationError,
     GitHubAppSettings,
+    GitHubAppSettingsDestination,
     ProjectConfig,
     ProjectConfigLoader,
     resolve_global_config,
@@ -259,14 +260,38 @@ def test_implementer_and_reviewer_github_apps_are_independent(tmp_path: Path) ->
     )
 
 
-def test_tui_configuration_writer_persists_only_app_references(tmp_path: Path) -> None:
+def test_tui_configuration_writer_updates_active_global_source_without_creating_local_override(
+    tmp_path: Path,
+) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
+    (repository / ".git").mkdir()
     loader = ProjectConfigLoader(tmp_path / "orchestrator.yml")
-    (tmp_path / "orchestrator.yml").write_text("defaults: {}\n", encoding="utf-8")
+    global_path = tmp_path / "orchestrator.yml"
+    global_path.write_text(
+        """defaults: {}
+repositories:
+  example:
+    path: repository
+""",
+        encoding="utf-8",
+    )
+    task = DevelopmentTask(
+        id="1",
+        source="trello",
+        title="Task",
+        description="",
+        url="https://example.test/1",
+        repository="example",
+    )
+    config = loader.load(task)
+    assert config.configuration_source == global_path
+    assert config.repository_key == "example"
+    assert config.local_override_path is None
 
     saved = loader.save_github_app_settings(
-        repository,
+        GitHubAppSettingsDestination("global", global_path),
+        repository_key=config.repository_key,
         implementer_app=GitHubAppSettings(
             app_id=789,
             installation_id=987,
@@ -275,15 +300,45 @@ def test_tui_configuration_writer_persists_only_app_references(tmp_path: Path) -
         reviewer_app=GitHubAppSettings(),
     )
 
-    assert saved == repository / ".orchestrator.yml"
+    assert saved == global_path
+    assert not (repository / ".orchestrator.yml").exists()
     content = saved.read_text(encoding="utf-8")
+    assert "repositories:" in content
     assert "implementer_app:" in content
     assert "IMPLEMENTER_APP_KEY" in content
     assert "private_key:" not in content
     resolved = ProjectConfig.model_validate(
-        {"path": repository, **yaml.safe_load(content)}
+        {
+            "path": repository,
+            **yaml.safe_load(content)["repositories"]["example"],
+        }
     )
     assert resolved.integrations.github.implementer_app.app_id == 789
+
+
+def test_tui_configuration_writer_creates_local_override_only_when_selected(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    local_path = repository / ".orchestrator.yml"
+    loader = ProjectConfigLoader(tmp_path / "orchestrator.yml")
+
+    saved = loader.save_github_app_settings(
+        GitHubAppSettingsDestination("repository-local", local_path),
+        repository_key="example",
+        implementer_app=GitHubAppSettings(),
+        reviewer_app=GitHubAppSettings(
+            app_id=123,
+            installation_id=456,
+            private_key_env="REVIEWER_APP_KEY",
+        ),
+    )
+
+    assert saved == local_path
+    content = saved.read_text(encoding="utf-8")
+    assert "app:" in content
+    assert "REVIEWER_APP_KEY" in content
 
 
 @pytest.mark.parametrize(

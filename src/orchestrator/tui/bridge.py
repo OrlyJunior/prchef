@@ -11,6 +11,7 @@ from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import (
     ConfiguredRepository,
     GitHubAppSettings,
+    GitHubAppSettingsDestination,
     ProjectConfig,
     ProjectConfigLoader,
     ProviderRuntimeCapabilities,
@@ -113,16 +114,28 @@ class WorkflowController:
         github = self.project_config(repository).integrations.github
         return github.implementer_app, github.app
 
+    def github_app_settings_destinations(
+        self, repository: str
+    ) -> list[GitHubAppSettingsDestination]:
+        """Expose the explicit configuration layers available to the TUI."""
+        return self._config_loader.github_app_settings_destinations(
+            self.project_config(repository)
+        )
+
     def save_github_app_settings(
         self,
         repository: str,
         *,
+        destination: GitHubAppSettingsDestination,
         implementer_app: GitHubAppSettings,
         reviewer_app: GitHubAppSettings,
     ) -> Path:
         config = self.project_config(repository)
+        if destination not in self._config_loader.github_app_settings_destinations(config):
+            raise ValueError("Choose a configuration destination for the selected repository")
         return self._config_loader.save_github_app_settings(
-            config.path,
+            destination,
+            repository_key=config.repository_key,
             implementer_app=implementer_app,
             reviewer_app=reviewer_app,
         )
