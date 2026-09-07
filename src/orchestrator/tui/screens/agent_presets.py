@@ -162,9 +162,13 @@ class AgentPresetsScreen(Screen[None]):
             return
         provider = self.query_one("#agent-preset-provider", OrchestratorSelect)
         provider.set_options([(name, name) for name in providers])
-        role = self.query_one("#agent-preset-role", OrchestratorSelect)
-        role.value = AgentRole.PLANNER.value
-        self._status("Choose a role, then create or edit one of its presets.")
+        role_selector = self.query_one("#agent-preset-role", OrchestratorSelect)
+        active_role = self._role() or AgentRole.PLANNER
+        # Keep the role-local editor active when navigating between repositories.
+        # Assigning the existing value does not emit a change event, so load the
+        # role directly instead of relying on Textual to do it for us.
+        role_selector.value = active_role.value
+        self._load_role(active_role)
 
     def _load_role(self, role: AgentRole) -> None:
         repository = self._repository()

@@ -49,6 +49,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._role_presets: dict[AgentRole, dict[str, AgentPresetConfig]] = {}
         self._selected_presets: dict[AgentRole, str] = {}
         self._suppressed_preset_changes: set[tuple[AgentRole, str]] = set()
+        self._suppressed_manual_preset_changes: set[AgentRole] = set()
         self._runtime_inputs: dict[tuple[AgentRole, str], dict[str, Any]] = {}
         self._runtime_defaults: dict[tuple[AgentRole, str], dict[str, Any]] = {}
         self._advanced_open: dict[AgentRole, bool] = {}
@@ -239,24 +240,20 @@ class WorkflowRunnerScreen(Screen[None]):
                         return
                     self._select_role_preset(role, prefix, event.value)
                 elif event.value is _MANUAL_PRESET:
-                    self._selected_presets.pop(role, None)
-                    provider = self._selected(f"#{prefix}-provider")
-                    repository = self._selected("#repository")
-                    if provider is not None and repository is not None:
-                        capabilities = self.controller.provider_runtime_capabilities(
-                            repository, provider
-                        )
-                        self._update_role_summary(
-                            role,
-                            prefix,
-                            provider,
-                            self._runtime_values_from_controls(prefix),
-                            capabilities,
-                        )
-                    self._update_preset_source(role, prefix)
+                    if role in self._suppressed_manual_preset_changes:
+                        self._suppressed_manual_preset_changes.remove(role)
+                        return
+                    self._restore_role_defaults(role, prefix)
                 return
             if event.select.id == f"{prefix}-provider" and isinstance(event.value, str):
+                # Provider changes can be posted after a preset selection has
+                # already changed the control again. Applying an older event
+                # here would load that provider's defaults into the current
+                # role, even though its selector now names a different one.
+                if event.select.value != event.value:
+                    return
                 self._load_role_runtime_controls(role, prefix, event.value)
+                self._clear_preset_if_provider_changed(role, prefix, event.value)
                 self._update_preset_source(role, prefix)
                 return
 
@@ -276,6 +273,7 @@ class WorkflowRunnerScreen(Screen[None]):
             except Exception:
                 return
             values = self._runtime_values_from_controls(prefix)
+            self._clear_preset_if_runtime_changed(role, prefix)
             self._update_role_summary(role, prefix, provider, values, capabilities)
             self._update_advanced_indicators(role, prefix, provider, values)
             self._update_preset_source(role, prefix)
@@ -341,11 +339,18 @@ class WorkflowRunnerScreen(Screen[None]):
             return
         self._role_presets[role] = presets
         selector = self.query_one(f"#{prefix}-preset", OrchestratorSelect)
+        # The explicit Manual option is the only fallback this selector needs.
+        # Remove Textual's synthetic blank choice so the first option remains
+        # the role-local manual reset and cannot be mistaken for a separate
+        # preset selection.
+        if selector.value is not _MANUAL_PRESET:
+            self._suppressed_manual_preset_changes.add(role)
         selector.set_options(
             [
                 ("Provider/YAML default (manual)", _MANUAL_PRESET),
                 *[(name, name) for name in presets],
-            ]
+            ],
+            allow_blank=False,
         )
         target = selected_name or self._selected_presets.get(role)
         if target is None:
@@ -395,6 +400,51 @@ class WorkflowRunnerScreen(Screen[None]):
         self._load_role_runtime_controls(role, prefix, preset.provider)
         self._set_preset_runtime_controls(prefix, preset)
         self._update_preset_source(role, prefix)
+
+    def _restore_role_defaults(self, role: AgentRole, prefix: str) -> None:
+        """Return one role to its configured provider and runtime defaults."""
+
+        self._selected_presets.pop(role, None)
+        default_provider = self._role_default_providers.get(role)
+        if default_provider is None:
+            self.notify(
+                f"Could not restore {role.value} defaults: no default provider is configured.",
+                severity="warning",
+            )
+            return
+        for key in [key for key in self._runtime_inputs if key[0] is role]:
+            del self._runtime_inputs[key]
+        for name in ("model", "reasoning", "temperature", "max-output-tokens"):
+            self.query_one(f"#{prefix}-{name}", Input).value = ""
+        provider_select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
+        provider_select.value = default_provider
+        self._load_role_runtime_controls(
+            role, prefix, default_provider, reset_to_defaults=True
+        )
+        self._update_preset_source(role, prefix)
+
+    def _clear_preset_if_provider_changed(
+        self, role: AgentRole, prefix: str, provider: str
+    ) -> None:
+        selected = self._selected_presets.get(role)
+        preset = self._role_presets.get(role, {}).get(selected) if selected else None
+        if preset is not None and preset.provider != provider:
+            self._select_manual_without_reset(role, prefix)
+
+    def _clear_preset_if_runtime_changed(self, role: AgentRole, prefix: str) -> None:
+        selected = self._selected_presets.get(role)
+        preset = self._role_presets.get(role, {}).get(selected) if selected else None
+        if preset is not None and not self._preset_matches_controls(role, prefix, preset):
+            self._select_manual_without_reset(role, prefix)
+
+    def _select_manual_without_reset(self, role: AgentRole, prefix: str) -> None:
+        """Reflect an edit in the selector while retaining that edit for this run."""
+
+        self._selected_presets.pop(role, None)
+        selector = self.query_one(f"#{prefix}-preset", OrchestratorSelect)
+        if selector.value is not _MANUAL_PRESET:
+            self._suppressed_manual_preset_changes.add(role)
+            selector.value = _MANUAL_PRESET
 
     def _set_preset_runtime_controls(self, prefix: str, preset: AgentPresetConfig) -> None:
         self.query_one(f"#{prefix}-model", Input).value = preset.model or ""
@@ -491,16 +541,23 @@ class WorkflowRunnerScreen(Screen[None]):
         )
         return not self._preset_matches_controls(role, prefix, baseline)
 
-    def _load_role_runtime_controls(self, role: AgentRole, prefix: str, provider: str) -> None:
+    def _load_role_runtime_controls(
+        self,
+        role: AgentRole,
+        prefix: str,
+        provider: str,
+        *,
+        reset_to_defaults: bool = False,
+    ) -> None:
         repository = self._selected("#repository")
         if repository is None:
             return
         previous = self._role_providers.get(role)
-        if previous is not None:
+        if previous is not None and not reset_to_defaults:
             self._runtime_inputs[(role, previous)] = self._runtime_values_from_controls(prefix)
         try:
             capabilities = self.controller.provider_runtime_capabilities(repository, provider)
-            values = self._runtime_inputs.get((role, provider))
+            values = None if reset_to_defaults else self._runtime_inputs.get((role, provider))
             if values is None:
                 values = self.controller.provider_runtime_values(repository, provider)
         except Exception as exc:
