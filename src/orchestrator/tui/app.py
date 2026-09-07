@@ -10,6 +10,7 @@ from textual.containers import Container, Horizontal
 from textual.widgets import Button, Footer, Header, Static
 
 from orchestrator.tui.bridge import WorkflowController
+from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
 from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 from orchestrator.tui.screens.workflow_runner import WorkflowRunnerScreen
@@ -21,12 +22,14 @@ class OrchestratorApp(App[None]):
     TITLE = "Orchestrator"
     SUB_TITLE = "Interactive workflow control"
     CSS = """
-    #home, #workflow-runner, #execution-history, #execution-detail, #github-app-settings {
+    #home, #workflow-runner, #execution-history, #execution-detail,
+    #github-app-settings, #agent-instructions {
         width: 100%;
         height: 1fr;
         padding: 1 2;
     }
-    #workflow-runner, #execution-history, #execution-detail, #github-app-settings {
+    #workflow-runner, #execution-history, #execution-detail,
+    #github-app-settings, #agent-instructions {
         overflow-y: auto;
     }
     .screen-title { text-style: bold; margin-bottom: 1; }
@@ -80,6 +83,7 @@ class OrchestratorApp(App[None]):
         Binding("n", "new_workflow", "New workflow"),
         Binding("h", "history", "History"),
         Binding("c", "github_apps", "GitHub Apps"),
+        Binding("i", "agent_instructions", "Agent instructions"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -99,6 +103,7 @@ class OrchestratorApp(App[None]):
                 yield Button("Start workflow", variant="success", id="new-workflow")
                 yield Button("Execution history", id="history")
                 yield Button("GitHub Apps", id="github-apps")
+                yield Button("Agent instructions", id="agent-instructions")
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -108,6 +113,8 @@ class OrchestratorApp(App[None]):
             self.action_history()
         elif event.button.id == "github-apps":
             self.action_github_apps()
+        elif event.button.id == "agent-instructions":
+            self.action_agent_instructions()
 
     def action_new_workflow(self) -> None:
         self.push_screen(WorkflowRunnerScreen())
@@ -117,3 +124,6 @@ class OrchestratorApp(App[None]):
 
     def action_github_apps(self) -> None:
         self.push_screen(GitHubAppSettingsScreen())
+
+    def action_agent_instructions(self) -> None:
+        self.push_screen(AgentInstructionsScreen())

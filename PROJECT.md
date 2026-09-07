@@ -8,8 +8,13 @@
 - It coordinates providers, Git, GitHub, and persistence. It is **not** a merge bot or a generic
   repository browser/RAG service. Human-blocked executions are resumable using their persisted
   workflow state; this is not a provider-session resume system.
-- `PROJECT.md` is injected as supporting context into planning and review prompts (capped at
-  12,000 characters). Current task text and repository state win over this file.
+- `PROJECT.md` is shared supporting context for planning, implementation, and review prompts
+  (capped at 12,000 characters). `IMPLEMENTER.md` and `REVIEWER.md` are optional, capped,
+  role-specific local
+  guidance loaded from the configured repository root at execution time: implementers receive
+  only `IMPLEMENTER.md`, reviewers receive only `REVIEWER.md`. All are supplementary; the current
+  task, repository state, and core orchestrator invariants win. The role files are Git-ignored by
+  default, can be versioned deliberately, and are editable from the TUI without staging or commit.
 
 ## Ownership and layering
 
@@ -36,6 +41,9 @@
   Users choose a displayed task; its provider-specific identifier remains internal to the launch
   data. The interactive selector exposes refresh, loading, and inline-error states, while explicit
   CLI task identifiers remain supported.
+- The TUI's Agent Instructions view edits the selected repository's optional `IMPLEMENTER.md` and
+  `REVIEWER.md` independently. Missing files remain absent until their own save action; the TUI
+  never stages or commits either file.
 - Provider-specific commands, polling, credentials, or API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Planner/implementer/reviewer services stay provider
   neutral.

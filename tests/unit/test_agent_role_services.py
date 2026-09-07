@@ -17,6 +17,10 @@ from orchestrator.models import (
     ValidationResult,
 )
 from orchestrator.services.implementation_service import ImplementationService
+from orchestrator.services.project_context import (
+    load_implementer_instructions,
+    load_reviewer_instructions,
+)
 from orchestrator.services.review_service import ReviewService, format_pull_request_review
 from orchestrator.services.spec_service import SpecService
 
@@ -72,6 +76,59 @@ def _write_project_context(path: Path) -> None:
     )
 
 
+def _write_role_instructions(path: Path) -> None:
+    (path / "IMPLEMENTER.md").write_text("Prefer small, tested changes.", encoding="utf-8")
+    (path / "REVIEWER.md").write_text("Prioritize regression risks.", encoding="utf-8")
+
+
+def test_role_instruction_loaders_handle_present_and_missing_files(tmp_path: Path) -> None:
+    assert load_implementer_instructions(tmp_path) is None
+    assert load_reviewer_instructions(tmp_path) is None
+
+    _write_role_instructions(tmp_path)
+
+    assert load_implementer_instructions(tmp_path) == "Prefer small, tested changes."
+    assert load_reviewer_instructions(tmp_path) == "Prioritize regression risks."
+
+
+def test_implementer_instructions_use_the_control_checkout_then_worktree_fallback(
+    tmp_path: Path,
+) -> None:
+    control_checkout = tmp_path / "control"
+    worktree = tmp_path / "worktree"
+    control_checkout.mkdir()
+    worktree.mkdir()
+    (control_checkout / "IMPLEMENTER.md").write_text("Use control guidance.", encoding="utf-8")
+    (worktree / "IMPLEMENTER.md").write_text("Use worktree guidance.", encoding="utf-8")
+
+    provider = RecordingProvider(AgentResult(output="implemented"))
+    ImplementationService(provider, ChangedFilesGit()).implement(  # type: ignore[arg-type]
+        _task(),
+        _spec(),
+        worktree,
+        instructions_repository_path=control_checkout,
+    )
+    assert "Use control guidance." in provider.requests[0].instructions
+    assert "Use worktree guidance." not in provider.requests[0].instructions
+
+    (control_checkout / "IMPLEMENTER.md").unlink()
+    fallback_provider = RecordingProvider(AgentResult(output="implemented"))
+    ImplementationService(fallback_provider, ChangedFilesGit()).implement(  # type: ignore[arg-type]
+        _task(),
+        _spec(),
+        worktree,
+        instructions_repository_path=control_checkout,
+    )
+    assert "Use worktree guidance." in fallback_provider.requests[0].instructions
+
+
+def test_repository_ignores_local_agent_instruction_files() -> None:
+    gitignore = Path(__file__).parents[2] / ".gitignore"
+
+    assert "IMPLEMENTER.md" in gitignore.read_text(encoding="utf-8")
+    assert "REVIEWER.md" in gitignore.read_text(encoding="utf-8")
+
+
 def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     _write_project_context(tmp_path)
     (tmp_path / "src").mkdir()
@@ -110,6 +167,7 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
 
 def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     _write_project_context(tmp_path)
+    _write_role_instructions(tmp_path)
     provider = RecordingProvider(AgentResult(output="implemented"))
 
     result = ImplementationService(
@@ -121,6 +179,48 @@ def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> No
     assert provider.requests[0].workspace_path == tmp_path
     assert "Stable architecture rule." in provider.requests[0].instructions
     assert "Keep PROJECT.md accurate" in provider.requests[0].instructions
+    assert provider.requests[0].instructions.count("Prefer small, tested changes.") == 1
+    assert "Prioritize regression risks." not in provider.requests[0].instructions
+
+
+def test_implementer_instructions_are_included_in_all_implementation_prompts(
+    tmp_path: Path,
+) -> None:
+    _write_role_instructions(tmp_path)
+
+    prompts: list[str] = []
+    calls = (
+        lambda service: service.implement(_task(), _spec(), tmp_path),
+        lambda service: service.correct_validation_failures(
+            _task(), _spec(), ValidationResult(success=False), tmp_path
+        ),
+        lambda service: service.correct_review_findings(
+            _task(),
+            _spec(),
+            CodeReview(result=ReviewDecision.CHANGES_REQUESTED, summary="Fix this."),
+            tmp_path,
+        ),
+        lambda service: service.run_polish_pass(
+            _task(),
+            _spec(),
+            [],
+            tmp_path,
+            PullRequest(
+                5,
+                "https://github.example/pull/5",
+                "Task",
+                "develop",
+                "feature/task",
+            ),
+        ),
+    )
+    for call in calls:
+        provider = RecordingProvider(AgentResult(output="implemented"))
+        call(ImplementationService(provider, ChangedFilesGit()))  # type: ignore[arg-type]
+        prompts.append(provider.requests[0].instructions)
+
+    assert all(prompt.count("Prefer small, tested changes.") == 1 for prompt in prompts)
+    assert all("Prioritize regression risks." not in prompt for prompt in prompts)
 
 
 def test_implementation_inspects_changes_after_a_structured_provider_failure(
@@ -137,7 +237,9 @@ def test_implementation_inspects_changes_after_a_structured_provider_failure(
     )
     git = RecordingGit(["src/example.py"])
 
-    result = ImplementationService(provider, git).implement(_task(), _spec(), tmp_path)  # type: ignore[arg-type]
+    result = ImplementationService(provider, git).implement(  # type: ignore[arg-type]
+        _task(), _spec(), tmp_path
+    )
 
     assert not result.success
     assert result.changed_files == ["src/example.py"]
@@ -155,7 +257,9 @@ def test_implementation_does_not_inspect_changes_for_regular_provider_failure(
     )
     git = RecordingGit(["src/example.py"])
 
-    result = ImplementationService(provider, git).implement(_task(), _spec(), tmp_path)  # type: ignore[arg-type]
+    result = ImplementationService(provider, git).implement(  # type: ignore[arg-type]
+        _task(), _spec(), tmp_path
+    )
 
     assert not result.success
     assert result.changed_files == []
@@ -271,6 +375,7 @@ def test_polish_skip_reasons_are_parsed_only_from_structured_public_output(
 
 def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     _write_project_context(tmp_path)
+    _write_role_instructions(tmp_path)
     provider = RecordingProvider(
         AgentResult(
             output="provider-native structured output",
@@ -328,6 +433,8 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
         in provider.requests[0].instructions
     )
     assert "may accompany APPROVED" in provider.requests[0].instructions
+    assert provider.requests[0].instructions.count("Prioritize regression risks.") == 1
+    assert "Prefer small, tested changes." not in provider.requests[0].instructions
 
 
 def _review_with_output(tmp_path: Path, output: str) -> CodeReview:

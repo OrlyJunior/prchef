@@ -200,7 +200,12 @@ class WorkflowService:
                 execution_clients.agent(AgentRole.IMPLEMENTER), execution_clients.git
             )
             with self._step(execution.id, WorkflowStage.IMPLEMENT):
-                implementation = implementation_service.implement(task, spec, workspace_path)
+                implementation = implementation_service.implement(
+                    task,
+                    spec,
+                    workspace_path,
+                    instructions_repository_path=config.path,
+                )
                 self._repository.record_implementation(execution.id, implementation)
                 if not implementation.success:
                     raise WorkflowError(
@@ -257,6 +262,7 @@ class WorkflowService:
                         diff=execution_clients.git.diff(config.repository.base_branch),
                         validation=validation,
                         repository_path=workspace_path,
+                        instructions_repository_path=config.path,
                         repository_slug=repository_slug,
                         base_branch=config.repository.base_branch,
                         feature_branch=working_branch,
@@ -287,7 +293,12 @@ class WorkflowService:
                     polish_attempted = True
                     with self._step(execution.id, WorkflowStage.POLISH):
                         implementation = implementation_service.run_polish_pass(
-                            task, spec, review.suggestions, workspace_path, pull_request
+                            task,
+                            spec,
+                            review.suggestions,
+                            workspace_path,
+                            pull_request,
+                            instructions_repository_path=config.path,
                         )
                         self._repository.record_implementation(execution.id, implementation)
 
@@ -344,7 +355,11 @@ class WorkflowService:
                 )
                 with self._step(execution.id, WorkflowStage.IMPLEMENT):
                     implementation = implementation_service.correct_review_findings(
-                        task, spec, review, workspace_path
+                        task,
+                        spec,
+                        review,
+                        workspace_path,
+                        instructions_repository_path=config.path,
                     )
                     self._repository.record_implementation(execution.id, implementation)
                     if not implementation.success:
@@ -556,6 +571,7 @@ class WorkflowService:
                 diff=execution_clients.git.diff(config.repository.base_branch),
                 validation=validation,
                 repository_path=workspace_path,
+                instructions_repository_path=config.path,
                 repository_slug=repository_slug,
                 base_branch=config.repository.base_branch,
                 feature_branch=execution.working_branch,
@@ -600,7 +616,12 @@ class WorkflowService:
         )
         try:
             with self._step(execution_id, WorkflowStage.IMPLEMENT):
-                implementation = implementation_service.implement(task, spec, workspace_path)
+                implementation = implementation_service.implement(
+                    task,
+                    spec,
+                    workspace_path,
+                    instructions_repository_path=config.path,
+                )
                 self._repository.record_implementation(execution_id, implementation)
                 if not implementation.success:
                     raise WorkflowError(
@@ -651,6 +672,7 @@ class WorkflowService:
                     diff=execution_clients.git.diff(config.repository.base_branch),
                     validation=validation,
                     repository_path=workspace_path,
+                    instructions_repository_path=config.path,
                     repository_slug=repository_slug,
                     base_branch=config.repository.base_branch,
                     feature_branch=working_branch,
@@ -867,7 +889,11 @@ class WorkflowService:
                 )
                 with self._step(execution_id, WorkflowStage.IMPLEMENT):
                     implementation = implementation_service.correct_validation_failures(
-                        task, spec, exc.validation, workspace_path
+                        task,
+                        spec,
+                        exc.validation,
+                        workspace_path,
+                        instructions_repository_path=config.path,
                     )
                     self._repository.record_implementation(execution_id, implementation)
                     if not implementation.success:

@@ -62,6 +62,7 @@ class WorkflowRunnerScreen(Screen[None]):
                     yield Button("Start workflow", variant="success", id="start-workflow")
                     yield Button("Execution history", id="workflow-history")
                     yield Button("GitHub App settings", id="workflow-github-apps")
+                    yield Button("Agent instructions", id="workflow-agent-instructions")
                 yield Static(
                     "Agent settings are temporary for this run; "
                     "Provider/YAML defaults are unchanged.",
@@ -445,6 +446,12 @@ class WorkflowRunnerScreen(Screen[None]):
             from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 
             self.app.push_screen(GitHubAppSettingsScreen())
+        elif event.button.id == "workflow-agent-instructions":
+            from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
+
+            self.app.push_screen(
+                AgentInstructionsScreen(self._selected("#repository"))
+            )
         elif event.button.id == "toggle-workflow-logs":
             self._show_raw_events = not self._show_raw_events
             raw_events = self.query_one("#workflow-raw-events", Static)
