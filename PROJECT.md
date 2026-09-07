@@ -39,6 +39,9 @@
 - Provider-specific commands, polling, credentials, or API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Planner/implementer/reviewer services stay provider
   neutral.
+- `AgentProvider` is the orchestrator's provider boundary. Model-routing libraries such as
+  LiteLLM are implementation backends behind that boundary and must not own workflow semantics,
+  persistence, scheduling, role behavior, or lifecycle state.
 - Database schema changes require versioned Alembic migrations; never add runtime
   `Base.metadata.create_all()`.
 
@@ -170,7 +173,9 @@
   a sandbox/execution failure. Never infer a failure from free-form command output, diffs, or test
   fixtures. A structured failure after an exit-0 run still inspects Git status so persisted results
   retain any files changed before the failure. Codex may edit only its assigned local workspace.
-  Gemini Vertex uses ADC and has no local shell/filesystem access.
+  Gemini Vertex uses ADC and has no local shell/filesystem access. LiteLLM is an optional generic
+  cloud/local API-model backend; its configured API key is an environment-variable reference only,
+  and it also has no implicit local shell/filesystem access.
 - Jules credentials come from `JULES_API_KEY` or `ORCHESTRATOR_JULES_API_KEY`; GitHub PR creation
   uses ambient `gh` authentication unless a configured implementer App supplies a short-lived,
   process-local installation token. Formal review publication independently uses its configured
