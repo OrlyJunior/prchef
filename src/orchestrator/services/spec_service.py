@@ -120,6 +120,19 @@ ORIGINAL TASK (preserve as authoritative):
 
 {project_context_prompt(repository_path)}
 {repository_context_prompt(repository_path, task)}
+USER-FACING PLANNING:
+- Apply the following only when the task or repository evidence affects a TUI, CLI, GUI, other
+  user-facing interface, or user-facing messaging. Treat the TUI as a first-class product
+  interface, and keep every UX consideration grounded in the task and current product behavior.
+- Consider the interaction flow, action discoverability, layout complexity, sensible defaults,
+  loading/error/empty states, and consistency with existing interface patterns.
+- For terminal interfaces, also consider constrained-terminal behavior and, where relevant,
+  keyboard navigation, focus management, and scrolling.
+- Prefer a simple primary workflow over exposing internal configuration mechanics directly on its
+  main screen. Identify when configuration belongs in a dedicated settings screen instead.
+- Capture relevant UX decisions and interaction constraints in implementation_proposal and
+  acceptance_criteria.
+- Do not invent UX requirements for backend-only changes.
 When writing implementation_proposal, explicitly direct
 the implementation agent to keep
 PROJECT.md accurate when the change affects durable project knowledge (architecture, workflows,

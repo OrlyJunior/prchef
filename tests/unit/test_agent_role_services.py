@@ -163,6 +163,34 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     assert "LOCAL REPOSITORY CONTEXT" in provider.requests[0].instructions
     assert "src/provider_contract.py" in provider.requests[0].instructions
     assert "keep\nPROJECT.md accurate" in provider.requests[0].instructions
+    assert (
+        "Treat the TUI as a first-class product\n  interface"
+        in provider.requests[0].instructions
+    )
+    assert (
+        "interaction flow, action discoverability, layout complexity, sensible defaults"
+        in provider.requests[0].instructions
+    )
+    assert "loading/error/empty states" in provider.requests[0].instructions
+    assert "constrained-terminal behavior" in provider.requests[0].instructions
+    assert (
+        "keyboard navigation, focus management, and scrolling"
+        in provider.requests[0].instructions
+    )
+    assert "consistency with existing interface patterns" in provider.requests[0].instructions
+    assert (
+        "configuration belongs in a dedicated settings screen instead"
+        in provider.requests[0].instructions
+    )
+    assert (
+        "Capture relevant UX decisions and interaction constraints in implementation_proposal and\n"
+        "  acceptance_criteria"
+        in provider.requests[0].instructions
+    )
+    assert (
+        "Do not invent UX requirements for backend-only changes."
+        in provider.requests[0].instructions
+    )
 
 
 def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
