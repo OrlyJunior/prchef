@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
-from textual.widgets import Button, Input, Select, Static, TextArea
+from textual.widgets import Button, Input, RichLog, Select, Static, TextArea
 
 from orchestrator.config.project_config import (
     AgentPresetConfig,
@@ -502,10 +502,11 @@ def test_workflow_runner_maps_live_events_to_timeline_and_keeps_raw_logs_optiona
 
             screen.query_one("#toggle-workflow-logs", Button).press()
             await pilot.pause()
-            raw_events = screen.query_one("#workflow-raw-events", Static)
+            raw_events = screen.query_one("#workflow-raw-events", RichLog)
             assert raw_events.display is True
-            assert "STAGE_STARTED" in str(raw_events.renderable)
-            assert "STAGE_FINISHED" in str(raw_events.renderable)
+            raw_log = "\n".join(line.text for line in raw_events.lines)
+            assert "STAGE_STARTED" in raw_log
+            assert "STAGE_FINISHED" in raw_log
 
     asyncio.run(drive())
 
