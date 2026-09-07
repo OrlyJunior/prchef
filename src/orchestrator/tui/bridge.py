@@ -9,6 +9,7 @@ from typing import Any
 
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import (
+    AgentPresetConfig,
     ConfiguredRepository,
     GitHubAppSettings,
     ProjectConfig,
@@ -112,6 +113,32 @@ class WorkflowController:
 
     def provider_runtime_values(self, repository: str, provider: str) -> dict[str, Any]:
         return self.project_config(repository).provider_runtime_values(provider)
+
+    def agent_presets(self, repository: str, role: AgentRole) -> dict[str, AgentPresetConfig]:
+        return self.project_config(repository).presets_for_role(role.value)
+
+    def save_agent_preset(
+        self,
+        repository: str,
+        role: AgentRole,
+        name: str,
+        preset: AgentPresetConfig,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        return self._config_loader.save_agent_preset(
+            repository, role.value, name, preset, overwrite=overwrite
+        )
+
+    def rename_agent_preset(
+        self, repository: str, role: AgentRole, old_name: str, new_name: str
+    ) -> Path:
+        return self._config_loader.rename_agent_preset(
+            repository, role.value, old_name, new_name
+        )
+
+    def delete_agent_preset(self, repository: str, role: AgentRole, name: str) -> Path:
+        return self._config_loader.delete_agent_preset(repository, role.value, name)
 
     def github_app_settings(
         self, repository: str

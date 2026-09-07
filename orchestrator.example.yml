@@ -26,6 +26,13 @@ defaults:
     #   provider: vertex-gemini
     # reviewer:
     #   provider: vertex-gemini
+  # Reusable launcher templates are role-local and never modify `providers`.
+  # agent_presets:
+  #   implementer:
+  #     focused:
+  #       provider: codex
+  #       model: <your-supported-codex-model>
+  #       reasoning_effort: medium
   safety:
     allow_direct_merge: false
     require_tests: true
