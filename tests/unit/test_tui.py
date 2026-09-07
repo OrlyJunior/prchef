@@ -24,6 +24,7 @@ from orchestrator.models.workflow_status import StepStatus, WorkflowStage, Workf
 from orchestrator.tui.app import OrchestratorApp
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
 from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
+from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
 from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
 from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
@@ -539,7 +540,7 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
     asyncio.run(drive())
 
 
-def test_workflow_runner_selects_and_manages_role_local_presets(tmp_path: Path) -> None:
+def test_workflow_runner_selects_role_local_presets_without_crud_controls(tmp_path: Path) -> None:
     controller, service, _ = _controller(tmp_path)
     config = controller.project_config("example")
     config.agent_presets = {
@@ -557,9 +558,14 @@ def test_workflow_runner_selects_and_manages_role_local_presets(tmp_path: Path) 
             await pilot.press("n")
             await pilot.pause()
             screen = application.screen
-            screen.query_one("#implementer-configure", Button).press()
             screen.query_one("#implementer-preset", Select).value = "deep"
             await pilot.pause()
+            assert list(screen.query("#implementer-preset-name")) == []
+            assert list(screen.query("#implementer-preset-create")) == []
+            assert list(screen.query("#implementer-preset-update")) == []
+            assert list(screen.query("#implementer-preset-rename")) == []
+            assert list(screen.query("#implementer-preset-delete")) == []
+            screen.query_one("#implementer-configure", Button).press()
             assert screen.query_one("#implementer-model", Input).value == "preset-model"
             assert screen.query_one("#implementer-reasoning", Input).value == "xhigh"
             assert "Selected preset: deep" in str(
@@ -578,21 +584,74 @@ def test_workflow_runner_selects_and_manages_role_local_presets(tmp_path: Path) 
                 "reasoning_effort": "xhigh",
             }
             assert config.agent_presets["implementer"]["deep"].model == "preset-model"
-            screen.query_one("#implementer-preset-update", Button).press()
-            await pilot.pause()
-            assert config.agent_presets["implementer"]["deep"].model == "temporary-model"
 
-            screen.query_one("#implementer-preset-name", Input).value = "renamed"
-            screen.query_one("#implementer-preset-rename", Button).press()
+    asyncio.run(drive())
+
+
+def test_agent_presets_screen_manages_all_role_presets(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.agent_presets = {
+        "implementer": {"deep": AgentPresetConfig(provider="implementer", model="old")}
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("p")
+            await pilot.pause()
+            assert isinstance(application.screen, AgentPresetsScreen)
+            screen = application.screen
+            repository = screen.query_one("#agent-presets-repository", Select)
+            repository.value = "example"
+            await pilot.pause()
+            role = screen.query_one("#agent-preset-role", Select)
+            assert {option[1] for option in role._options} == {
+                "planner", "implementer", "reviewer"
+            }
+
+            role.value = "implementer"
+            await pilot.pause()
+            screen.query_one("#agent-preset-select", Select).value = "deep"
+            await pilot.pause()
+            screen.query_one("#agent-preset-model", Input).value = "updated"
+            screen.query_one("#update-agent-preset", Button).press()
+            await pilot.pause()
+            assert config.agent_presets["implementer"]["deep"].model == "updated"
+
+            screen.query_one("#agent-preset-name", Input).value = "renamed"
+            screen.query_one("#rename-agent-preset", Button).press()
             await pilot.pause()
             assert "renamed" in config.agent_presets["implementer"]
-            screen.query_one("#implementer-preset-delete", Button).press()
+            screen.query_one("#delete-agent-preset", Button).press()
             await pilot.pause()
             assert "implementer" not in config.agent_presets
-            screen.query_one("#implementer-preset-name", Input).value = "fast"
-            screen.query_one("#implementer-preset-create", Button).press()
+
+            role.value = "planner"
             await pilot.pause()
-            assert config.agent_presets["implementer"]["fast"].model == "temporary-model"
+            screen.query_one("#agent-preset-name", Input).value = "fast"
+            screen.query_one("#agent-preset-provider", Select).value = "planner"
+            screen.query_one("#create-agent-preset", Button).press()
+            await pilot.pause()
+            assert config.agent_presets["planner"]["fast"].provider == "planner"
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_preselects_matching_configured_preset(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    controller.project_config("example").agent_presets = {
+        "implementer": {"configured": AgentPresetConfig(provider="implementer")}
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            screen = application.screen
+            assert screen.query_one("#implementer-preset", Select).value == "configured"
+            assert screen.query_one("#planner-preset", Select).value is not None
 
     asyncio.run(drive())
 

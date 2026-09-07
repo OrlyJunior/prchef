@@ -227,10 +227,10 @@
   global configuration; keep examples generic.
 - `agent_presets` contains named, role-scoped (`planner`, `implementer`, `reviewer`) templates of
   a configured provider plus the launcher-exposed model, reasoning, and generation options. The
-  launcher can select, create, update, rename, or delete them in the resolved global configuration;
-  selecting a preset only seeds one run's controls, and later edits remain temporary until an
-  explicit update. Presets never alter or remove provider definitions. A preset with a missing
-  provider remains persisted and is shown as an actionable launcher warning.
+  dedicated TUI Agent Presets screen creates, updates, renames, and deletes them in the resolved
+  global configuration; the compact launcher selectors only apply a preset to one run. Later
+  launcher edits remain temporary. Presets never alter or remove provider definitions. A preset
+  with a missing provider remains persisted and is shown as an actionable launcher warning.
 - Notifications are opt-in per resolved project configuration through `notifications.enabled`
   (default `false`) and `notifications.channel` (currently `desktop`). Workflow policy emits one
   best-effort alert only for terminal `APPROVED`, `FAILED`, `NEEDS_HUMAN`, or exhausted-review
