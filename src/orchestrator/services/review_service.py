@@ -127,6 +127,16 @@ RISK REVIEW:
 - Also assess unnecessary work, performance, memory/storage growth, token and prompt efficiency,
   redundant model calls or duplicated context, provider coupling, quota/rate-limit handling,
   configuration compatibility, migration safety, and consistency with PROJECT.md.
+- When the task or diff affects a user-facing surface (CLI, TUI, terminal interface, or
+  user-facing messaging), assess usability alongside technical quality. Check label and message
+  clarity, action discoverability, unnecessary steps, loading/error/empty/blocked states, and
+  confusing or misleading interaction flows. For Textual TUI changes, also check focus,
+  scrolling, and keyboard behavior, including whether primary actions remain reachable in
+  constrained terminal sizes.
+- Ground usability findings in the task and existing product behavior. Do not invent UX
+  requirements for backend-only changes. A broken, misleading, or blocking user experience may
+  be a concrete blocking finding; subjective polish or minor usability improvements belong only
+  in `suggestions` and must not downgrade an otherwise APPROVED review.
 - Report a blocking finding only when the diff and available context support a plausible concrete
   correctness, safety, reliability, or architectural failure mode. State the failure mode and why
   it applies. Do not reject for style or naming preferences, speculative concerns without a

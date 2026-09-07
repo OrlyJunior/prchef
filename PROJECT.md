@@ -165,11 +165,15 @@
   textual output accepts plain JSON, one fenced JSON object, or exactly one safely extractable
   object with surrounding prose. Ambiguous/malformed data is rejected, never guessed.
 - Review is adversarial and evidence-based: beyond task/spec compliance, it considers relevant
-  operational, architectural, reliability, efficiency, and regression risks. Structured reviews
-  separate concrete blocking findings from non-blocking suggestions; suggestions may accompany
-  approval. Invalid output is converted conservatively to `NEEDS_HUMAN`; contradictory decisions
-  (for example, approval with blocking findings or change requests with none) are also unsafe.
-  Final review maps only to `APPROVED`, `CHANGES_REQUESTED`, or `NEEDS_HUMAN`.
+  operational, architectural, reliability, efficiency, and regression risks. When a task or diff
+  affects a CLI, TUI, terminal interface, or user-facing messaging, it also considers grounded
+  usability risks; backend-only changes do not receive invented UX requirements. Serious concrete
+  usability defects may block approval, while subjective polish remains a non-blocking suggestion.
+  Structured reviews separate concrete blocking findings from non-blocking suggestions; suggestions
+  may accompany approval. Invalid output is converted conservatively to `NEEDS_HUMAN`;
+  contradictory decisions (for example, approval with blocking findings or change requests with
+  none) are also unsafe. Final review maps only to `APPROVED`, `CHANGES_REQUESTED`, or
+  `NEEDS_HUMAN`.
 - Jules uses official asynchronous REST sessions: create → persist identity/URL → poll session
   state → fetch paged activities. It uses configurable poll interval, overall timeout, and bounded
   exponential retries only for transient polling/result requests. It never creates a replacement
