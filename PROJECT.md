@@ -166,6 +166,12 @@
 - Planner and reviewer require structured objects. Provider-native structured output is preferred;
   textual output accepts plain JSON, one fenced JSON object, or exactly one safely extractable
   object with surrounding prose. Ambiguous/malformed data is rejected, never guessed.
+- For user-facing planning, the planner treats the TUI as a first-class interface and grounds UX
+  decisions in the task and current behavior. Specs consider interaction flow, discoverability,
+  layout complexity, defaults, state handling, terminal constraints, input behavior, and existing
+  patterns where relevant; they keep primary workflows simple, moving configuration to dedicated
+  settings views when appropriate, and record applicable decisions in implementation proposals and
+  acceptance criteria. Backend-only specs do not receive invented UX requirements.
 - Review is adversarial and evidence-based: beyond task/spec compliance, it considers relevant
   operational, architectural, reliability, efficiency, and regression risks. When a task or diff
   affects a CLI, TUI, terminal interface, or user-facing messaging, it also considers grounded
