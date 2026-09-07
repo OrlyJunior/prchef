@@ -429,6 +429,36 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
         "provider coupling, quota/rate-limit handling" in provider.requests[0].instructions
     )
     assert (
+        "CLI, TUI, terminal interface, or\n  user-facing messaging"
+        in provider.requests[0].instructions
+    )
+    assert (
+        "label and message\n  clarity, action discoverability, unnecessary steps"
+        in provider.requests[0].instructions
+    )
+    assert "loading/error/empty/blocked states" in provider.requests[0].instructions
+    assert (
+        "focus,\n  scrolling, and keyboard behavior"
+        in provider.requests[0].instructions
+    )
+    assert (
+        "primary actions remain reachable in\n  constrained terminal sizes"
+        in provider.requests[0].instructions
+    )
+    assert (
+        "Do not invent UX\n  requirements for backend-only changes"
+        in provider.requests[0].instructions
+    )
+    assert (
+        "broken, misleading, or blocking user experience may\n  be a concrete blocking finding"
+        in provider.requests[0].instructions
+    )
+    assert (
+        "subjective polish or minor usability improvements belong only\n  in `suggestions`"
+        in provider.requests[0].instructions
+    )
+    assert "must not downgrade an otherwise APPROVED review" in provider.requests[0].instructions
+    assert (
         "only blocking issues in `blocking_findings`"
         in provider.requests[0].instructions
     )
