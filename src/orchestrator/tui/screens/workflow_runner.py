@@ -11,6 +11,7 @@ from textual.events import DescendantFocus, Resize
 from textual.screen import Screen
 from textual.widgets import Button, Input, Static, TextArea
 
+from orchestrator.config.project_config import AgentPresetConfig
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
@@ -22,6 +23,9 @@ from orchestrator.tui.widgets import OrchestratorSelect, is_orchestrator_select_
 
 if TYPE_CHECKING:
     from orchestrator.tui.app import OrchestratorApp
+
+
+_MANUAL_PRESET = object()
 
 
 class WorkflowRunnerScreen(Screen[None]):
@@ -38,6 +42,8 @@ class WorkflowRunnerScreen(Screen[None]):
         self._show_raw_events = False
         self._role_providers: dict[AgentRole, str] = {}
         self._role_default_providers: dict[AgentRole, str] = {}
+        self._role_presets: dict[AgentRole, dict[str, AgentPresetConfig]] = {}
+        self._selected_presets: dict[AgentRole, str] = {}
         self._runtime_inputs: dict[tuple[AgentRole, str], dict[str, Any]] = {}
         self._runtime_defaults: dict[tuple[AgentRole, str], dict[str, Any]] = {}
         self._advanced_open: dict[AgentRole, bool] = {}
@@ -75,6 +81,32 @@ class WorkflowRunnerScreen(Screen[None]):
                             yield Static("", id=f"{prefix}-summary")
                             yield Button("Configure", id=f"{prefix}-configure")
                         with Vertical(classes="role-config", id=f"{prefix}-config"):
+                            with Horizontal(classes="role-config-row"):
+                                with Vertical(classes="role-field"):
+                                    yield Static("Preset", id=f"{prefix}-preset-label")
+                                    yield OrchestratorSelect(
+                                        [],
+                                        prompt="Provider/YAML default",
+                                        id=f"{prefix}-preset",
+                                    )
+                                with Vertical(classes="role-field"):
+                                    yield Static("Preset name", id=f"{prefix}-preset-name-label")
+                                    yield Input(
+                                        placeholder="Name for create or rename",
+                                        id=f"{prefix}-preset-name",
+                                    )
+                            with Horizontal(classes="role-config-row preset-actions"):
+                                yield Button("Create", id=f"{prefix}-preset-create")
+                                yield Button("Update", id=f"{prefix}-preset-update")
+                                yield Button("Rename", id=f"{prefix}-preset-rename")
+                                yield Button(
+                                    "Delete", variant="error", id=f"{prefix}-preset-delete"
+                                )
+                            yield Static(
+                                "Provider/YAML default",
+                                classes="default-indicator",
+                                id=f"{prefix}-preset-source",
+                            )
                             with Horizontal(classes="role-config-row"):
                                 with Vertical(classes="role-field"):
                                     yield Static("Provider", id=f"{prefix}-provider-label")
@@ -205,8 +237,29 @@ class WorkflowRunnerScreen(Screen[None]):
                 self._request_task_load(repository, event.value)
             return
         for role, prefix in self._role_fields():
+            if event.select.id == f"{prefix}-preset":
+                if isinstance(event.value, str):
+                    self._select_role_preset(role, prefix, event.value)
+                elif event.value is _MANUAL_PRESET:
+                    self._selected_presets.pop(role, None)
+                    provider = self._selected(f"#{prefix}-provider")
+                    repository = self._selected("#repository")
+                    if provider is not None and repository is not None:
+                        capabilities = self.controller.provider_runtime_capabilities(
+                            repository, provider
+                        )
+                        self._update_role_summary(
+                            role,
+                            prefix,
+                            provider,
+                            self._runtime_values_from_controls(prefix),
+                            capabilities,
+                        )
+                    self._update_preset_source(role, prefix)
+                return
             if event.select.id == f"{prefix}-provider" and isinstance(event.value, str):
                 self._load_role_runtime_controls(role, prefix, event.value)
+                self._update_preset_source(role, prefix)
                 return
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -227,6 +280,7 @@ class WorkflowRunnerScreen(Screen[None]):
             values = self._runtime_values_from_controls(prefix)
             self._update_role_summary(role, prefix, provider, values, capabilities)
             self._update_advanced_indicators(role, prefix, provider, values)
+            self._update_preset_source(role, prefix)
             return
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
@@ -251,6 +305,8 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#task-selector", TaskSelector).clear_tasks()
         self._role_providers.clear()
         self._role_default_providers = selected_agents.copy()
+        self._role_presets.clear()
+        self._selected_presets.clear()
         self._runtime_inputs.clear()
         self._runtime_defaults.clear()
         self._advanced_open.clear()
@@ -259,6 +315,7 @@ class WorkflowRunnerScreen(Screen[None]):
             select.set_options([(provider, provider) for provider in configured_agents])
             select.value = selected_agents[role]
             self._load_role_runtime_controls(role, prefix, selected_agents[role])
+            self._load_role_presets(role, prefix)
         self._load_github_app_summary(repository)
         self._request_task_load(repository, providers[0])
 
@@ -269,6 +326,157 @@ class WorkflowRunnerScreen(Screen[None]):
             (AgentRole.IMPLEMENTER, "implementer"),
             (AgentRole.REVIEWER, "reviewer"),
         )
+
+    def _load_role_presets(
+        self, role: AgentRole, prefix: str, selected_name: str | None = None
+    ) -> None:
+        """Load only presets for this role and keep manual use available."""
+
+        repository = self._selected("#repository")
+        if repository is None:
+            return
+        try:
+            presets = self.controller.agent_presets(repository, role)
+        except Exception as exc:
+            self._role_presets[role] = {}
+            self.notify(f"Could not load {role.value} presets: {exc}", severity="error")
+            return
+        self._role_presets[role] = presets
+        selector = self.query_one(f"#{prefix}-preset", OrchestratorSelect)
+        selector.set_options(
+            [
+                ("Provider/YAML default (manual)", _MANUAL_PRESET),
+                *[(name, name) for name in presets],
+            ]
+        )
+        target = selected_name or self._selected_presets.get(role)
+        if target is not None and target in presets:
+            selector.value = target
+            self._selected_presets[role] = target
+            self.query_one(f"#{prefix}-preset-name", Input).value = target
+        else:
+            selector.value = _MANUAL_PRESET
+            self._selected_presets.pop(role, None)
+        self._update_preset_source(role, prefix)
+
+    def _select_role_preset(self, role: AgentRole, prefix: str, name: str) -> None:
+        preset = self._role_presets.get(role, {}).get(name)
+        if preset is None:
+            self.notify(f"Unknown {role.value} preset: {name}", severity="warning")
+            return
+        self._selected_presets[role] = name
+        self.query_one(f"#{prefix}-preset-name", Input).value = name
+        repository = self._selected("#repository")
+        if repository is None:
+            return
+        try:
+            self.controller.provider_runtime_capabilities(repository, preset.provider)
+        except Exception as exc:
+            self.query_one(f"#{prefix}-preset-source", Static).update(
+                f"Selected preset {name!r} references unavailable provider "
+                f"{preset.provider!r}: {exc}"
+            )
+            return
+        provider_select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
+        provider_select.value = preset.provider
+        self._load_role_runtime_controls(role, prefix, preset.provider)
+        self._set_preset_runtime_controls(prefix, preset)
+        self._update_preset_source(role, prefix)
+
+    def _set_preset_runtime_controls(self, prefix: str, preset: AgentPresetConfig) -> None:
+        self.query_one(f"#{prefix}-model", Input).value = preset.model or ""
+        self.query_one(f"#{prefix}-reasoning", Input).value = preset.reasoning_effort or ""
+        generation = dict(preset.generation)
+        for name in ("temperature", "max-output-tokens"):
+            value = generation.get(name.replace("-", "_"))
+            self.query_one(f"#{prefix}-{name}", Input).value = "" if value is None else str(value)
+
+    def _preset_from_controls(self, role: AgentRole, prefix: str) -> AgentPresetConfig:
+        provider = self._selected(f"#{prefix}-provider")
+        if provider is None:
+            raise ValueError(f"Select a provider for {role.value} first")
+        options = self._runtime_options_for_role(role, prefix)
+        generation = options.get("generation", {})
+        if isinstance(generation, dict):
+            generation = {key: value for key, value in generation.items() if value is not None}
+        return AgentPresetConfig(
+            provider=provider,
+            model=options.get("model"),
+            reasoning_effort=options.get("reasoning_effort"),
+            generation=generation,
+        )
+
+    def _preset_matches_controls(
+        self, role: AgentRole, prefix: str, preset: AgentPresetConfig
+    ) -> bool:
+        if self._selected(f"#{prefix}-provider") != preset.provider:
+            return False
+        current = self._preset_from_controls(role, prefix).model_dump(exclude_none=True)
+        expected = preset.model_dump(exclude_none=True)
+        return bool(
+            self._preset_comparison_value(current)
+            == self._preset_comparison_value(expected)
+        )
+
+    @staticmethod
+    def _preset_comparison_value(value: Any) -> Any:
+        """Compare persisted numeric generation values with their text inputs."""
+
+        if isinstance(value, dict):
+            return {
+                key: WorkflowRunnerScreen._preset_comparison_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [WorkflowRunnerScreen._preset_comparison_value(item) for item in value]
+        return None if value is None else str(value)
+
+    def _update_preset_source(self, role: AgentRole, prefix: str) -> None:
+        selected = self._selected_presets.get(role)
+        source = "Provider/YAML default (manual)"
+        if selected is not None:
+            preset = self._role_presets.get(role, {}).get(selected)
+            if preset is not None:
+                repository = self._selected("#repository")
+                if repository is not None:
+                    try:
+                        self.controller.provider_runtime_capabilities(repository, preset.provider)
+                    except Exception as exc:
+                        self.query_one(f"#{prefix}-preset-source", Static).update(
+                            f"Selected preset {selected!r} references unavailable provider "
+                            f"{preset.provider!r}: {exc}"
+                        )
+                        return
+                try:
+                    matches = self._preset_matches_controls(role, prefix, preset)
+                except Exception:
+                    matches = False
+                source = (
+                    f"Selected preset: {selected}"
+                    if matches
+                    else f"Selected preset: {selected}; temporary this-run overrides"
+                )
+        elif self._manual_runtime_overrides(role, prefix):
+            source = "Manual configuration; temporary this-run overrides"
+        self.query_one(f"#{prefix}-preset-source", Static).update(source)
+
+    def _manual_runtime_overrides(self, role: AgentRole, prefix: str) -> bool:
+        provider = self._selected(f"#{prefix}-provider")
+        if provider is None:
+            return False
+        defaults = self._runtime_defaults.get((role, provider))
+        if defaults is None:
+            return False
+        generation = defaults.get("generation", {})
+        if not isinstance(generation, dict):
+            generation = {}
+        baseline = AgentPresetConfig(
+            provider=provider,
+            model=defaults.get("model"),
+            reasoning_effort=defaults.get("reasoning_effort"),
+            generation={key: value for key, value in generation.items() if value is not None},
+        )
+        return not self._preset_matches_controls(role, prefix, baseline)
 
     def _load_role_runtime_controls(self, role: AgentRole, prefix: str, provider: str) -> None:
         repository = self._selected("#repository")
@@ -362,11 +570,21 @@ class WorkflowRunnerScreen(Screen[None]):
     def _update_role_summary(
         self, role: AgentRole, prefix: str, provider: str, values: dict[str, Any], capabilities: Any
     ) -> None:
-        provider_note = (
-            "Provider/YAML default"
-            if self._role_default_providers.get(role) == provider
-            else "this-run provider override"
-        )
+        selected_preset = self._selected_presets.get(role)
+        if selected_preset is not None:
+            preset = self._role_presets.get(role, {}).get(selected_preset)
+            provider_note = (
+                f"preset: {selected_preset}"
+                if preset is not None and self._preset_matches_controls(role, prefix, preset)
+                else f"preset: {selected_preset}; this-run override"
+            )
+        else:
+            if self._role_default_providers.get(role) != provider:
+                provider_note = "this-run provider override"
+            elif self._manual_runtime_overrides(role, prefix):
+                provider_note = "this-run runtime override"
+            else:
+                provider_note = "Provider/YAML default"
         parts = [f"{provider} ({provider_note})"]
         if capabilities.supports_model:
             parts.append(str(values.get("model") or "Provider default"))
@@ -461,6 +679,18 @@ class WorkflowRunnerScreen(Screen[None]):
             )
         else:
             for role, prefix in self._role_fields():
+                if event.button.id == f"{prefix}-preset-create":
+                    self._create_role_preset(role, prefix)
+                    return
+                if event.button.id == f"{prefix}-preset-update":
+                    self._update_role_preset(role, prefix)
+                    return
+                if event.button.id == f"{prefix}-preset-rename":
+                    self._rename_role_preset(role, prefix)
+                    return
+                if event.button.id == f"{prefix}-preset-delete":
+                    self._delete_role_preset(role, prefix)
+                    return
                 if event.button.id == f"{prefix}-configure":
                     config = self.query_one(f"#{prefix}-config", Vertical)
                     config.display = not config.display
@@ -478,6 +708,83 @@ class WorkflowRunnerScreen(Screen[None]):
                             role, prefix, capabilities.supports_generation
                         )
                     return
+
+    def _preset_name_from_input(self, prefix: str) -> str | None:
+        name = self.query_one(f"#{prefix}-preset-name", Input).value.strip()
+        if not name:
+            self.notify("Enter a preset name first.", severity="warning")
+            return None
+        return name
+
+    def _create_role_preset(self, role: AgentRole, prefix: str) -> None:
+        repository = self._selected("#repository")
+        name = self._preset_name_from_input(prefix)
+        if repository is None or name is None:
+            return
+        try:
+            self.controller.save_agent_preset(
+                repository, role, name, self._preset_from_controls(role, prefix)
+            )
+        except Exception as exc:
+            self.notify(f"Could not create preset: {exc}", severity="error")
+            return
+        self._load_role_presets(role, prefix, name)
+        self.notify(f"Created {role.value} preset {name!r}.")
+
+    def _update_role_preset(self, role: AgentRole, prefix: str) -> None:
+        repository = self._selected("#repository")
+        name = self._selected_presets.get(role)
+        if repository is None:
+            return
+        if name is None:
+            self.notify("Select a preset to update.", severity="warning")
+            return
+        try:
+            self.controller.save_agent_preset(
+                repository,
+                role,
+                name,
+                self._preset_from_controls(role, prefix),
+                overwrite=True,
+            )
+        except Exception as exc:
+            self.notify(f"Could not update preset: {exc}", severity="error")
+            return
+        self._load_role_presets(role, prefix, name)
+        self.notify(f"Updated {role.value} preset {name!r}.")
+
+    def _rename_role_preset(self, role: AgentRole, prefix: str) -> None:
+        repository = self._selected("#repository")
+        old_name = self._selected_presets.get(role)
+        new_name = self._preset_name_from_input(prefix)
+        if repository is None or new_name is None:
+            return
+        if old_name is None:
+            self.notify("Select a preset to rename.", severity="warning")
+            return
+        try:
+            self.controller.rename_agent_preset(repository, role, old_name, new_name)
+        except Exception as exc:
+            self.notify(f"Could not rename preset: {exc}", severity="error")
+            return
+        self._load_role_presets(role, prefix, new_name)
+        self.notify(f"Renamed {role.value} preset to {new_name!r}.")
+
+    def _delete_role_preset(self, role: AgentRole, prefix: str) -> None:
+        repository = self._selected("#repository")
+        name = self._selected_presets.get(role)
+        if repository is None:
+            return
+        if name is None:
+            self.notify("Select a preset to delete.", severity="warning")
+            return
+        try:
+            self.controller.delete_agent_preset(repository, role, name)
+        except Exception as exc:
+            self.notify(f"Could not delete preset: {exc}", severity="error")
+            return
+        self._load_role_presets(role, prefix)
+        self.notify(f"Deleted {role.value} preset {name!r}.")
 
     def _show_history(self) -> None:
         from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen

@@ -11,6 +11,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Button, Input, Select, Static, TextArea
 
 from orchestrator.config.project_config import (
+    AgentPresetConfig,
     ConfiguredRepository,
     GitHubAppSettings,
     ProjectConfig,
@@ -136,6 +137,39 @@ class _ConfigLoader:
     ) -> Path:
         assert repository_key == "example"
         self.saved_github_apps = (repository_key, implementer_app, reviewer_app)
+        return self._path / "orchestrator.yml"
+
+    def save_agent_preset(
+        self,
+        repository_key: str,
+        role: str,
+        name: str,
+        preset: AgentPresetConfig,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        assert repository_key == "example"
+        presets = self.config.agent_presets.setdefault(role, {})
+        if name in presets and not overwrite:
+            raise ValueError("preset already exists")
+        presets[name] = preset
+        return self._path / "orchestrator.yml"
+
+    def rename_agent_preset(
+        self, repository_key: str, role: str, old_name: str, new_name: str
+    ) -> Path:
+        assert repository_key == "example"
+        presets = self.config.agent_presets[role]
+        if old_name != new_name and new_name in presets:
+            raise ValueError("preset already exists")
+        presets[new_name] = presets.pop(old_name)
+        return self._path / "orchestrator.yml"
+
+    def delete_agent_preset(self, repository_key: str, role: str, name: str) -> Path:
+        assert repository_key == "example"
+        del self.config.agent_presets[role][name]
+        if not self.config.agent_presets[role]:
+            del self.config.agent_presets[role]
         return self._path / "orchestrator.yml"
 
 
@@ -479,6 +513,87 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
             await pilot.pause()
             assert screen.query_one("#planner-model").display is True
             assert screen.query_one("#planner-reasoning").display is True
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_selects_and_manages_role_local_presets(tmp_path: Path) -> None:
+    controller, service, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.agent_presets = {
+        "implementer": {
+            "deep": AgentPresetConfig(
+                provider="implementer", model="preset-model", reasoning_effort="xhigh"
+            )
+        },
+        "reviewer": {"review": AgentPresetConfig(provider="reviewer")},
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            screen = application.screen
+            screen.query_one("#implementer-configure", Button).press()
+            screen.query_one("#implementer-preset", Select).value = "deep"
+            await pilot.pause()
+            assert screen.query_one("#implementer-model", Input).value == "preset-model"
+            assert screen.query_one("#implementer-reasoning", Input).value == "xhigh"
+            assert "Selected preset: deep" in str(
+                screen.query_one("#implementer-preset-source", Static).renderable
+            )
+            screen.query_one("#implementer-model", Input).value = "temporary-model"
+            await pilot.pause()
+            assert "temporary this-run overrides" in str(
+                screen.query_one("#implementer-preset-source", Static).renderable
+            )
+            screen.query_one("#available-tasks", Select).value = "12"
+            screen.query_one("#start-workflow", Button).press()
+            await pilot.pause(delay=0.1)
+            assert service.calls[-1][3][AgentRole.IMPLEMENTER] == {
+                "model": "temporary-model",
+                "reasoning_effort": "xhigh",
+            }
+            assert config.agent_presets["implementer"]["deep"].model == "preset-model"
+            screen.query_one("#implementer-preset-update", Button).press()
+            await pilot.pause()
+            assert config.agent_presets["implementer"]["deep"].model == "temporary-model"
+
+            screen.query_one("#implementer-preset-name", Input).value = "renamed"
+            screen.query_one("#implementer-preset-rename", Button).press()
+            await pilot.pause()
+            assert "renamed" in config.agent_presets["implementer"]
+            screen.query_one("#implementer-preset-delete", Button).press()
+            await pilot.pause()
+            assert "implementer" not in config.agent_presets
+            screen.query_one("#implementer-preset-name", Input).value = "fast"
+            screen.query_one("#implementer-preset-create", Button).press()
+            await pilot.pause()
+            assert config.agent_presets["implementer"]["fast"].model == "temporary-model"
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_warns_when_a_preset_provider_is_missing(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    controller.project_config("example").agent_presets = {
+        "planner": {"retired": AgentPresetConfig(provider="missing-provider")}
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            screen = application.screen
+            screen.query_one("#planner-configure", Button).press()
+            screen.query_one("#planner-preset", Select).value = "retired"
+            await pilot.pause()
+            assert "unavailable provider" in str(
+                screen.query_one("#planner-preset-source", Static).renderable
+            )
+            assert screen.query_one("#planner-provider", Select).value == "planner"
 
     asyncio.run(drive())
 
