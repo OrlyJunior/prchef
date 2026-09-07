@@ -78,6 +78,7 @@ class OrchestratorSelect(Select[SelectValue]):
     """
 
     MAX_OVERLAY_HEIGHT = 12
+    OVERLAY_FRAME_HEIGHT = 2
     # Textual normally focuses the clicked Select on mouse-down. Delaying that
     # focus until after click dispatch avoids it replacing the overlay focus.
     FOCUS_ON_CLICK = False
@@ -154,7 +155,15 @@ class OrchestratorSelect(Select[SelectValue]):
             return
 
         viewport = scroll_parent.content_region
-        overlay_height = min(self.MAX_OVERLAY_HEIGHT, max(1, len(self._options)))
+        # ``SelectOverlay`` has a top and bottom border in addition to its
+        # option rows.  Its height limit applies to the entire widget, so
+        # reserve those two cells as well.  Without them a short menu such as
+        # Planner / Implementer / Reviewer is limited to three cells and only
+        # one of its choices is visible.
+        overlay_height = min(
+            self.MAX_OVERLAY_HEIGHT,
+            self.OVERLAY_FRAME_HEIGHT + max(1, len(self._options)),
+        )
         available_below = max(0, viewport.bottom - self.region.bottom)
 
         # On a short terminal, keep the Select at the viewport top and constrain

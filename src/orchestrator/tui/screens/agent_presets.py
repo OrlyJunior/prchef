@@ -31,6 +31,13 @@ class AgentPresetsScreen(Screen[None]):
 
     BINDINGS = [("escape", "app.pop_screen", "Back")]
 
+    DEFAULT_CSS = """
+    #agent-preset-role {
+        width: 32;
+        max-width: 100%;
+    }
+    """
+
     def __init__(self, repository: str | None = None) -> None:
         super().__init__()
         self._initial_repository = repository
