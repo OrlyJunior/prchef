@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import (
+    AgentPresetConfig,
     CodexCliProviderSettings,
     ConfigurationError,
     GitHubAppSettings,
@@ -124,6 +125,101 @@ def test_role_runtime_overrides_reject_unsupported_and_invalid_values(tmp_path: 
         config.with_agent_runtime_overrides(
             {}, {"implementer": {"reasoning_effort": " "}}
         )
+
+
+def test_agent_presets_are_role_scoped_and_apply_as_runtime_templates(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "providers": {
+                "codex": {
+                    "type": "codex-cli",
+                    "command": ["codex", "exec", "-"],
+                    "model": "configured-model",
+                },
+                "jules": {"type": "jules"},
+            },
+            "agents": {
+                "planner": {"provider": "jules"},
+                "implementer": {"provider": "codex"},
+                "reviewer": {"provider": "jules"},
+            },
+            "agent_presets": {
+                "implementer": {
+                    "deep": {
+                        "provider": "codex",
+                        "model": "free-form-model",
+                        "reasoning_effort": "xhigh",
+                    }
+                },
+                "reviewer": {"default": {"provider": "jules"}},
+            },
+        }
+    )
+
+    assert set(config.presets_for_role("implementer")) == {"deep"}
+    assert config.presets_for_role("planner") == {}
+    assert set(config.presets_for_role("reviewer")) == {"default"}
+    selected = config.with_agent_preset("implementer", "deep")
+    assert selected.agents.implementer.provider == "__tui_runtime_implementer"
+    assert selected.provider_runtime_values("__tui_runtime_implementer") == {
+        "model": "free-form-model",
+        "reasoning_effort": "xhigh",
+    }
+    assert config.provider_runtime_values("codex") == {
+        "model": "configured-model",
+        "reasoning_effort": None,
+    }
+
+
+def test_missing_preset_provider_is_retained_and_rejected_only_when_selected(
+    tmp_path: Path,
+) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "agent_presets": {"planner": {"retired": {"provider": "missing"}}},
+        }
+    )
+
+    assert config.presets_for_role("planner")["retired"].provider == "missing"
+    with pytest.raises(ConfigurationError, match="is not configured"):
+        config.with_agent_preset("planner", "retired")
+
+
+def test_agent_preset_supports_provider_generation_options(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "providers": {
+                "vertex": {
+                    "type": "gemini-vertex",
+                    "project": "example-project",
+                    "model": "configured-model",
+                }
+            },
+            "agents": {
+                "planner": {"provider": "vertex"},
+                "implementer": {"provider": "vertex"},
+                "reviewer": {"provider": "vertex"},
+            },
+            "agent_presets": {
+                "planner": {
+                    "creative": {
+                        "provider": "vertex",
+                        "model": "free-form-model",
+                        "generation": {"temperature": 0.8, "max_output_tokens": 512},
+                    }
+                }
+            },
+        }
+    )
+
+    selected = config.with_agent_preset("planner", "creative")
+    assert selected.provider_runtime_values("__tui_runtime_planner") == {
+        "model": "free-form-model",
+        "generation": {"temperature": 0.8, "max_output_tokens": 512},
+    }
 
 
 def test_workspace_root_is_configurable(tmp_path: Path) -> None:
@@ -312,6 +408,67 @@ repositories:
         )
     )
     assert resolved.integrations.github.implementer_app.app_id == 789
+
+
+def test_agent_preset_crud_persists_in_resolved_config_without_touching_providers(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        """defaults:
+  agents:
+    planner: {provider: jules}
+    implementer: {provider: codex}
+    reviewer: {provider: jules}
+  providers:
+    jules: {type: jules}
+    codex: {type: codex-cli, command: [codex, exec, -]}
+repositories:
+  example:
+    path: repository
+""",
+        encoding="utf-8",
+    )
+    loader = ProjectConfigLoader(config_file)
+
+    loader.save_agent_preset(
+        "example",
+        "implementer",
+        "fast",
+        AgentPresetConfig(provider="codex", model="free-form", reasoning_effort="medium"),
+    )
+    loader.save_agent_preset(
+        "example",
+        "implementer",
+        "fast",
+        AgentPresetConfig(provider="codex", model="updated", reasoning_effort="xhigh"),
+        overwrite=True,
+    )
+    loader.rename_agent_preset("example", "implementer", "fast", "deep")
+
+    persisted = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert persisted["repositories"]["example"]["agent_presets"] == {
+        "implementer": {
+            "deep": {
+                "provider": "codex",
+                "model": "updated",
+                "reasoning_effort": "xhigh",
+            }
+        }
+    }
+    assert persisted["defaults"]["providers"]["codex"]["type"] == "codex-cli"
+    assert not (repository / ".orchestrator.yml").exists()
+    reloaded = loader.load(
+        DevelopmentTask("1", "trello", "Task", "", "https://example.test/1", repository="example")
+    )
+    assert reloaded.presets_for_role("implementer")["deep"].reasoning_effort == "xhigh"
+
+    loader.delete_agent_preset("example", "implementer", "deep")
+    persisted = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert "agent_presets" not in persisted["repositories"]["example"]
 
 
 @pytest.mark.parametrize(

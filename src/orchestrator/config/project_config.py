@@ -61,6 +61,52 @@ class AgentRoleSettings(BaseModel):
     provider: str
 
 
+class AgentPresetConfig(BaseModel):
+    """A reusable, role-local selection of a provider and runtime options.
+
+    Presets intentionally store only the same role-local values exposed by the
+    launcher.  They are templates, not provider definitions: a missing provider
+    is therefore retained so the launcher can report it clearly rather than
+    silently changing or deleting the preset.
+    """
+
+    provider: str
+    model: str | None = None
+    reasoning_effort: str | None = None
+    generation: Mapping[str, Any] = Field(default_factory=dict)
+
+    @field_validator("provider", "model", "reasoning_effort")
+    @classmethod
+    def validate_non_empty_string(
+        cls, value: str | None, info: ValidationInfo
+    ) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"Agent preset {info.field_name} must be a non-empty string")
+        return normalized
+
+    @field_validator("generation")
+    @classmethod
+    def validate_generation(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        if not isinstance(value, Mapping):
+            raise ValueError("Agent preset generation options must be a mapping")
+        return dict(value)
+
+    def runtime_options(self) -> dict[str, Any]:
+        """Return only values that can be passed to runtime override validation."""
+
+        options: dict[str, Any] = {}
+        if self.model is not None:
+            options["model"] = self.model
+        if self.reasoning_effort is not None:
+            options["reasoning_effort"] = self.reasoning_effort
+        if self.generation:
+            options["generation"] = dict(self.generation)
+        return options
+
+
 class AgentsSettings(BaseModel):
     planner: AgentRoleSettings = Field(
         default_factory=lambda: AgentRoleSettings(provider="jules")
@@ -483,6 +529,7 @@ class ProjectConfig(BaseModel):
     repository: RepositorySettings = Field(default_factory=RepositorySettings)
     roles: RolesSettings = Field(default_factory=RolesSettings)
     agents: AgentsSettings = Field(default_factory=AgentsSettings)
+    agent_presets: dict[str, dict[str, AgentPresetConfig]] = Field(default_factory=dict)
     providers: dict[str, AgentProviderSettings] = Field(default_factory=dict)
     safety: SafetySettings = Field(default_factory=SafetySettings)
     validation: ValidationSettings = Field(default_factory=ValidationSettings)
@@ -554,7 +601,35 @@ class ProjectConfig(BaseModel):
     def enforce_v1_safety(self) -> ProjectConfig:
         if self.safety.allow_direct_merge:
             raise ValueError("allow_direct_merge=true is not supported by V1")
+        unknown_roles = sorted(set(self.agent_presets) - {"planner", "implementer", "reviewer"})
+        if unknown_roles:
+            raise ValueError(
+                "Agent presets have unknown roles: " + ", ".join(unknown_roles)
+            )
+        for role, presets in self.agent_presets.items():
+            if not presets:
+                continue
+            blank_names = [name for name in presets if not name.strip()]
+            if blank_names:
+                raise ValueError(f"Agent presets for {role} contain an empty preset name")
         return self
+
+    def presets_for_role(self, role: str) -> dict[str, AgentPresetConfig]:
+        """Return a copy of the named presets available to one agent role."""
+
+        if role not in {"planner", "implementer", "reviewer"}:
+            raise ConfigurationError(f"Unknown agent role: {role}")
+        return dict(self.agent_presets.get(role, {}))
+
+    def with_agent_preset(self, role: str, preset_name: str) -> ProjectConfig:
+        """Materialize a preset for one in-memory run without changing YAML."""
+
+        preset = self.presets_for_role(role).get(preset_name)
+        if preset is None:
+            raise ConfigurationError(f"Agent preset {preset_name!r} is not configured for {role}")
+        return self.with_agent_runtime_overrides(
+            {role: preset.provider}, {role: preset.runtime_options()}
+        )
 
     def with_agent_providers(self, overrides: Mapping[str, str]) -> ProjectConfig:
         """Return an in-memory configuration with selected configured providers.
@@ -945,6 +1020,119 @@ class ProjectConfigLoader:
             else:
                 github.pop(key, None)
 
+        return self._write_configuration(configuration)
+
+    def save_agent_preset(
+        self,
+        repository_key: str,
+        role: str,
+        name: str,
+        preset: AgentPresetConfig,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        """Create or update one repository-scoped agent preset.
+
+        The resolved global ``orchestrator.yml`` remains the sole persistence
+        target.  A preset is intentionally written under the selected
+        repository entry, preserving the established repository override
+        behavior and never creating a local ``.orchestrator.yml``.
+        """
+
+        normalized_role = self._preset_role(role)
+        normalized_name = self._preset_name(name)
+        configuration, repository = self._repository_entry_for_write(repository_key)
+        presets = repository.setdefault("agent_presets", {})
+        if not isinstance(presets, dict):
+            raise ConfigurationError("'agent_presets' must be a mapping")
+        role_presets = presets.setdefault(normalized_role, {})
+        if not isinstance(role_presets, dict):
+            raise ConfigurationError(f"'agent_presets.{normalized_role}' must be a mapping")
+        if normalized_name in role_presets and not overwrite:
+            raise ConfigurationError(
+                f"Agent preset {normalized_name!r} already exists for {normalized_role}"
+            )
+        role_presets[normalized_name] = preset.model_dump(
+            mode="json", exclude_none=True, exclude_defaults=True
+        )
+        return self._write_configuration(configuration)
+
+    def rename_agent_preset(
+        self, repository_key: str, role: str, old_name: str, new_name: str
+    ) -> Path:
+        """Rename a role-local preset without affecting any provider definition."""
+
+        normalized_role = self._preset_role(role)
+        old = self._preset_name(old_name)
+        new = self._preset_name(new_name)
+        configuration, repository = self._repository_entry_for_write(repository_key)
+        presets = repository.get("agent_presets", {})
+        if not isinstance(presets, dict) or not isinstance(presets.get(normalized_role), dict):
+            raise ConfigurationError(
+                f"Agent preset {old!r} is not configured for {normalized_role}"
+            )
+        role_presets = presets[normalized_role]
+        if old not in role_presets:
+            raise ConfigurationError(
+                f"Agent preset {old!r} is not configured for {normalized_role}"
+            )
+        if old != new and new in role_presets:
+            raise ConfigurationError(f"Agent preset {new!r} already exists for {normalized_role}")
+        if old != new:
+            role_presets[new] = role_presets.pop(old)
+        return self._write_configuration(configuration)
+
+    def delete_agent_preset(self, repository_key: str, role: str, name: str) -> Path:
+        """Delete a role-local preset while leaving provider definitions intact."""
+
+        normalized_role = self._preset_role(role)
+        normalized_name = self._preset_name(name)
+        configuration, repository = self._repository_entry_for_write(repository_key)
+        presets = repository.get("agent_presets", {})
+        if not isinstance(presets, dict) or not isinstance(presets.get(normalized_role), dict):
+            raise ConfigurationError(
+                f"Agent preset {normalized_name!r} is not configured for {normalized_role}"
+            )
+        role_presets = presets[normalized_role]
+        if normalized_name not in role_presets:
+            raise ConfigurationError(
+                f"Agent preset {normalized_name!r} is not configured for {normalized_role}"
+            )
+        del role_presets[normalized_name]
+        if not role_presets:
+            del presets[normalized_role]
+        if not presets:
+            repository.pop("agent_presets", None)
+        return self._write_configuration(configuration)
+
+    def _repository_entry_for_write(
+        self, repository_key: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        configuration = _load_yaml(self._config_file, required=True)
+        self._reject_misplaced_project_settings(configuration)
+        repositories = configuration.setdefault("repositories", {})
+        if not isinstance(repositories, dict):
+            raise ConfigurationError("'repositories' must be a mapping")
+        repository = repositories.get(repository_key)
+        if not isinstance(repository, dict):
+            raise ConfigurationError(f"Repository entry '{repository_key}' must be a mapping")
+        return configuration, repository
+
+    @staticmethod
+    def _preset_role(role: str) -> str:
+        normalized = role.strip().casefold()
+        if normalized not in {"planner", "implementer", "reviewer"}:
+            raise ConfigurationError(f"Unknown agent role: {role}")
+        return normalized
+
+    @staticmethod
+    def _preset_name(name: str) -> str:
+        normalized = name.strip()
+        if not normalized:
+            raise ConfigurationError("Agent preset name must be non-empty")
+        return normalized
+
+    def _write_configuration(self, configuration: dict[str, Any]) -> Path:
         try:
             serialized = yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False)
             temporary_path = self._config_file.with_suffix(".yml.tmp")
@@ -993,6 +1181,7 @@ class ProjectConfigLoader:
     def _reject_misplaced_project_settings(global_config: dict[str, Any]) -> None:
         project_settings = {
             "agents",
+            "agent_presets",
             "providers",
             "roles",
             "integrations",
