@@ -103,7 +103,10 @@ class OrchestratorApp(App[None]):
                 yield Button("Start workflow", variant="success", id="new-workflow")
                 yield Button("Execution history", id="history")
                 yield Button("GitHub Apps", id="github-apps")
-                yield Button("Agent instructions", id="agent-instructions")
+                # This is a navigation control, not the editor's content
+                # container. Keeping their IDs distinct prevents the editor
+                # layout rules from making this button fill the home screen.
+                yield Button("Agent instructions", id="agent-instructions-button")
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -113,7 +116,7 @@ class OrchestratorApp(App[None]):
             self.action_history()
         elif event.button.id == "github-apps":
             self.action_github_apps()
-        elif event.button.id == "agent-instructions":
+        elif event.button.id == "agent-instructions-button":
             self.action_agent_instructions()
 
     def action_new_workflow(self) -> None:
