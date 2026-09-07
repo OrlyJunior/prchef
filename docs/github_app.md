@@ -50,10 +50,12 @@ The standard orchestrator installation already includes the PyJWT cryptography s
 to sign GitHub App JWTs. No separate `pip install "PyJWT[crypto]"` step is needed.
 
 Without `implementer_app`, commits, pushes, and PR creation retain ambient Git and `gh`
-authentication. With it, `gh pr create` and `gh pr view` receive `GH_TOKEN` only in their
-subprocess environment, and commit author/committer metadata uses the App bot identity. HTTPS
-pushes receive a process-local `http.extraHeader`; SSH and unsupported transports safely retain
-ambient push authentication. Reviewer publication independently uses the reviewer `app` token.
+authentication. With it, `gh pr create`, `gh pr view`, and PR assignment receive `GH_TOKEN` only
+in their subprocess environment. The created PR is assigned to the same resolved implementer bot
+identity used for commit attribution; assignment failures are logged and do not fail an otherwise
+successful workflow. HTTPS pushes receive a process-local `http.extraHeader`; SSH and unsupported
+transports safely retain ambient push authentication. Reviewer publication independently uses the
+reviewer `app` token and never assigns that identity to a PR.
 
 The Textual TUI exposes the two roles under **GitHub Apps** (or `c`). It writes only App IDs,
 installation IDs, and private-key references to the selected repository's
