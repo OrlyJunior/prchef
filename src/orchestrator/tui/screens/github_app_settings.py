@@ -12,7 +12,11 @@ from textual.widgets import Button, Input, Static
 
 from orchestrator.config.project_config import GitHubAppSettings
 from orchestrator.tui.bridge import WorkflowController
-from orchestrator.tui.widgets import OrchestratorSelect, is_orchestrator_select_widget
+from orchestrator.tui.widgets import (
+    OrchestratorSelect,
+    RepositorySelect,
+    is_orchestrator_select_widget,
+)
 
 if TYPE_CHECKING:
     from orchestrator.tui.app import OrchestratorApp
@@ -31,9 +35,7 @@ class GitHubAppSettingsScreen(Screen[None]):
                 "Never paste private keys or tokens."
             )
             with Vertical(classes="workflow-form"):
-                yield OrchestratorSelect(
-                    [], prompt="Configured repository", id="github-app-repository"
-                )
+                yield RepositorySelect(id="github-app-repository")
                 with Horizontal(classes="github-app-roles"):
                     for role in ("implementer", "reviewer"):
                         with Vertical(classes="github-app-role"):
@@ -72,8 +74,14 @@ class GitHubAppSettingsScreen(Screen[None]):
         except Exception as exc:
             self._status(f"Cannot load configured repositories: {exc}")
             return
-        repository_select = self.query_one("#github-app-repository", OrchestratorSelect)
-        repository_select.set_options([(item.key, item.key) for item in repositories])
+        repository_select = self.query_one("#github-app-repository", RepositorySelect)
+        if not repositories:
+            repository_select.set_repositories(repositories)
+            self._status("No repositories are configured in orchestrator.yml.")
+            return
+        repository_select.set_repositories(
+            repositories, selected_repository=self.controller.selected_repository
+        )
         repository_select.focus()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
@@ -85,6 +93,7 @@ class GitHubAppSettingsScreen(Screen[None]):
 
     def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
         if event.select.id == "github-app-repository" and isinstance(event.value, str):
+            self.controller.select_repository(event.value)
             try:
                 implementer, reviewer = self.controller.github_app_settings(event.value)
             except Exception as exc:
