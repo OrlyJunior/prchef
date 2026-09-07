@@ -13,3 +13,5 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+IMPLEMENTER.md
+REVIEWER.md

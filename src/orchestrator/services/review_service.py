@@ -16,7 +16,10 @@ from orchestrator.models.validation_result import ValidationResult
 from orchestrator.models.workflow_status import ReviewDecision
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.services.exceptions import StructuredOutputError
-from orchestrator.services.project_context import project_context_prompt
+from orchestrator.services.project_context import (
+    project_context_prompt,
+    reviewer_instructions_prompt,
+)
 from orchestrator.services.structured_output import parse_json_object, string_list
 
 _REVIEW_OUTPUT = StructuredOutputExpectation(
@@ -101,11 +104,15 @@ class ReviewService:
         diff: str,
         validation: ValidationResult,
         repository_path: Path,
+        instructions_repository_path: Path | None = None,
         repository_slug: str,
         base_branch: str,
         feature_branch: str,
         on_execution_started: Callable[[AgentExecutionReference], None],
     ) -> CodeReview:
+        instructions = reviewer_instructions_prompt(
+            instructions_repository_path or repository_path, repository_path
+        )
         prompt = f"""Review this implementation against the original task and technical spec.
 Perform an adversarial, evidence-based risk analysis; do not limit the review to stated
 requirements. Look for concrete failure modes and regressions in the supplied context and diff.
@@ -138,7 +145,7 @@ ORIGINAL TASK:
 REPOSITORY SPEC:
 {spec.as_prompt_context()}
 
-{project_context_prompt(repository_path)}
+{project_context_prompt(repository_path)}{instructions}
 PULL REQUEST:
 {json.dumps(asdict(pull_request), ensure_ascii=False, indent=2)}
 
