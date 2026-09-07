@@ -573,7 +573,8 @@ def test_workflow_runner_selects_role_local_presets_without_crud_controls(tmp_pa
             )
             screen.query_one("#implementer-model", Input).value = "temporary-model"
             await pilot.pause()
-            assert "temporary this-run overrides" in str(
+            assert screen.query_one("#implementer-preset", Select).value != "deep"
+            assert "Manual configuration; temporary this-run overrides" in str(
                 screen.query_one("#implementer-preset-source", Static).renderable
             )
             screen.query_one("#available-tasks", Select).value = "12"
@@ -584,6 +585,50 @@ def test_workflow_runner_selects_role_local_presets_without_crud_controls(tmp_pa
                 "reasoning_effort": "xhigh",
             }
             assert config.agent_presets["implementer"]["deep"].model == "preset-model"
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_applies_and_resets_reviewer_preset_independently(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    controller.project_config("example").agent_presets = {
+        "implementer": {"deep": AgentPresetConfig(provider="implementer", model="build")},
+        "reviewer": {
+            "thorough": AgentPresetConfig(
+                provider="vertex",
+                model="review-model",
+                generation={"temperature": "0.4", "max_output_tokens": "600"},
+            )
+        },
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            screen = application.screen
+            reviewer_preset = screen.query_one("#reviewer-preset", Select)
+            assert {option[1] for option in reviewer_preset._options} == {
+                reviewer_preset._options[0][1],
+                "thorough",
+            }
+            assert "deep" not in {option[1] for option in reviewer_preset._options}
+
+            reviewer_preset.value = "thorough"
+            await pilot.pause()
+            assert screen.query_one("#reviewer-provider", Select).value == "vertex"
+            assert screen.query_one("#reviewer-model", Input).value == "review-model"
+            assert screen.query_one("#reviewer-temperature", Input).value == "0.4"
+
+            reviewer_preset.value = reviewer_preset._options[0][1]
+            await pilot.pause()
+            assert screen.query_one("#reviewer-provider", Select).value == "reviewer"
+            assert screen.query_one("#reviewer-model", Input).value == ""
+            assert screen.query_one("#reviewer-temperature", Input).value == ""
+            assert "Provider/YAML default (manual)" in str(
+                screen.query_one("#reviewer-preset-source", Static).renderable
+            )
 
     asyncio.run(drive())
 
@@ -634,6 +679,24 @@ def test_agent_presets_screen_manages_all_role_presets(tmp_path: Path) -> None:
             screen.query_one("#create-agent-preset", Button).press()
             await pilot.pause()
             assert config.agent_presets["planner"]["fast"].provider == "planner"
+
+            role.value = "reviewer"
+            await pilot.pause()
+            preset_selector = screen.query_one("#agent-preset-select", Select)
+            assert "fast" not in {option[1] for option in preset_selector._options}
+            screen.query_one("#agent-preset-name", Input).value = "focused"
+            screen.query_one("#agent-preset-provider", Select).value = "reviewer"
+            screen.query_one("#create-agent-preset", Button).press()
+            await pilot.pause()
+            assert config.agent_presets["reviewer"]["focused"].provider == "reviewer"
+            screen.query_one("#agent-preset-name", Input).value = "focused-review"
+            screen.query_one("#rename-agent-preset", Button).press()
+            await pilot.pause()
+            assert "focused-review" in config.agent_presets["reviewer"]
+            screen.query_one("#delete-agent-preset", Button).press()
+            await pilot.pause()
+            assert "reviewer" not in config.agent_presets
+            assert "fast" in config.agent_presets["planner"]
 
     asyncio.run(drive())
 
