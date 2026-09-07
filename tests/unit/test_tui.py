@@ -29,7 +29,7 @@ from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 from orchestrator.tui.screens.task_selector import TaskSelector
 from orchestrator.tui.screens.workflow_runner import WorkflowRunnerScreen
-from orchestrator.tui.widgets import OrchestratorSelect
+from orchestrator.tui.widgets import OrchestratorSelect, RepositorySelect
 
 
 class _ScrollableSelectApp(App[None]):
@@ -772,6 +772,45 @@ def test_workflow_runner_repository_selector_uses_configured_non_blank_options(
     asyncio.run(drive())
 
 
+@pytest.mark.parametrize(
+    ("key", "selector_id"),
+    [
+        ("n", "#repository"),
+        ("c", "#github-app-repository"),
+        ("i", "#agent-instructions-repository"),
+    ],
+)
+def test_repository_select_populates_mounted_overlay_from_configured_repository(
+    tmp_path: Path, key: str, selector_id: str
+) -> None:
+    """A resolved repository key must be a real, visible Select choice everywhere."""
+
+    repository_key = "OrlyJunior/autonomous-development-orchestrator"
+    controller, _, _ = _controller(tmp_path)
+    controller.repositories = lambda: [  # type: ignore[method-assign]
+        ConfiguredRepository(repository_key, tmp_path)
+    ]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press(key)
+            await pilot.pause()
+            selector = application.screen.query_one(selector_id, RepositorySelect)
+            overlay = selector.query_one("SelectOverlay")
+
+            assert selector.value == repository_key
+            assert selector._options == [(repository_key, repository_key)]
+            assert len(overlay._options) == 1
+            assert str(overlay._options[0].prompt) == repository_key
+
+            await pilot.click(selector_id)
+            assert selector.expanded is True
+            assert len(overlay._options) == 1
+
+    asyncio.run(drive())
+
+
 def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     task_loads: list[tuple[str, str]] = []
@@ -823,6 +862,7 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
             await pilot.pause(delay=0.1)
             screen.query_one("#repository", Select).value = "other"
             await pilot.pause(delay=0.1)
+            assert controller.selected_repository == "other"
             assert task_loads == [
                 ("example", "github"),
                 ("example", "trello"),

@@ -19,7 +19,11 @@ from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import WorkflowStage, WorkflowStatus
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
 from orchestrator.tui.screens.task_selector import TaskSelector
-from orchestrator.tui.widgets import OrchestratorSelect, is_orchestrator_select_widget
+from orchestrator.tui.widgets import (
+    OrchestratorSelect,
+    RepositorySelect,
+    is_orchestrator_select_widget,
+)
 
 if TYPE_CHECKING:
     from orchestrator.tui.app import OrchestratorApp
@@ -44,6 +48,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._role_default_providers: dict[AgentRole, str] = {}
         self._role_presets: dict[AgentRole, dict[str, AgentPresetConfig]] = {}
         self._selected_presets: dict[AgentRole, str] = {}
+        self._suppressed_preset_changes: set[tuple[AgentRole, str]] = set()
         self._runtime_inputs: dict[tuple[AgentRole, str], dict[str, Any]] = {}
         self._runtime_defaults: dict[tuple[AgentRole, str], dict[str, Any]] = {}
         self._advanced_open: dict[AgentRole, bool] = {}
@@ -57,7 +62,7 @@ class WorkflowRunnerScreen(Screen[None]):
             yield Static("Start workflow", classes="screen-title")
             with Vertical(classes="workflow-form"):
                 yield Static("Repository", classes="field-label")
-                yield OrchestratorSelect([], prompt="Configured repository", id="repository")
+                yield RepositorySelect(id="repository")
                 yield Static("Task provider", classes="field-label")
                 yield OrchestratorSelect([], prompt="Task provider", id="task-provider")
                 yield TaskSelector(id="task-selector")
@@ -190,16 +195,12 @@ class WorkflowRunnerScreen(Screen[None]):
                 f"Cannot load configured repositories: {exc}"
             )
             return
-        repository_select = self.query_one("#repository", OrchestratorSelect)
+        repository_select = self.query_one("#repository", RepositorySelect)
         repository_select.focus()
         if repositories:
-            repository_options = [
-                (item.key.strip() or str(item.path), item.key) for item in repositories
-            ]
-            # Repository keys are the Select values. Once real options have
-            # loaded, a blank selection must not be offered alongside them.
-            repository_select.set_options(repository_options, allow_blank=False)
-            repository_select.value = repositories[0].key
+            repository_select.set_repositories(
+                repositories, selected_repository=self.controller.selected_repository
+            )
         else:
             # Textual cannot create a non-blank Select without choices. Keep the
             # empty-state selector usable while reporting the configuration issue.
@@ -230,6 +231,7 @@ class WorkflowRunnerScreen(Screen[None]):
 
     def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
         if event.select.id == "repository" and isinstance(event.value, str):
+            self.controller.select_repository(event.value)
             self._load_repository_options(event.value)
             return
         if event.select.id == "task-provider" and isinstance(event.value, str):
@@ -245,6 +247,10 @@ class WorkflowRunnerScreen(Screen[None]):
         for role, prefix in self._role_fields():
             if event.select.id == f"{prefix}-preset":
                 if isinstance(event.value, str):
+                    suppressed_change = (role, event.value)
+                    if suppressed_change in self._suppressed_preset_changes:
+                        self._suppressed_preset_changes.remove(suppressed_change)
+                        return
                     self._select_role_preset(role, prefix, event.value)
                 elif event.value is _MANUAL_PRESET:
                     self._selected_presets.pop(role, None)
@@ -357,6 +363,11 @@ class WorkflowRunnerScreen(Screen[None]):
         )
         target = selected_name or self._selected_presets.get(role)
         if target is not None and target in presets:
+            # ``Select.value`` posts its Changed message asynchronously. This
+            # is a programmatic refresh, so let the state established below
+            # stand rather than allowing its delayed event to overwrite a name
+            # the user has started entering for a rename.
+            self._suppressed_preset_changes.add((role, target))
             selector.value = target
             self._selected_presets[role] = target
             self.query_one(f"#{prefix}-preset-name", Input).value = target
