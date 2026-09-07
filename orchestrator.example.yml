@@ -76,6 +76,23 @@ defaults:
     #   generation:
     #     temperature: 0.2
     #     # max_output_tokens: 8192
+    # LiteLLM is an optional generic API-model backend. Install with:
+    # pip install autonomous-dev-orchestrator[litellm]
+    # Model identifiers are free-form. A key is referenced by its environment
+    # variable name only; omit api_key_env for local/self-hosted endpoints.
+    # local-ollama:
+    #   type: litellm
+    #   model: ollama/llama3.2
+    #   api_base: http://localhost:11434
+    #   timeout_seconds: 120
+    #   temperature: 0.2
+    #   max_output_tokens: 4096
+    #   generation:
+    #     top_p: 0.9
+    # cloud-api:
+    #   type: litellm
+    #   model: openai/gpt-4.1-mini
+    #   api_key_env: OPENAI_API_KEY
   integrations:
     github:
       command: [gh]

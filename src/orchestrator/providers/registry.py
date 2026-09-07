@@ -13,11 +13,13 @@ from orchestrator.config.project_config import (
     ConfigurationError,
     GeminiVertexProviderSettings,
     JulesProviderSettings,
+    LiteLLMProviderSettings,
 )
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.providers.codex_provider import CodexAgentProvider
 from orchestrator.providers.gemini_vertex_provider import GeminiVertexAgentProvider
 from orchestrator.providers.jules_provider import JulesAgentProvider
+from orchestrator.providers.litellm_provider import LiteLLMAgentProvider
 
 ProviderBuilder = Callable[[str, AgentProviderSettings, CommandClient], AgentProvider]
 
@@ -31,6 +33,7 @@ class AgentProviderRegistry:
             "jules": self._build_jules,
             "codex-cli": self._build_codex,
             "gemini-vertex": self._build_gemini_vertex,
+            "litellm": self._build_litellm,
         }
 
     def create(
@@ -90,3 +93,11 @@ class AgentProviderRegistry:
         del commands
         options = GeminiVertexProviderSettings.model_validate(settings.model_dump())
         return GeminiVertexAgentProvider(name, options)
+
+    @staticmethod
+    def _build_litellm(
+        name: str, settings: AgentProviderSettings, commands: CommandClient
+    ) -> AgentProvider:
+        del commands
+        options = LiteLLMProviderSettings.model_validate(settings.model_dump())
+        return LiteLLMAgentProvider(name, options)
