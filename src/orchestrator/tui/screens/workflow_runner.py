@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, cast
 
 from textual import work
@@ -17,6 +18,7 @@ from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import WorkflowStage, WorkflowStatus
+from orchestrator.runtime_logging import redact_payload, redact_text
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
 from orchestrator.tui.screens.task_selector import TaskSelector
 from orchestrator.tui.widgets import (
@@ -880,6 +882,8 @@ class WorkflowRunnerScreen(Screen[None]):
         """Retain observer diagnostics without putting them in the primary timeline."""
 
         details = [event.kind.value]
+        if event.category:
+            details.append(f"[{event.category}]")
         if event.stage is not None:
             details.append(f"stage={event.stage.value}")
         if event.status is not None:
@@ -887,10 +891,14 @@ class WorkflowRunnerScreen(Screen[None]):
         if event.step_status is not None:
             details.append(f"step={event.step_status.value}")
         if event.message:
-            details.append(event.message)
+            details.append(redact_text(event.message))
+        if event.payload is not None:
+            details.append(
+                json.dumps(redact_payload(event.payload), ensure_ascii=False, indent=2, default=str)
+            )
         self._raw_event_lines.append(" | ".join(details))
         self.query_one("#workflow-raw-events", Static).update(
-            "\n".join(self._raw_event_lines[-30:])
+            "\n\n".join(self._raw_event_lines)
         )
 
     def _timeline_message(self, event: WorkflowEvent) -> str | None:

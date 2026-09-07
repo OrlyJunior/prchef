@@ -18,6 +18,7 @@ from orchestrator.config.project_config import (
 )
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
 from orchestrator.models.workflow_event import WorkflowEventListener
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_step import WorkflowStep
@@ -280,6 +281,10 @@ class WorkflowController:
             self._repository.get_execution(execution_id),
             self._repository.list_steps(execution_id),
         )
+
+    def execution_diagnostics(self, execution_id: str) -> list[ExecutionDiagnostic]:
+        method = getattr(self._repository, "list_diagnostics", None)
+        return method(execution_id) if callable(method) else []
 
     def respond_and_resume(
         self,

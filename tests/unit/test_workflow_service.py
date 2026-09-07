@@ -733,8 +733,11 @@ def test_verbose_workflow_logs_parsed_spec_and_review_summaries(
     assert "[review] summary: Looks good" in messages
     assert "[review] blocking_findings: 0" in messages
     assert "[review] suggestions: 0" in messages
-    assert '{"technical_context"' not in caplog.text
-    assert '"decision"' not in caplog.text
+    # Verbose mode uses the persisted diagnostic stream, so it includes the
+    # same full, sanitized request schemas available in Detailed Logs.
+    assert "[diagnostic]" in caplog.text
+    assert '"technical_context"' in caplog.text
+    assert '"decision"' in caplog.text
 
 
 def test_non_verbose_workflow_does_not_log_agent_summaries(

@@ -1038,7 +1038,9 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
                 ("other", "github"),
             ]
             screen.query_one("#workflow-agent-instructions", Button).press()
-            await pilot.pause()
+            # The pushed screen's nested Select mounts asynchronously. Wait
+            # for its retained repository selection to finish restoring.
+            await pilot.pause(delay=0.1)
             assert isinstance(application.screen, AgentInstructionsScreen)
             assert (
                 application.screen.query_one(
