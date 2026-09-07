@@ -110,8 +110,9 @@
   branch. Commit stages **all** worktree changes and fails if nothing is staged. Push is only
   `git push --set-upstream origin <working-branch>`.
 - PR creation occurs only after a successful push. `gh pr create` must yield a URL, then `gh pr
-  view` supplies the persisted PR fields. A later failure never rolls back a commit, push, PR, or
-  worktree.
+  view` supplies the persisted PR fields. When an implementer App is configured, its resolved bot
+  identity is assigned to the created PR; assignment failures are logged but do not fail the
+  workflow. A later failure never rolls back a commit, push, PR, or worktree.
 
 ## Validation and review correction loops
 
@@ -173,8 +174,9 @@
 - Jules credentials come from `JULES_API_KEY` or `ORCHESTRATOR_JULES_API_KEY`; GitHub PR creation
   uses ambient `gh` authentication unless a configured implementer App supplies a short-lived,
   process-local installation token. Formal review publication independently uses its configured
-  reviewer App token or ambient `gh` authentication. Do not put credentials in YAML or tracked
-  files.
+  reviewer App token or ambient `gh` authentication. The reviewer App is never automatically
+  assigned; only the configured implementer App bot can be assigned to created PRs. Do not put
+  credentials in YAML or tracked files.
 
 ## Configuration precedence
 

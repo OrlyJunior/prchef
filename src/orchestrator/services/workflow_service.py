@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
+from orchestrator.clients.exceptions import GitHubClientError
 from orchestrator.clients.factory import ClientFactory, WorkflowClients
 from orchestrator.config.project_config import (
     ConfigurationError,
@@ -239,6 +240,11 @@ class WorkflowService:
                     head_branch=working_branch,
                 )
                 self._repository.record_pull_request(execution.id, pull_request)
+                self._assign_implementer(
+                    execution_clients=execution_clients,
+                    pull_request_number=pull_request.number,
+                    workspace_path=workspace_path,
+                )
 
             review_attempt = 0
             polish_attempted = False
@@ -632,6 +638,11 @@ class WorkflowService:
                     head_branch=working_branch,
                 )
                 self._repository.record_pull_request(execution_id, pull_request)
+                self._assign_implementer(
+                    execution_clients=execution_clients,
+                    pull_request_number=pull_request.number,
+                    workspace_path=workspace_path,
+                )
             with self._step(execution_id, WorkflowStage.REVIEW):
                 review = ReviewService(clients.agent(AgentRole.REVIEWER)).review(
                     task=task,
@@ -926,6 +937,32 @@ class WorkflowService:
             # Publication is an external side effect. Preserve the reviewer decision and let
             # the terminal workflow status reflect it even when GitHub is unavailable.
             self._repository.record_error(execution_id, message)
+
+    @staticmethod
+    def _assign_implementer(
+        *,
+        execution_clients: WorkflowClients,
+        pull_request_number: int,
+        workspace_path: Path,
+    ) -> None:
+        """Assign the implementer App without making PR creation fail."""
+        try:
+            assignee = execution_clients.github.assign_implementer(
+                pull_request_number, cwd=workspace_path
+            )
+            if assignee is not None:
+                logger.info(
+                    "[github] Assigned implementer %s to pull request #%s",
+                    assignee,
+                    pull_request_number,
+                )
+        except GitHubClientError as exc:
+            logger.warning(
+                "[github] Implementer assignment failed for pull request #%s; "
+                "continuing workflow: %s",
+                pull_request_number,
+                redact_text(str(exc)),
+            )
 
     @staticmethod
     def _format_polish_skip_comment(implementation: ImplementationResult) -> str:

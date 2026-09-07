@@ -391,9 +391,12 @@ class FakeGitHubClient:
     def __init__(self) -> None:
         self.error: Exception | None = None
         self.review_error: Exception | None = None
+        self.assignment_error: Exception | None = None
+        self.implementer_identity: str | None = None
         self.last_pull_request_body: str | None = None
         self.create_calls = 0
         self.review_calls: list[dict[str, Any]] = []
+        self.assignment_calls: list[dict[str, Any]] = []
         self.comment_error: Exception | None = None
         self.comment_calls: list[dict[str, Any]] = []
 
@@ -419,6 +422,21 @@ class FakeGitHubClient:
         self.comment_calls.append(kwargs)
         if self.comment_error:
             raise self.comment_error
+
+    def assign_pull_request(
+        self, pr_number: int, assignees: list[str] | tuple[str, ...], **kwargs: Any
+    ) -> None:
+        self.assignment_calls.append(
+            {"pr_number": pr_number, "assignees": list(assignees), **kwargs}
+        )
+        if self.assignment_error:
+            raise self.assignment_error
+
+    def assign_implementer(self, pr_number: int, **kwargs: Any) -> str | None:
+        if self.implementer_identity is None:
+            return None
+        self.assign_pull_request(pr_number, (self.implementer_identity,), **kwargs)
+        return self.implementer_identity
 
     def at_path(self, repository_path: Path) -> FakeGitHubClient:
         del repository_path
@@ -467,6 +485,12 @@ class FakeClientFactory:
         *,
         agent_roles: set[AgentRole] | None = None,
     ) -> SimpleNamespace:
+        implementer_app = config.integrations.github.implementer_app
+        self.github.implementer_identity = (
+            implementer_app.bot_name or "implementer[bot]"
+            if implementer_app.is_configured
+            else None
+        )
         selected = agent_roles if agent_roles is not None else set(AgentRole)
         provider_by_name = {"jules": self.jules, "codex": self.codex}
         role_names = {
