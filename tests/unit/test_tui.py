@@ -701,6 +701,53 @@ def test_agent_presets_screen_manages_all_role_presets(tmp_path: Path) -> None:
     asyncio.run(drive())
 
 
+def test_agent_presets_role_selector_shows_all_roles_and_supports_keyboard_and_mouse(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 24)) as pilot:
+            await pilot.press("p")
+            await pilot.pause()
+            screen = application.screen
+            role = screen.query_one("#agent-preset-role", Select)
+
+            assert role.value == "planner"
+            assert [option[0] for option in role._options] == [
+                "Planner",
+                "Implementer",
+                "Reviewer",
+            ]
+
+            role.focus()
+            await pilot.press("enter", "down", "enter")
+            await pilot.pause()
+            assert role.value == "implementer"
+            assert "Implementer presets loaded" in str(
+                screen.query_one("#agent-presets-status", Static).renderable
+            )
+
+            await pilot.click("#agent-preset-role")
+            await pilot.pause()
+            overlay = role.query_one("SelectOverlay")
+            assert role.expanded is True
+            # The menu includes a top and bottom border plus all three rows.
+            assert overlay.region.height >= len(role._options) + 2
+
+            # The third option is visible and selectable directly by mouse.
+            await pilot.click(overlay, offset=(2, 3))
+            await pilot.pause()
+            assert role.value == "reviewer"
+            assert role.expanded is False
+            assert "Reviewer presets loaded" in str(
+                screen.query_one("#agent-presets-status", Static).renderable
+            )
+
+    asyncio.run(drive())
+
+
 def test_workflow_runner_preselects_matching_configured_preset(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     controller.project_config("example").agent_presets = {
