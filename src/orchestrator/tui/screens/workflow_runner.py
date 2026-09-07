@@ -191,13 +191,19 @@ class WorkflowRunnerScreen(Screen[None]):
             )
             return
         repository_select = self.query_one("#repository", OrchestratorSelect)
-        repository_select.set_options(
-            [(f"{item.key} — {item.path}", item.key) for item in repositories]
-        )
         repository_select.focus()
         if repositories:
+            repository_options = [
+                (item.key.strip() or str(item.path), item.key) for item in repositories
+            ]
+            # Repository keys are the Select values. Once real options have
+            # loaded, a blank selection must not be offered alongside them.
+            repository_select.set_options(repository_options, allow_blank=False)
             repository_select.value = repositories[0].key
         else:
+            # Textual cannot create a non-blank Select without choices. Keep the
+            # empty-state selector usable while reporting the configuration issue.
+            repository_select.set_options([], allow_blank=True)
             self.query_one("#workflow-progress", Static).update(
                 "No repositories are configured. Add entries under repositories "
                 "in orchestrator.yml."

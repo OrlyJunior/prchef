@@ -67,7 +67,13 @@ class AgentInstructionsScreen(Screen[None]):
             self._status(f"Cannot load configured repositories: {exc}")
             return
         selector = self.query_one("#agent-instructions-repository", OrchestratorSelect)
-        selector.set_options([(item.key, item.key) for item in repositories])
+        if not repositories:
+            selector.set_options([], allow_blank=True)
+            self._status("No repositories are configured in orchestrator.yml.")
+            return
+        selector.set_options(
+            [(item.key, item.key) for item in repositories], allow_blank=False
+        )
         if self._initial_repository and any(
             item.key == self._initial_repository for item in repositories
         ):

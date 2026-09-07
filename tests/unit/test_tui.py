@@ -332,6 +332,28 @@ def test_textual_app_navigates_to_workflow_runner(tmp_path: Path) -> None:
     asyncio.run(drive())
 
 
+def test_agent_instructions_navigation_uses_a_compact_distinct_control(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            navigation = application.query_one("#agent-instructions-button", Button)
+            history = application.query_one("#history", Button)
+
+            assert navigation.size.height == history.size.height
+            assert navigation.size.height < application.size.height
+            assert navigation.size.width < application.size.width
+
+            await pilot.click("#agent-instructions-button")
+            assert isinstance(application.screen, AgentInstructionsScreen)
+            assert isinstance(
+                application.screen.query_one("#agent-instructions"), VerticalScroll
+            )
+
+    asyncio.run(drive())
+
+
 def test_tui_buttons_activate_on_initial_click(tmp_path: Path) -> None:
     """A pointer click should activate an action without a focus-setting click first."""
 
@@ -716,6 +738,40 @@ def test_workflow_runner_auto_loads_tasks_on_mount(tmp_path: Path) -> None:
     asyncio.run(drive())
 
 
+def test_workflow_runner_repository_selector_uses_configured_non_blank_options(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    controller.repositories = lambda: [  # type: ignore[method-assign]
+        ConfiguredRepository("example", tmp_path),
+        ConfiguredRepository("other", tmp_path),
+    ]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            selector = application.screen.query_one("#repository", OrchestratorSelect)
+            options = selector._options
+
+            assert [(str(label), value) for label, value in options] == [
+                ("example", "example"),
+                ("other", "other"),
+            ]
+            assert selector.value == "example"
+            assert selector.value in {value for _, value in options}
+            assert all(str(label).strip() for label, _ in options)
+
+            await pilot.click("#repository")
+            assert selector.expanded is True
+            assert selector.value == "example"
+            await pilot.press("escape")
+            assert selector.value == "example"
+
+    asyncio.run(drive())
+
+
 def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     task_loads: list[tuple[str, str]] = []
@@ -772,6 +828,15 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
                 ("example", "trello"),
                 ("other", "github"),
             ]
+            screen.query_one("#workflow-agent-instructions", Button).press()
+            await pilot.pause()
+            assert isinstance(application.screen, AgentInstructionsScreen)
+            assert (
+                application.screen.query_one(
+                    "#agent-instructions-repository", OrchestratorSelect
+                ).value
+                == "other"
+            )
 
     asyncio.run(drive())
 

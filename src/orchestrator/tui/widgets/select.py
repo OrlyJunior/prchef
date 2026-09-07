@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable
-from typing import TypeVar
+from collections.abc import Hashable, Iterable
+from typing import Any, TypeVar
 
 from textual import events
 from textual.app import ComposeResult
@@ -88,6 +88,27 @@ class OrchestratorSelect(Select[SelectValue]):
         if hasattr(Select, "compact"):
             overlay = overlay.data_bind(compact=Select.compact)
         yield overlay
+
+    def set_options(
+        self,
+        options: Iterable[tuple[Any, SelectValue]],
+        *,
+        allow_blank: bool | None = None,
+    ) -> None:
+        """Replace options and, when needed, update blank-selection behavior.
+
+        Textual requires an initially empty Select to permit a blank value.
+        Screens which load options after mounting can opt out once they have at
+        least one real value, so the overlay contains only configured choices.
+        """
+
+        # ``Select.set_options`` rebuilds both its legal-value set and the
+        # overlay entries from ``_allow_blank``.  Update that flag before
+        # delegating, so those structures are rebuilt together rather than
+        # leaving the prompt's synthetic blank option in the overlay.
+        if allow_blank is not None:
+            self._allow_blank = allow_blank
+        super().set_options(list(options))
 
     async def _on_click(self, event: events.Click) -> None:
         """Handle clicks that land on the Select border rather than its current child."""
