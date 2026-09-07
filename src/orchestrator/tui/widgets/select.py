@@ -13,6 +13,8 @@ from textual.widgets import Select
 from textual.widgets._option_list import OptionList
 from textual.widgets._select import SelectCurrent, SelectOverlay
 
+from orchestrator.config.project_config import ConfiguredRepository
+
 SelectValue = TypeVar("SelectValue", bound=Hashable)
 
 
@@ -185,6 +187,60 @@ class OrchestratorSelect(Select[SelectValue]):
             (ancestor for ancestor in self.ancestors if isinstance(ancestor, VerticalScroll)),
             None,
         )
+
+
+class RepositorySelect(OrchestratorSelect[str]):
+    """A Select whose choices are the configured repository keys.
+
+    Repository controls are mounted with no choices because configuration is
+    resolved by the controller at runtime. Keeping that transition here makes
+    the value shown in the collapsed control and the mounted overlay derive
+    from the same key/value collection on every screen.
+    """
+
+    def __init__(self, *, prompt: str = "Configured repository", **kwargs: Any) -> None:
+        super().__init__([], prompt=prompt, **kwargs)
+
+    def set_repositories(
+        self,
+        repositories: Iterable[ConfiguredRepository],
+        *,
+        selected_repository: str | None = None,
+    ) -> str | None:
+        """Load configured repository keys and retain a still-valid selection.
+
+        A configured key is both the visible label and the Select value. Empty
+        keys are ignored rather than becoming unlabelled rows in the overlay.
+        """
+
+        options = [
+            (repository.key, repository.key)
+            for repository in repositories
+            if repository.key.strip()
+        ]
+        if not options:
+            self.set_options([], allow_blank=True)
+            return None
+
+        values = {value for _, value in options}
+        current = self.value if isinstance(self.value, str) else None
+        value = (
+            selected_repository
+            if selected_repository in values
+            else current
+            if current in values
+            else options[0][1]
+        )
+
+        # Textual's public set_options() always initializes a non-blank Select
+        # to its first entry. Seed the desired legal value before initializing
+        # it so a config reload never flashes a different repository or emits a
+        # transient change event for it.
+        self._allow_blank = False
+        self._setup_variables_for_options(options)
+        self._setup_options_renderables()
+        self._init_selected_option(value)
+        return value
 
 
 def is_orchestrator_select_widget(widget: Widget) -> bool:

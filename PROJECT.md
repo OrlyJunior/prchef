@@ -29,7 +29,9 @@
   not alter the CLI's verbose logging contract or workflow observer semantics.
 - TUI screens use `OrchestratorSelect` for Select controls in vertical scroll regions. It reserves
   visible overlay space after mouse or keyboard activation and restores focus without triggering
-  parent-scroll jumps.
+  parent-scroll jumps. Repository controls use its `RepositorySelect` specialization: configured
+  repository keys are both their visible labels and Select values, with the selected key retained
+  by `WorkflowController` across screen navigation.
 - The TUI launcher may select configured provider instances and role-local runtime settings
   (model, reasoning, and exposed provider generation options) for one run. These overrides are
   schema-validated in memory, never alter YAML defaults, and may give roles sharing a configured

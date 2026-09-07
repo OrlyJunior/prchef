@@ -12,7 +12,11 @@ from textual.widgets import Button, Static, TextArea
 
 from orchestrator.models.agent import AgentRole
 from orchestrator.tui.bridge import WorkflowController
-from orchestrator.tui.widgets import OrchestratorSelect, is_orchestrator_select_widget
+from orchestrator.tui.widgets import (
+    OrchestratorSelect,
+    RepositorySelect,
+    is_orchestrator_select_widget,
+)
 
 if TYPE_CHECKING:
     from orchestrator.tui.app import OrchestratorApp
@@ -35,9 +39,7 @@ class AgentInstructionsScreen(Screen[None]):
                 "orchestrator invariants; saving never stages or commits files."
             )
             with Vertical(classes="workflow-form"):
-                yield OrchestratorSelect(
-                    [], prompt="Configured repository", id="agent-instructions-repository"
-                )
+                yield RepositorySelect(id="agent-instructions-repository")
                 for role, label in (
                     ("implementer", "Implementer instructions (IMPLEMENTER.md)"),
                     ("reviewer", "Reviewer instructions (REVIEWER.md)"),
@@ -66,20 +68,16 @@ class AgentInstructionsScreen(Screen[None]):
         except Exception as exc:
             self._status(f"Cannot load configured repositories: {exc}")
             return
-        selector = self.query_one("#agent-instructions-repository", OrchestratorSelect)
+        selector = self.query_one("#agent-instructions-repository", RepositorySelect)
         if not repositories:
-            selector.set_options([], allow_blank=True)
+            selector.set_repositories(repositories)
             self._status("No repositories are configured in orchestrator.yml.")
             return
-        selector.set_options(
-            [(item.key, item.key) for item in repositories], allow_blank=False
+        selected_repository = (
+            self._initial_repository or self.controller.selected_repository
         )
-        if self._initial_repository and any(
-            item.key == self._initial_repository for item in repositories
-        ):
-            selector.value = self._initial_repository
-        else:
-            selector.focus()
+        selector.set_repositories(repositories, selected_repository=selected_repository)
+        selector.focus()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         if is_orchestrator_select_widget(event.widget):
@@ -93,6 +91,7 @@ class AgentInstructionsScreen(Screen[None]):
             event.select.id == "agent-instructions-repository"
             and isinstance(event.value, str)
         ):
+            self.controller.select_repository(event.value)
             self._load_repository(event.value)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

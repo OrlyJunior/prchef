@@ -72,9 +72,29 @@ class WorkflowController:
         self._task_provider_factory = task_provider_factory
         self._verbose = verbose
         self._workflow_service_factory = workflow_service_factory
+        self._selected_repository: str | None = None
 
     def repositories(self) -> list[ConfiguredRepository]:
-        return self._config_loader.list_repositories()
+        repositories = self._config_loader.list_repositories()
+        configured_keys = {repository.key for repository in repositories}
+        if self._selected_repository not in configured_keys:
+            self._selected_repository = repositories[0].key if repositories else None
+        return repositories
+
+    @property
+    def selected_repository(self) -> str | None:
+        """The configured repository retained while the user navigates the TUI."""
+
+        if self._selected_repository is None:
+            self.repositories()
+        return self._selected_repository
+
+    def select_repository(self, repository: str) -> None:
+        """Retain a repository selection after validating it against current config."""
+
+        if repository not in {configured.key for configured in self.repositories()}:
+            raise ValueError(f"Unknown configured repository: {repository}")
+        self._selected_repository = repository
 
     def project_config(self, repository: str) -> ProjectConfig:
         selection = DevelopmentTask(
