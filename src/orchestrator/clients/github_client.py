@@ -15,6 +15,7 @@ from orchestrator.clients.command_client import CommandClient, CommandResult
 from orchestrator.clients.exceptions import GitHubClientError
 from orchestrator.config.project_config import GitHubAppSettings
 from orchestrator.models.pull_request import PullRequest
+from orchestrator.runtime_logging import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +319,36 @@ class GitHubClient:
             env=self._implementer_auth_environment(),
         )
 
+    def assign_pull_request(
+        self,
+        pr_number: int,
+        assignees: Sequence[str],
+        cwd: Path | None = None,
+    ) -> None:
+        """Assign one or more GitHub users to a pull request as the implementer."""
+        if pr_number <= 0:
+            raise ValueError("Pull request number must be positive")
+        if not assignees or any(not assignee.strip() for assignee in assignees):
+            raise ValueError("At least one non-empty pull request assignee is required")
+
+        logger.info("[github] Assigning pull request #%s", pr_number)
+        arguments = ["pr", "edit", str(pr_number)]
+        for assignee in assignees:
+            arguments.extend(("--add-assignee", assignee))
+        self._run(
+            *arguments,
+            env=self._implementer_auth_environment(),
+            cwd=cwd,
+        )
+
+    def assign_implementer(self, pr_number: int, cwd: Path | None = None) -> str | None:
+        """Assign the configured implementer App bot to a pull request, if present."""
+        if self._implementer_authenticator is None:
+            return None
+        bot_name, _ = self._implementer_authenticator.bot_identity()
+        self.assign_pull_request(pr_number, (bot_name,), cwd=cwd)
+        return bot_name
+
     def _review_auth_environment(self) -> dict[str, str] | None:
         return self._authentication_environment(self._app_authenticator)
 
@@ -334,14 +365,19 @@ class GitHubClient:
         environment["GH_TOKEN"] = authenticator.token()
         return environment
 
-    def _run(self, *arguments: str, env: dict[str, str] | None = None) -> CommandResult:
+    def _run(
+        self,
+        *arguments: str,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> CommandResult:
         result = self._commands.run(
             [*self._command, *arguments],
-            cwd=self._path,
+            cwd=cwd or self._path,
             timeout_seconds=self._timeout_seconds,
             env=env,
         )
         if not result.success:
             detail = result.stderr.strip() or result.stdout.strip()
-            raise GitHubClientError(f"GitHub CLI failed: {detail}")
+            raise GitHubClientError(f"GitHub CLI failed: {redact_text(detail)}")
         return result

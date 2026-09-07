@@ -6,10 +6,12 @@ from typing import Any
 
 import httpx
 import jwt
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from orchestrator.clients.command_client import CommandResult
+from orchestrator.clients.exceptions import GitHubClientError
 from orchestrator.clients.github_client import GitHubAppAuthenticator, GitHubClient
 from orchestrator.config.project_config import GitHubAppSettings
 
@@ -205,3 +207,68 @@ def test_comment_pull_request_uses_implementer_app_token(tmp_path: Path) -> None
     ]
     assert call["env"] is not None
     assert call["env"]["GH_TOKEN"] == "ghs_implementer"
+
+
+def test_assign_pull_request_uses_implementer_app_token_and_workspace(tmp_path: Path) -> None:
+    commands = RecordingCommands()
+    client = GitHubClient(commands, tmp_path, ["gh"], 120)
+
+    class Authenticator:
+        def token(self) -> str:
+            return "ghs_implementer"
+
+    workspace = tmp_path / "worktree"
+    client._implementer_authenticator = Authenticator()  # type: ignore[assignment]
+    client.assign_pull_request(42, ("implementer[bot]",), cwd=workspace)
+
+    call = commands.calls[0]
+    assert call["command"] == [
+        "gh",
+        "pr",
+        "edit",
+        "42",
+        "--add-assignee",
+        "implementer[bot]",
+    ]
+    assert call["cwd"] == workspace
+    assert call["env"] is not None
+    assert call["env"]["GH_TOKEN"] == "ghs_implementer"
+
+
+def test_assign_implementer_resolves_bot_identity_and_assigns(tmp_path: Path) -> None:
+    commands = RecordingCommands()
+    client = GitHubClient(commands, tmp_path, ["gh"], 120)
+
+    class Authenticator:
+        def bot_identity(self) -> tuple[str, str]:
+            return ("implementer[bot]", "123+implementer[bot]@users.noreply.github.com")
+
+        def token(self) -> str:
+            return "ghs_implementer"
+
+    client._implementer_authenticator = Authenticator()  # type: ignore[assignment]
+
+    assert client.assign_implementer(42) == "implementer[bot]"
+    assert commands.calls[0]["command"][-2:] == ["--add-assignee", "implementer[bot]"]
+
+
+def test_assign_implementer_is_noop_without_implementer_app(tmp_path: Path) -> None:
+    commands = RecordingCommands()
+    client = GitHubClient(commands, tmp_path, ["gh"], 120)
+
+    assert client.assign_implementer(42) is None
+    assert commands.calls == []
+
+
+def test_assign_pull_request_redacts_token_when_github_cli_fails(tmp_path: Path) -> None:
+    class FailingCommands(RecordingCommands):
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            self.calls.append({"command": command, **kwargs})
+            return CommandResult(command, 1, "", "GH_TOKEN=ghs_installation", 0.01)
+
+    client = GitHubClient(FailingCommands(), tmp_path, ["gh"], 120)
+
+    with pytest.raises(GitHubClientError, match="GitHub CLI failed") as exc_info:
+        client.assign_pull_request(42, ("implementer[bot]",))
+
+    assert "ghs_installation" not in str(exc_info.value)

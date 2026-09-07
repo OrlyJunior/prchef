@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.clients.exceptions import GitHubClientError
+from orchestrator.config.project_config import GitHubAppSettings
 from orchestrator.models import (
     CodeReview,
     DevelopmentTask,
@@ -66,6 +68,71 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
         }
     ]
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
+
+
+def test_workflow_assigns_configured_implementer_bot_but_not_reviewer(workflow) -> None:
+    service, _, _, factory = workflow
+    loader = service._config_loader
+    loader.config.integrations.github.implementer_app = GitHubAppSettings(
+        app_id=1,
+        installation_id=2,
+        private_key_env="IMPLEMENTER_GITHUB_APP_PRIVATE_KEY",
+        bot_name="implementer[bot]",
+        bot_user_id=3,
+    )
+    loader.config.integrations.github.app = GitHubAppSettings(
+        app_id=4,
+        installation_id=5,
+        private_key_env="REVIEWER_GITHUB_APP_PRIVATE_KEY",
+        bot_name="reviewer[bot]",
+        bot_user_id=6,
+    )
+
+    result = service.run("card-implementer-assignment")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert factory.github.assignment_calls == [
+        {
+            "pr_number": 42,
+            "assignees": ["implementer[bot]"],
+            "cwd": factory.git.workspace_path,
+        }
+    ]
+
+
+def test_workflow_without_implementer_app_does_not_assign_pull_request(workflow) -> None:
+    service, _, _, factory = workflow
+
+    result = service.run("card-no-implementer-assignment")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert factory.github.assignment_calls == []
+
+
+def test_implementer_assignment_failure_is_logged_and_does_not_block_review(
+    workflow, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _, _, factory = workflow
+    loader = service._config_loader
+    loader.config.integrations.github.implementer_app = GitHubAppSettings(
+        app_id=1,
+        installation_id=2,
+        private_key_env="IMPLEMENTER_GITHUB_APP_PRIVATE_KEY",
+        bot_name="implementer[bot]",
+        bot_user_id=3,
+    )
+    factory.github.assignment_error = GitHubClientError(
+        "GitHub assignment unavailable: GH_TOKEN=ghs_assignment_secret"
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = service.run("card-implementer-assignment-failure")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert len(factory.github.assignment_calls) == 1
+    assert len(factory.github.review_calls) == 1
+    assert "Implementer assignment failed for pull request #42" in caplog.text
+    assert "ghs_assignment_secret" not in caplog.text
 
 
 def test_workflow_events_follow_persisted_transitions_and_do_not_control_execution(
