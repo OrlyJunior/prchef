@@ -72,6 +72,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 with Horizontal(classes="screen-actions"):
                     yield Button("Start workflow", variant="success", id="start-workflow")
                     yield Button("Execution history", id="workflow-history")
+                    yield Button("Agent presets", id="workflow-agent-presets")
                     yield Button("GitHub App settings", id="workflow-github-apps")
                     yield Button("Agent instructions", id="workflow-agent-instructions")
                 yield Static(
@@ -84,29 +85,14 @@ class WorkflowRunnerScreen(Screen[None]):
                         yield Static(role.value.title(), classes="role-title", id=f"{prefix}-title")
                         with Horizontal(classes="role-summary-row"):
                             yield Static("", id=f"{prefix}-summary")
+                            yield OrchestratorSelect(
+                                [],
+                                prompt="Provider/YAML default",
+                                id=f"{prefix}-preset",
+                                classes="role-preset-select",
+                            )
                             yield Button("Configure", id=f"{prefix}-configure")
                         with Vertical(classes="role-config", id=f"{prefix}-config"):
-                            with Horizontal(classes="role-config-row"):
-                                with Vertical(classes="role-field"):
-                                    yield Static("Preset", id=f"{prefix}-preset-label")
-                                    yield OrchestratorSelect(
-                                        [],
-                                        prompt="Provider/YAML default",
-                                        id=f"{prefix}-preset",
-                                    )
-                                with Vertical(classes="role-field"):
-                                    yield Static("Preset name", id=f"{prefix}-preset-name-label")
-                                    yield Input(
-                                        placeholder="Name for create or rename",
-                                        id=f"{prefix}-preset-name",
-                                    )
-                            with Horizontal(classes="role-config-row preset-actions"):
-                                yield Button("Create", id=f"{prefix}-preset-create")
-                                yield Button("Update", id=f"{prefix}-preset-update")
-                                yield Button("Rename", id=f"{prefix}-preset-rename")
-                                yield Button(
-                                    "Delete", variant="error", id=f"{prefix}-preset-delete"
-                                )
                             yield Static(
                                 "Provider/YAML default",
                                 classes="default-indicator",
@@ -362,6 +348,18 @@ class WorkflowRunnerScreen(Screen[None]):
             ]
         )
         target = selected_name or self._selected_presets.get(role)
+        if target is None:
+            # A preset which exactly describes the configured role is the
+            # useful default selection. Otherwise the explicit default choice
+            # represents the existing Provider/YAML configuration.
+            target = next(
+                (
+                    name
+                    for name, preset in presets.items()
+                    if self._preset_matches_controls(role, prefix, preset)
+                ),
+                None,
+            )
         if target is not None and target in presets:
             # ``Select.value`` posts its Changed message asynchronously. This
             # is a programmatic refresh, so let the state established below
@@ -370,7 +368,6 @@ class WorkflowRunnerScreen(Screen[None]):
             self._suppressed_preset_changes.add((role, target))
             selector.value = target
             self._selected_presets[role] = target
-            self.query_one(f"#{prefix}-preset-name", Input).value = target
         else:
             selector.value = _MANUAL_PRESET
             self._selected_presets.pop(role, None)
@@ -382,7 +379,6 @@ class WorkflowRunnerScreen(Screen[None]):
             self.notify(f"Unknown {role.value} preset: {name}", severity="warning")
             return
         self._selected_presets[role] = name
-        self.query_one(f"#{prefix}-preset-name", Input).value = name
         repository = self._selected("#repository")
         if repository is None:
             return
@@ -677,6 +673,10 @@ class WorkflowRunnerScreen(Screen[None]):
             self.notify("The execution remains available in execution history.")
         elif event.button.id == "workflow-history":
             self._show_history()
+        elif event.button.id == "workflow-agent-presets":
+            from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
+
+            self.app.push_screen(AgentPresetsScreen(self._selected("#repository")))
         elif event.button.id == "workflow-github-apps":
             from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 
@@ -696,18 +696,6 @@ class WorkflowRunnerScreen(Screen[None]):
             )
         else:
             for role, prefix in self._role_fields():
-                if event.button.id == f"{prefix}-preset-create":
-                    self._create_role_preset(role, prefix)
-                    return
-                if event.button.id == f"{prefix}-preset-update":
-                    self._update_role_preset(role, prefix)
-                    return
-                if event.button.id == f"{prefix}-preset-rename":
-                    self._rename_role_preset(role, prefix)
-                    return
-                if event.button.id == f"{prefix}-preset-delete":
-                    self._delete_role_preset(role, prefix)
-                    return
                 if event.button.id == f"{prefix}-configure":
                     config = self.query_one(f"#{prefix}-config", Vertical)
                     config.display = not config.display
@@ -725,83 +713,6 @@ class WorkflowRunnerScreen(Screen[None]):
                             role, prefix, capabilities.supports_generation
                         )
                     return
-
-    def _preset_name_from_input(self, prefix: str) -> str | None:
-        name = self.query_one(f"#{prefix}-preset-name", Input).value.strip()
-        if not name:
-            self.notify("Enter a preset name first.", severity="warning")
-            return None
-        return name
-
-    def _create_role_preset(self, role: AgentRole, prefix: str) -> None:
-        repository = self._selected("#repository")
-        name = self._preset_name_from_input(prefix)
-        if repository is None or name is None:
-            return
-        try:
-            self.controller.save_agent_preset(
-                repository, role, name, self._preset_from_controls(role, prefix)
-            )
-        except Exception as exc:
-            self.notify(f"Could not create preset: {exc}", severity="error")
-            return
-        self._load_role_presets(role, prefix, name)
-        self.notify(f"Created {role.value} preset {name!r}.")
-
-    def _update_role_preset(self, role: AgentRole, prefix: str) -> None:
-        repository = self._selected("#repository")
-        name = self._selected_presets.get(role)
-        if repository is None:
-            return
-        if name is None:
-            self.notify("Select a preset to update.", severity="warning")
-            return
-        try:
-            self.controller.save_agent_preset(
-                repository,
-                role,
-                name,
-                self._preset_from_controls(role, prefix),
-                overwrite=True,
-            )
-        except Exception as exc:
-            self.notify(f"Could not update preset: {exc}", severity="error")
-            return
-        self._load_role_presets(role, prefix, name)
-        self.notify(f"Updated {role.value} preset {name!r}.")
-
-    def _rename_role_preset(self, role: AgentRole, prefix: str) -> None:
-        repository = self._selected("#repository")
-        old_name = self._selected_presets.get(role)
-        new_name = self._preset_name_from_input(prefix)
-        if repository is None or new_name is None:
-            return
-        if old_name is None:
-            self.notify("Select a preset to rename.", severity="warning")
-            return
-        try:
-            self.controller.rename_agent_preset(repository, role, old_name, new_name)
-        except Exception as exc:
-            self.notify(f"Could not rename preset: {exc}", severity="error")
-            return
-        self._load_role_presets(role, prefix, new_name)
-        self.notify(f"Renamed {role.value} preset to {new_name!r}.")
-
-    def _delete_role_preset(self, role: AgentRole, prefix: str) -> None:
-        repository = self._selected("#repository")
-        name = self._selected_presets.get(role)
-        if repository is None:
-            return
-        if name is None:
-            self.notify("Select a preset to delete.", severity="warning")
-            return
-        try:
-            self.controller.delete_agent_preset(repository, role, name)
-        except Exception as exc:
-            self.notify(f"Could not delete preset: {exc}", severity="error")
-            return
-        self._load_role_presets(role, prefix)
-        self.notify(f"Deleted {role.value} preset {name!r}.")
 
     def _show_history(self) -> None:
         from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen

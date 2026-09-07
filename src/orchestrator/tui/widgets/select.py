@@ -240,7 +240,17 @@ class RepositorySelect(OrchestratorSelect[str]):
         self._setup_variables_for_options(options)
         self._setup_options_renderables()
         self._init_selected_option(value)
+        # A Select mounted without options first publishes its blank value.
+        # Restore the configured selection after that initial mount work has
+        # completed, otherwise a delayed blank update can win the race.
+        self.call_later(self._restore_selection, value)
         return value
+
+    def _restore_selection(self, value: str) -> None:
+        """Reapply a valid configured repository after initial mount events."""
+
+        if value in self._legal_values and self.value != value:
+            self.value = value
 
 
 def is_orchestrator_select_widget(widget: Widget) -> bool:
