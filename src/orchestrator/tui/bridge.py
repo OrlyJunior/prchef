@@ -21,6 +21,12 @@ from orchestrator.models.workflow_event import WorkflowEventListener
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.repositories.workflow_repository import WorkflowRepository
+from orchestrator.services.project_context import (
+    IMPLEMENTER_INSTRUCTIONS_FILE,
+    REVIEWER_INSTRUCTIONS_FILE,
+    load_implementer_instructions,
+    load_reviewer_instructions,
+)
 from orchestrator.services.task_provider import TaskProvider
 from orchestrator.services.workflow_service import WorkflowService
 
@@ -112,6 +118,35 @@ class WorkflowController:
     ) -> tuple[GitHubAppSettings, GitHubAppSettings]:
         github = self.project_config(repository).integrations.github
         return github.implementer_app, github.app
+
+    def agent_instructions(self, repository: str) -> tuple[str | None, str | None]:
+        """Load role-specific local guidance from a configured repository root."""
+        repository_path = self.repository_path(repository)
+        return (
+            load_implementer_instructions(repository_path),
+            load_reviewer_instructions(repository_path),
+        )
+
+    def save_agent_instructions(self, repository: str, role: AgentRole, content: str) -> Path:
+        """Save one role's local instructions without changing Git state."""
+        filename = {
+            AgentRole.IMPLEMENTER: IMPLEMENTER_INSTRUCTIONS_FILE,
+            AgentRole.REVIEWER: REVIEWER_INSTRUCTIONS_FILE,
+        }.get(role)
+        if filename is None:
+            raise ValueError(
+                "Agent instructions are only supported for implementer and reviewer"
+            )
+        path = self.repository_path(repository) / filename
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def repository_path(self, repository: str) -> Path:
+        """Resolve a registered repository key to its configured root."""
+        for configured in self.repositories():
+            if configured.key == repository:
+                return configured.path
+        raise ValueError(f"Unknown configured repository: {repository}")
 
     def save_github_app_settings(
         self,

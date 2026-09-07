@@ -12,7 +12,10 @@ from orchestrator.models.validation_result import ValidationResult
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.runtime_logging import format_command, redact_text
 from orchestrator.services.exceptions import StructuredOutputError
-from orchestrator.services.project_context import project_context_prompt
+from orchestrator.services.project_context import (
+    implementer_instructions_prompt,
+    project_context_prompt,
+)
 from orchestrator.services.structured_output import parse_json_object
 
 _CORRECTION_OUTPUT_LIMIT = 4_000
@@ -29,14 +32,17 @@ class ImplementationService:
         task: DevelopmentTask,
         spec: RepositorySpec,
         repository_path: Path,
+        *,
+        instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
+        context = self._prompt_context(repository_path, instructions_repository_path)
         prompt = f"""ORIGINAL TASK:
 {task.as_original_prompt()}
 
 REPOSITORY SPEC:
 {spec.as_prompt_context()}
 
-{project_context_prompt(repository_path)}Keep PROJECT.md accurate when this task meaningfully
+{context}Keep PROJECT.md accurate when this task meaningfully
 changes durable project knowledge:
 architecture, workflows, domain behavior, invariants, configuration, persistence, integrations,
 or important design decisions. Treat any necessary PROJECT.md update as part of the normal diff.
@@ -51,16 +57,23 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
 """
         return self._run_prompt(prompt, repository_path)
 
-    def implement_prompt(self, prompt: str, repository_path: Path) -> ImplementationResult:
+    def implement_prompt(
+        self,
+        prompt: str,
+        repository_path: Path,
+        *,
+        instructions_repository_path: Path | None = None,
+    ) -> ImplementationResult:
         """Run explicit implementation input while retaining the safety contract."""
         if not prompt.strip():
             raise ValueError("Implementation prompt must not be empty")
+        context = self._prompt_context(repository_path, instructions_repository_path)
         safe_prompt = f"""EXPLICIT IMPLEMENTATION INPUT:
 {prompt}
 
 STRICT SAFETY RULES:
 Implement only the requested input in the configured workspace.
-{project_context_prompt(repository_path)}Keep PROJECT.md accurate when the requested change
+{context}Keep PROJECT.md accurate when the requested change
 meaningfully changes durable project knowledge; include any needed update in the normal diff. Do
 not update it for trivial details, and treat the repository as authoritative if it conflicts with
 PROJECT.md.
@@ -74,9 +87,12 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         spec: RepositorySpec,
         validation: ValidationResult,
         repository_path: Path,
+        *,
+        instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
         """Ask the implementer to repair the existing workspace after validation failed."""
         failures = self._render_validation_failures(validation)
+        context = self._prompt_context(repository_path, instructions_repository_path)
         prompt = f"""ORIGINAL TASK:
 {task.as_original_prompt()}
 
@@ -86,7 +102,7 @@ REPOSITORY SPEC:
 VALIDATION FAILURES FROM THE CURRENT IMPLEMENTATION:
 {failures}
 
-{project_context_prompt(repository_path)}Keep PROJECT.md accurate if correcting these failures also
+{context}Keep PROJECT.md accurate if correcting these failures also
 changes durable project knowledge.
 Do not update it for trivial details; current repository behavior is authoritative.
 
@@ -102,6 +118,8 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         spec: RepositorySpec,
         review: CodeReview,
         repository_path: Path,
+        *,
+        instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
         """Ask the implementer to address a review in the existing workspace."""
         feedback = json.dumps(
@@ -114,6 +132,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
             ensure_ascii=False,
             indent=2,
         )
+        context = self._prompt_context(repository_path, instructions_repository_path)
         prompt = f"""ORIGINAL TASK:
 {task.as_original_prompt()}
 
@@ -123,7 +142,7 @@ REPOSITORY SPEC:
 REVIEWER CHANGE REQUESTS FOR THE CURRENT IMPLEMENTATION:
 {feedback}
 
-{project_context_prompt(repository_path)}Keep PROJECT.md accurate if addressing these findings also
+{context}Keep PROJECT.md accurate if addressing these findings also
 changes durable project knowledge.
 Do not update it for trivial details; current repository behavior is authoritative.
 
@@ -141,6 +160,8 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         suggestions: list[str],
         repository_path: Path,
         pull_request: PullRequest,
+        *,
+        instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
         """Offer approved-review suggestions as one optional, scoped polish pass."""
         feedback = json.dumps(suggestions, ensure_ascii=False, indent=2)
@@ -154,6 +175,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
             ensure_ascii=False,
             indent=2,
         )
+        context = self._prompt_context(repository_path, instructions_repository_path)
         prompt = f"""ORIGINAL TASK:
 {task.as_original_prompt()}
 
@@ -166,7 +188,7 @@ CURRENT PULL REQUEST:
 NON-BLOCKING REVIEW SUGGESTIONS:
 {feedback}
 
-{project_context_prompt(repository_path)}The review is already APPROVED. Evaluate every suggestion
+{context}The review is already APPROVED. Evaluate every suggestion
 against the current implementation in this workspace, but apply only small, safe, clearly
 actionable improvements that remain within the original task
 scope. Decline or skip any suggestion that is outside the original task scope, disproportionately
@@ -220,6 +242,15 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
                 result.success = False
                 result.error_message = "Implementation provider completed without changing files"
         return result
+
+    @staticmethod
+    def _prompt_context(
+        repository_path: Path, instructions_repository_path: Path | None
+    ) -> str:
+        return project_context_prompt(repository_path) + implementer_instructions_prompt(
+            instructions_repository_path or repository_path,
+            repository_path,
+        )
 
     @staticmethod
     def _render_validation_failures(validation: ValidationResult) -> str:

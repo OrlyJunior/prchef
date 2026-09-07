@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
-from textual.widgets import Button, Input, Select, Static
+from textual.widgets import Button, Input, Select, Static, TextArea
 
 from orchestrator.config.project_config import (
     ConfiguredRepository,
@@ -22,6 +22,7 @@ from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.tui.app import OrchestratorApp
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
+from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
 from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
 from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
@@ -728,6 +729,54 @@ def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path
             await pilot.press("enter")
             assert "Saved App references" in str(
                 application.screen.query_one("#github-app-status").renderable
+            )
+
+    asyncio.run(drive())
+
+
+def test_tui_creates_updates_and_switches_agent_instruction_files(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    other_path = tmp_path / "other"
+    other_path.mkdir()
+    controller.repositories = lambda: [  # type: ignore[method-assign]
+        ConfiguredRepository("example", tmp_path),
+        ConfiguredRepository("other", other_path),
+    ]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("i")
+            assert isinstance(application.screen, AgentInstructionsScreen)
+            screen = application.screen
+            repository = screen.query_one("#agent-instructions-repository", OrchestratorSelect)
+            repository.value = "example"
+            await pilot.pause()
+            assert "No IMPLEMENTER.md yet" in str(
+                screen.query_one("#implementer-instructions-status", Static).renderable
+            )
+            assert not (tmp_path / "IMPLEMENTER.md").exists()
+            assert not (tmp_path / "REVIEWER.md").exists()
+
+            screen.query_one("#implementer-instructions", TextArea).text = "Use focused tests."
+            screen.query_one("#save-implementer-instructions", Button).press()
+            await pilot.pause()
+            assert (tmp_path / "IMPLEMENTER.md").read_text(encoding="utf-8") == "Use focused tests."
+            assert not (tmp_path / "REVIEWER.md").exists()
+
+            screen.query_one("#reviewer-instructions", TextArea).text = "Check retries."
+            screen.query_one("#save-reviewer-instructions", Button).press()
+            await pilot.pause()
+            assert (tmp_path / "REVIEWER.md").read_text(encoding="utf-8") == "Check retries."
+            assert "Git was not changed" in str(
+                screen.query_one("#agent-instructions-status", Static).renderable
+            )
+
+            repository.value = "other"
+            await pilot.pause()
+            assert screen.query_one("#implementer-instructions", TextArea).text == ""
+            assert "No REVIEWER.md yet" in str(
+                screen.query_one("#reviewer-instructions-status", Static).renderable
             )
 
     asyncio.run(drive())
