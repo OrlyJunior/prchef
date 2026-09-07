@@ -295,8 +295,8 @@ Task providers suportados:
 - `trello`: usa `ORCHESTRATOR_TRELLO_API_KEY` e `ORCHESTRATOR_TRELLO_TOKEN`.
 - `github`: executa `gh issue view` com a autenticação já ativa no GitHub CLI.
 
-Agent providers sao instancias nomeadas em `providers`, dos tipos `jules`, `codex-cli` e
-`gemini-vertex`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
+Agent providers sao instancias nomeadas em `providers`, dos tipos `jules`, `codex-cli`,
+`gemini-vertex` e `litellm`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
 do workflow a essas instancias. Mais de um papel pode reutilizar a mesma instancia, ou cada papel
 pode apontar para uma configuracao diferente do mesmo tipo. Opcoes de runtime/modelo permanecem
 dentro da instancia do provider.
@@ -321,6 +321,15 @@ agents:
   reviewer:
     provider: vertex-gemini
 ```
+
+`litellm` e um backend API generico opcional (instale com
+`pip install autonomous-dev-orchestrator[litellm]`) para identificadores de modelo livres, incluindo
+provedores cloud e endpoints locais/self-hosted compativeis, como Ollama, vLLM e servidores
+OpenAI-compativeis. Configure `api_key_env` somente com o nome da variavel de ambiente; omita-o
+para endpoints sem autenticacao. `temperature`, `max_output_tokens` e `generation` ficam isolados
+na configuracao do provider. Como uma API de modelo simples nao fornece automaticamente shell ou
+edicao de arquivos, um provider LiteLLM pode planejar ou revisar, mas nao substitui as ferramentas
+de coding agent do `codex-cli` para implementacao local.
 
 Configuracoes legadas com `roles.spec|implementation|review` e
 `integrations.jules|codex` continuam aceitas e sao normalizadas para os providers `jules` e

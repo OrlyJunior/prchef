@@ -377,9 +377,64 @@ class GeminiVertexProviderSettings(BaseModel):
     generation: GeminiGenerationSettings = Field(default_factory=GeminiGenerationSettings)
 
 
+class LiteLLMProviderSettings(BaseModel):
+    """Configuration for LiteLLM's generic API-model execution backend.
+
+    The API key is deliberately an environment-variable *reference* only. It
+    is resolved by the provider at execution time and is never retained here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["litellm"] = "litellm"
+    model: str = Field(min_length=1)
+    api_key_env: str | None = None
+    api_base: str | None = None
+    timeout_seconds: float | None = Field(default=None, gt=0)
+    temperature: float | None = None
+    max_output_tokens: int | None = Field(default=None, gt=0)
+    generation: Mapping[str, Any] = Field(default_factory=dict)
+
+    @field_validator("model", "api_key_env", "api_base")
+    @classmethod
+    def validate_non_empty_string(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"LiteLLM provider {info.field_name} must be a non-empty string")
+        return normalized
+
+    @field_validator("generation")
+    @classmethod
+    def validate_generation(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        reserved = {
+            "api_key",
+            "api_base",
+            "messages",
+            "model",
+            "response_format",
+            "temperature",
+            "timeout",
+            "max_tokens",
+        }
+        conflicting = sorted(str(key) for key in value if str(key).casefold() in reserved)
+        if conflicting:
+            raise ValueError(
+                "LiteLLM generation options cannot override provider settings: "
+                f"{', '.join(conflicting)}"
+            )
+        return value
+
+
 def _validate_provider_settings(
     values: Mapping[str, Any], provider_name: str
-) -> JulesProviderSettings | CodexCliProviderSettings | GeminiVertexProviderSettings:
+) -> (
+    JulesProviderSettings
+    | CodexCliProviderSettings
+    | GeminiVertexProviderSettings
+    | LiteLLMProviderSettings
+):
     """Validate a runtime-adjusted provider through its existing schema."""
 
     provider_type = values.get("type")
@@ -390,6 +445,8 @@ def _validate_provider_settings(
             return CodexCliProviderSettings.model_validate(values)
         if provider_type == "gemini-vertex":
             return GeminiVertexProviderSettings.model_validate(values)
+        if provider_type == "litellm":
+            return LiteLLMProviderSettings.model_validate(values)
     except ValueError as exc:
         raise ConfigurationError(
             f"Invalid runtime configuration for agent provider {provider_name!r}: {exc}"
@@ -545,6 +602,8 @@ class ProjectConfig(BaseModel):
             )
         if settings.type == "gemini-vertex":
             return ProviderRuntimeCapabilities(supports_model=True, supports_generation=True)
+        if settings.type == "litellm":
+            return ProviderRuntimeCapabilities(supports_model=True, supports_generation=True)
         return ProviderRuntimeCapabilities()
 
     def provider_runtime_values(self, provider_name: str) -> dict[str, Any]:
@@ -565,6 +624,14 @@ class ProjectConfig(BaseModel):
                 "model": vertex.model,
                 "generation": vertex.generation.model_dump(),
             }
+        if settings.type == "litellm":
+            litellm = LiteLLMProviderSettings.model_validate(settings.model_dump())
+            generation = dict(litellm.generation)
+            if litellm.temperature is not None:
+                generation["temperature"] = litellm.temperature
+            if litellm.max_output_tokens is not None:
+                generation["max_output_tokens"] = litellm.max_output_tokens
+            return {"model": litellm.model, "generation": generation}
         return {}
 
     def with_agent_runtime_overrides(
@@ -612,7 +679,18 @@ class ProjectConfig(BaseModel):
             for key, value in overrides.items():
                 if key == "generation":
                     if not isinstance(value, Mapping):
-                        raise ConfigurationError("Gemini generation options must be a mapping")
+                        raise ConfigurationError("Provider generation options must be a mapping")
+                    if base.type == "litellm":
+                        generation_overrides = dict(value)
+                        for setting_name in ("temperature", "max_output_tokens"):
+                            if setting_name in generation_overrides:
+                                values[setting_name] = generation_overrides.pop(setting_name)
+                        generation = values.get("generation", {})
+                        if not isinstance(generation, dict):
+                            generation = {}
+                        generation.update(generation_overrides)
+                        values["generation"] = generation
+                        continue
                     generation = values.get("generation", {})
                     if not isinstance(generation, dict):
                         generation = {}

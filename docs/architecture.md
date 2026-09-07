@@ -20,7 +20,9 @@
 5. O provider associado a `agents.planner` recebe um `AgentRequest`. Com Jules, o adaptador cria
    uma sessao remota read-only com `AUTOMATION_MODE_UNSPECIFIED`; seu ID e URL sao persistidos antes
    do polling. Com `gemini-vertex`, o adaptador faz uma chamada Vertex AI request/response usando
-   ADC, sem acesso a filesystem, shell ou ferramentas locais. A spec parte da branch base e o review
+   ADC, sem acesso a filesystem, shell ou ferramentas locais. Com `litellm`, o adaptador faz uma
+   chamada API-modelo genÃ©rica (cloud ou endpoint local/self-hosted), tambÃ©m sem acesso implÃ­cito a
+   filesystem, shell ou ferramentas locais. A spec parte da branch base e o review
    parte da feature branch.
 6. Ambiguidade bloqueante encerra em `NEEDS_HUMAN`.
 7. Git cria uma branch nova a partir da branch base, recusando qualquer branch protegida.
@@ -50,7 +52,7 @@ Spec/Implementation/Review service
 AgentProvider.execute(AgentRequest) -> AgentResult
               |
               v
-JulesClient (REST/polling), CodexClient (CLI/subprocesso) ou Gemini Vertex (SDK/Vertex AI)
+JulesClient (REST/polling), CodexClient (CLI/subprocesso), Gemini Vertex ou LiteLLM (SDK/API)
 ```
 
 O papel define as instrucoes e a expectativa de output estruturado. O provider resolve o mecanismo
@@ -64,6 +66,11 @@ selecionam modelo, esforco de raciocinio ou fallback de runtime.
 O adapter `gemini-vertex` traduz `StructuredOutputExpectation` para `application/json` e
 `response_json_schema` nativos do `google-genai`. Tipos e excecoes do SDK permanecem dentro do
 adapter; o restante do workflow recebe apenas `AgentResult` e erros neutros de provider.
+
+`litellm` Ã© uma dependÃªncia opcional e uma biblioteca de roteamento/execuÃ§Ã£o, nÃ£o um dono do
+workflow. Seu adaptador traduz o contrato compartilhado para APIs compatÃ­veis, valida JSON
+estruturado e devolve apenas `AgentResult` e erros normalizados. Chaves sÃ£o sempre referÃªncias a
+variÃ¡veis de ambiente na configuraÃ§Ã£o; endpoints locais podem nÃ£o usar chave.
 
 Cada operacao logica cria uma linha em `workflow_steps`. `current_stage` e atualizado antes de
 cada etapa, permitindo que uma V2 selecione um ponto de retomada sem mudar o schema conceitual.

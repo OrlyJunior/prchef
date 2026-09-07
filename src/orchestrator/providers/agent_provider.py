@@ -12,6 +12,17 @@ class AgentNeedsHumanError(RuntimeError):
 class AgentProviderError(RuntimeError):
     """A provider failed without exposing provider-specific SDK exceptions."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str = "unknown",
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.category = category
+        self.retry_after_seconds = retry_after_seconds
+
 
 class AgentProvider(Protocol):
     """Provider-neutral boundary for one agent execution."""
