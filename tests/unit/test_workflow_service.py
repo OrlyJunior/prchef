@@ -421,6 +421,13 @@ def test_approved_review_suggestions_can_be_declined_without_changing_approval(w
     assert len(factory.codex.requests) == 2
     assert "NON-BLOCKING REVIEW SUGGESTIONS" in factory.codex.requests[1].instructions
     assert factory.commands.working_directories == [factory.codex.requests[0].workspace_path]
+    assert factory.github.comment_calls == [
+        {
+            "pr_number": 42,
+            "body": "## Optional polish\n\nThe non-blocking review suggestions were evaluated "
+            "and intentionally skipped.\n\n- No small, safe, in-scope code change was warranted.",
+        }
+    ]
 
 
 def test_applied_polish_is_validated_pushed_to_existing_pr_and_re_reviewed(workflow) -> None:
@@ -439,6 +446,7 @@ def test_applied_polish_is_validated_pushed_to_existing_pr_and_re_reviewed(workf
     assert factory.git.diff_calls == 2
     assert factory.github.create_calls == 1
     assert factory.jules.review_calls == 2
+    assert factory.github.comment_calls == []
 
 
 def test_fresh_approved_review_does_not_trigger_a_second_polish_pass(workflow) -> None:
@@ -490,12 +498,28 @@ def test_changes_requested_after_polish_uses_mandatory_correction_loop(workflow)
 
 
 def test_approved_review_without_suggestions_does_not_enter_polish_stage(workflow) -> None:
-    service, repository, _, _ = workflow
+    service, repository, _, factory = workflow
 
     result = service.run("card-no-polish")
 
     assert result.status is WorkflowStatus.APPROVED
     assert WorkflowStage.POLISH not in repository.stage_changes
+    assert factory.github.comment_calls == []
+
+
+def test_polish_skip_comment_publication_failure_preserves_approval(workflow, caplog) -> None:
+    service, _, _, factory = workflow
+    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.git.changed_files_results = [["src/audit.py"], []]
+    factory.github.comment_error = RuntimeError("GitHub unavailable")
+
+    with caplog.at_level(logging.WARNING):
+        result = service.run("card-polish-comment-failure")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert result.error_message is None
+    assert len(factory.github.comment_calls) == 1
+    assert "Optional polish skip comment publication failed: GitHub unavailable" in caplog.text
 
 
 def test_review_publication_failure_preserves_reviewer_decision(workflow) -> None:

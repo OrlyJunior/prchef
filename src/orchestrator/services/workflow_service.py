@@ -18,6 +18,7 @@ from orchestrator.config.project_config import (
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationCheck, ValidationResult
@@ -292,6 +293,11 @@ class WorkflowService:
                         break
                     if not implementation.changed_files:
                         logger.info("[workflow] Implementer declined optional polish suggestions")
+                        self._publish_polish_skip_comment(
+                            execution_clients=execution_clients,
+                            pull_request_number=pull_request.number,
+                            implementation=implementation,
+                        )
                         break
 
                     polish_validation = self._validate_polish_changes(
@@ -920,6 +926,41 @@ class WorkflowService:
             # Publication is an external side effect. Preserve the reviewer decision and let
             # the terminal workflow status reflect it even when GitHub is unavailable.
             self._repository.record_error(execution_id, message)
+
+    @staticmethod
+    def _format_polish_skip_comment(implementation: ImplementationResult) -> str:
+        """Render a concise, safe explanation for an intentionally skipped polish pass."""
+        lines = [
+            "## Optional polish",
+            "",
+            "The non-blocking review suggestions were evaluated and intentionally skipped.",
+            "",
+        ]
+        if implementation.polish_skip_reasons:
+            lines.extend(f"- {reason}" for reason in implementation.polish_skip_reasons)
+        else:
+            lines.append("- No small, safe, in-scope code change was warranted.")
+        return "\n".join(lines)
+
+    def _publish_polish_skip_comment(
+        self,
+        *,
+        execution_clients: WorkflowClients,
+        pull_request_number: int,
+        implementation: ImplementationResult,
+    ) -> None:
+        try:
+            execution_clients.github.comment_pull_request(
+                pr_number=pull_request_number,
+                body=self._format_polish_skip_comment(implementation),
+            )
+        except Exception as exc:
+            # A skip explanation is audit context, not a new review decision. Keep the existing
+            # approval intact if GitHub is temporarily unavailable.
+            logger.warning(
+                "[github] Optional polish skip comment publication failed: %s",
+                redact_text(str(exc)),
+            )
 
     @staticmethod
     def _branch_name(prefix: str, card_id: str, title: str, execution_id: str) -> str:
