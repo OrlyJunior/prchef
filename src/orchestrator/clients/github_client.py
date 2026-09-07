@@ -302,6 +302,22 @@ class GitHubClient:
             env=self._review_auth_environment(),
         )
 
+    def comment_pull_request(self, pr_number: int, body: str) -> None:
+        """Publish a general pull request comment as the implementer identity."""
+        if pr_number <= 0:
+            raise ValueError("Pull request number must be positive")
+        if not body.strip():
+            raise ValueError("Pull request comment body must be non-empty")
+        logger.info("[github] Publishing pull request comment to #%s", pr_number)
+        self._run(
+            "pr",
+            "comment",
+            str(pr_number),
+            "--body",
+            body,
+            env=self._implementer_auth_environment(),
+        )
+
     def _review_auth_environment(self) -> dict[str, str] | None:
         return self._authentication_environment(self._app_authenticator)
 

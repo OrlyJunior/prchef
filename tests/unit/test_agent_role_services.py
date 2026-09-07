@@ -223,6 +223,52 @@ def test_polish_prompt_offers_non_blocking_suggestions_without_requiring_changes
     assert "Do not commit, push" in prompt
 
 
+def test_polish_skip_reasons_are_parsed_only_from_structured_public_output(
+    tmp_path: Path,
+) -> None:
+    _write_project_context(tmp_path)
+    provider = RecordingProvider(
+        AgentResult(
+            output=json.dumps(
+                {
+                    "skip_reasons": [
+                        {
+                            "suggestions": ["Add a focused regression test"],
+                            "reason": "It would expand the approved scope.",
+                        },
+                        {
+                            "suggestions": ["Consider clearer naming"],
+                            "reason": "The current naming is already clear in this small change.",
+                        },
+                    ]
+                }
+            )
+        )
+    )
+
+    result = ImplementationService(
+        provider, RecordingGit([])  # type: ignore[arg-type]
+    ).run_polish_pass(
+        _task(),
+        _spec(),
+        ["Add a focused regression test", "Consider clearer naming"],
+        tmp_path,
+        PullRequest(
+            number=5,
+            url="https://github.example/pull/5",
+            title="Provider contracts",
+            base_branch="develop",
+            head_branch="feature/provider-contracts",
+        ),
+    )
+
+    assert result.polish_skip_reasons == [
+        "Add a focused regression test — It would expand the approved scope.",
+        "Consider clearer naming — The current naming is already clear in this small change.",
+    ]
+    assert "private reasoning, prompts" in provider.requests[0].instructions
+
+
 def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     _write_project_context(tmp_path)
     provider = RecordingProvider(

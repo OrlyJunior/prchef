@@ -11,7 +11,9 @@ from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationResult
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.runtime_logging import format_command, redact_text
+from orchestrator.services.exceptions import StructuredOutputError
 from orchestrator.services.project_context import project_context_prompt
+from orchestrator.services.structured_output import parse_json_object
 
 _CORRECTION_OUTPUT_LIMIT = 4_000
 
@@ -172,10 +174,26 @@ large, requires an architectural redesign, is unrelated cleanup, or is otherwise
 If none should be applied,
 make no modifications. These suggestions are non-blocking and must never be treated as required.
 
+If you make no modifications, finish with exactly one JSON object in this shape:
+{{
+  "skip_reasons": [
+    {{"suggestions": ["exact suggestion text"], "reason": "brief public-facing reason"}}
+  ]
+}}
+You may group suggestions with the same reason. This will be used only for a short pull request
+comment, so include concise final-facing reasons only. Do not include private reasoning, prompts,
+commands, credentials, provider metadata, or raw tool output. If no concise reason is available,
+return an empty `skip_reasons` list.
+
 Keep PROJECT.md accurate only if an applied change meaningfully changes durable project knowledge.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
-        return self._run_prompt(prompt, repository_path, allow_no_changes=True)
+        result = self._run_prompt(prompt, repository_path, allow_no_changes=True)
+        if result.success and not result.changed_files:
+            result.polish_skip_reasons = self._parse_polish_skip_reasons(
+                result.summary, suggestions
+            )
+        return result
 
     def _run_prompt(
         self, prompt: str, repository_path: Path, *, allow_no_changes: bool = False
@@ -221,3 +239,67 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
                 )
             )
         return "\n\n".join(rendered) or (validation.error_message or "Validation failed")
+
+    @staticmethod
+    def _parse_polish_skip_reasons(output: str, suggestions: list[str]) -> list[str]:
+        """Extract only explicitly structured, public-facing optional-polish reasons.
+
+        Free-form provider output can include implementation detail or private reasoning, so it is
+        deliberately never republished. A malformed or absent structured response falls back to a
+        workflow-owned grouped explanation.
+        """
+        try:
+            data = parse_json_object(output, "Optional polish output")
+        except StructuredOutputError:
+            return []
+
+        entries = data.get("skip_reasons")
+        if not isinstance(entries, list):
+            return []
+        known_suggestions = set(suggestions)
+        reasons: list[str] = []
+        covered_suggestions: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            grouped_suggestions = entry.get("suggestions")
+            reason = entry.get("reason")
+            if (
+                not isinstance(grouped_suggestions, list)
+                or not grouped_suggestions
+                or not all(
+                    isinstance(suggestion, str) and suggestion in known_suggestions
+                    for suggestion in grouped_suggestions
+                )
+                or not isinstance(reason, str)
+            ):
+                continue
+            public_reason = ImplementationService._public_polish_reason(reason)
+            if not public_reason:
+                continue
+            rendered_suggestions = "; ".join(
+                ImplementationService._public_polish_suggestion(suggestion)
+                for suggestion in grouped_suggestions
+            )
+            reasons.append(f"{rendered_suggestions} — {public_reason}")
+            covered_suggestions.update(grouped_suggestions)
+        # If a provider omitted a suggestion, use the workflow-owned grouped fallback instead of
+        # presenting an incomplete audit record. Keep successful comments intentionally brief.
+        return reasons if covered_suggestions == known_suggestions and len(reasons) <= 6 else []
+
+    @staticmethod
+    def _public_polish_reason(reason: str) -> str:
+        """Bound a model-provided reason before it can become a public PR comment."""
+        compact = redact_text(" ".join(reason.split()))
+        if not compact:
+            return ""
+        if len(compact) > 240:
+            compact = f"{compact[:237].rstrip()}..."
+        return compact
+
+    @staticmethod
+    def _public_polish_suggestion(suggestion: str) -> str:
+        compact = " ".join(suggestion.split())
+        if len(compact) > 160:
+            return f"{compact[:157].rstrip()}..."
+        return compact
