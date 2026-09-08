@@ -14,8 +14,10 @@ from textual.events import DescendantFocus
 from textual.screen import Screen
 from textual.widgets import Button, Static, TextArea
 
+from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_step import WorkflowStep
+from orchestrator.runtime_logging import redact_payload
 from orchestrator.tui.bridge import WorkflowController
 
 if TYPE_CHECKING:
@@ -59,12 +61,13 @@ class ExecutionDetailScreen(Screen[None]):
     def on_mount(self) -> None:
         try:
             execution, steps = self.controller.execution_detail(self.execution_id)
+            diagnostics = self.controller.execution_diagnostics(self.execution_id)
         except Exception as exc:
             self.query_one("#execution-content", Static).update(
                 f"Could not load execution {self.execution_id}: {exc}"
             )
             return
-        self._render_execution(execution, steps)
+        self._render_execution(execution, steps, diagnostics)
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         self.query_one("#execution-detail", VerticalScroll).scroll_to_widget(
@@ -94,14 +97,20 @@ class ExecutionDetailScreen(Screen[None]):
         try:
             execution = self.controller.respond_and_resume(self.execution_id, response)
             _, steps = self.controller.execution_detail(self.execution_id)
+            diagnostics = self.controller.execution_diagnostics(self.execution_id)
         except Exception as exc:
             self.app.call_from_thread(
                 self.notify, f"Could not resume workflow: {exc}", severity="error"
             )
             return
-        self.app.call_from_thread(self._render_execution, execution, steps)
+        self.app.call_from_thread(self._render_execution, execution, steps, diagnostics)
 
-    def _render_execution(self, execution: WorkflowExecution, steps: list[WorkflowStep]) -> None:
+    def _render_execution(
+        self,
+        execution: WorkflowExecution,
+        steps: list[WorkflowStep],
+        diagnostics: list[ExecutionDiagnostic],
+    ) -> None:
         self._links = {
             "open-task": execution.task_url,
             "open-pr": execution.pr_url or "",
@@ -140,9 +149,10 @@ class ExecutionDetailScreen(Screen[None]):
         details = {
             "execution": asdict(execution),
             "steps": [asdict(step) for step in steps],
+            "detailed_logs": [asdict(item) for item in diagnostics],
             "links": {
                 key.removeprefix("open-"): value for key, value in self._links.items() if value
             },
         }
-        rendered = json.dumps(details, ensure_ascii=False, indent=2, default=str)
+        rendered = json.dumps(redact_payload(details), ensure_ascii=False, indent=2, default=str)
         self.query_one("#execution-content", Static).update(rendered)

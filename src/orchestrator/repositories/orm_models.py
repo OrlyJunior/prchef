@@ -47,6 +47,11 @@ class WorkflowExecutionEntity(Base):
         cascade="all, delete-orphan",
         order_by="HumanInteractionEntity.id",
     )
+    diagnostics: Mapped[list["ExecutionDiagnosticEntity"]] = relationship(
+        back_populates="execution",
+        cascade="all, delete-orphan",
+        order_by="ExecutionDiagnosticEntity.id",
+    )
 
     __table_args__ = (
         Index("ix_workflow_executions_task_source_id", "task_source", "task_id"),
@@ -99,4 +104,25 @@ class HumanInteractionEntity(Base):
     __table_args__ = (
         Index("ix_human_interactions_execution_id", "workflow_execution_id"),
         Index("ix_human_interactions_response", "workflow_execution_id", "response"),
+    )
+
+
+class ExecutionDiagnosticEntity(Base):
+    __tablename__ = "execution_diagnostics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workflow_execution_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflow_executions.id", ondelete="CASCADE"), nullable=False
+    )
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    stage: Mapped[str | None] = mapped_column(String(32))
+    role: Mapped[str | None] = mapped_column(String(32))
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    execution: Mapped[WorkflowExecutionEntity] = relationship(back_populates="diagnostics")
+
+    __table_args__ = (
+        Index("ix_execution_diagnostics_execution_id", "workflow_execution_id", "id"),
+        Index("ix_execution_diagnostics_category", "workflow_execution_id", "category"),
     )

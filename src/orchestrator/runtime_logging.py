@@ -21,6 +21,13 @@ _SENSITIVE_HEADER_VALUE = re.compile(
 )
 _BEARER = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _GITHUB_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
+_PRIVATE_KEY = re.compile(
+    r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----",
+    re.DOTALL,
+)
+_SENSITIVE_FIELD_NAME = re.compile(
+    r"(?i)(?:^|[_-])(?:api[_-]?key|token|secret|password|authorization|private[_-]?key)(?:$|[_-])"
+)
 
 
 class UtcTimestampFormatter(logging.Formatter):
@@ -50,10 +57,31 @@ def redact_text(value: str) -> str:
     # Redact bearer values first.  Otherwise an ``Authorization: Bearer ...``
     # value would have only ``Bearer`` consumed by _SENSITIVE_VALUE, leaving
     # the credential itself in the log message.
-    redacted = _BEARER.sub("Bearer [REDACTED]", value)
+    redacted = _PRIVATE_KEY.sub("[REDACTED PRIVATE KEY]", value)
+    redacted = _BEARER.sub("Bearer [REDACTED]", redacted)
     redacted = _SENSITIVE_VALUE.sub(r"\1=[REDACTED]", redacted)
     redacted = _SENSITIVE_HEADER_VALUE.sub(r"\1=[REDACTED]", redacted)
     return _GITHUB_TOKEN.sub("[REDACTED]", redacted)
+
+
+def redact_payload(value: object) -> object:
+    """Return a JSON-safe copy with credentials removed at every nesting level."""
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            normalized = str(key)
+            if _SENSITIVE_FIELD_NAME.search(normalized):
+                result[normalized] = "[REDACTED]"
+            else:
+                result[normalized] = redact_payload(item)
+        return result
+    if isinstance(value, (list, tuple, set)):
+        return [redact_payload(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_text(str(value))
 
 
 def summarize_text(value: str | None, *, limit: int = 240) -> str:

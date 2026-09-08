@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import unicodedata
@@ -8,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from orchestrator.clients.exceptions import GitHubClientError
 from orchestrator.clients.factory import ClientFactory, WorkflowClients
@@ -19,6 +21,7 @@ from orchestrator.config.project_config import (
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
 from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
@@ -35,9 +38,15 @@ from orchestrator.models.workflow_status import (
     WorkflowStage,
     WorkflowStatus,
 )
-from orchestrator.providers.agent_provider import AgentNeedsHumanError
+from orchestrator.providers.agent_provider import AgentNeedsHumanError, AgentProvider
+from orchestrator.providers.diagnostic_provider import DiagnosticAgentProvider
 from orchestrator.repositories.workflow_repository import WorkflowRepository
-from orchestrator.runtime_logging import log_review_summary, log_spec_summary, redact_text
+from orchestrator.runtime_logging import (
+    log_review_summary,
+    log_spec_summary,
+    redact_payload,
+    redact_text,
+)
 from orchestrator.services.exceptions import WorkflowError
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.notifications import NotificationService
@@ -89,6 +98,7 @@ class WorkflowService:
         self._verbose = verbose
         self._notification_service = notification_service or NotificationService()
         self._event_listener: WorkflowEventListener | None = None
+        self._active_stage: WorkflowStage | None = None
 
     def run(
         self,
@@ -156,7 +166,14 @@ class WorkflowService:
                 repository_slug = clients.git.github_repository()
 
             with self._step(execution.id, WorkflowStage.GENERATE_SPEC):
-                spec = SpecService(clients.agent(AgentRole.PLANNER)).generate(
+                spec = SpecService(
+                    self._diagnostic_agent(
+                        clients.agent(AgentRole.PLANNER),
+                        config,
+                        AgentRole.PLANNER,
+                        execution.id,
+                    )
+                ).generate(
                     task,
                     config.path,
                     repository_slug,
@@ -197,7 +214,13 @@ class WorkflowService:
             execution_clients = clients.at_path(workspace_path)
 
             implementation_service = ImplementationService(
-                execution_clients.agent(AgentRole.IMPLEMENTER), execution_clients.git
+                self._diagnostic_agent(
+                    execution_clients.agent(AgentRole.IMPLEMENTER),
+                    config,
+                    AgentRole.IMPLEMENTER,
+                    execution.id,
+                ),
+                execution_clients.git,
             )
             with self._step(execution.id, WorkflowStage.IMPLEMENT):
                 implementation = implementation_service.implement(
@@ -255,7 +278,14 @@ class WorkflowService:
             polish_attempted = False
             while True:
                 with self._step(execution.id, WorkflowStage.REVIEW):
-                    review = ReviewService(clients.agent(AgentRole.REVIEWER)).review(
+                    review = ReviewService(
+                        self._diagnostic_agent(
+                            clients.agent(AgentRole.REVIEWER),
+                            config,
+                            AgentRole.REVIEWER,
+                            execution.id,
+                        )
+                    ).review(
                         task=task,
                         spec=spec,
                         pull_request=pull_request,
@@ -500,7 +530,11 @@ class WorkflowService:
     ) -> WorkflowExecution:
         """Repeat only planning, then continue through a newly safe workspace."""
         with self._step(execution.id, WorkflowStage.GENERATE_SPEC):
-            spec = SpecService(clients.agent(AgentRole.PLANNER)).generate(
+            spec = SpecService(
+                self._diagnostic_agent(
+                    clients.agent(AgentRole.PLANNER), config, AgentRole.PLANNER, execution.id
+                )
+            ).generate(
                 task,
                 config.path,
                 repository_slug,
@@ -564,7 +598,11 @@ class WorkflowService:
         validation = self._validation_from_snapshot(execution.validation_snapshot)
         execution_clients = clients.at_path(workspace_path)
         with self._step(execution.id, WorkflowStage.REVIEW):
-            review = ReviewService(clients.agent(AgentRole.REVIEWER)).review(
+            review = ReviewService(
+                self._diagnostic_agent(
+                    clients.agent(AgentRole.REVIEWER), config, AgentRole.REVIEWER, execution.id
+                )
+            ).review(
                 task=task,
                 spec=spec,
                 pull_request=pull_request,
@@ -612,7 +650,13 @@ class WorkflowService:
         """Continue a resumed planning execution without creating another execution."""
         execution_clients = clients.at_path(workspace_path)
         implementation_service = ImplementationService(
-            execution_clients.agent(AgentRole.IMPLEMENTER), execution_clients.git
+            self._diagnostic_agent(
+                execution_clients.agent(AgentRole.IMPLEMENTER),
+                config,
+                AgentRole.IMPLEMENTER,
+                execution_id,
+            ),
+            execution_clients.git,
         )
         try:
             with self._step(execution_id, WorkflowStage.IMPLEMENT):
@@ -665,7 +709,11 @@ class WorkflowService:
                     workspace_path=workspace_path,
                 )
             with self._step(execution_id, WorkflowStage.REVIEW):
-                review = ReviewService(clients.agent(AgentRole.REVIEWER)).review(
+                review = ReviewService(
+                    self._diagnostic_agent(
+                        clients.agent(AgentRole.REVIEWER), config, AgentRole.REVIEWER, execution_id
+                    )
+                ).review(
                     task=task,
                     spec=spec,
                     pull_request=pull_request,
@@ -794,6 +842,8 @@ class WorkflowService:
     @contextmanager
     def _step(self, execution_id: str, stage: WorkflowStage) -> Iterator[None]:
         label = _STAGE_LABELS.get(stage, stage.value.casefold().replace("_", " "))
+        previous_stage = self._active_stage
+        self._active_stage = stage
         logger.info("[workflow] Entering %s", label)
         self._repository.update_stage(execution_id, stage)
         step_id = self._repository.start_step(execution_id, stage)
@@ -807,6 +857,16 @@ class WorkflowService:
             yield
         except Exception as exc:
             self._repository.finish_step(step_id, StepStatus.FAILED, str(exc))
+            self._record_diagnostic(
+                execution_id,
+                DiagnosticCategory.ERROR,
+                {
+                    "operation": "workflow_stage",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+                stage=stage,
+            )
             self._emit(
                 execution_id,
                 WorkflowEventKind.STAGE_FAILED,
@@ -825,6 +885,80 @@ class WorkflowService:
                 step_status=StepStatus.SUCCEEDED,
             )
             logger.info("[workflow] Completed %s", label)
+        finally:
+            self._active_stage = previous_stage
+
+    def _diagnostic_agent(
+        self,
+        provider: AgentProvider,
+        config: ProjectConfig,
+        role: AgentRole,
+        execution_id: str,
+    ) -> DiagnosticAgentProvider:
+        configured = getattr(config.agents, role.value).provider
+        provider_settings = config.providers[configured].model_dump()
+        return DiagnosticAgentProvider(
+            provider,
+            role=role,
+            provider_config={"name": configured, **provider_settings},
+            record=lambda category, event_role, payload: self._record_diagnostic(
+                execution_id, category, payload, stage=self._active_stage, role=event_role
+            ),
+        )
+
+    def _record_diagnostic(
+        self,
+        execution_id: str,
+        category: DiagnosticCategory,
+        payload: dict[str, Any],
+        *,
+        stage: WorkflowStage | None = None,
+        role: AgentRole | None = None,
+        notify: bool = True,
+    ) -> None:
+        """Persist first, then notify observers. Diagnostics cannot affect a run."""
+        sanitized = redact_payload(payload)
+        if not isinstance(sanitized, dict):
+            sanitized = {"value": sanitized}
+        diagnostic = ExecutionDiagnostic(
+            execution_id=execution_id,
+            category=category,
+            payload=sanitized,
+            stage=stage,
+            role=role,
+        )
+        try:
+            self._repository.record_diagnostic(diagnostic)
+        except AttributeError:
+            # Lightweight repository fakes used by integrations predating the
+            # diagnostics table retain their existing workflow behavior.
+            pass
+        except Exception:
+            logger.warning("[workflow] Could not persist diagnostic event", exc_info=True)
+        if self._verbose:
+            logger.debug(
+                "[diagnostic] %s",
+                json.dumps(
+                    {
+                        "category": category.value,
+                        "stage": stage.value if stage else None,
+                        "role": role.value if role else None,
+                        "payload": sanitized,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
+        if notify:
+            self._notify_event(
+                WorkflowEvent(
+                    execution_id=execution_id,
+                    kind=WorkflowEventKind.DIAGNOSTIC,
+                    stage=stage,
+                    category=category.value,
+                    payload=sanitized,
+                )
+            )
 
     def _emit(
         self,
@@ -836,20 +970,35 @@ class WorkflowService:
         step_status: StepStatus | None = None,
         message: str | None = None,
     ) -> None:
+        self._record_diagnostic(
+            execution_id,
+            DiagnosticCategory.WORKFLOW_EVENT,
+            {
+                "kind": kind.value,
+                "status": status.value if status else None,
+                "step_status": step_status.value if step_status else None,
+                "message": message,
+            },
+            stage=stage,
+            notify=False,
+        )
+        self._notify_event(
+            WorkflowEvent(
+                execution_id=execution_id,
+                kind=kind,
+                stage=stage,
+                status=status,
+                step_status=step_status,
+                message=message,
+            )
+        )
+
+    def _notify_event(self, event: WorkflowEvent) -> None:
         listener = self._event_listener
         if listener is None:
             return
         try:
-            listener(
-                WorkflowEvent(
-                    execution_id=execution_id,
-                    kind=kind,
-                    stage=stage,
-                    status=status,
-                    step_status=step_status,
-                    message=message,
-                )
-            )
+            listener(event)
         except Exception:
             # A presentation observer is never allowed to change workflow
             # semantics or make a successfully persisted transition fail.
@@ -874,9 +1023,34 @@ class WorkflowService:
                         workspace_path,
                         config.validation,
                         require_tests=config.safety.require_tests,
+                        on_check_complete=lambda payload: self._record_diagnostic(
+                            execution_id,
+                            DiagnosticCategory.VALIDATION,
+                            payload,
+                            stage=WorkflowStage.VALIDATE,
+                        ),
                     )
                     self._repository.record_validation(execution_id, validation)
                     if not validation.success:
+                        self._record_diagnostic(
+                            execution_id,
+                            DiagnosticCategory.ERROR,
+                            {
+                                "operation": "validation",
+                                "message": validation.error_message,
+                                "failing_commands": [
+                                    {
+                                        "command": check.command,
+                                        "exit_code": check.exit_code,
+                                        "stdout": check.stdout,
+                                        "stderr": check.stderr,
+                                    }
+                                    for check in validation.checks
+                                    if not check.success
+                                ],
+                            },
+                            stage=WorkflowStage.VALIDATE,
+                        )
                         raise _ValidationFailed(validation)
             except _ValidationFailed as exc:
                 if validation_attempt >= config.validation.max_validation_retries:
@@ -919,9 +1093,29 @@ class WorkflowService:
                     workspace_path,
                     config.validation,
                     require_tests=config.safety.require_tests,
+                    on_check_complete=lambda payload: self._record_diagnostic(
+                        execution_id,
+                        DiagnosticCategory.VALIDATION,
+                        payload,
+                        stage=WorkflowStage.VALIDATE,
+                    ),
                 )
                 self._repository.record_validation(execution_id, validation)
                 if not validation.success:
+                    self._record_diagnostic(
+                        execution_id,
+                        DiagnosticCategory.ERROR,
+                        {
+                            "operation": "optional_polish_validation",
+                            "message": validation.error_message,
+                            "failing_commands": [
+                                {"command": check.command, "exit_code": check.exit_code,
+                                 "stdout": check.stdout, "stderr": check.stderr}
+                                for check in validation.checks if not check.success
+                            ],
+                        },
+                        stage=WorkflowStage.VALIDATE,
+                    )
                     raise _ValidationFailed(validation)
         except _ValidationFailed:
             logger.warning(
