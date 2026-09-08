@@ -36,3 +36,10 @@ class ReviewDecision(StrEnum):
     APPROVED = "APPROVED"
     CHANGES_REQUESTED = "CHANGES_REQUESTED"
     NEEDS_HUMAN = "NEEDS_HUMAN"
+
+
+class PolishOutcome(StrEnum):
+    """The single evaluated result of optional approved-review polish."""
+
+    APPLIED = "APPLIED"
+    SKIPPED = "SKIPPED"

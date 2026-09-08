@@ -10,6 +10,7 @@ from orchestrator.models.validation_result import ValidationCheck, ValidationRes
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
+    PolishOutcome,
     ReviewDecision,
     StepStatus,
     WorkflowStage,
@@ -32,6 +33,7 @@ __all__ = [
     "JulesSession",
     "JulesSessionState",
     "PullRequest",
+    "PolishOutcome",
     "RepositorySpec",
     "ReviewDecision",
     "StepStatus",

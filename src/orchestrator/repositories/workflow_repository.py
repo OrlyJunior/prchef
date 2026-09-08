@@ -20,7 +20,12 @@ from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationResult
 from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
+from orchestrator.models.workflow_status import (
+    PolishOutcome,
+    StepStatus,
+    WorkflowStage,
+    WorkflowStatus,
+)
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.repositories.orm_models import (
     ExecutionDiagnosticEntity,
@@ -155,6 +160,15 @@ class WorkflowRepository:
     def record_review(self, execution_id: str, review: CodeReview) -> None:
         self._mutate(
             execution_id, lambda entity: setattr(entity, "review_snapshot_json", _dump(review))
+        )
+
+    def record_polish_outcome(self, execution_id: str, outcome: PolishOutcome) -> None:
+        self._mutate(execution_id, lambda entity: setattr(entity, "polish_outcome", outcome.value))
+
+    def record_polish_skip_comment_attempt(self, execution_id: str) -> None:
+        self._mutate(
+            execution_id,
+            lambda entity: setattr(entity, "polish_skip_comment_attempted", True),
         )
 
     def record_review_jules_session(
@@ -365,6 +379,10 @@ class WorkflowRepository:
             review_jules_session_id=entity.review_jules_session_id,
             review_jules_session_url=entity.review_jules_session_url,
             review_snapshot=_load(entity.review_snapshot_json),
+            polish_outcome=(
+                PolishOutcome(entity.polish_outcome) if entity.polish_outcome is not None else None
+            ),
+            polish_skip_comment_attempted=entity.polish_skip_comment_attempted,
             human_interactions=[
                 WorkflowRepository._interaction_to_domain(interaction)
                 for interaction in entity.human_interactions

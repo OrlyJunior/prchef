@@ -35,6 +35,10 @@ class WorkflowExecutionEntity(Base):
     review_jules_session_id: Mapped[str | None] = mapped_column(String(255))
     review_jules_session_url: Mapped[str | None] = mapped_column(Text)
     review_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    polish_outcome: Mapped[str | None] = mapped_column(String(32))
+    polish_skip_comment_attempted: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
