@@ -10,7 +10,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus, Resize
 from textual.screen import Screen
-from textual.widgets import Button, Input, RichLog, Static, TextArea
+from textual.widgets import Button, Input, Static, TextArea
 
 from orchestrator.config.project_config import AgentPresetConfig
 from orchestrator.models.agent import AgentRole
@@ -190,7 +190,12 @@ class WorkflowRunnerScreen(Screen[None]):
             yield Static("", id="workflow-events")
             with Horizontal(classes="workflow-log-actions"):
                 yield Button("Show detailed logs", id="toggle-workflow-logs")
-            yield RichLog(id="workflow-raw-events", wrap=True, markup=False)
+            yield Static("Detailed logs", id="workflow-raw-events-title")
+            # A Static grows with its rendered content, leaving the surrounding
+            # VerticalScroll as the sole vertical scroll context. RichLog owns
+            # a fixed viewport and its own scrollbar, which makes diagnostics
+            # difficult to inspect in an execution screen.
+            yield Static("", id="workflow-raw-events", markup=False, expand=True)
 
     @property
     def controller(self) -> WorkflowController:
@@ -770,12 +775,15 @@ class WorkflowRunnerScreen(Screen[None]):
             )
         elif event.button.id == "toggle-workflow-logs":
             self._show_raw_events = not self._show_raw_events
-            raw_events = self.query_one("#workflow-raw-events", RichLog)
+            raw_events = self.query_one("#workflow-raw-events", Static)
+            raw_events_title = self.query_one("#workflow-raw-events-title", Static)
             raw_events.display = self._show_raw_events
-            if self._show_raw_events:
-                # A hidden RichLog has no usable width. Replay after it is
-                # visible so Textual can lay out retained diagnostics.
-                self.call_after_refresh(self._render_raw_events)
+            raw_events_title.display = self._show_raw_events
+            # Static sizes itself from its renderable. Make it visible before
+            # changing that renderable so the layout pass measures the full
+            # diagnostic content, then refresh the owning scroll region.
+            raw_events.update(self._rendered_raw_events() if self._show_raw_events else "")
+            self.query_one("#workflow-runner", VerticalScroll).refresh(layout=True)
             event.button.label = (
                 "Hide detailed logs" if self._show_raw_events else "Show detailed logs"
             )
@@ -861,7 +869,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._active_timeline_stages.clear()
         self._stage_attempts.clear()
         self.query_one("#workflow-events", Static).update("")
-        self.query_one("#workflow-raw-events", RichLog).clear()
+        self.query_one("#workflow-raw-events", Static).update("")
         self._hide_human_panel()
         self._run_workflow(launch)
 
@@ -924,19 +932,15 @@ class WorkflowRunnerScreen(Screen[None]):
             )
         rendered_event = " | ".join(details)
         self._raw_event_lines.append(rendered_event)
-        raw_events = self.query_one("#workflow-raw-events", RichLog)
+        raw_events = self.query_one("#workflow-raw-events", Static)
         if self._show_raw_events:
-            raw_events.write(rendered_event)
+            raw_events.update(self._rendered_raw_events())
+            self.query_one("#workflow-runner", VerticalScroll).refresh(layout=True)
 
-    def _render_raw_events(self) -> None:
-        """Render retained diagnostics after the optional log becomes visible."""
+    def _rendered_raw_events(self) -> str:
+        """Keep individual diagnostics visually distinct in the page log."""
 
-        raw_events = self.query_one("#workflow-raw-events", RichLog)
-        if not self._show_raw_events:
-            return
-        raw_events.clear()
-        for line in self._raw_event_lines:
-            raw_events.write(line)
+        return "\n\n".join(self._raw_event_lines)
 
     def _timeline_message(self, event: WorkflowEvent) -> str | None:
         """Translate persisted observer events into concise, user-facing progress."""

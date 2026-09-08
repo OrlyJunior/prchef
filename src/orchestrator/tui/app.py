@@ -88,7 +88,19 @@ class OrchestratorApp(App[None]):
     #workflow-events { margin-top: 1; color: $text-muted; }
     .workflow-log-actions { height: auto; margin-top: 1; }
     .workflow-log-actions Button { width: auto; }
-    #workflow-raw-events { display: none; margin-top: 1; color: $text-muted; }
+    #workflow-raw-events-title {
+        display: none;
+        margin-top: 1;
+        text-style: bold;
+    }
+    #workflow-raw-events {
+        display: none;
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
     #human-input-panel {
         display: none;
         height: auto;
@@ -105,7 +117,12 @@ class OrchestratorApp(App[None]):
         display: none;
     }
     #execution-human-response { height: 7; }
-    #execution-content { width: 100%; }
+    #execution-content {
+        width: 100%;
+        height: auto;
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
     """
     BINDINGS = [
         Binding("n", "new_workflow", "New workflow"),
