@@ -6,7 +6,8 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Grid
+from textual.containers import Container, Horizontal
+from textual.events import Resize
 from textual.widgets import Button, Footer, Header, Static
 
 from orchestrator.tui.bridge import WorkflowController
@@ -24,13 +25,13 @@ class OrchestratorApp(App[None]):
     SUB_TITLE = "Interactive workflow control"
     CSS = """
     #home, #workflow-runner, #execution-history, #execution-detail,
-    #github-app-settings, #agent-instructions, #agent-presets {
+    #github-app-settings, #agent-instructions {
         width: 100%;
         height: 1fr;
         padding: 1 2;
     }
     #workflow-runner, #execution-history, #execution-detail,
-    #github-app-settings, #agent-instructions, #agent-presets {
+    #github-app-settings, #agent-instructions {
         overflow-y: auto;
     }
     .screen-title { text-style: bold; margin-bottom: 1; }
@@ -61,11 +62,28 @@ class OrchestratorApp(App[None]):
     .github-app-role { width: 1fr; height: auto; margin-right: 1; }
     .screen-actions { margin-top: 1; height: auto; }
     .screen-actions Button { margin-right: 1; }
-    #home-actions {
-        grid-size: 3;
-        grid-gutter: 1 0;
+    .navigation-actions {
+        width: 100%;
+        height: auto;
+        layout: horizontal;
+        margin-top: 1;
     }
-    #home-actions Button { width: 1fr; margin-right: 0; }
+    .navigation-actions .navigation-control {
+        width: auto;
+        max-width: 100%;
+        min-width: 16;
+        height: 3;
+        margin: 0 1 0 0;
+    }
+    .navigation-actions .navigation-control:last-of-type { margin-right: 0; }
+    #home.-compact-navigation .navigation-actions,
+    WorkflowRunnerScreen.-compact-navigation .navigation-actions {
+        layout: vertical;
+    }
+    #home.-compact-navigation .navigation-actions .navigation-control,
+    WorkflowRunnerScreen.-compact-navigation .navigation-actions .navigation-control {
+        margin: 0 0 1 0;
+    }
     #workflow-progress { margin-top: 2; text-style: bold; }
     #workflow-events { margin-top: 1; color: $text-muted; }
     .workflow-log-actions { height: auto; margin-top: 1; }
@@ -110,16 +128,40 @@ class OrchestratorApp(App[None]):
                 "Browse configured repositories and tasks, select role providers, "
                 "start a workflow, or inspect persisted executions."
             )
-            with Grid(classes="screen-actions", id="home-actions"):
-                yield Button("Start workflow", variant="success", id="new-workflow")
-                yield Button("Execution history", id="history")
-                yield Button("Agent presets", id="agent-presets")
-                yield Button("GitHub Apps", id="github-apps")
-                # This is a navigation control, not the editor's content
-                # container. Keeping their IDs distinct prevents the editor
-                # layout rules from making this button fill the home screen.
-                yield Button("Agent instructions", id="agent-instructions-button")
+            with Horizontal(classes="navigation-actions", id="home-actions"):
+                yield Button(
+                    "Start workflow",
+                    variant="success",
+                    id="new-workflow",
+                    classes="navigation-control",
+                )
+                yield Button(
+                    "Execution history", id="history", classes="navigation-control"
+                )
+                yield Button(
+                    "Agent presets", id="agent-presets", classes="navigation-control"
+                )
+                yield Button(
+                    "GitHub Apps", id="github-apps", classes="navigation-control"
+                )
+                yield Button(
+                    "Agent instructions",
+                    id="agent-instructions-button",
+                    classes="navigation-control",
+                )
         yield Footer()
+
+    def on_mount(self) -> None:
+        self._set_home_layout_mode(self.size.width)
+
+    def on_resize(self, event: Resize) -> None:
+        self._set_home_layout_mode(event.size.width)
+
+    def _set_home_layout_mode(self, width: int) -> None:
+        # The home container is unmounted while a destination screen is active.
+        # App-level resize events still fire then, so only update it when present.
+        for home in self.query("#home"):
+            home.set_class(width <= 96, "-compact-navigation")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "new-workflow":

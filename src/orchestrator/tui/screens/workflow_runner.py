@@ -42,6 +42,7 @@ class WorkflowRunnerScreen(Screen[None]):
     def __init__(self) -> None:
         super().__init__()
         self._event_lines: list[str] = []
+        self._raw_event_lines: list[str] = []
         self._active_timeline_stages: dict[WorkflowStage, int] = {}
         self._stage_attempts: dict[WorkflowStage, int] = {}
         self._show_raw_events = False
@@ -71,12 +72,33 @@ class WorkflowRunnerScreen(Screen[None]):
                 yield Static("", id="github-app-summary")
                 # Launch and navigation remain usable before the optional role
                 # configuration sections, even on a short terminal.
-                with Horizontal(classes="screen-actions"):
-                    yield Button("Start workflow", variant="success", id="start-workflow")
-                    yield Button("Execution history", id="workflow-history")
-                    yield Button("Agent presets", id="workflow-agent-presets")
-                    yield Button("GitHub App settings", id="workflow-github-apps")
-                    yield Button("Agent instructions", id="workflow-agent-instructions")
+                with Horizontal(classes="screen-actions navigation-actions"):
+                    yield Button(
+                        "Start workflow",
+                        variant="success",
+                        id="start-workflow",
+                        classes="navigation-control",
+                    )
+                    yield Button(
+                        "Execution history",
+                        id="workflow-history",
+                        classes="navigation-control",
+                    )
+                    yield Button(
+                        "Agent presets",
+                        id="workflow-agent-presets",
+                        classes="navigation-control",
+                    )
+                    yield Button(
+                        "GitHub Apps",
+                        id="workflow-github-apps",
+                        classes="navigation-control",
+                    )
+                    yield Button(
+                        "Agent instructions",
+                        id="workflow-agent-instructions",
+                        classes="navigation-control",
+                    )
                 yield Static(
                     "Agent settings are temporary for this run; "
                     "Provider/YAML defaults are unchanged.",
@@ -204,6 +226,7 @@ class WorkflowRunnerScreen(Screen[None]):
     def _set_layout_mode(self, width: int) -> None:
         self.set_class(width <= 80, "-narrow")
         self.set_class(width > 80, "-wide")
+        self.set_class(width <= 96, "-compact-navigation")
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         # A mouse press focuses a button before Textual dispatches its matching
@@ -749,6 +772,10 @@ class WorkflowRunnerScreen(Screen[None]):
             self._show_raw_events = not self._show_raw_events
             raw_events = self.query_one("#workflow-raw-events", RichLog)
             raw_events.display = self._show_raw_events
+            if self._show_raw_events:
+                # A hidden RichLog has no usable width. Replay after it is
+                # visible so Textual can lay out retained diagnostics.
+                self.call_after_refresh(self._render_raw_events)
             event.button.label = (
                 "Hide detailed logs" if self._show_raw_events else "Show detailed logs"
             )
@@ -830,6 +857,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#start-workflow", Button).disabled = True
         self.query_one("#workflow-progress", Static).update("Starting workflow…")
         self._event_lines.clear()
+        self._raw_event_lines.clear()
         self._active_timeline_stages.clear()
         self._stage_attempts.clear()
         self.query_one("#workflow-events", Static).update("")
@@ -895,7 +923,20 @@ class WorkflowRunnerScreen(Screen[None]):
                 json.dumps(redact_payload(event.payload), ensure_ascii=False, indent=2, default=str)
             )
         rendered_event = " | ".join(details)
-        self.query_one("#workflow-raw-events", RichLog).write(rendered_event)
+        self._raw_event_lines.append(rendered_event)
+        raw_events = self.query_one("#workflow-raw-events", RichLog)
+        if self._show_raw_events:
+            raw_events.write(rendered_event)
+
+    def _render_raw_events(self) -> None:
+        """Render retained diagnostics after the optional log becomes visible."""
+
+        raw_events = self.query_one("#workflow-raw-events", RichLog)
+        if not self._show_raw_events:
+            return
+        raw_events.clear()
+        for line in self._raw_event_lines:
+            raw_events.write(line)
 
     def _timeline_message(self, event: WorkflowEvent) -> str | None:
         """Translate persisted observer events into concise, user-facing progress."""

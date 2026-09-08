@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Input, RichLog, Select, Static, TextArea
 
 from orchestrator.config.project_config import (
@@ -351,6 +351,103 @@ def test_agent_instructions_navigation_uses_a_compact_distinct_control(tmp_path:
             assert isinstance(
                 application.screen.query_one("#agent-instructions"), VerticalScroll
             )
+
+    asyncio.run(drive())
+
+
+def test_main_navigation_reflows_compact_controls_without_content_sizing(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    navigation_ids = (
+        "new-workflow",
+        "history",
+        "github-apps",
+        "agent-instructions-button",
+        "agent-presets",
+    )
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            navigation = application.query_one("#home-actions", Horizontal)
+            controls = [
+                application.query_one(f"#{control_id}", Button) for control_id in navigation_ids
+            ]
+
+            assert all(control.has_class("navigation-control") for control in controls)
+            assert len({control.size.height for control in controls}) == 1
+            assert len({control.region.y for control in controls}) == 1
+            assert navigation.size.height == 3
+            assert navigation.size.height < application.size.height
+            assert all(control.size.width < application.size.width for control in controls)
+            assert all(str(control.styles.width) != "1fr" for control in controls)
+
+            await pilot.resize_terminal(70, 50)
+            await pilot.pause()
+
+            assert len({control.region.y for control in controls}) > 1
+            assert len({control.size.height for control in controls}) == 1
+            assert all(control.size.width < application.size.width for control in controls)
+            assert all(str(control.styles.width) != "1fr" for control in controls)
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_navigation_reflows_compact_controls(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    navigation_ids = (
+        "start-workflow",
+        "workflow-history",
+        "workflow-github-apps",
+        "workflow-agent-instructions",
+        "workflow-agent-presets",
+    )
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await pilot.pause()
+            controls = [
+                application.screen.query_one(f"#{control_id}", Button)
+                for control_id in navigation_ids
+            ]
+
+            assert all(control.has_class("navigation-control") for control in controls)
+            assert len({control.size.height for control in controls}) == 1
+            assert len({control.region.y for control in controls}) == 1
+            assert all(control.size.width < application.size.width for control in controls)
+            assert all(str(control.styles.width) != "1fr" for control in controls)
+
+            await pilot.resize_terminal(70, 50)
+            await pilot.pause()
+
+            assert len({control.region.y for control in controls}) > 1
+            assert len({control.size.height for control in controls}) == 1
+            assert all(control.size.width < application.size.width for control in controls)
+            assert all(str(control.styles.width) != "1fr" for control in controls)
+
+    asyncio.run(drive())
+
+
+def test_main_navigation_controls_keep_their_destinations(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    destinations = (
+        ("#new-workflow", WorkflowRunnerScreen),
+        ("#history", ExecutionHistoryScreen),
+        ("#github-apps", GitHubAppSettingsScreen),
+        ("#agent-instructions-button", AgentInstructionsScreen),
+        ("#agent-presets", AgentPresetsScreen),
+    )
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            for selector, expected_screen in destinations:
+                await pilot.click(selector)
+                await pilot.pause()
+                assert isinstance(application.screen, expected_screen)
+                await pilot.press("escape")
+                await pilot.pause()
 
     asyncio.run(drive())
 
