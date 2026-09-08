@@ -48,7 +48,7 @@ from orchestrator.runtime_logging import (
     redact_payload,
     redact_text,
 )
-from orchestrator.services.exceptions import WorkflowError
+from orchestrator.services.exceptions import WorkflowCancelledError, WorkflowError
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.notifications import NotificationService
 from orchestrator.services.review_service import ReviewService, format_pull_request_review
@@ -100,6 +100,27 @@ class WorkflowService:
         self._notification_service = notification_service or NotificationService()
         self._event_listener: WorkflowEventListener | None = None
         self._active_stage: WorkflowStage | None = None
+
+    def cancel_execution(self, execution_id: str) -> bool:
+        """Request cancellation without coupling the caller to a provider.
+
+        Providers remain responsible for any interruption mechanism they can
+        safely offer. The workflow itself observes this persisted request at
+        stage boundaries, so a request made by another process is restart-safe.
+        """
+        accepted = self._repository.request_cancellation(execution_id)
+        if accepted:
+            self._record_diagnostic(
+                execution_id,
+                DiagnosticCategory.WORKFLOW_EVENT,
+                {
+                    "kind": "CANCELLATION_REQUESTED",
+                    "message": "Cancellation requested by user",
+                },
+                stage=self._active_stage,
+                notify=False,
+            )
+        return accepted
 
     def run(
         self,
@@ -401,6 +422,14 @@ class WorkflowService:
                     execution.id, WorkflowStage.REVIEW, self._review_prompt(review)
                 )
             return self._finish(execution.id, final_status, config)
+        except WorkflowCancelledError:
+            result = self._finish(execution.id, WorkflowStatus.CANCELLED, config)
+            if workspace_path is not None:
+                logger.info(
+                    "[workspace] Workflow cancelled; preserving workspace: %s",
+                    workspace_path,
+                )
+            return result
         except ConfigurationError as exc:
             return self._pause_for_human(
                 execution.id,
@@ -482,6 +511,8 @@ class WorkflowService:
             raise WorkflowError(
                 f"Cannot resume human input requested during {interaction.requesting_stage.value}"
             )
+        except WorkflowCancelledError:
+            return self._finish(execution_id, WorkflowStatus.CANCELLED, config)
         except AgentNeedsHumanError as exc:
             return self._pause_for_human(
                 execution_id, interaction.requesting_stage, str(exc), config
@@ -788,6 +819,8 @@ class WorkflowService:
                     execution_id, WorkflowStage.REVIEW, self._review_prompt(review)
                 )
             return self._finish(execution_id, status, config)
+        except WorkflowCancelledError:
+            return self._finish(execution_id, WorkflowStatus.CANCELLED, config)
         except AgentNeedsHumanError as exc:
             return self._pause_for_human(
                 execution_id, WorkflowStage.IMPLEMENT, str(exc), config
@@ -803,6 +836,8 @@ class WorkflowService:
         prompt: str,
         config: ProjectConfig | None,
     ) -> WorkflowExecution:
+        if self._repository.cancellation_requested(execution_id):
+            return self._finish(execution_id, WorkflowStatus.CANCELLED, config)
         self._repository.record_error(execution_id, prompt)
         self._repository.request_human_input(execution_id, stage, prompt)
         return self._finish(execution_id, WorkflowStatus.NEEDS_HUMAN, config)
@@ -867,8 +902,19 @@ class WorkflowService:
         status: WorkflowStatus,
         config: ProjectConfig | None,
     ) -> WorkflowExecution:
+        if status is not WorkflowStatus.CANCELLED:
+            try:
+                self._raise_if_cancellation_requested(execution_id)
+            except WorkflowCancelledError:
+                status = WorkflowStatus.CANCELLED
         self._repository.finish(execution_id, status)
         execution = self._repository.get_execution(execution_id)
+        self._emit(
+            execution_id,
+            WorkflowEventKind.STATUS_CHANGED,
+            stage=execution.current_stage,
+            status=status,
+        )
         self._emit(
             execution_id,
             WorkflowEventKind.WORKFLOW_FINISHED,
@@ -881,6 +927,7 @@ class WorkflowService:
 
     @contextmanager
     def _step(self, execution_id: str, stage: WorkflowStage) -> Iterator[None]:
+        self._raise_if_cancellation_requested(execution_id)
         label = _STAGE_LABELS.get(stage, stage.value.casefold().replace("_", " "))
         previous_stage = self._active_stage
         self._active_stage = stage
@@ -895,6 +942,18 @@ class WorkflowService:
         )
         try:
             yield
+            self._raise_if_cancellation_requested(execution_id)
+        except WorkflowCancelledError as exc:
+            self._repository.finish_step(step_id, StepStatus.CANCELLED, str(exc))
+            self._emit(
+                execution_id,
+                WorkflowEventKind.STAGE_FINISHED,
+                stage=stage,
+                step_status=StepStatus.CANCELLED,
+                message=str(exc),
+            )
+            logger.info("[workflow] %s cancelled", label)
+            raise
         except Exception as exc:
             self._repository.finish_step(step_id, StepStatus.FAILED, str(exc))
             self._record_diagnostic(
@@ -928,6 +987,10 @@ class WorkflowService:
         finally:
             self._active_stage = previous_stage
 
+    def _raise_if_cancellation_requested(self, execution_id: str) -> None:
+        if self._repository.cancellation_requested(execution_id):
+            raise WorkflowCancelledError("Cancellation requested by user")
+
     def _diagnostic_agent(
         self,
         provider: AgentProvider,
@@ -944,7 +1007,19 @@ class WorkflowService:
             record=lambda category, event_role, payload: self._record_diagnostic(
                 execution_id, category, payload, stage=self._active_stage, role=event_role
             ),
+            cancellation_check=lambda: self._raise_if_cancellation_requested(execution_id),
         )
+
+    def _record_validation_check(
+        self, execution_id: str, payload: dict[str, Any]
+    ) -> None:
+        self._record_diagnostic(
+            execution_id,
+            DiagnosticCategory.VALIDATION,
+            payload,
+            stage=WorkflowStage.VALIDATE,
+        )
+        self._raise_if_cancellation_requested(execution_id)
 
     def _record_diagnostic(
         self,
@@ -1063,11 +1138,8 @@ class WorkflowService:
                         workspace_path,
                         config.validation,
                         require_tests=config.safety.require_tests,
-                        on_check_complete=lambda payload: self._record_diagnostic(
-                            execution_id,
-                            DiagnosticCategory.VALIDATION,
-                            payload,
-                            stage=WorkflowStage.VALIDATE,
+                        on_check_complete=lambda payload: self._record_validation_check(
+                            execution_id, payload
                         ),
                     )
                     self._repository.record_validation(execution_id, validation)
@@ -1133,11 +1205,8 @@ class WorkflowService:
                     workspace_path,
                     config.validation,
                     require_tests=config.safety.require_tests,
-                    on_check_complete=lambda payload: self._record_diagnostic(
-                        execution_id,
-                        DiagnosticCategory.VALIDATION,
-                        payload,
-                        stage=WorkflowStage.VALIDATE,
+                    on_check_complete=lambda payload: self._record_validation_check(
+                        execution_id, payload
                     ),
                 )
                 self._repository.record_validation(execution_id, validation)

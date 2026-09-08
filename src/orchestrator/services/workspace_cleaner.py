@@ -52,7 +52,11 @@ class WorkspaceCleanupService:
     """Classify and safely remove retained execution worktrees for one control checkout."""
 
     _SUCCESSFUL_STATUSES = {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}
-    _RECOVERY_STATUSES = {WorkflowStatus.FAILED, WorkflowStatus.NEEDS_HUMAN}
+    _RECOVERY_STATUSES = {
+        WorkflowStatus.FAILED,
+        WorkflowStatus.CANCELLED,
+        WorkflowStatus.NEEDS_HUMAN,
+    }
     _ACTIVE_STATUSES = {WorkflowStatus.PENDING, WorkflowStatus.RUNNING}
 
     def __init__(

@@ -82,7 +82,14 @@ class ExecutionHistoryScreen(Screen[None]):
                         (
                             "AWAITING HUMAN"
                             if execution.status.value == "NEEDS_HUMAN"
-                            else execution.status.value
+                            else (
+                                "CANCELLATION REQUESTED"
+                                if (
+                                    execution.status.value == "RUNNING"
+                                    and execution.cancellation_requested_at is not None
+                                )
+                                else execution.status.value
+                            )
                         ),
                         execution.current_stage.value,
                         f"{execution.task_source}:{execution.task_id}",

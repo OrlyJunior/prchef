@@ -119,6 +119,34 @@ class WorkflowRepository:
     def update_status(self, execution_id: str, status: WorkflowStatus) -> None:
         self._mutate(execution_id, lambda entity: setattr(entity, "status", status.value))
 
+    def request_cancellation(self, execution_id: str) -> bool:
+        """Durably request cooperative cancellation of a running execution.
+
+        The request deliberately does not discard workspace or artifact fields.
+        A running service observes this marker and performs the terminal transition
+        at a safe stage boundary.
+        """
+        with self._sessions() as session, session.begin():
+            entity = session.get(WorkflowExecutionEntity, execution_id)
+            if entity is None:
+                raise KeyError(f"Workflow execution not found: {execution_id}")
+            if entity.status != WorkflowStatus.RUNNING.value:
+                return False
+            if entity.cancellation_requested_at is None:
+                entity.cancellation_requested_at = _utcnow()
+                entity.updated_at = _utcnow()
+            return True
+
+    def cancellation_requested(self, execution_id: str) -> bool:
+        with self._sessions() as session:
+            entity = session.get(WorkflowExecutionEntity, execution_id)
+            if entity is None:
+                raise KeyError(f"Workflow execution not found: {execution_id}")
+            return (
+                entity.status == WorkflowStatus.RUNNING.value
+                and entity.cancellation_requested_at is not None
+            )
+
     def record_spec(self, execution_id: str, spec: RepositorySpec) -> None:
         self._mutate(
             execution_id, lambda entity: setattr(entity, "spec_snapshot_json", _dump(spec))
@@ -369,6 +397,7 @@ class WorkflowRepository:
             created_at=entity.created_at,
             updated_at=entity.updated_at,
             finished_at=entity.finished_at,
+            cancellation_requested_at=entity.cancellation_requested_at,
             task_snapshot=_load(entity.task_snapshot_json),
             spec_snapshot=_load(entity.spec_snapshot_json),
             implementation_snapshot=_load(entity.implementation_snapshot_json),

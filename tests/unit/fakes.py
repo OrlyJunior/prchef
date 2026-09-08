@@ -82,6 +82,21 @@ class FakeWorkflowRepository:
     def update_status(self, execution_id: str, status: WorkflowStatus) -> None:
         self._execution().status = status
 
+    def request_cancellation(self, execution_id: str) -> bool:
+        execution = self._execution()
+        if execution.status is not WorkflowStatus.RUNNING:
+            return False
+        if execution.cancellation_requested_at is None:
+            execution.cancellation_requested_at = datetime.now(UTC)
+        return True
+
+    def cancellation_requested(self, execution_id: str) -> bool:
+        execution = self._execution()
+        return (
+            execution.status is WorkflowStatus.RUNNING
+            and execution.cancellation_requested_at is not None
+        )
+
     def record_spec(self, execution_id: str, spec: RepositorySpec) -> None:
         self._execution().spec_snapshot = asdict(spec)
 
