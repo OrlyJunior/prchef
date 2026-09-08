@@ -27,6 +27,8 @@
 - The TUI presents workflow observer events as a concise user-facing stage timeline by default.
   Sanitized persisted diagnostics are available only through its detailed-log toggle; they record
   effective agent requests/responses, validation command results, errors, and workflow events.
+  Expanded diagnostics grow in the screen's main vertical scroll area rather than using a nested
+  vertical log viewport, so long entries remain readable in live runs and execution history.
   This does not alter the CLI's concise progress view or workflow observer semantics. `--verbose`
   emits that same structured diagnostic stream to stderr.
 - TUI screens use `OrchestratorSelect` for Select controls in vertical scroll regions. It reserves

@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import Button, Input, RichLog, Select, Static, TextArea
+from textual.widgets import Button, Input, Select, Static, TextArea
 
 from orchestrator.config.project_config import (
     AgentPresetConfig,
@@ -566,17 +566,24 @@ def test_github_app_compact_summary_hides_identifiers() -> None:
     assert "12" not in WorkflowRunnerScreen.github_app_summary(configured, unconfigured)
 
 
-def test_workflow_runner_maps_live_events_to_timeline_and_keeps_raw_logs_optional(
+def test_workflow_runner_detailed_logs_expand_the_main_scroll_region_and_collapse_cleanly(
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
-        async with application.run_test() as pilot:
+        async with application.run_test(size=(120, 200)) as pilot:
             application.push_screen(WorkflowRunnerScreen())
             await pilot.pause()
             screen = application.screen
+            content = screen.query_one("#workflow-runner", VerticalScroll)
+            raw_events = screen.query_one("#workflow-raw-events", Static)
+            raw_events_title = screen.query_one("#workflow-raw-events-title", Static)
+            assert raw_events.display is False
+            assert raw_events_title.display is False
+            assert content.max_scroll_y == 0
+
             started = WorkflowEvent(
                 execution_id="execution-1",
                 kind=WorkflowEventKind.STAGE_STARTED,
@@ -597,13 +604,39 @@ def test_workflow_runner_maps_live_events_to_timeline_and_keeps_raw_logs_optiona
             assert "STAGE_STARTED" not in timeline
             assert "STAGE_FINISHED" not in timeline
 
+            # Include a diagnostic large enough to exceed the otherwise tall
+            # viewport. It must grow the outer page rather than a RichLog-sized
+            # nested vertical viewport.
+            screen._raw_event_lines.append(
+                "REQUEST\n" + "\n".join(f"prompt line {number}" for number in range(300))
+            )
             screen.query_one("#toggle-workflow-logs", Button).press()
             await pilot.pause()
-            raw_events = screen.query_one("#workflow-raw-events", RichLog)
             assert raw_events.display is True
-            raw_log = "\n".join(line.text for line in raw_events.lines)
+            assert raw_events_title.display is True
+            assert (
+                screen.query_one("#toggle-workflow-logs", Button).label.plain
+                == "Hide detailed logs"
+            )
+            assert raw_events.size.height > 200
+            assert content.max_scroll_y > 0
+            content.scroll_end(animate=False)
+            await pilot.pause()
+            assert content.scroll_y > 0
+            raw_log = str(raw_events.renderable)
             assert "STAGE_STARTED" in raw_log
             assert "STAGE_FINISHED" in raw_log
+            assert "REQUEST" in raw_log
+
+            screen.query_one("#toggle-workflow-logs", Button).press()
+            await pilot.pause()
+            assert raw_events.display is False
+            assert raw_events_title.display is False
+            assert (
+                screen.query_one("#toggle-workflow-logs", Button).label.plain
+                == "Show detailed logs"
+            )
+            assert content.max_scroll_y == 0
 
     asyncio.run(drive())
 
@@ -1381,7 +1414,9 @@ def test_secondary_screens_keep_content_in_scrollable_regions_in_small_terminals
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
             await pilot.pause()
             detail = application.screen.query_one("#execution-detail", VerticalScroll)
+            detail_content = application.screen.query_one("#execution-content", Static)
             assert detail.max_scroll_y > 0
+            assert detail_content.size.height > 20
             detail.scroll_end(animate=False)
             await pilot.pause()
             assert detail.scroll_y > 0

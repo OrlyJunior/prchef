@@ -52,7 +52,7 @@ class ExecutionDetailScreen(Screen[None]):
                     id="execution-resume",
                     disabled=True,
                 )
-            yield Static("Loading execution…", id="execution-content")
+            yield Static("Loading execution…", id="execution-content", markup=False)
 
     @property
     def controller(self) -> WorkflowController:
@@ -156,3 +156,6 @@ class ExecutionDetailScreen(Screen[None]):
         }
         rendered = json.dumps(redact_payload(details), ensure_ascii=False, indent=2, default=str)
         self.query_one("#execution-content", Static).update(rendered)
+        # The content Static has its natural height; refresh the owning page
+        # so persisted diagnostics extend the main scroll range immediately.
+        self.query_one("#execution-detail", VerticalScroll).refresh(layout=True)
