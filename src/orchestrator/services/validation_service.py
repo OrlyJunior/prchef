@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.config.project_config import ValidationSettings
@@ -23,6 +25,7 @@ class ValidationService:
         settings: ValidationSettings,
         *,
         require_tests: bool,
+        on_check_complete: Callable[[dict[str, Any]], None] | None = None,
     ) -> ValidationResult:
         commands = [list(command) for command in settings.commands]
         if settings.auto_detect:
@@ -62,17 +65,29 @@ class ValidationService:
                     format_duration(result.duration_seconds),
                     output or "no output",
                 )
-            checks.append(
-                ValidationCheck(
-                    name=" ".join(command),
-                    command=command,
-                    success=result.success,
-                    exit_code=result.exit_code,
-                    stdout=result.stdout,
-                    stderr=result.stderr,
-                    duration_seconds=result.duration_seconds,
-                )
+            check = ValidationCheck(
+                name=" ".join(command),
+                command=command,
+                success=result.success,
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                duration_seconds=result.duration_seconds,
             )
+            checks.append(check)
+            if on_check_complete is not None:
+                on_check_complete(
+                    {
+                        "command": format_command(command),
+                        "argv": command,
+                        "working_directory": str(repository_path),
+                        "exit_code": result.exit_code,
+                        "elapsed_time_seconds": result.duration_seconds,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "result": "PASS" if result.success else "FAIL",
+                    }
+                )
         success = all(check.success for check in checks)
         return ValidationResult(
             success=success,

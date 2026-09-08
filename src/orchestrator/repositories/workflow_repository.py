@@ -10,8 +10,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from orchestrator.models.agent import AgentRole
 from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
 from orchestrator.models.human_interaction import HumanInteraction
 from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.pull_request import PullRequest
@@ -21,10 +23,12 @@ from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.repositories.orm_models import (
+    ExecutionDiagnosticEntity,
     HumanInteractionEntity,
     WorkflowExecutionEntity,
     WorkflowStepEntity,
 )
+from orchestrator.runtime_logging import redact_payload, redact_text
 
 
 def _utcnow() -> datetime:
@@ -32,7 +36,7 @@ def _utcnow() -> datetime:
 
 
 def _dump(value: Any) -> str:
-    return json.dumps(asdict(value), ensure_ascii=False, default=str)
+    return json.dumps(redact_payload(asdict(value)), ensure_ascii=False, default=str)
 
 
 def _load(value: str | None) -> dict[str, Any] | None:
@@ -163,7 +167,35 @@ class WorkflowRepository:
         self._mutate(execution_id, mutate)
 
     def record_error(self, execution_id: str, message: str) -> None:
-        self._mutate(execution_id, lambda entity: setattr(entity, "error_message", message))
+        self._mutate(
+            execution_id, lambda entity: setattr(entity, "error_message", redact_text(message))
+        )
+
+    def record_diagnostic(self, diagnostic: ExecutionDiagnostic) -> ExecutionDiagnostic:
+        payload = redact_payload(diagnostic.payload)
+        if not isinstance(payload, dict):
+            payload = {"value": payload}
+        entity = ExecutionDiagnosticEntity(
+            workflow_execution_id=diagnostic.execution_id,
+            category=diagnostic.category.value,
+            stage=diagnostic.stage.value if diagnostic.stage else None,
+            role=diagnostic.role.value if diagnostic.role else None,
+            payload_json=json.dumps(payload, ensure_ascii=False, default=str),
+            occurred_at=diagnostic.occurred_at,
+        )
+        with self._sessions() as session, session.begin():
+            session.add(entity)
+            session.flush()
+            return self._diagnostic_to_domain(entity)
+
+    def list_diagnostics(self, execution_id: str) -> list[ExecutionDiagnostic]:
+        with self._sessions() as session:
+            entities = session.scalars(
+                select(ExecutionDiagnosticEntity)
+                .where(ExecutionDiagnosticEntity.workflow_execution_id == execution_id)
+                .order_by(ExecutionDiagnosticEntity.id)
+            ).all()
+            return [self._diagnostic_to_domain(entity) for entity in entities]
 
     def request_human_input(
         self, execution_id: str, stage: WorkflowStage, prompt: str
@@ -171,7 +203,7 @@ class WorkflowRepository:
         entity = HumanInteractionEntity(
             workflow_execution_id=execution_id,
             requesting_stage=stage.value,
-            prompt=prompt,
+            prompt=redact_text(prompt),
             requested_at=_utcnow(),
         )
         with self._sessions() as session, session.begin():
@@ -193,7 +225,7 @@ class WorkflowRepository:
             ).first()
             if entity is None:
                 raise ValueError(f"Execution {execution_id} is not awaiting human input")
-            entity.response = response
+            entity.response = redact_text(response)
             entity.responded_at = _utcnow()
             execution = session.get(WorkflowExecutionEntity, execution_id)
             if execution is None:
@@ -349,4 +381,17 @@ class WorkflowRepository:
             response=entity.response,
             requested_at=entity.requested_at,
             responded_at=entity.responded_at,
+        )
+
+    @staticmethod
+    def _diagnostic_to_domain(entity: ExecutionDiagnosticEntity) -> ExecutionDiagnostic:
+        payload = json.loads(entity.payload_json)
+        return ExecutionDiagnostic(
+            id=entity.id,
+            execution_id=entity.workflow_execution_id,
+            category=DiagnosticCategory(entity.category),
+            stage=WorkflowStage(entity.stage) if entity.stage else None,
+            role=AgentRole(entity.role) if entity.role else None,
+            payload=payload if isinstance(payload, dict) else {"value": payload},
+            occurred_at=entity.occurred_at,
         )

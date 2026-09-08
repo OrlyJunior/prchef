@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, cast
 
 from textual import work
@@ -9,7 +10,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus, Resize
 from textual.screen import Screen
-from textual.widgets import Button, Input, Static, TextArea
+from textual.widgets import Button, Input, RichLog, Static, TextArea
 
 from orchestrator.config.project_config import AgentPresetConfig
 from orchestrator.models.agent import AgentRole
@@ -17,6 +18,7 @@ from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import WorkflowStage, WorkflowStatus
+from orchestrator.runtime_logging import redact_payload, redact_text
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
 from orchestrator.tui.screens.task_selector import TaskSelector
 from orchestrator.tui.widgets import (
@@ -40,7 +42,6 @@ class WorkflowRunnerScreen(Screen[None]):
     def __init__(self) -> None:
         super().__init__()
         self._event_lines: list[str] = []
-        self._raw_event_lines: list[str] = []
         self._active_timeline_stages: dict[WorkflowStage, int] = {}
         self._stage_attempts: dict[WorkflowStage, int] = {}
         self._show_raw_events = False
@@ -167,7 +168,7 @@ class WorkflowRunnerScreen(Screen[None]):
             yield Static("", id="workflow-events")
             with Horizontal(classes="workflow-log-actions"):
                 yield Button("Show detailed logs", id="toggle-workflow-logs")
-            yield Static("", id="workflow-raw-events")
+            yield RichLog(id="workflow-raw-events", wrap=True, markup=False)
 
     @property
     def controller(self) -> WorkflowController:
@@ -746,7 +747,7 @@ class WorkflowRunnerScreen(Screen[None]):
             )
         elif event.button.id == "toggle-workflow-logs":
             self._show_raw_events = not self._show_raw_events
-            raw_events = self.query_one("#workflow-raw-events", Static)
+            raw_events = self.query_one("#workflow-raw-events", RichLog)
             raw_events.display = self._show_raw_events
             event.button.label = (
                 "Hide detailed logs" if self._show_raw_events else "Show detailed logs"
@@ -829,11 +830,10 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#start-workflow", Button).disabled = True
         self.query_one("#workflow-progress", Static).update("Starting workflow…")
         self._event_lines.clear()
-        self._raw_event_lines.clear()
         self._active_timeline_stages.clear()
         self._stage_attempts.clear()
         self.query_one("#workflow-events", Static).update("")
-        self.query_one("#workflow-raw-events", Static).update("")
+        self.query_one("#workflow-raw-events", RichLog).clear()
         self._hide_human_panel()
         self._run_workflow(launch)
 
@@ -880,6 +880,8 @@ class WorkflowRunnerScreen(Screen[None]):
         """Retain observer diagnostics without putting them in the primary timeline."""
 
         details = [event.kind.value]
+        if event.category:
+            details.append(f"[{event.category}]")
         if event.stage is not None:
             details.append(f"stage={event.stage.value}")
         if event.status is not None:
@@ -887,11 +889,13 @@ class WorkflowRunnerScreen(Screen[None]):
         if event.step_status is not None:
             details.append(f"step={event.step_status.value}")
         if event.message:
-            details.append(event.message)
-        self._raw_event_lines.append(" | ".join(details))
-        self.query_one("#workflow-raw-events", Static).update(
-            "\n".join(self._raw_event_lines[-30:])
-        )
+            details.append(redact_text(event.message))
+        if event.payload is not None:
+            details.append(
+                json.dumps(redact_payload(event.payload), ensure_ascii=False, indent=2, default=str)
+            )
+        rendered_event = " | ".join(details)
+        self.query_one("#workflow-raw-events", RichLog).write(rendered_event)
 
     def _timeline_message(self, event: WorkflowEvent) -> str | None:
         """Translate persisted observer events into concise, user-facing progress."""

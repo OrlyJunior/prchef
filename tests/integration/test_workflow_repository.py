@@ -7,6 +7,8 @@ from sqlalchemy import text
 from orchestrator.config.database import build_engine, build_session_factory
 from orchestrator.models import (
     DevelopmentTask,
+    DiagnosticCategory,
+    ExecutionDiagnostic,
     StepStatus,
     WorkflowStage,
     WorkflowStatus,
@@ -121,6 +123,34 @@ def test_human_interactions_persist_response_and_resume_state(tmp_path: Path) ->
     assert persisted.human_interactions[0].prompt == "Which retention policy should apply?"
     assert persisted.human_interactions[0].response == "Use 30 days."
     assert persisted.human_interactions[0].responded_at is not None
+
+
+def test_execution_diagnostics_are_redacted_and_available_after_repository_restart(
+    tmp_path: Path,
+) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    execution = repository.create_execution("diagnostics")
+    repository.record_diagnostic(
+        ExecutionDiagnostic(
+            execution_id=execution.id,
+            category=DiagnosticCategory.VALIDATION,
+            stage=WorkflowStage.VALIDATE,
+            payload={"command": "pytest", "stderr": "Authorization: Bearer secret"},
+        )
+    )
+
+    restarted = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    diagnostics = restarted.list_diagnostics(execution.id)
+
+    assert diagnostics[0].category is DiagnosticCategory.VALIDATION
+    assert diagnostics[0].payload["command"] == "pytest"
+    assert diagnostics[0].payload["stderr"] == "Authorization=[REDACTED] [REDACTED]"
 
 
 def test_migration_backfills_common_identity_for_existing_trello_execution(

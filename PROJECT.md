@@ -25,8 +25,10 @@
   presentation/controller layer over configuration, task providers, the workflow service, and
   persisted execution reads; it must not implement workflow policy or a second state machine.
 - The TUI presents workflow observer events as a concise user-facing stage timeline by default.
-  Raw observer-event diagnostics are available only through its detailed-log toggle; this does
-  not alter the CLI's verbose logging contract or workflow observer semantics.
+  Sanitized persisted diagnostics are available only through its detailed-log toggle; they record
+  effective agent requests/responses, validation command results, errors, and workflow events.
+  This does not alter the CLI's concise progress view or workflow observer semantics. `--verbose`
+  emits that same structured diagnostic stream to stderr.
 - TUI screens use `OrchestratorSelect` for Select controls in vertical scroll regions. It reserves
   visible overlay space after mouse or keyboard activation and restores focus without triggering
   parent-scroll jumps. Repository controls use its `RepositorySelect` specialization: configured
@@ -69,6 +71,9 @@
   resolver; repository-local configuration never selects persistence.
 - Runtime logs are UTC ISO-8601 timestamps on stderr. Final `run` execution JSON and all `debug`
   result JSON stay on stdout. Redact secrets before logging.
+- Execution diagnostics are persisted as JSON-safe `execution_diagnostics` rows and must be
+  redacted before persistence and before observer delivery. They preserve full non-sensitive
+  prompt/output/context data; any future size limit must be explicit to the user.
 - An execution is created as `PENDING`, immediately marked `RUNNING`, and records every entered
   stage as a separately persisted step. Repeated validation/correction attempts create repeated
   `VALIDATE`/`IMPLEMENT` steps.
