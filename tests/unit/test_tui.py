@@ -208,6 +208,7 @@ class _TaskProvider:
 class _WorkflowService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None, dict[AgentRole, str], dict[AgentRole, Any]]] = []
+        self.emit_terminal_event = False
 
     def run(
         self,
@@ -219,7 +220,21 @@ class _WorkflowService:
         event_listener: Callable[..., None] | None,
     ) -> WorkflowExecution:
         self.calls.append((task_id, repository, agent_providers, agent_runtime_options))
-        del event_listener
+        if self.emit_terminal_event and event_listener is not None:
+            event_listener(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.EXECUTION_CREATED,
+                    status=WorkflowStatus.PENDING,
+                )
+            )
+            event_listener(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.WORKFLOW_FINISHED,
+                    status=WorkflowStatus.APPROVED,
+                )
+            )
         return WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED)
 
 
@@ -274,6 +289,26 @@ def test_controller_browses_selections_and_delegates_workflow_start(tmp_path: Pa
             {},
         )
     ]
+
+
+def test_controller_discards_finished_workflow_service(tmp_path: Path) -> None:
+    controller, service, _ = _controller(tmp_path)
+    service.emit_terminal_event = True
+
+    controller.start_workflow(
+        WorkflowLaunch(
+            repository="example",
+            task_provider="github",
+            task_id="12",
+            agent_providers={
+                AgentRole.PLANNER: "planner",
+                AgentRole.IMPLEMENTER: "implementer",
+                AgentRole.REVIEWER: "reviewer",
+            },
+        )
+    )
+
+    assert controller._active_services == {}
 
 
 def test_controller_passes_validated_role_runtime_overrides_without_mutating_defaults(

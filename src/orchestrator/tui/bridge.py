@@ -19,7 +19,11 @@ from orchestrator.config.project_config import (
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
-from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventListener
+from orchestrator.models.workflow_event import (
+    WorkflowEvent,
+    WorkflowEventKind,
+    WorkflowEventListener,
+)
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.repositories.workflow_repository import WorkflowRepository
@@ -248,8 +252,10 @@ class WorkflowController:
             )
         )
         def observe(event: WorkflowEvent) -> None:
-            if event.kind.value == "EXECUTION_CREATED":
+            if event.kind is WorkflowEventKind.EXECUTION_CREATED:
                 self._active_services[event.execution_id] = service
+            elif event.kind is WorkflowEventKind.WORKFLOW_FINISHED:
+                self._active_services.pop(event.execution_id, None)
             if event_listener is not None:
                 event_listener(event)
 
