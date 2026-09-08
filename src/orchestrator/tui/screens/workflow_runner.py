@@ -15,11 +15,13 @@ from textual.widgets import Button, Input, Static, TextArea
 from orchestrator.config.project_config import AgentPresetConfig
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import WorkflowStage, WorkflowStatus
 from orchestrator.runtime_logging import redact_payload, redact_text
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
+from orchestrator.tui.diagnostics import format_diagnostics_for_export
 from orchestrator.tui.screens.task_selector import TaskSelector
 from orchestrator.tui.widgets import (
     OrchestratorSelect,
@@ -43,6 +45,7 @@ class WorkflowRunnerScreen(Screen[None]):
         super().__init__()
         self._event_lines: list[str] = []
         self._raw_event_lines: list[str] = []
+        self._live_diagnostics: list[ExecutionDiagnostic] = []
         self._active_timeline_stages: dict[WorkflowStage, int] = {}
         self._stage_attempts: dict[WorkflowStage, int] = {}
         self._show_raw_events = False
@@ -190,6 +193,9 @@ class WorkflowRunnerScreen(Screen[None]):
             yield Static("", id="workflow-events")
             with Horizontal(classes="workflow-log-actions"):
                 yield Button("Show detailed logs", id="toggle-workflow-logs")
+                yield Button(
+                    "Copy detailed logs", id="copy-detailed-logs-button", disabled=True
+                )
             yield Static("Detailed logs", id="workflow-raw-events-title")
             # A Static grows with its rendered content, leaving the surrounding
             # VerticalScroll as the sole vertical scroll context. RichLog owns
@@ -773,6 +779,8 @@ class WorkflowRunnerScreen(Screen[None]):
             self.app.push_screen(
                 AgentInstructionsScreen(self._selected("#repository"))
             )
+        elif event.button.id == "copy-detailed-logs-button":
+            self._copy_detailed_logs()
         elif event.button.id == "toggle-workflow-logs":
             self._show_raw_events = not self._show_raw_events
             raw_events = self.query_one("#workflow-raw-events", Static)
@@ -866,6 +874,9 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#workflow-progress", Static).update("Starting workflow…")
         self._event_lines.clear()
         self._raw_event_lines.clear()
+        self._live_diagnostics.clear()
+        self._active_execution_id = None
+        self.query_one("#copy-detailed-logs-button", Button).disabled = True
         self._active_timeline_stages.clear()
         self._stage_attempts.clear()
         self.query_one("#workflow-events", Static).update("")
@@ -888,7 +899,9 @@ class WorkflowRunnerScreen(Screen[None]):
         self.app.call_from_thread(self._render_workflow_event, event)
 
     def _render_workflow_event(self, event: WorkflowEvent) -> None:
+        self._active_execution_id = event.execution_id
         self._append_raw_event(event)
+        self._append_live_diagnostic(event)
         message = self._timeline_message(event)
         if message is None:
             return
@@ -936,6 +949,54 @@ class WorkflowRunnerScreen(Screen[None]):
         if self._show_raw_events:
             raw_events.update(self._rendered_raw_events())
             self.query_one("#workflow-runner", VerticalScroll).refresh(layout=True)
+
+    def _append_live_diagnostic(self, event: WorkflowEvent) -> None:
+        """Retain diagnostics while persistence is still being updated in a live run."""
+
+        if event.kind is WorkflowEventKind.DIAGNOSTIC:
+            try:
+                category = DiagnosticCategory(event.category or "")
+            except ValueError:
+                category = DiagnosticCategory.WORKFLOW_EVENT
+            payload = event.payload or {}
+        else:
+            category = DiagnosticCategory.WORKFLOW_EVENT
+            payload = {
+                "kind": event.kind.value,
+                "status": event.status.value if event.status else None,
+                "step_status": event.step_status.value if event.step_status else None,
+                "message": event.message,
+            }
+        self._live_diagnostics.append(
+            ExecutionDiagnostic(
+                execution_id=event.execution_id,
+                category=category,
+                payload=cast(dict[str, Any], redact_payload(payload)),
+                stage=event.stage,
+                occurred_at=event.occurred_at,
+            )
+        )
+        self.query_one("#copy-detailed-logs-button", Button).disabled = False
+
+    def _copy_detailed_logs(self) -> None:
+        diagnostics = self._live_diagnostics
+        if self._active_execution_id is not None:
+            try:
+                persisted = self.controller.execution_diagnostics(self._active_execution_id)
+            except Exception:
+                persisted = []
+            if persisted:
+                diagnostics = persisted
+        content = format_diagnostics_for_export(diagnostics)
+        if not content:
+            self.notify("No detailed logs are available to copy yet.", severity="warning")
+            return
+        try:
+            self.app.copy_to_clipboard(content)
+        except Exception as exc:
+            self.notify(f"Could not copy detailed logs: {exc}", severity="error")
+            return
+        self.notify("Detailed logs copied to clipboard.")
 
     def _rendered_raw_events(self) -> str:
         """Keep individual diagnostics visually distinct in the page log."""

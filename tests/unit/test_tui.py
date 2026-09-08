@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +19,13 @@ from orchestrator.config.project_config import (
 )
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.tui.app import OrchestratorApp
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
+from orchestrator.tui.diagnostics import format_diagnostics_for_export
 from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
 from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
 from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
@@ -65,6 +68,7 @@ class _Repository:
     def __init__(self) -> None:
         self.execution = WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED)
         self.executions = [self.execution]
+        self.diagnostics: list[ExecutionDiagnostic] = []
 
     def list_executions(self) -> list[WorkflowExecution]:
         return self.executions
@@ -76,6 +80,10 @@ class _Repository:
     def list_steps(self, execution_id: str) -> list[Any]:
         assert execution_id == self.execution.id
         return []
+
+    def list_diagnostics(self, execution_id: str) -> list[ExecutionDiagnostic]:
+        assert execution_id == self.execution.id
+        return self.diagnostics
 
 
 class _ConfigLoader:
@@ -564,6 +572,71 @@ def test_github_app_compact_summary_hides_identifiers() -> None:
         "GitHub Apps: Implementer ✓ · Reviewer —"
     )
     assert "12" not in WorkflowRunnerScreen.github_app_summary(configured, unconfigured)
+
+
+def test_format_diagnostics_for_export_keeps_sections_metadata_and_redaction() -> None:
+    timestamp = datetime(2026, 9, 8, 20, 30, tzinfo=UTC)
+    diagnostics = [
+        ExecutionDiagnostic(
+            id=index,
+            execution_id="execution-1",
+            category=category,
+            stage=WorkflowStage.IMPLEMENT,
+            role=AgentRole.IMPLEMENTER,
+            occurred_at=timestamp,
+            payload={"summary": f"{category.value.lower()} payload", "token": "not-safe"},
+        )
+        for index, category in enumerate(DiagnosticCategory, start=1)
+    ]
+
+    rendered = format_diagnostics_for_export(diagnostics)
+
+    for header in ("REQUEST", "RESPONSE", "VALIDATION", "ERROR", "WORKFLOW EVENT"):
+        assert f"=== {header} ===" in rendered
+    assert "Timestamp: 2026-09-08T20:30:00+00:00" in rendered
+    assert "Stage: IMPLEMENT" in rendered
+    assert "Role: implementer" in rendered
+    assert '"summary": "request payload"' in rendered
+    assert '"token": "[REDACTED]"' in rendered
+    assert "not-safe" not in rendered
+
+
+def test_workflow_runner_copies_complete_live_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    copied: list[str] = []
+    monkeypatch.setattr(application, "copy_to_clipboard", copied.append)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await pilot.pause()
+            screen = application.screen
+            payload = "\n".join(f"request line {number}" for number in range(400))
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.DIAGNOSTIC,
+                    category=DiagnosticCategory.REQUEST.value,
+                    stage=WorkflowStage.IMPLEMENT,
+                    payload={"instructions": payload, "authorization": "Bearer private-token"},
+                )
+            )
+            copy_button = screen.query_one("#copy-detailed-logs-button", Button)
+            assert not copy_button.disabled
+            copy_button.press()
+            await pilot.pause()
+
+    asyncio.run(drive())
+
+    assert len(copied) == 1
+    assert "=== REQUEST ===" in copied[0]
+    assert "request line 399" in copied[0]
+    assert "private-token" not in copied[0]
+    assert '"authorization": "[REDACTED]"' in copied[0]
 
 
 def test_workflow_runner_detailed_logs_expand_the_main_scroll_region_and_collapse_cleanly(
@@ -1353,6 +1426,87 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
             assert '"spec-session": "https://example/sessions/planner"' in rendered
 
     asyncio.run(drive())
+
+
+def test_execution_detail_copies_all_persisted_detailed_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.diagnostics = [
+        ExecutionDiagnostic(
+            execution_id=repository.execution.id,
+            category=DiagnosticCategory.REQUEST,
+            stage=WorkflowStage.IMPLEMENT,
+            role=AgentRole.IMPLEMENTER,
+            payload={"instructions": "implement the requested change"},
+        ),
+        ExecutionDiagnostic(
+            execution_id=repository.execution.id,
+            category=DiagnosticCategory.RESPONSE,
+            stage=WorkflowStage.IMPLEMENT,
+            role=AgentRole.IMPLEMENTER,
+            payload={"output": "\n".join(f"response line {number}" for number in range(400))},
+        ),
+    ]
+    application = OrchestratorApp(controller)
+    copied: list[str] = []
+    monkeypatch.setattr(application, "copy_to_clipboard", copied.append)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await pilot.pause()
+            screen = application.screen
+            copy_button = screen.query_one("#copy-detailed-logs-button", Button)
+            assert not copy_button.disabled
+            copy_button.press()
+            await pilot.pause()
+
+    asyncio.run(drive())
+
+    assert copied == [format_diagnostics_for_export(repository.diagnostics)]
+    assert "=== REQUEST ===" in copied[0]
+    assert "=== RESPONSE ===" in copied[0]
+    assert "response line 399" in copied[0]
+
+
+def test_execution_detail_reports_clipboard_failures_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.diagnostics = [
+        ExecutionDiagnostic(
+            execution_id=repository.execution.id,
+            category=DiagnosticCategory.ERROR,
+            payload={"message": "validation failed"},
+        )
+    ]
+    application = OrchestratorApp(controller)
+    notifications: list[tuple[str, str | None]] = []
+
+    def clipboard_failure(_: str) -> None:
+        raise RuntimeError("clipboard integration is unavailable")
+
+    def record_notification(
+        _screen: ExecutionDetailScreen, message: str, **kwargs: Any
+    ) -> None:
+        notifications.append((message, kwargs.get("severity")))
+
+    monkeypatch.setattr(application, "copy_to_clipboard", clipboard_failure)
+    monkeypatch.setattr(ExecutionDetailScreen, "notify", record_notification)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await pilot.pause()
+            application.screen.query_one("#copy-detailed-logs-button", Button).press()
+            await pilot.pause()
+
+    asyncio.run(drive())
+
+    assert notifications == [
+        ("Could not copy detailed logs: clipboard integration is unavailable", "error")
+    ]
 
 
 def test_workflow_runner_submits_selected_task_id_in_workflow_launch(

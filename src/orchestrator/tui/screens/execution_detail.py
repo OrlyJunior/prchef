@@ -19,6 +19,7 @@ from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.runtime_logging import redact_payload
 from orchestrator.tui.bridge import WorkflowController
+from orchestrator.tui.diagnostics import format_diagnostics_for_export
 
 if TYPE_CHECKING:
     from orchestrator.tui.app import OrchestratorApp
@@ -33,6 +34,7 @@ class ExecutionDetailScreen(Screen[None]):
         super().__init__()
         self.execution_id = execution_id
         self._links: dict[str, str] = {}
+        self._diagnostics: list[ExecutionDiagnostic] = []
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="execution-detail"):
@@ -42,6 +44,9 @@ class ExecutionDetailScreen(Screen[None]):
                 yield Button("Open PR", id="open-pr")
                 yield Button("Open planner session", id="open-spec-session")
                 yield Button("Open review session", id="open-review-session")
+                yield Button(
+                    "Copy detailed logs", id="copy-detailed-logs-button", disabled=True
+                )
             yield Static("", id="execution-human-title")
             yield Static("", id="execution-human-prompt")
             yield TextArea("", id="execution-human-response")
@@ -81,6 +86,9 @@ class ExecutionDetailScreen(Screen[None]):
                 event.button.disabled = True
                 self._resume_execution(response)
             return
+        if event.button.id == "copy-detailed-logs-button":
+            self._copy_detailed_logs()
+            return
         url = self._links.get(event.button.id or "")
         if not url:
             self.notify("No related link was persisted for this execution.", severity="warning")
@@ -111,6 +119,8 @@ class ExecutionDetailScreen(Screen[None]):
         steps: list[WorkflowStep],
         diagnostics: list[ExecutionDiagnostic],
     ) -> None:
+        self._diagnostics = diagnostics
+        self.query_one("#copy-detailed-logs-button", Button).disabled = not diagnostics
         self._links = {
             "open-task": execution.task_url,
             "open-pr": execution.pr_url or "",
@@ -159,3 +169,15 @@ class ExecutionDetailScreen(Screen[None]):
         # The content Static has its natural height; refresh the owning page
         # so persisted diagnostics extend the main scroll range immediately.
         self.query_one("#execution-detail", VerticalScroll).refresh(layout=True)
+
+    def _copy_detailed_logs(self) -> None:
+        content = format_diagnostics_for_export(self._diagnostics)
+        if not content:
+            self.notify("No detailed logs are available to copy.", severity="warning")
+            return
+        try:
+            self.app.copy_to_clipboard(content)
+        except Exception as exc:
+            self.notify(f"Could not copy detailed logs: {exc}", severity="error")
+            return
+        self.notify("Detailed logs copied to clipboard.")
