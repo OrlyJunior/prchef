@@ -32,6 +32,15 @@ class AgentPresetsScreen(Screen[None]):
     BINDINGS = [("escape", "app.pop_screen", "Back")]
 
     DEFAULT_CSS = """
+    /* This ID is intentionally local to the editor. The home-screen
+       navigation button uses the same destination name, so sizing the
+       editor here prevents a content-area rule from leaking into navigation. */
+    #agent-presets {
+        width: 100%;
+        height: 1fr;
+        padding: 1 2;
+        overflow-y: auto;
+    }
     #agent-preset-role {
         width: 32;
         max-width: 100%;
