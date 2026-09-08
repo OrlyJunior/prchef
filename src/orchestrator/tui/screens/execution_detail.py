@@ -37,6 +37,7 @@ class ExecutionDetailScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="execution-detail"):
             yield Static("Execution detail", classes="screen-title")
+            yield Static("", id="execution-status")
             with Horizontal(classes="screen-actions"):
                 yield Button("Open task", id="open-task")
                 yield Button("Open PR", id="open-pr")
@@ -111,6 +112,13 @@ class ExecutionDetailScreen(Screen[None]):
         steps: list[WorkflowStep],
         diagnostics: list[ExecutionDiagnostic],
     ) -> None:
+        status = self.query_one("#execution-status", Static)
+        cancellation_pending = (
+            execution.status.value == "RUNNING"
+            and execution.cancellation_requested_at is not None
+        )
+        status.update("CANCELLATION REQUESTED" if cancellation_pending else execution.status.value)
+        status.set_class(cancellation_pending or execution.status.value == "CANCELLED", "cancelled")
         self._links = {
             "open-task": execution.task_url,
             "open-pr": execution.pr_url or "",

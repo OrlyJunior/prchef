@@ -152,6 +152,71 @@ def test_workflow_events_follow_persisted_transitions_and_do_not_control_executi
     assert events[-1].kind.value == "WORKFLOW_FINISHED"
 
 
+def test_cancellation_stops_later_stages_and_preserves_workspace_artifacts(workflow) -> None:
+    service, repository, _, _ = workflow
+    events = []
+    original_record_implementation = repository.record_implementation
+
+    def record_implementation_and_cancel(*args, **kwargs) -> None:
+        original_record_implementation(*args, **kwargs)
+        assert repository.execution is not None
+        assert service.cancel_execution(repository.execution.id) is True
+
+    repository.record_implementation = record_implementation_and_cancel  # type: ignore[method-assign]
+
+    result = service.run("card-cancelled", event_listener=events.append)
+
+    assert result.status is WorkflowStatus.CANCELLED
+    assert result.error_message is None
+    assert result.workspace_path is not None
+    assert result.working_branch is not None
+    assert WorkflowStage.VALIDATE not in repository.stage_changes
+    assert WorkflowStage.COMMIT not in repository.stage_changes
+    assert any(
+        step["stage"] is WorkflowStage.IMPLEMENT and step["status"] is StepStatus.CANCELLED
+        for step in repository.steps.values()
+    )
+    assert not any(event.step_status is StepStatus.FAILED for event in events)
+    assert events[-1].status is WorkflowStatus.CANCELLED
+
+
+def test_cancellation_is_a_terminal_notification_outcome(tmp_path: Path) -> None:
+    service, recorder = _workflow_with_notifications(tmp_path)
+    repository = service._repository
+    original_record_implementation = repository.record_implementation
+
+    def record_implementation_and_cancel(*args, **kwargs) -> None:
+        original_record_implementation(*args, **kwargs)
+        assert repository.execution is not None
+        service.cancel_execution(repository.execution.id)
+
+    repository.record_implementation = record_implementation_and_cancel  # type: ignore[method-assign]
+
+    assert service.run("card-cancel-notification").status is WorkflowStatus.CANCELLED
+    assert [event.status for event in recorder.events] == [WorkflowStatus.CANCELLED]
+
+
+def test_cancellation_retains_already_created_pull_request_artifacts(workflow) -> None:
+    service, repository, _, _ = workflow
+    original_record_pull_request = repository.record_pull_request
+
+    def record_pull_request_and_cancel(*args, **kwargs) -> None:
+        original_record_pull_request(*args, **kwargs)
+        assert repository.execution is not None
+        service.cancel_execution(repository.execution.id)
+
+    repository.record_pull_request = record_pull_request_and_cancel  # type: ignore[method-assign]
+
+    result = service.run("card-cancel-after-pr")
+
+    assert result.status is WorkflowStatus.CANCELLED
+    assert result.workspace_path is not None
+    assert result.working_branch is not None
+    assert result.commit_sha == "a" * 40
+    assert result.pr_url == "https://github.example/pr/42"
+    assert WorkflowStage.REVIEW not in repository.stage_changes
+
+
 def test_workflow_event_listener_failures_do_not_control_execution(workflow) -> None:
     service, _, _, _ = workflow
 

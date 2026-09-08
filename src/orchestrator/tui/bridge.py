@@ -19,7 +19,11 @@ from orchestrator.config.project_config import (
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
-from orchestrator.models.workflow_event import WorkflowEventListener
+from orchestrator.models.workflow_event import (
+    WorkflowEvent,
+    WorkflowEventKind,
+    WorkflowEventListener,
+)
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.repositories.workflow_repository import WorkflowRepository
@@ -74,6 +78,7 @@ class WorkflowController:
         self._verbose = verbose
         self._workflow_service_factory = workflow_service_factory
         self._selected_repository: str | None = None
+        self._active_services: dict[str, WorkflowService] = {}
 
     def repositories(self) -> list[ConfiguredRepository]:
         repositories = self._config_loader.list_repositories()
@@ -246,13 +251,32 @@ class WorkflowController:
                 verbose=self._verbose,
             )
         )
+        def observe(event: WorkflowEvent) -> None:
+            if event.kind is WorkflowEventKind.EXECUTION_CREATED:
+                self._active_services[event.execution_id] = service
+            elif event.kind is WorkflowEventKind.WORKFLOW_FINISHED:
+                self._active_services.pop(event.execution_id, None)
+            if event_listener is not None:
+                event_listener(event)
+
         return service.run(
             task_id,
             launch.repository,
             agent_providers=launch.agent_providers,
             agent_runtime_options=launch.agent_runtime_options,
-            event_listener=event_listener,
+            event_listener=observe,
         )
+
+    def cancel_workflow(self, execution_id: str) -> bool:
+        """Request cancellation through the service boundary when it is live.
+
+        Falling back to the repository keeps a request durable when the TUI was
+        restarted while an execution is still marked running.
+        """
+        service = self._active_services.get(execution_id)
+        if service is not None:
+            return service.cancel_execution(execution_id)
+        return self._repository.request_cancellation(execution_id)
 
     def executions(self, query: str = "") -> list[WorkflowExecution]:
         normalized = query.strip().casefold()

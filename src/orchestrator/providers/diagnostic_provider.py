@@ -30,11 +30,13 @@ class DiagnosticAgentProvider:
         role: AgentRole,
         provider_config: Mapping[str, Any],
         record: DiagnosticRecorder,
+        cancellation_check: Callable[[], None] | None = None,
     ) -> None:
         self._provider = provider
         self._role = role
         self._provider_config = dict(provider_config)
         self._record = record
+        self._cancellation_check = cancellation_check
 
     def execute(
         self, request: AgentRequest, *, on_started: AgentStartedCallback | None = None
@@ -54,6 +56,8 @@ class DiagnosticAgentProvider:
                 },
             )
             raise
+        if self._cancellation_check is not None:
+            self._cancellation_check()
         self._record(DiagnosticCategory.RESPONSE, self._role, self._response_payload(result))
         return result
 
