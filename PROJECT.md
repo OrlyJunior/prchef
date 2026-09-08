@@ -87,6 +87,10 @@
   requesting stage, exact blocking prompt, request/response timestamps, and the response. `respond`
   and the TUI resume the same execution ID; planner responses rerun planning before any workspace is
   created, while review responses reuse the persisted worktree, branch, PR, and snapshots.
+- A running execution can receive a durable cancellation request through the workflow
+  service/controller boundary. It ends as `CANCELLED`, never `FAILED`; providers that cannot be
+  interrupted immediately finish their current operation, but no later stage is scheduled.
+  Cancellation status and diagnostics remain inspectable after restart.
 - Provider startup references during spec/review are persisted immediately in legacy-named
   `spec_jules_session_*` / `review_jules_session_*` fields. Preserve those fields for later human
   inspection; no automatic session/workflow resume exists.
@@ -120,10 +124,10 @@
 
 - Worktree root is configurable. The default is a sibling `orchestrator-workspaces` directory;
   configured roots may not resolve inside the control checkout. Existing target paths are errors.
-- Worktrees are retained automatically on success, failure, and human intervention so they remain
+- Worktrees are retained automatically on success, failure, cancellation, and human intervention so they remain
   available for inspection and recovery. `cleanup-workspaces --repository <key-or-path> --dry-run`
   lists their retention decisions; without `--dry-run` it removes successful (`APPROVED` or
-  `CHANGES_REQUESTED`) worktrees and prunes Git metadata. `FAILED`/`NEEDS_HUMAN` worktrees require
+  `CHANGES_REQUESTED`) worktrees and prunes Git metadata. `FAILED`/`CANCELLED`/`NEEDS_HUMAN` worktrees require
   `--include-failed` (or `--all`); `PENDING`, `RUNNING`, unmanaged, and out-of-root paths are never
   removed by this command.
 - Commit/push refuse protected branches and refuse if the current checkout is not the workflow
@@ -245,18 +249,19 @@
   and is shown as an actionable launcher warning.
 - Notifications are opt-in per resolved project configuration through `notifications.enabled`
   (default `false`) and `notifications.channel` (currently `desktop`). Workflow policy emits one
-  best-effort alert only for terminal `APPROVED`, `FAILED`, `NEEDS_HUMAN`, or exhausted-review
+  best-effort alert only for terminal `APPROVED`, `FAILED`, `CANCELLED`, `NEEDS_HUMAN`, or exhausted-review
   `CHANGES_REQUESTED` outcomes. Desktop delivery selects native Windows toasts; unsupported,
   headless, or failed delivery only writes a warning and can never alter workflow state.
 
 ## Failure semantics
 
-- Configuration errors and explicit `AgentNeedsHumanError` end as `NEEDS_HUMAN`; all other stage,
+- Configuration errors and explicit `AgentNeedsHumanError` end as `NEEDS_HUMAN`; requested user
+  cancellation ends as `CANCELLED`; all other stage,
   provider, Git, command, or persistence errors end as `FAILED`. The triggering step is persisted
   as failed with its error and the execution retains its last recorded snapshots.
 - No compensation is attempted after external side effects. Inspect persisted execution ID,
   workspace, branch, session reference, and PR/commit fields rather than assuming a clean retry.
-- A successful review sets `current_stage=COMPLETED`; terminal failed/human executions retain the
+- A successful review sets `current_stage=COMPLETED`; terminal failed/cancelled/human executions retain the
   stage that failed or stopped them.
 
 ## `debug` is diagnostics, not resume

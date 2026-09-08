@@ -29,7 +29,7 @@ from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
 from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 from orchestrator.tui.screens.task_selector import TaskSelector
-from orchestrator.tui.screens.workflow_runner import WorkflowRunnerScreen
+from orchestrator.tui.screens.workflow_runner import StopWorkflowConfirmation, WorkflowRunnerScreen
 from orchestrator.tui.widgets import OrchestratorSelect, RepositorySelect
 
 
@@ -65,6 +65,7 @@ class _Repository:
     def __init__(self) -> None:
         self.execution = WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED)
         self.executions = [self.execution]
+        self.cancellation_requests: list[str] = []
 
     def list_executions(self) -> list[WorkflowExecution]:
         return self.executions
@@ -76,6 +77,13 @@ class _Repository:
     def list_steps(self, execution_id: str) -> list[Any]:
         assert execution_id == self.execution.id
         return []
+
+    def request_cancellation(self, execution_id: str) -> bool:
+        assert execution_id == self.execution.id
+        if self.execution.status is not WorkflowStatus.RUNNING:
+            return False
+        self.cancellation_requests.append(execution_id)
+        return True
 
 
 class _ConfigLoader:
@@ -1378,6 +1386,66 @@ def test_workflow_runner_submits_selected_task_id_in_workflow_launch(
             await pilot.press("enter")
             await pilot.pause(delay=0.1)
             assert service.calls[0][0:2] == ("12", "example")
+
+    asyncio.run(drive())
+
+
+def test_execution_history_and_detail_display_cancelled_status(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.CANCELLED
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionHistoryScreen())
+            await pilot.pause()
+            picker = application.screen.query_one("#execution-picker", OrchestratorSelect)
+            assert "CANCELLED" in str(picker._options)
+
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await pilot.pause()
+            status = application.screen.query_one("#execution-status", Static)
+            assert str(status.renderable) == "CANCELLED"
+            assert status.has_class("cancelled")
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_confirms_and_requests_cancellation(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.RUNNING
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await pilot.pause()
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.EXECUTION_CREATED,
+                    status=WorkflowStatus.RUNNING,
+                )
+            )
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.STATUS_CHANGED,
+                    status=WorkflowStatus.RUNNING,
+                )
+            )
+            assert screen.query_one("#workflow-stop-actions", Horizontal).display is True
+            screen.query_one("#stop-workflow", Button).press()
+            await pilot.pause()
+            assert isinstance(application.screen, StopWorkflowConfirmation)
+            application.screen.query_one("#confirm-stop-workflow", Button).press()
+            await pilot.pause()
+            assert repository.cancellation_requests == [repository.execution.id]
+            assert "Cancellation requested" in str(
+                screen.query_one("#workflow-progress", Static).renderable
+            )
 
     asyncio.run(drive())
 

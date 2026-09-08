@@ -27,6 +27,7 @@ class WorkflowExecution:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     finished_at: datetime | None = None
+    cancellation_requested_at: datetime | None = None
     task_snapshot: dict[str, Any] | None = None
     spec_snapshot: dict[str, Any] | None = None
     implementation_snapshot: dict[str, Any] | None = None

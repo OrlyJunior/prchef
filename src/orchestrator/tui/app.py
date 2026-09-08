@@ -85,6 +85,7 @@ class OrchestratorApp(App[None]):
         margin: 0 0 1 0;
     }
     #workflow-progress { margin-top: 2; text-style: bold; }
+    #workflow-progress.cancelled, #execution-status.cancelled { color: $warning; }
     #workflow-events { margin-top: 1; color: $text-muted; }
     .workflow-log-actions { height: auto; margin-top: 1; }
     .workflow-log-actions Button { width: auto; }
