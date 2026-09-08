@@ -9,6 +9,7 @@ from orchestrator.models import (
     DevelopmentTask,
     DiagnosticCategory,
     ExecutionDiagnostic,
+    PolishOutcome,
     StepStatus,
     WorkflowStage,
     WorkflowStatus,
@@ -96,6 +97,12 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     assert [(step.stage, step.status) for step in polish_steps] == [
         (WorkflowStage.POLISH, StepStatus.SUCCEEDED)
     ]
+
+    repository.record_polish_outcome(github_execution.id, PolishOutcome.SKIPPED)
+    repository.record_polish_skip_comment_attempt(github_execution.id)
+    persisted_polish = repository.get_execution(github_execution.id)
+    assert persisted_polish.polish_outcome is PolishOutcome.SKIPPED
+    assert persisted_polish.polish_skip_comment_attempted is True
 
 
 def test_human_interactions_persist_response_and_resume_state(tmp_path: Path) -> None:

@@ -33,6 +33,7 @@ from orchestrator.models.workflow_event import (
 )
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
+    PolishOutcome,
     ReviewDecision,
     StepStatus,
     WorkflowStage,
@@ -275,7 +276,7 @@ class WorkflowService:
                 )
 
             review_attempt = 0
-            polish_attempted = False
+            polish_attempted = execution.polish_outcome is not None
             while True:
                 with self._step(execution.id, WorkflowStage.REVIEW):
                     review = ReviewService(
@@ -321,54 +322,23 @@ class WorkflowService:
                     and not polish_attempted
                 ):
                     polish_attempted = True
-                    with self._step(execution.id, WorkflowStage.POLISH):
-                        implementation = implementation_service.run_polish_pass(
-                            task,
-                            spec,
-                            review.suggestions,
-                            workspace_path,
-                            pull_request,
-                            instructions_repository_path=config.path,
-                        )
-                        self._repository.record_implementation(execution.id, implementation)
-
-                    if not implementation.success:
-                        logger.warning(
-                            "[workflow] Optional polish did not complete; retaining approved review"
-                        )
-                        self._discard_polish_changes(execution_clients)
-                        break
-                    if not implementation.changed_files:
-                        logger.info("[workflow] Implementer declined optional polish suggestions")
-                        self._publish_polish_skip_comment(
-                            execution_clients=execution_clients,
-                            pull_request_number=pull_request.number,
-                            implementation=implementation,
-                        )
-                        break
-
-                    polish_validation = self._validate_polish_changes(
+                    polish_outcome, polish_validation = self._evaluate_optional_polish(
                         execution_id=execution.id,
                         execution_clients=execution_clients,
+                        implementation_service=implementation_service,
+                        task=task,
+                        spec=spec,
+                        suggestions=review.suggestions,
                         workspace_path=workspace_path,
+                        pull_request=pull_request,
+                        working_branch=working_branch,
                         config=config,
                     )
-                    if polish_validation is None:
+                    if polish_outcome is PolishOutcome.SKIPPED:
                         break
+                    if polish_validation is None:
+                        raise WorkflowError("Applied optional polish is missing validation results")
                     validation = polish_validation
-
-                    with self._step(execution.id, WorkflowStage.COMMIT):
-                        commit_sha = execution_clients.git.commit_all(
-                            self._commit_message(task),
-                            working_branch,
-                            config.repository.protected_branches,
-                        )
-                        self._repository.record_commit(execution.id, commit_sha)
-
-                    with self._step(execution.id, WorkflowStage.PUSH):
-                        execution_clients.git.push(
-                            working_branch, config.repository.protected_branches
-                        )
                     continue
 
                 if review.result is not ReviewDecision.CHANGES_REQUESTED:
@@ -597,34 +567,71 @@ class WorkflowService:
         pull_request = PullRequest(**execution.pull_request_snapshot)
         validation = self._validation_from_snapshot(execution.validation_snapshot)
         execution_clients = clients.at_path(workspace_path)
-        with self._step(execution.id, WorkflowStage.REVIEW):
-            review = ReviewService(
-                self._diagnostic_agent(
-                    clients.agent(AgentRole.REVIEWER), config, AgentRole.REVIEWER, execution.id
+        implementation_service = ImplementationService(
+            self._diagnostic_agent(
+                execution_clients.agent(AgentRole.IMPLEMENTER),
+                config,
+                AgentRole.IMPLEMENTER,
+                execution.id,
+            ),
+            execution_clients.git,
+        )
+        polish_attempted = execution.polish_outcome is not None
+        while True:
+            with self._step(execution.id, WorkflowStage.REVIEW):
+                review = ReviewService(
+                    self._diagnostic_agent(
+                        clients.agent(AgentRole.REVIEWER), config, AgentRole.REVIEWER, execution.id
+                    )
+                ).review(
+                    task=task,
+                    spec=spec,
+                    pull_request=pull_request,
+                    diff=execution_clients.git.diff(config.repository.base_branch),
+                    validation=validation,
+                    repository_path=workspace_path,
+                    instructions_repository_path=config.path,
+                    repository_slug=repository_slug,
+                    base_branch=config.repository.base_branch,
+                    feature_branch=execution.working_branch,
+                    on_execution_started=lambda reference: (
+                        self._repository.record_review_jules_session(
+                            execution.id, reference.external_id, reference.url
+                        )
+                    ),
                 )
-            ).review(
-                task=task,
-                spec=spec,
-                pull_request=pull_request,
-                diff=execution_clients.git.diff(config.repository.base_branch),
-                validation=validation,
-                repository_path=workspace_path,
-                instructions_repository_path=config.path,
-                repository_slug=repository_slug,
-                base_branch=config.repository.base_branch,
-                feature_branch=execution.working_branch,
-                on_execution_started=lambda reference: self._repository.record_review_jules_session(
-                    execution.id, reference.external_id, reference.url
-                ),
-            )
-            self._repository.record_review(execution.id, review)
-            self._publish_review(
-                execution_id=execution.id,
-                execution_clients=execution_clients,
-                repository_slug=repository_slug,
-                pull_request_number=pull_request.number,
-                review=review,
-            )
+                self._repository.record_review(execution.id, review)
+                self._publish_review(
+                    execution_id=execution.id,
+                    execution_clients=execution_clients,
+                    repository_slug=repository_slug,
+                    pull_request_number=pull_request.number,
+                    review=review,
+                )
+            if (
+                review.result is ReviewDecision.APPROVED
+                and review.suggestions
+                and not polish_attempted
+            ):
+                polish_attempted = True
+                polish_outcome, polish_validation = self._evaluate_optional_polish(
+                    execution_id=execution.id,
+                    execution_clients=execution_clients,
+                    implementation_service=implementation_service,
+                    task=task,
+                    spec=spec,
+                    suggestions=review.suggestions,
+                    workspace_path=workspace_path,
+                    pull_request=pull_request,
+                    working_branch=execution.working_branch,
+                    config=config,
+                )
+                if polish_outcome is PolishOutcome.APPLIED:
+                    if polish_validation is None:
+                        raise WorkflowError("Applied optional polish is missing validation results")
+                    validation = polish_validation
+                    continue
+            break
         status = {
             ReviewDecision.APPROVED: WorkflowStatus.APPROVED,
             ReviewDecision.CHANGES_REQUESTED: WorkflowStatus.CHANGES_REQUESTED,
@@ -708,36 +715,69 @@ class WorkflowService:
                     pull_request_number=pull_request.number,
                     workspace_path=workspace_path,
                 )
-            with self._step(execution_id, WorkflowStage.REVIEW):
-                review = ReviewService(
-                    self._diagnostic_agent(
-                        clients.agent(AgentRole.REVIEWER), config, AgentRole.REVIEWER, execution_id
-                    )
-                ).review(
-                    task=task,
-                    spec=spec,
-                    pull_request=pull_request,
-                    diff=execution_clients.git.diff(config.repository.base_branch),
-                    validation=validation,
-                    repository_path=workspace_path,
-                    instructions_repository_path=config.path,
-                    repository_slug=repository_slug,
-                    base_branch=config.repository.base_branch,
-                    feature_branch=working_branch,
-                    on_execution_started=lambda reference: (
-                        self._repository.record_review_jules_session(
-                            execution_id, reference.external_id, reference.url
+            polish_attempted = (
+                self._repository.get_execution(execution_id).polish_outcome is not None
+            )
+            while True:
+                with self._step(execution_id, WorkflowStage.REVIEW):
+                    review = ReviewService(
+                        self._diagnostic_agent(
+                            clients.agent(AgentRole.REVIEWER),
+                            config,
+                            AgentRole.REVIEWER,
+                            execution_id,
                         )
-                    ),
-                )
-                self._repository.record_review(execution_id, review)
-                self._publish_review(
-                    execution_id=execution_id,
-                    execution_clients=execution_clients,
-                    repository_slug=repository_slug,
-                    pull_request_number=pull_request.number,
-                    review=review,
-                )
+                    ).review(
+                        task=task,
+                        spec=spec,
+                        pull_request=pull_request,
+                        diff=execution_clients.git.diff(config.repository.base_branch),
+                        validation=validation,
+                        repository_path=workspace_path,
+                        instructions_repository_path=config.path,
+                        repository_slug=repository_slug,
+                        base_branch=config.repository.base_branch,
+                        feature_branch=working_branch,
+                        on_execution_started=lambda reference: (
+                            self._repository.record_review_jules_session(
+                                execution_id, reference.external_id, reference.url
+                            )
+                        ),
+                    )
+                    self._repository.record_review(execution_id, review)
+                    self._publish_review(
+                        execution_id=execution_id,
+                        execution_clients=execution_clients,
+                        repository_slug=repository_slug,
+                        pull_request_number=pull_request.number,
+                        review=review,
+                    )
+                if (
+                    review.result is ReviewDecision.APPROVED
+                    and review.suggestions
+                    and not polish_attempted
+                ):
+                    polish_attempted = True
+                    polish_outcome, polish_validation = self._evaluate_optional_polish(
+                        execution_id=execution_id,
+                        execution_clients=execution_clients,
+                        implementation_service=implementation_service,
+                        task=task,
+                        spec=spec,
+                        suggestions=review.suggestions,
+                        workspace_path=workspace_path,
+                        pull_request=pull_request,
+                        working_branch=working_branch,
+                        config=config,
+                    )
+                    if polish_outcome is PolishOutcome.APPLIED:
+                        if polish_validation is None:
+                            raise WorkflowError(
+                                "Applied optional polish is missing validation results"
+                            )
+                        validation = polish_validation
+                        continue
+                break
             status = {
                 ReviewDecision.APPROVED: WorkflowStatus.APPROVED,
                 ReviewDecision.CHANGES_REQUESTED: WorkflowStatus.CHANGES_REQUESTED,
@@ -1126,6 +1166,109 @@ class WorkflowService:
 
         return validation
 
+    def _evaluate_optional_polish(
+        self,
+        *,
+        execution_id: str,
+        execution_clients: WorkflowClients,
+        implementation_service: ImplementationService,
+        task: DevelopmentTask,
+        spec: RepositorySpec,
+        suggestions: list[str],
+        workspace_path: Path,
+        pull_request: PullRequest,
+        working_branch: str,
+        config: ProjectConfig,
+    ) -> tuple[PolishOutcome, ValidationResult | None]:
+        """Evaluate approved-review suggestions once and persist an auditable outcome."""
+        persisted = self._repository.get_execution(execution_id).polish_outcome
+        if persisted is not None:
+            return persisted, None
+
+        with self._step(execution_id, WorkflowStage.POLISH):
+            implementation = implementation_service.run_polish_pass(
+                task,
+                spec,
+                suggestions,
+                workspace_path,
+                pull_request,
+                instructions_repository_path=config.path,
+            )
+            self._repository.record_implementation(execution_id, implementation)
+
+        if not implementation.success:
+            logger.warning("[workflow] Optional polish did not complete; retaining approved review")
+            self._discard_polish_changes(execution_clients)
+            self._record_skipped_polish(
+                execution_id=execution_id,
+                execution_clients=execution_clients,
+                pull_request_number=pull_request.number,
+                implementation=implementation,
+                fallback_reason=(
+                    "The optional polish pass did not complete safely, so no changes were applied."
+                ),
+            )
+            return PolishOutcome.SKIPPED, None
+
+        if not implementation.changed_files:
+            logger.info("[workflow] Implementer declined optional polish suggestions")
+            self._record_skipped_polish(
+                execution_id=execution_id,
+                execution_clients=execution_clients,
+                pull_request_number=pull_request.number,
+                implementation=implementation,
+            )
+            return PolishOutcome.SKIPPED, None
+
+        validation = self._validate_polish_changes(
+            execution_id=execution_id,
+            execution_clients=execution_clients,
+            workspace_path=workspace_path,
+            config=config,
+        )
+        if validation is None:
+            self._record_skipped_polish(
+                execution_id=execution_id,
+                execution_clients=execution_clients,
+                pull_request_number=pull_request.number,
+                implementation=implementation,
+                fallback_reason=(
+                    "The optional changes did not pass validation, so no changes were applied."
+                ),
+            )
+            return PolishOutcome.SKIPPED, None
+
+        with self._step(execution_id, WorkflowStage.COMMIT):
+            commit_sha = execution_clients.git.commit_all(
+                self._commit_message(task),
+                working_branch,
+                config.repository.protected_branches,
+            )
+            self._repository.record_commit(execution_id, commit_sha)
+        with self._step(execution_id, WorkflowStage.PUSH):
+            execution_clients.git.push(working_branch, config.repository.protected_branches)
+
+        self._repository.record_polish_outcome(execution_id, PolishOutcome.APPLIED)
+        return PolishOutcome.APPLIED, validation
+
+    def _record_skipped_polish(
+        self,
+        *,
+        execution_id: str,
+        execution_clients: WorkflowClients,
+        pull_request_number: int,
+        implementation: ImplementationResult,
+        fallback_reason: str | None = None,
+    ) -> None:
+        self._repository.record_polish_outcome(execution_id, PolishOutcome.SKIPPED)
+        self._publish_polish_skip_comment(
+            execution_id=execution_id,
+            execution_clients=execution_clients,
+            pull_request_number=pull_request_number,
+            implementation=implementation,
+            fallback_reason=fallback_reason,
+        )
+
     @staticmethod
     def _discard_polish_changes(execution_clients: WorkflowClients) -> None:
         execution_clients.git.discard_uncommitted_changes()
@@ -1185,7 +1328,9 @@ class WorkflowService:
             )
 
     @staticmethod
-    def _format_polish_skip_comment(implementation: ImplementationResult) -> str:
+    def _format_polish_skip_comment(
+        implementation: ImplementationResult, fallback_reason: str | None = None
+    ) -> str:
         """Render a concise, safe explanation for an intentionally skipped polish pass."""
         lines = [
             "## Optional polish",
@@ -1196,20 +1341,30 @@ class WorkflowService:
         if implementation.polish_skip_reasons:
             lines.extend(f"- {reason}" for reason in implementation.polish_skip_reasons)
         else:
-            lines.append("- No small, safe, in-scope code change was warranted.")
+            reason = fallback_reason or "No small, safe, in-scope code change was warranted."
+            lines.append(f"- {reason}")
         return "\n".join(lines)
 
     def _publish_polish_skip_comment(
         self,
         *,
+        execution_id: str,
         execution_clients: WorkflowClients,
         pull_request_number: int,
         implementation: ImplementationResult,
+        fallback_reason: str | None = None,
     ) -> None:
+        execution = self._repository.get_execution(execution_id)
+        if execution.polish_skip_comment_attempted:
+            logger.info("[github] Optional polish skip comment was already attempted")
+            return
+        # Persist before the external side effect so a retry after a process interruption cannot
+        # publish a second timeline comment. Publication itself remains deliberately non-fatal.
+        self._repository.record_polish_skip_comment_attempt(execution_id)
         try:
             execution_clients.github.comment_pull_request(
                 pr_number=pull_request_number,
-                body=self._format_polish_skip_comment(implementation),
+                body=self._format_polish_skip_comment(implementation, fallback_reason),
             )
         except Exception as exc:
             # A skip explanation is audit context, not a new review decision. Keep the existing
