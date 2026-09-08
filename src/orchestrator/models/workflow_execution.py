@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from orchestrator.models.human_interaction import HumanInteraction
-from orchestrator.models.workflow_status import WorkflowStage, WorkflowStatus
+from orchestrator.models.workflow_status import PolishOutcome, WorkflowStage, WorkflowStatus
 
 
 @dataclass(slots=True)
@@ -37,4 +37,6 @@ class WorkflowExecution:
     review_jules_session_id: str | None = None
     review_jules_session_url: str | None = None
     review_snapshot: dict[str, Any] | None = None
+    polish_outcome: PolishOutcome | None = None
+    polish_skip_comment_attempted: bool = False
     human_interactions: list[HumanInteraction] = field(default_factory=list)

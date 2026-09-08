@@ -8,6 +8,7 @@ from orchestrator.config.project_config import GitHubAppSettings
 from orchestrator.models import (
     CodeReview,
     DevelopmentTask,
+    ImplementationResult,
     RepositorySpec,
     ReviewDecision,
     StepStatus,
@@ -546,6 +547,8 @@ def test_invalid_optional_polish_is_discarded_without_downgrading_approval(workf
     assert factory.git.commit_calls == 1
     assert factory.git.push_calls == 1
     assert factory.jules.review_calls == 1
+    assert len(factory.github.comment_calls) == 1
+    assert "did not pass validation" in factory.github.comment_calls[0]["body"]
 
 
 def test_changes_requested_after_polish_uses_mandatory_correction_loop(workflow) -> None:
@@ -585,8 +588,48 @@ def test_polish_skip_comment_publication_failure_preserves_approval(workflow, ca
 
     assert result.status is WorkflowStatus.APPROVED
     assert result.error_message is None
+    assert result.polish_skip_comment_attempted is True
     assert len(factory.github.comment_calls) == 1
     assert "Optional polish skip comment publication failed: GitHub unavailable" in caplog.text
+
+
+def test_resumed_approved_review_with_suggestions_runs_polish_before_completion(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.malformed_review = True
+
+    paused = service.run("card-resumed-polish")
+
+    factory.jules.malformed_review = False
+    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    # The initial implementation was committed before the review paused.  On
+    # resume, this is the polish pass's post-agent worktree state, so an empty
+    # result models the implementer declining the optional suggestion.
+    factory.git.changed_files_results = [[]]
+    resumed = service.respond_and_resume(paused.id, "The implementation is intentional.")
+
+    assert resumed.status is WorkflowStatus.APPROVED
+    assert repository.stage_changes.count(WorkflowStage.POLISH) == 1
+    assert len(factory.github.comment_calls) == 1
+
+
+def test_persisted_polish_comment_attempt_prevents_duplicate_comment_on_retry(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.git.changed_files_results = [["src/audit.py"], []]
+
+    result = service.run("card-polish-comment-retry")
+    execution_clients = factory.create(service._config_loader.config).at_path(
+        Path(result.workspace_path or "")
+    )
+    service._publish_polish_skip_comment(
+        execution_id=result.id,
+        execution_clients=execution_clients,
+        pull_request_number=42,
+        implementation=ImplementationResult(success=True),
+    )
+
+    assert result.polish_skip_comment_attempted is True
+    assert len(factory.github.comment_calls) == 1
 
 
 def test_review_publication_failure_preserves_reviewer_decision(workflow) -> None:

@@ -18,6 +18,7 @@ from orchestrator.models import (
     DevelopmentTask,
     HumanInteraction,
     ImplementationResult,
+    PolishOutcome,
     PullRequest,
     RepositorySpec,
     StepStatus,
@@ -110,6 +111,12 @@ class FakeWorkflowRepository:
 
     def record_review(self, execution_id: str, review: CodeReview) -> None:
         self._execution().review_snapshot = asdict(review)
+
+    def record_polish_outcome(self, execution_id: str, outcome: PolishOutcome) -> None:
+        self._execution().polish_outcome = outcome
+
+    def record_polish_skip_comment_attempt(self, execution_id: str) -> None:
+        self._execution().polish_skip_comment_attempted = True
 
     def record_review_jules_session(
         self, execution_id: str, session_id: str, session_url: str | None
