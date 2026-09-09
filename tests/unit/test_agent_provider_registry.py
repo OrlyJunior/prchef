@@ -7,7 +7,9 @@ from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import ConfigurationError, ProjectConfig
 from orchestrator.models import AgentRole
 from orchestrator.providers.codex_provider import CodexAgentProvider
+from orchestrator.providers.gemini_vertex_provider import GeminiVertexAgentProvider
 from orchestrator.providers.jules_provider import JulesAgentProvider
+from orchestrator.providers.litellm_provider import LiteLLMAgentProvider
 
 
 def _config(
@@ -72,6 +74,61 @@ def test_different_roles_can_reference_different_named_instances(tmp_path: Path)
     clients = ClientFactory("test-key").create(config)
 
     assert clients.agent(AgentRole.PLANNER) is not clients.agent(AgentRole.REVIEWER)
+
+
+def test_litellm_backend_is_preserved_for_independent_planner_and_reviewer_roles(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        agents={
+            "planner": {"provider": "vertex-gemini-litellm"},
+            "implementer": {"provider": "codex"},
+            "reviewer": {"provider": "vertex-gemini-litellm"},
+        },
+        providers={
+            "vertex-gemini-litellm": {
+                "type": "litellm",
+                "model": "vertex_ai/gemini-3.8-flash",
+                "generation": {
+                    "vertex_project": "agents-orchestrator-507215",
+                    "vertex_location": "global",
+                },
+            },
+            "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+        },
+    )
+
+    clients = ClientFactory(None).create(config)
+
+    assert isinstance(clients.agent(AgentRole.PLANNER), LiteLLMAgentProvider)
+    assert isinstance(clients.agent(AgentRole.REVIEWER), LiteLLMAgentProvider)
+    assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.REVIEWER)
+    assert isinstance(clients.agent(AgentRole.IMPLEMENTER), CodexAgentProvider)
+
+
+def test_legacy_gemini_vertex_backend_remains_available(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        agents={
+            "planner": {"provider": "vertex-gemini"},
+            "implementer": {"provider": "codex"},
+            "reviewer": {"provider": "vertex-gemini"},
+        },
+        providers={
+            "vertex-gemini": {
+                "type": "gemini-vertex",
+                "project": "example-project",
+                "model": "gemini-3.8-flash",
+            },
+            "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+        },
+    )
+
+    clients = ClientFactory(None).create(config)
+
+    assert isinstance(clients.agent(AgentRole.PLANNER), GeminiVertexAgentProvider)
+    assert isinstance(clients.agent(AgentRole.REVIEWER), GeminiVertexAgentProvider)
 
 
 def test_unknown_provider_name_has_an_actionable_error(tmp_path: Path) -> None:
