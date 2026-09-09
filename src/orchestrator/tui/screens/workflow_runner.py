@@ -72,6 +72,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._role_providers: dict[AgentRole, str] = {}
         self._role_default_providers: dict[AgentRole, str] = {}
         self._role_presets: dict[AgentRole, dict[str, AgentPresetConfig]] = {}
+        self._role_fallback_presets: dict[AgentRole, str] = {}
         self._selected_presets: dict[AgentRole, str] = {}
         self._suppressed_preset_changes: set[tuple[AgentRole, str]] = set()
         self._suppressed_manual_preset_changes: set[AgentRole] = set()
@@ -360,6 +361,11 @@ class WorkflowRunnerScreen(Screen[None]):
         self._role_providers.clear()
         self._role_default_providers = selected_agents.copy()
         self._role_presets.clear()
+        self._role_fallback_presets = {
+            role: fallback
+            for role, _ in self._role_fields()
+            if (fallback := self.controller.agent_fallback_preset(repository, role)) is not None
+        }
         self._selected_presets.clear()
         self._runtime_inputs.clear()
         self._runtime_defaults.clear()
@@ -435,6 +441,16 @@ class WorkflowRunnerScreen(Screen[None]):
             selector.value = _MANUAL_PRESET
             self._selected_presets.pop(role, None)
         self._update_preset_source(role, prefix)
+        provider = self._selected(f"#{prefix}-provider")
+        if provider is not None:
+            capabilities = self.controller.provider_runtime_capabilities(repository, provider)
+            self._update_role_summary(
+                role,
+                prefix,
+                provider,
+                self._runtime_values_from_controls(prefix),
+                capabilities,
+            )
 
     def _select_role_preset(self, role: AgentRole, prefix: str, name: str) -> None:
         preset = self._role_presets.get(role, {}).get(name)
@@ -698,6 +714,9 @@ class WorkflowRunnerScreen(Screen[None]):
     def _update_role_summary(
         self, role: AgentRole, prefix: str, provider: str, values: dict[str, Any], capabilities: Any
     ) -> None:
+        primary_overridden = self._role_default_providers.get(role) != provider
+        if not primary_overridden:
+            primary_overridden = self._manual_runtime_overrides(role, prefix)
         selected_preset = self._selected_presets.get(role)
         if selected_preset is not None:
             preset = self._role_presets.get(role, {}).get(selected_preset)
@@ -714,6 +733,14 @@ class WorkflowRunnerScreen(Screen[None]):
             else:
                 provider_note = "Provider/YAML default"
         parts = [f"{provider} ({provider_note})"]
+        fallback_preset = self._role_fallback_presets.get(role)
+        if fallback_preset is not None:
+            fallback = self._role_presets.get(role, {}).get(fallback_preset)
+            if fallback is not None:
+                fallback_note = f"fallback: {fallback.provider}/{fallback_preset}"
+                if primary_overridden:
+                    fallback_note += " (repository setting; unchanged)"
+                parts.append(fallback_note)
         if capabilities.supports_model:
             parts.append(str(values.get("model") or "Provider default"))
         if capabilities.supports_reasoning_effort:
@@ -960,6 +987,8 @@ class WorkflowRunnerScreen(Screen[None]):
                 self._event_lines[active_line] = message
         elif event.kind == WorkflowEventKind.WORKFLOW_FINISHED:
             self._event_lines.append(message)
+        elif event.kind == WorkflowEventKind.AGENT_FALLBACK:
+            self._event_lines.append(message)
 
         self.query_one("#workflow-events", Static).update("\n".join(self._event_lines[-10:]))
 
@@ -1050,6 +1079,8 @@ class WorkflowRunnerScreen(Screen[None]):
             return self._status_message(event.status)
         if event.kind == WorkflowEventKind.WORKFLOW_FINISHED:
             return self._status_message(event.status)
+        if event.kind == WorkflowEventKind.AGENT_FALLBACK:
+            return f"↳ {event.message or 'Agent fallback activated'}"
         if event.stage is None:
             return None
 

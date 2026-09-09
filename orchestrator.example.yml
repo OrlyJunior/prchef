@@ -17,6 +17,9 @@ defaults:
   agents:
     planner:
       provider: jules
+      # Optional one-hop failover to a role-local named preset. It is used only
+      # for quota, rate-limit, or temporary provider-capacity failures.
+      # fallback_preset: cloud-backup
     implementer:
       provider: codex
     reviewer:
@@ -28,6 +31,10 @@ defaults:
     #   provider: vertex-gemini
   # Reusable launcher templates are role-local and never modify `providers`.
   # agent_presets:
+  #   planner:
+  #     cloud-backup:
+  #       provider: cloud-api
+  #       model: openai/gpt-4.1-mini
   #   implementer:
   #     focused:
   #       provider: codex
