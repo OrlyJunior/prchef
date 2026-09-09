@@ -81,7 +81,10 @@
   result JSON stay on stdout. Redact secrets before logging.
 - Execution diagnostics are persisted as JSON-safe `execution_diagnostics` rows and must be
   redacted before persistence and before observer delivery. They preserve full non-sensitive
-  prompt/output/context data; any future size limit must be explicit to the user.
+  prompt/output/context data; any future size limit must be explicit to the user. Agent-request
+  diagnostics store `effective_instructions` as the one canonical provider prompt; a distinct
+  `instructions` field is retained only when it adds prompt-construction context. TUI detailed
+  logs and clipboard exports also collapse duplicate legacy prompt fields.
 - An execution is created as `PENDING`, immediately marked `RUNNING`, and records every entered
   stage as a separately persisted step. Repeated validation/correction attempts create repeated
   `VALIDATE`/`IMPLEMENT` steps.
