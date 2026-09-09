@@ -25,8 +25,10 @@
   presentation/controller layer over configuration, task providers, the workflow service, and
   persisted execution reads; it must not implement workflow policy or a second state machine.
 - The TUI presents workflow observer events as a concise user-facing stage timeline by default.
-  Sanitized persisted diagnostics are available only through its detailed-log toggle; they record
-  effective agent requests/responses, validation command results, errors, and workflow events.
+  Sanitized persisted diagnostics are available through its detailed-log toggle and a full-log
+  clipboard export action; they record effective agent requests/responses, validation command
+  results, errors, and workflow events. Clipboard exports preserve readable section metadata and
+  apply the same redaction boundary as persisted diagnostics.
   Expanded diagnostics grow in the screen's main vertical scroll area rather than using a nested
   vertical log viewport, so long entries remain readable in live runs and execution history.
   This does not alter the CLI's concise progress view or workflow observer semantics. `--verbose`
