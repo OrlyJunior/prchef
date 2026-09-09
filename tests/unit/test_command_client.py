@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -243,7 +244,96 @@ def test_codex_client_delegates_its_configured_command_to_command_client(tmp_pat
     assert command[:5] == ["codex", "exec", "--json", "--sandbox", "workspace-write"]
     assert command[-1] == "-"
     assert "--approve-for-me" not in command
+    assert "--output-schema" not in command
     assert kwargs["input_text"] == "private prompt"
+
+
+def test_codex_client_materializes_and_cleans_up_output_schema(tmp_path: Path) -> None:
+    schema = {
+        "type": "object",
+        "properties": {"summary": {"type": "string"}},
+        "required": ["summary"],
+    }
+    schema_paths: list[Path] = []
+
+    class SchemaRecordingCommandClient(RecordingCommandClient):
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            schema_path = Path(command[command.index("--output-schema") + 1])
+            schema_paths.append(schema_path)
+            assert schema_path.is_relative_to(tmp_path) is False
+            assert json.loads(schema_path.read_text(encoding="utf-8")) == schema
+            return super().run(command, **kwargs)
+
+    commands = SchemaRecordingCommandClient()
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--output-last-message", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    client.implement("private prompt", tmp_path, output_schema=schema)
+
+    command, _ = commands.calls[0]
+    assert "--json" in command
+    assert "--output-schema" in command
+    assert len(schema_paths) == 1
+    assert not schema_paths[0].exists()
+
+
+def test_codex_client_keeps_jsonl_parsing_with_output_schema(tmp_path: Path) -> None:
+    commands = RecordingCommandClient(
+        stdout="\n".join(
+            (
+                '{"type":"item.completed","item":{"type":"file_change"}}',
+                '{"type":"item.completed","item":{"type":"agent_message",'
+                '"text":"{\\"plan\\": \\"ready\\"}"}}',
+                '{"type":"turn.completed"}',
+            )
+        )
+    )
+    client = CodexClient(
+        commands,  # type: ignore[arg-type]
+        ["codex", "exec", "--output-last-message", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    result = client.implement(
+        "Return the plan as JSON",
+        tmp_path,
+        output_schema={
+            "type": "object",
+            "properties": {"plan": {"type": "string"}},
+        },
+    )
+
+    command, _ = commands.calls[0]
+    assert "--json" in command
+    assert "--output-schema" in command
+    assert result.success
+    assert result.summary == '{"plan": "ready"}'
+
+
+def test_codex_client_cleans_up_output_schema_after_execution_error(tmp_path: Path) -> None:
+    schema_path: Path | None = None
+
+    class FailingCommandClient:
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            nonlocal schema_path
+            schema_path = Path(command[command.index("--output-schema") + 1])
+            assert schema_path.exists()
+            raise RuntimeError("Codex did not start")
+
+    client = CodexClient(
+        FailingCommandClient(),  # type: ignore[arg-type]
+        ["codex", "exec", "--output-last-message", "{output_file}", "-"],
+        timeout_seconds=30,
+    )
+
+    with pytest.raises(RuntimeError, match="Codex did not start"):
+        client.implement("private prompt", tmp_path, output_schema={"type": "object"})
+
+    assert schema_path is not None
+    assert not schema_path.exists()
 
 
 def test_codex_client_approve_for_me_replaces_explicit_sandbox(tmp_path: Path) -> None:
