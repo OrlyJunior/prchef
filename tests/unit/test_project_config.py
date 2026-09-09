@@ -516,6 +516,87 @@ repositories:
     assert resolved.integrations.github.implementer_app.app_id == 789
 
 
+def test_repository_crud_round_trips_commands_and_preserves_configuration(
+    tmp_path: Path,
+) -> None:
+    existing_path = tmp_path / "existing"
+    existing_path.mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        """# global configuration comment
+defaults:
+  validation:
+    auto_detect: false
+  notifications:
+    enabled: true
+providers_metadata: # unrelated inline comment
+  keep: exactly
+repositories:
+  first:
+    path: existing
+    integrations:
+      custom: {enabled: true}
+  last:
+    path: elsewhere
+""",
+        encoding="utf-8",
+    )
+    loader = ProjectConfigLoader(config_file)
+
+    loader.save_repository(
+        "created",
+        "new/repository",
+        True,
+        [["python", "-m", "pytest"], ["python", "-m", "mypy", "src/orchestrator"]],
+    )
+    loader.save_repository(
+        "renamed",
+        "existing",
+        False,
+        [["python", "-m", "ruff", "check", "."]],
+        original_key="first",
+    )
+
+    content = config_file.read_text(encoding="utf-8")
+    persisted = yaml.safe_load(content)
+    assert "# global configuration comment" in content
+    assert "# unrelated inline comment" in content
+    assert persisted["providers_metadata"] == {"keep": "exactly"}
+    assert list(persisted["repositories"]) == ["renamed", "last", "created"]
+    assert persisted["repositories"]["renamed"]["integrations"] == {
+        "custom": {"enabled": True}
+    }
+    assert persisted["repositories"]["created"]["validation"] == {
+        "auto_detect": True,
+        "commands": [
+            ["python", "-m", "pytest"],
+            ["python", "-m", "mypy", "src/orchestrator"],
+        ],
+    }
+    settings = loader.repository_settings("created")
+    assert settings.path == "new/repository"
+    assert settings.commands[0] == ["python", "-m", "pytest"]
+    assert settings.path_exists is False
+
+    loader.delete_repository("renamed")
+    assert existing_path.is_dir()
+    assert "renamed" not in yaml.safe_load(config_file.read_text(encoding="utf-8"))[
+        "repositories"
+    ]
+
+
+def test_invalid_repository_input_does_not_change_configuration(tmp_path: Path) -> None:
+    config_file = tmp_path / "orchestrator.yml"
+    original = "repositories:\n  example:\n    path: repository\n"
+    config_file.write_text(original, encoding="utf-8")
+    loader = ProjectConfigLoader(config_file)
+
+    with pytest.raises(ConfigurationError, match="at least one argument"):
+        loader.save_repository("example", "repository", True, [[]])
+
+    assert config_file.read_text(encoding="utf-8") == original
+
+
 def test_agent_preset_crud_persists_in_resolved_config_without_touching_providers(
     tmp_path: Path,
 ) -> None:

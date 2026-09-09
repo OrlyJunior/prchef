@@ -38,6 +38,11 @@
   parent-scroll jumps. Repository controls use its `RepositorySelect` specialization: configured
   repository keys are both their visible labels and Select values, with the selected key retained
   by `WorkflowController` across screen navigation.
+- The dedicated TUI Repositories screen creates, edits, renames, and removes entries only under
+  `repositories` in the resolved global `orchestrator.yml`. It retains unrelated YAML content and
+  repository ordering, stores validation commands as argument lists, and reports missing paths
+  without preventing deliberate configuration. Removing an entry never removes its directory,
+  changes Git state, or creates repository-local configuration.
 - The TUI launcher may select configured provider instances and role-local runtime settings
   (model, reasoning, and exposed provider generation options) for one run. These overrides are
   schema-validated in memory, never alter YAML defaults, and may give roles sharing a configured

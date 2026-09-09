@@ -16,6 +16,7 @@ from orchestrator.config.project_config import (
     ProjectConfig,
     ProjectConfigLoader,
     ProviderRuntimeCapabilities,
+    RepositoryConfiguration,
 )
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
@@ -217,6 +218,46 @@ class WorkflowController:
             if configured.key == repository:
                 return configured.path
         raise ValueError(f"Unknown configured repository: {repository}")
+
+    def repository_settings(self, repository: str) -> RepositoryConfiguration:
+        """Load the repository fields supported by the dedicated settings screen."""
+
+        return self._config_loader.repository_settings(repository)
+
+    def resolve_repository_path(self, path: str) -> Path:
+        """Resolve an editor path exactly as normal configuration loading will."""
+
+        return self._config_loader.resolve_repository_path(path)
+
+    def save_repository(
+        self,
+        repository_key: str,
+        path: str,
+        auto_detect: bool,
+        commands: list[list[str]],
+        original_key: str | None = None,
+    ) -> Path:
+        """Persist repository settings and retain the resulting key as selected."""
+
+        saved = self._config_loader.save_repository(
+            repository_key,
+            path,
+            auto_detect,
+            commands,
+            original_key=original_key,
+        )
+        self._selected_repository = repository_key.strip()
+        self.repositories()
+        return saved
+
+    def delete_repository(self, repository: str) -> Path:
+        """Delete repository configuration without performing filesystem operations."""
+
+        deleted = self._config_loader.delete_repository(repository)
+        if self._selected_repository == repository:
+            self._selected_repository = None
+        self.repositories()
+        return deleted
 
     def save_github_app_settings(
         self,
