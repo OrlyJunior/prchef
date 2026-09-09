@@ -19,7 +19,7 @@ from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.runtime_logging import redact_payload
 from orchestrator.tui.bridge import WorkflowController
-from orchestrator.tui.diagnostics import format_diagnostics_for_export
+from orchestrator.tui.diagnostics import diagnostic_for_display, format_diagnostics_for_export
 
 if TYPE_CHECKING:
     from orchestrator.tui.app import OrchestratorApp
@@ -167,7 +167,7 @@ class ExecutionDetailScreen(Screen[None]):
         details = {
             "execution": asdict(execution),
             "steps": [asdict(step) for step in steps],
-            "detailed_logs": [asdict(item) for item in diagnostics],
+            "detailed_logs": [diagnostic_for_display(item) for item in diagnostics],
             "links": {
                 key.removeprefix("open-"): value for key, value in self._links.items() if value
             },
