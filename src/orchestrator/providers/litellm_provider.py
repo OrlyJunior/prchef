@@ -262,6 +262,10 @@ def _normalize_error(exc: Exception) -> AgentProviderError:
     details = f"{type(exc).__name__}: {exc}".casefold()
     status_code = _status_code(exc)
     retry_after = _retry_after(exc)
+    if status_code in {401, 403} or "authentication" in details or "unauthorized" in details:
+        return AgentProviderError(
+            "LiteLLM provider authentication or authorization failed.", category="authentication"
+        )
     if "quota" in details or "insufficient_quota" in details or status_code == 402:
         return AgentProviderError(
             "LiteLLM provider quota or usage limit was exhausted.", category="quota"
@@ -272,9 +276,14 @@ def _normalize_error(exc: Exception) -> AgentProviderError:
             category="rate_limit",
             retry_after_seconds=retry_after,
         )
-    if status_code in {401, 403} or "authentication" in details or "unauthorized" in details:
+    if status_code == 503 or any(
+        marker in details
+        for marker in ("capacity", "overloaded", "temporarily unavailable", "service unavailable")
+    ):
         return AgentProviderError(
-            "LiteLLM provider authentication or authorization failed.", category="authentication"
+            "LiteLLM provider is temporarily unavailable or out of capacity.",
+            category="capacity",
+            retry_after_seconds=retry_after,
         )
     if "timeout" in details or "timed out" in details:
         return AgentProviderError("LiteLLM request timed out.", category="timeout")

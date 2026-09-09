@@ -23,6 +23,12 @@ class AgentProviderError(RuntimeError):
         self.category = category
         self.retry_after_seconds = retry_after_seconds
 
+    @property
+    def is_retryable_quota_failure(self) -> bool:
+        """Whether a configured one-hop preset fallback may handle this failure."""
+
+        return self.category in {"quota", "rate_limit", "capacity"}
+
 
 class AgentProvider(Protocol):
     """Provider-neutral boundary for one agent execution."""

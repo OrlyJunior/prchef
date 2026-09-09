@@ -284,6 +284,7 @@ def test_invalid_structured_output_is_normalized(content: str) -> None:
         (FakeProviderException("connection reset"), "network"),
         (FakeProviderException("rate limit", status_code=429, retry_after="2.5"), "rate_limit"),
         (FakeProviderException("insufficient_quota"), "quota"),
+        (FakeProviderException("service overloaded", status_code=503), "capacity"),
         (FakeProviderException("unknown model", status_code=404), "invalid_model"),
     ],
 )
@@ -295,6 +296,9 @@ def test_provider_errors_are_normalized(error: Exception, category: str) -> None
 
     assert caught.value.category == category
     assert "credentials" not in str(caught.value)
+    assert caught.value.is_retryable_quota_failure is (
+        category in {"rate_limit", "quota", "capacity"}
+    )
 
 
 def test_rate_limit_preserves_retry_after_metadata() -> None:

@@ -59,6 +59,19 @@ class RolesSettings(BaseModel):
 
 class AgentRoleSettings(BaseModel):
     provider: str
+    fallback_preset: str | None = None
+
+    @field_validator("provider", "fallback_preset")
+    @classmethod
+    def validate_non_empty_string(
+        cls, value: str | None, info: ValidationInfo
+    ) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"Agent role {info.field_name} must be a non-empty string")
+        return normalized
 
 
 class AgentPresetConfig(BaseModel):
@@ -612,6 +625,27 @@ class ProjectConfig(BaseModel):
             blank_names = [name for name in presets if not name.strip()]
             if blank_names:
                 raise ValueError(f"Agent presets for {role} contain an empty preset name")
+        for role in ("planner", "implementer", "reviewer"):
+            fallback_preset = getattr(self.agents, role).fallback_preset
+            if fallback_preset is None:
+                continue
+            preset = self.agent_presets.get(role, {}).get(fallback_preset)
+            if preset is None:
+                raise ValueError(
+                    f"Fallback preset {fallback_preset!r} is not configured for {role}"
+                )
+            if preset.provider not in self.providers:
+                raise ValueError(
+                    f"Fallback preset {fallback_preset!r} for {role} references "
+                    f"unconfigured provider {preset.provider!r}"
+                )
+            # Validate the preset's runtime fields through the target provider
+            # schema now, rather than discovering an invalid fallback only
+            # after the primary request has already failed.
+            try:
+                self.with_agent_preset(role, fallback_preset)
+            except ConfigurationError as exc:
+                raise ValueError(str(exc)) from exc
         return self
 
     def presets_for_role(self, role: str) -> dict[str, AgentPresetConfig]:
@@ -1080,6 +1114,8 @@ class ProjectConfigLoader:
             raise ConfigurationError(f"Agent preset {new!r} already exists for {normalized_role}")
         if old != new:
             role_presets[new] = role_presets.pop(old)
+            if self._effective_fallback_preset(configuration, repository, normalized_role) == old:
+                self._set_repository_fallback(repository, normalized_role, new)
         return self._write_configuration(configuration)
 
     def delete_agent_preset(self, repository_key: str, role: str, name: str) -> Path:
@@ -1098,12 +1134,93 @@ class ProjectConfigLoader:
             raise ConfigurationError(
                 f"Agent preset {normalized_name!r} is not configured for {normalized_role}"
             )
+        if (
+            self._effective_fallback_preset(configuration, repository, normalized_role)
+            == normalized_name
+        ):
+            raise ConfigurationError(
+                f"Agent preset {normalized_name!r} is the configured fallback for "
+                f"{normalized_role}; disable or change the fallback before deleting it"
+            )
         del role_presets[normalized_name]
         if not role_presets:
             del presets[normalized_role]
         if not presets:
             repository.pop("agent_presets", None)
         return self._write_configuration(configuration)
+
+    def save_agent_fallback_preset(
+        self, repository_key: str, role: str, preset_name: str | None
+    ) -> Path:
+        """Persist one repository-scoped role fallback, including explicit disablement."""
+
+        normalized_role = self._preset_role(role)
+        normalized_name = self._preset_name(preset_name) if preset_name is not None else None
+        configuration, repository = self._repository_entry_for_write(repository_key)
+        if normalized_name is not None:
+            defaults = configuration.get("defaults", {})
+            default_presets = (
+                defaults.get("agent_presets", {}) if isinstance(defaults, dict) else {}
+            )
+            repository_presets = repository.get("agent_presets", {})
+            available: dict[str, Any] = {}
+            for source in (default_presets, repository_presets):
+                if not isinstance(source, dict):
+                    continue
+                role_presets = source.get(normalized_role, {})
+                if isinstance(role_presets, dict):
+                    available.update(role_presets)
+            if normalized_name not in available:
+                raise ConfigurationError(
+                    f"Fallback preset {normalized_name!r} is not configured for "
+                    f"{normalized_role}"
+                )
+        candidate_repository = deepcopy(repository)
+        self._set_repository_fallback(
+            candidate_repository, normalized_role, normalized_name
+        )
+        defaults = configuration.get("defaults", {})
+        candidate = (
+            _deep_merge(defaults, candidate_repository)
+            if isinstance(defaults, dict)
+            else candidate_repository
+        )
+        candidate["path"] = Path(".")
+        try:
+            ProjectConfig.model_validate(candidate)
+        except ValueError as exc:
+            raise ConfigurationError(f"Invalid fallback configuration: {exc}") from exc
+        self._set_repository_fallback(repository, normalized_role, normalized_name)
+        return self._write_configuration(configuration)
+
+    @staticmethod
+    def _set_repository_fallback(
+        repository: dict[str, Any], role: str, preset_name: str | None
+    ) -> None:
+        agents = repository.setdefault("agents", {})
+        if not isinstance(agents, dict):
+            raise ConfigurationError("'agents' must be a mapping")
+        settings = agents.setdefault(role, {})
+        if not isinstance(settings, dict):
+            raise ConfigurationError(f"'agents.{role}' must be a mapping")
+        # Keep an explicit null so a repository can disable a fallback inherited
+        # from defaults without duplicating its primary provider setting.
+        settings["fallback_preset"] = preset_name
+
+    @staticmethod
+    def _effective_fallback_preset(
+        configuration: dict[str, Any], repository: dict[str, Any], role: str
+    ) -> str | None:
+        defaults = configuration.get("defaults", {})
+        merged = _deep_merge(defaults, repository) if isinstance(defaults, dict) else repository
+        agents = merged.get("agents", {})
+        if not isinstance(agents, dict):
+            return None
+        settings = agents.get(role, {})
+        if not isinstance(settings, dict):
+            return None
+        value = settings.get("fallback_preset")
+        return str(value).strip() if value is not None else None
 
     def _repository_entry_for_write(
         self, repository_key: str

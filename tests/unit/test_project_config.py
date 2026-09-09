@@ -172,6 +172,66 @@ def test_agent_presets_are_role_scoped_and_apply_as_runtime_templates(tmp_path: 
     }
 
 
+def test_role_fallback_preset_is_optional_and_resolves_its_provider(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "providers": {
+                "primary": {"type": "jules"},
+                "backup": {
+                    "type": "litellm",
+                    "model": "openai/default-model",
+                },
+            },
+            "agents": {
+                "planner": {"provider": "primary", "fallback_preset": "cloud"},
+                "implementer": {"provider": "primary"},
+                "reviewer": {"provider": "primary"},
+            },
+            "agent_presets": {
+                "planner": {
+                    "cloud": {"provider": "backup", "model": "openai/backup-model"}
+                }
+            },
+        }
+    )
+
+    assert config.agents.planner.fallback_preset == "cloud"
+    assert config.agents.implementer.fallback_preset is None
+    fallback = config.with_agent_preset("planner", "cloud")
+    assert fallback.provider_runtime_values(fallback.agents.planner.provider)["model"] == (
+        "openai/backup-model"
+    )
+
+
+@pytest.mark.parametrize(
+    ("agent_presets", "message"),
+    [
+        ({}, "not configured"),
+        (
+            {"planner": {"cloud": {"provider": "missing"}}},
+            "unconfigured provider",
+        ),
+    ],
+)
+def test_role_fallback_preset_rejects_invalid_targets(
+    tmp_path: Path, agent_presets: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ProjectConfig.model_validate(
+            {
+                "path": tmp_path,
+                "providers": {"primary": {"type": "jules"}},
+                "agents": {
+                    "planner": {"provider": "primary", "fallback_preset": "cloud"},
+                    "implementer": {"provider": "primary"},
+                    "reviewer": {"provider": "primary"},
+                },
+                "agent_presets": agent_presets,
+            }
+        )
+
+
 def test_missing_preset_provider_is_retained_and_rejected_only_when_selected(
     tmp_path: Path,
 ) -> None:
@@ -469,6 +529,47 @@ repositories:
     loader.delete_agent_preset("example", "implementer", "deep")
     persisted = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert "agent_presets" not in persisted["repositories"]["example"]
+
+
+def test_agent_fallback_preset_persistence_tracks_rename_and_explicit_disable(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        """defaults:
+  agents:
+    planner: {provider: jules}
+    implementer: {provider: codex}
+    reviewer: {provider: jules}
+  providers:
+    jules: {type: jules}
+    codex: {type: codex-cli, command: [codex, exec, -]}
+repositories:
+  example:
+    path: repository
+""",
+        encoding="utf-8",
+    )
+    loader = ProjectConfigLoader(config_file)
+    loader.save_agent_preset(
+        "example", "planner", "backup", AgentPresetConfig(provider="jules")
+    )
+
+    loader.save_agent_fallback_preset("example", "planner", "backup")
+    loader.rename_agent_preset("example", "planner", "backup", "renamed")
+    persisted = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert persisted["repositories"]["example"]["agents"]["planner"] == {
+        "fallback_preset": "renamed"
+    }
+
+    loader.save_agent_fallback_preset("example", "planner", None)
+    persisted = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert persisted["repositories"]["example"]["agents"]["planner"] == {
+        "fallback_preset": None
+    }
 
 
 @pytest.mark.parametrize(

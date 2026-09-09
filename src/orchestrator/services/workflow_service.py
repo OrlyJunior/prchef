@@ -39,8 +39,13 @@ from orchestrator.models.workflow_status import (
     WorkflowStage,
     WorkflowStatus,
 )
-from orchestrator.providers.agent_provider import AgentNeedsHumanError, AgentProvider
+from orchestrator.providers.agent_provider import (
+    AgentNeedsHumanError,
+    AgentProvider,
+    AgentProviderError,
+)
 from orchestrator.providers.diagnostic_provider import DiagnosticAgentProvider
+from orchestrator.providers.fallback_provider import FallbackAgentProvider
 from orchestrator.repositories.workflow_repository import WorkflowRepository
 from orchestrator.runtime_logging import (
     log_review_summary,
@@ -997,17 +1002,103 @@ class WorkflowService:
         config: ProjectConfig,
         role: AgentRole,
         execution_id: str,
-    ) -> DiagnosticAgentProvider:
+    ) -> AgentProvider:
         configured = getattr(config.agents, role.value).provider
         provider_settings = config.providers[configured].model_dump()
-        return DiagnosticAgentProvider(
+        fallback_preset_name = getattr(config.agents, role.value).fallback_preset
+        primary_provider_name = configured
+        primary_preset_name: str | None = None
+        if fallback_preset_name is not None:
+            for preset_name, preset in config.presets_for_role(role.value).items():
+                if not configured.startswith("__tui_runtime_") and preset.provider != configured:
+                    continue
+                try:
+                    candidate = config.with_agent_preset(role.value, preset_name)
+                except ConfigurationError:
+                    continue
+                candidate_name = getattr(candidate.agents, role.value).provider
+                if candidate.providers[candidate_name].model_dump() == provider_settings:
+                    primary_provider_name = preset.provider
+                    primary_preset_name = preset_name
+                    break
+        primary = DiagnosticAgentProvider(
             provider,
             role=role,
-            provider_config={"name": configured, **provider_settings},
+            provider_config={
+                "name": primary_provider_name,
+                "preset": primary_preset_name,
+                **provider_settings,
+            },
             record=lambda category, event_role, payload: self._record_diagnostic(
                 execution_id, category, payload, stage=self._active_stage, role=event_role
             ),
             cancellation_check=lambda: self._raise_if_cancellation_requested(execution_id),
+        )
+        if fallback_preset_name is None:
+            return primary
+
+        fallback_preset = config.presets_for_role(role.value)[fallback_preset_name]
+        fallback_config = config.with_agent_preset(role.value, fallback_preset_name)
+        fallback_configured = getattr(fallback_config.agents, role.value).provider
+        fallback_settings = fallback_config.providers[fallback_configured].model_dump()
+        primary_values = config.provider_runtime_values(configured)
+        fallback_values = fallback_config.provider_runtime_values(fallback_configured)
+
+        def create_fallback() -> AgentProvider:
+            fallback_provider = self._client_factory.create(
+                fallback_config, agent_roles={role}
+            ).agent(role)
+            return DiagnosticAgentProvider(
+                fallback_provider,
+                role=role,
+                provider_config={
+                    "name": fallback_preset.provider,
+                    "preset": fallback_preset_name,
+                    **fallback_settings,
+                },
+                record=lambda category, event_role, payload: self._record_diagnostic(
+                    execution_id,
+                    category,
+                    payload,
+                    stage=self._active_stage,
+                    role=event_role,
+                ),
+                cancellation_check=lambda: self._raise_if_cancellation_requested(
+                    execution_id
+                ),
+            )
+
+        def record_fallback(error: AgentProviderError) -> None:
+            payload = {
+                "role": role.value,
+                "reason": error.category,
+                "primary_provider": primary_provider_name,
+                "primary_preset": primary_preset_name,
+                "primary_model": primary_values.get("model"),
+                "fallback_provider": fallback_preset.provider,
+                "fallback_preset": fallback_preset_name,
+                "fallback_model": fallback_values.get("model"),
+            }
+            logger.warning(
+                "[workflow] %s agent capacity failure; using fallback %s -> %s/%s",
+                role.value,
+                primary_provider_name,
+                fallback_preset.provider,
+                fallback_preset_name,
+            )
+            self._emit(
+                execution_id,
+                WorkflowEventKind.AGENT_FALLBACK,
+                stage=self._active_stage,
+                message=(
+                    f"{role.value.title()} switched from {primary_provider_name} to "
+                    f"{fallback_preset.provider}/{fallback_preset_name}"
+                ),
+                payload=payload,
+            )
+
+        return FallbackAgentProvider(
+            primary, fallback_factory=create_fallback, on_fallback=record_fallback
         )
 
     def _record_validation_check(
@@ -1084,19 +1175,24 @@ class WorkflowService:
         status: WorkflowStatus | None = None,
         step_status: StepStatus | None = None,
         message: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> None:
+        event_payload: dict[str, Any] = {
+            "kind": kind.value,
+            "status": status.value if status else None,
+            "step_status": step_status.value if step_status else None,
+            "message": message,
+        }
+        if payload is not None:
+            event_payload.update(payload)
         self._record_diagnostic(
             execution_id,
             DiagnosticCategory.WORKFLOW_EVENT,
-            {
-                "kind": kind.value,
-                "status": status.value if status else None,
-                "step_status": step_status.value if step_status else None,
-                "message": message,
-            },
+            event_payload,
             stage=stage,
             notify=False,
         )
+        sanitized_payload = redact_payload(payload) if payload is not None else None
         self._notify_event(
             WorkflowEvent(
                 execution_id=execution_id,
@@ -1104,7 +1200,8 @@ class WorkflowService:
                 stage=stage,
                 status=status,
                 step_status=step_status,
-                message=message,
+                message=redact_text(message) if message is not None else None,
+                payload=sanitized_payload if isinstance(sanitized_payload, dict) else None,
             )
         )
 
