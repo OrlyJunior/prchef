@@ -714,6 +714,9 @@ class WorkflowRunnerScreen(Screen[None]):
     def _update_role_summary(
         self, role: AgentRole, prefix: str, provider: str, values: dict[str, Any], capabilities: Any
     ) -> None:
+        primary_overridden = self._role_default_providers.get(role) != provider
+        if not primary_overridden:
+            primary_overridden = self._manual_runtime_overrides(role, prefix)
         selected_preset = self._selected_presets.get(role)
         if selected_preset is not None:
             preset = self._role_presets.get(role, {}).get(selected_preset)
@@ -734,7 +737,10 @@ class WorkflowRunnerScreen(Screen[None]):
         if fallback_preset is not None:
             fallback = self._role_presets.get(role, {}).get(fallback_preset)
             if fallback is not None:
-                parts.append(f"fallback: {fallback.provider}/{fallback_preset}")
+                fallback_note = f"fallback: {fallback.provider}/{fallback_preset}"
+                if primary_overridden:
+                    fallback_note += " (repository setting; unchanged)"
+                parts.append(fallback_note)
         if capabilities.supports_model:
             parts.append(str(values.get("model") or "Provider default"))
         if capabilities.supports_reasoning_effort:

@@ -808,6 +808,34 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
     asyncio.run(drive())
 
 
+def test_workflow_runner_clarifies_configured_fallback_during_primary_override(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.agent_presets = {
+        "implementer": {"backup": AgentPresetConfig(provider="vertex", model="fallback-model")}
+    }
+    config.agents.implementer.fallback_preset = "backup"
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            summary = application.screen.query_one("#implementer-summary", Static)
+            assert "fallback: vertex/backup" in str(summary.renderable)
+            assert "repository setting; unchanged" not in str(summary.renderable)
+
+            application.screen.query_one("#implementer-model", Input).value = "temporary-model"
+            await pilot.pause()
+
+            assert "fallback: vertex/backup" in str(summary.renderable)
+            assert "repository setting; unchanged" in str(summary.renderable)
+
+    asyncio.run(drive())
+
+
 def test_workflow_runner_selects_role_local_presets_without_crud_controls(tmp_path: Path) -> None:
     controller, service, _ = _controller(tmp_path)
     config = controller.project_config("example")
