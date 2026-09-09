@@ -212,7 +212,10 @@
   with the original session ID.
 - Jules plan/review requests explicitly disable publishing automation and prompt for read-only
   behavior. Codex uses configured argument lists via the generic command client and forces
-  `codex exec --json`: only structured `error`, `turn.failed`, or failed-item events can classify
+  `codex exec --json`; when an `AgentRequest` carries a structured-output expectation, it also
+  materializes that existing JSON Schema in a system temporary file and supplies it through
+  `--output-schema`, while orchestrator-side validation remains authoritative. Only structured
+  `error`, `turn.failed`, or failed-item events can classify
   a sandbox/execution failure. Never infer a failure from free-form command output, diffs, or test
   fixtures. A structured failure after an exit-0 run still inspects Git status so persisted results
   retain any files changed before the failure. Codex may edit only its assigned local workspace.

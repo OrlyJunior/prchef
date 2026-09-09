@@ -7,7 +7,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.models.implementation_result import ImplementationResult
@@ -82,10 +82,22 @@ class CodexClient:
                 "reasoning effort"
             )
 
-    def implement(self, prompt: str, repository_path: Path) -> ImplementationResult:
+    def implement(
+        self,
+        prompt: str,
+        repository_path: Path,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> ImplementationResult:
         with tempfile.TemporaryDirectory(prefix="orchestrator-codex-") as temp_root:
             output_file = Path(temp_root) / "last-message.txt"
-            command = self._execution_command(output_file)
+            schema_file: Path | None = None
+            if output_schema is not None:
+                schema_file = Path(temp_root) / "output-schema.json"
+                schema_file.write_text(
+                    json.dumps(dict(output_schema), ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            command = self._execution_command(output_file, schema_file)
             logger.info("[codex] Starting implementation")
             logger.debug(
                 "[codex] Starting provider=%s model=%s reasoning_effort=%s",
@@ -384,7 +396,9 @@ class CodexClient:
             f"(exit {exit_code}; {'; '.join(details)})"
         )
 
-    def _execution_command(self, output_file: Path) -> list[str]:
+    def _execution_command(
+        self, output_file: Path, output_schema_file: Path | None = None
+    ) -> list[str]:
         command = [part.replace("{output_file}", str(output_file)) for part in self._command]
         runtime_arguments: list[str] = []
         if self._model is not None and self._command_model(command) is None:
@@ -396,6 +410,8 @@ class CodexClient:
             runtime_arguments.extend(
                 ("--config", f'model_reasoning_effort="{self._reasoning_effort}"')
             )
+        if output_schema_file is not None:
+            runtime_arguments.extend(("--output-schema", str(output_schema_file)))
         insert_at = self._runtime_insert_index(command)
         command[insert_at:insert_at] = runtime_arguments
         command = self._with_json_events(command)
