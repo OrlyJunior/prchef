@@ -180,6 +180,9 @@ class _ConfigLoader:
         if old_name != new_name and new_name in presets:
             raise ValueError("preset already exists")
         presets[new_name] = presets.pop(old_name)
+        settings = getattr(self.config.agents, role)
+        if settings.fallback_preset == old_name:
+            settings.fallback_preset = new_name
         return self._path / "orchestrator.yml"
 
     def delete_agent_preset(self, repository_key: str, role: str, name: str) -> Path:
@@ -187,6 +190,13 @@ class _ConfigLoader:
         del self.config.agent_presets[role][name]
         if not self.config.agent_presets[role]:
             del self.config.agent_presets[role]
+        return self._path / "orchestrator.yml"
+
+    def save_agent_fallback_preset(
+        self, repository_key: str, role: str, preset_name: str | None
+    ) -> Path:
+        assert repository_key == "example"
+        getattr(self.config.agents, role).fallback_preset = preset_name
         return self._path / "orchestrator.yml"
 
 
@@ -713,10 +723,20 @@ def test_workflow_runner_detailed_logs_expand_the_main_scroll_region_and_collaps
                 step_status=StepStatus.SUCCEEDED,
             )
             screen._render_workflow_event(started)
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.AGENT_FALLBACK,
+                    stage=WorkflowStage.IMPLEMENT,
+                    message="Implementer switched from primary to backup/cloud",
+                    payload={"role": "implementer", "fallback_preset": "cloud"},
+                )
+            )
             screen._render_workflow_event(finished)
 
             timeline = str(screen.query_one("#workflow-events", Static).renderable)
             assert "✓ Changes implemented" in timeline
+            assert "primary to backup/cloud" in timeline
             assert "STAGE_STARTED" not in timeline
             assert "STAGE_FINISHED" not in timeline
 
@@ -742,6 +762,7 @@ def test_workflow_runner_detailed_logs_expand_the_main_scroll_region_and_collaps
             raw_log = str(raw_events.renderable)
             assert "STAGE_STARTED" in raw_log
             assert "STAGE_FINISHED" in raw_log
+            assert "AGENT_FALLBACK" in raw_log
             assert "REQUEST" in raw_log
 
             screen.query_one("#toggle-workflow-logs", Button).press()
@@ -906,6 +927,11 @@ def test_agent_presets_screen_manages_all_role_presets(tmp_path: Path) -> None:
             await pilot.pause()
             screen.query_one("#agent-preset-select", Select).value = "deep"
             await pilot.pause()
+            fallback = screen.query_one("#agent-fallback-preset", Select)
+            fallback.value = "deep"
+            screen.query_one("#save-agent-fallback", Button).press()
+            await pilot.pause()
+            assert config.agents.implementer.fallback_preset == "deep"
             screen.query_one("#agent-preset-model", Input).value = "updated"
             screen.query_one("#update-agent-preset", Button).press()
             await pilot.pause()
@@ -915,6 +941,10 @@ def test_agent_presets_screen_manages_all_role_presets(tmp_path: Path) -> None:
             screen.query_one("#rename-agent-preset", Button).press()
             await pilot.pause()
             assert "renamed" in config.agent_presets["implementer"]
+            fallback.value = fallback._options[0][1]
+            screen.query_one("#save-agent-fallback", Button).press()
+            await pilot.pause()
+            assert config.agents.implementer.fallback_preset is None
             screen.query_one("#delete-agent-preset", Button).press()
             await pilot.pause()
             assert "implementer" not in config.agent_presets
@@ -1252,6 +1282,9 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
         lambda repository: list(capabilities)
     )
     controller.agent_providers = lambda repository: agent_providers  # type: ignore[method-assign]
+    controller.agent_fallback_preset = (  # type: ignore[method-assign]
+        lambda repository, role: None
+    )
     controller.provider_runtime_capabilities = (  # type: ignore[method-assign]
         lambda repository, provider: capabilities[provider]
     )

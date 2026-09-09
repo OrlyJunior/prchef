@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 
 _NEW_PRESET = object()
+_NO_FALLBACK = object()
 
 
 class AgentPresetsScreen(Screen[None]):
@@ -70,6 +71,15 @@ class AgentPresetsScreen(Screen[None]):
                     prompt="Choose a role",
                     id="agent-preset-role",
                 )
+                yield Static("Fallback preset", classes="field-label")
+                with Horizontal(classes="role-config-row"):
+                    yield OrchestratorSelect(
+                        [("Disabled", _NO_FALLBACK)],
+                        allow_blank=False,
+                        prompt="Disabled",
+                        id="agent-fallback-preset",
+                    )
+                    yield Button("Save fallback", id="save-agent-fallback")
                 yield Static("Preset", classes="field-label")
                 yield OrchestratorSelect(
                     [("Create new preset", _NEW_PRESET)],
@@ -165,6 +175,7 @@ class AgentPresetsScreen(Screen[None]):
             "update-agent-preset": self._update,
             "rename-agent-preset": self._rename,
             "delete-agent-preset": self._delete,
+            "save-agent-fallback": self._save_fallback,
         }
         action = actions.get(event.button.id or "")
         if action is not None:
@@ -194,6 +205,7 @@ class AgentPresetsScreen(Screen[None]):
             presets = self.controller.agent_presets(repository, role)
             default_provider = self.controller.agent_providers(repository)[role]
             providers = self.controller.configured_agent_providers(repository)
+            fallback_preset = self.controller.agent_fallback_preset(repository, role)
         except Exception as exc:
             self._status(f"Cannot load {role.value} presets: {exc}")
             return
@@ -202,6 +214,12 @@ class AgentPresetsScreen(Screen[None]):
         selector.set_options(
             [("Create new preset", _NEW_PRESET), *[(name, name) for name in presets]]
         )
+        fallback = self.query_one("#agent-fallback-preset", OrchestratorSelect)
+        fallback.set_options(
+            [("Disabled", _NO_FALLBACK), *[(name, name) for name in presets]],
+            allow_blank=False,
+        )
+        fallback.value = fallback_preset if fallback_preset is not None else _NO_FALLBACK
         self._selected_preset = None
         selector.value = _NEW_PRESET
         self._clear_values()
@@ -323,6 +341,25 @@ class AgentPresetsScreen(Screen[None]):
             self._status(f"Could not delete preset: {exc}")
             return
         self._reload_role(None, f"Deleted {role.value} preset {name!r}.")
+
+    def _save_fallback(self) -> None:
+        repository = self._repository()
+        role = self._role()
+        value = self.query_one("#agent-fallback-preset", OrchestratorSelect).value
+        if repository is None or role is None:
+            self._status("Choose a repository and role first.")
+            return
+        preset_name = value if isinstance(value, str) else None
+        try:
+            self.controller.save_agent_fallback_preset(repository, role, preset_name)
+        except Exception as exc:
+            self._status(f"Could not save fallback preset: {exc}")
+            return
+        self._status(
+            f"{role.value.title()} fallback set to {preset_name!r}."
+            if preset_name is not None
+            else f"{role.value.title()} fallback disabled."
+        )
 
     def _reload_role(self, selected: str | None, message: str) -> None:
         role = self._role()
