@@ -116,6 +116,50 @@ def test_role_runtime_overrides_are_validated_in_memory_and_keep_defaults(tmp_pa
     }
 
 
+def test_litellm_role_runtime_materialization_preserves_backend_and_vertex_settings(
+    tmp_path: Path,
+) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "agents": {
+                "planner": {"provider": "vertex-gemini-litellm"},
+                "implementer": {"provider": "codex"},
+                "reviewer": {"provider": "vertex-gemini-litellm"},
+            },
+            "providers": {
+                "vertex-gemini-litellm": {
+                    "type": "litellm",
+                    "model": "vertex_ai/gemini-3.8-flash",
+                    "generation": {
+                        "vertex_project": "agents-orchestrator-507215",
+                        "vertex_location": "global",
+                    },
+                },
+                "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+            },
+        }
+    )
+
+    selected = config.with_agent_runtime_overrides(
+        {"planner": "vertex-gemini-litellm", "reviewer": "vertex-gemini-litellm"},
+        {
+            "planner": {"model": "vertex_ai/gemini-3.8-flash"},
+            "reviewer": {"model": "vertex_ai/gemini-3.8-flash"},
+        },
+    )
+
+    for role in ("planner", "reviewer"):
+        runtime_name = getattr(selected.agents, role).provider
+        settings = selected.providers[runtime_name].model_dump()
+        assert settings["type"] == "litellm"
+        assert settings["model"] == "vertex_ai/gemini-3.8-flash"
+        assert settings["generation"] == {
+            "vertex_project": "agents-orchestrator-507215",
+            "vertex_location": "global",
+        }
+
+
 def test_role_runtime_overrides_reject_unsupported_and_invalid_values(tmp_path: Path) -> None:
     config = ProjectConfig.model_validate({"path": tmp_path})
 
@@ -199,6 +243,8 @@ def test_role_fallback_preset_is_optional_and_resolves_its_provider(tmp_path: Pa
     assert config.agents.planner.fallback_preset == "cloud"
     assert config.agents.implementer.fallback_preset is None
     fallback = config.with_agent_preset("planner", "cloud")
+    fallback_settings = fallback.providers[fallback.agents.planner.provider]
+    assert fallback_settings.type == "litellm"
     assert fallback.provider_runtime_values(fallback.agents.planner.provider)["model"] == (
         "openai/backup-model"
     )
