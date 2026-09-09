@@ -72,7 +72,6 @@ class DiagnosticAgentProvider:
                 "repository": request.repository,
                 "revision": request.revision,
                 "effective_instructions": request.instructions,
-                "instructions": request.instructions,
                 "request_metadata": dict(request.metadata),
                 "structured_output": (
                     {"name": schema.name, "schema": dict(schema.schema)} if schema else None
