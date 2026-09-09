@@ -218,6 +218,28 @@ def test_sdk_failure_is_translated_without_leaking_provider_exception_details() 
     )
 
 
+@pytest.mark.parametrize(
+    ("error", "category", "retryable"),
+    [
+        (RuntimeError("RESOURCE_EXHAUSTED: rate limit"), "rate_limit", True),
+        (RuntimeError("quota exhausted"), "quota", True),
+        (RuntimeError("service overloaded and unavailable"), "capacity", True),
+        (RuntimeError("permission denied"), "authentication", False),
+        (RuntimeError("content policy refusal"), "content_policy", False),
+    ],
+)
+def test_request_failures_are_classified_for_fallback(
+    error: Exception, category: str, retryable: bool
+) -> None:
+    provider, _, _ = _provider(error)
+
+    with pytest.raises(AgentProviderError) as caught:
+        provider.execute(_request())
+
+    assert caught.value.category == category
+    assert caught.value.is_retryable_quota_failure is retryable
+
+
 def test_registry_resolves_gemini_vertex_and_reuses_it_for_multiple_roles(tmp_path: Path) -> None:
     config = ProjectConfig.model_validate(
         {

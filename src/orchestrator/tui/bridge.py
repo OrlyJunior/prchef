@@ -143,6 +143,14 @@ class WorkflowController:
     def agent_presets(self, repository: str, role: AgentRole) -> dict[str, AgentPresetConfig]:
         return self.project_config(repository).presets_for_role(role.value)
 
+    def agent_fallback_preset(self, repository: str, role: AgentRole) -> str | None:
+        config = self.project_config(repository)
+        return {
+            AgentRole.PLANNER: config.agents.planner,
+            AgentRole.IMPLEMENTER: config.agents.implementer,
+            AgentRole.REVIEWER: config.agents.reviewer,
+        }[role].fallback_preset
+
     def save_agent_preset(
         self,
         repository: str,
@@ -165,6 +173,13 @@ class WorkflowController:
 
     def delete_agent_preset(self, repository: str, role: AgentRole, name: str) -> Path:
         return self._config_loader.delete_agent_preset(repository, role.value, name)
+
+    def save_agent_fallback_preset(
+        self, repository: str, role: AgentRole, preset_name: str | None
+    ) -> Path:
+        return self._config_loader.save_agent_fallback_preset(
+            repository, role.value, preset_name
+        )
 
     def github_app_settings(
         self, repository: str

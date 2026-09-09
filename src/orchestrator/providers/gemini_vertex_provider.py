@@ -27,6 +27,13 @@ _AUTHENTICATION_MARKERS = (
     "unauthenticated",
 )
 
+_CONTENT_POLICY_MARKERS = (
+    "content policy",
+    "prohibited content",
+    "safety filter",
+    "safety violation",
+)
+
 
 class GeminiVertexAgentProvider:
     """Run one provider-neutral agent request with Gemini on Vertex AI.
@@ -180,15 +187,40 @@ class GeminiVertexAgentProvider:
     @staticmethod
     def _request_error(exc: Exception) -> AgentProviderError:
         details = f"{type(exc).__name__}: {exc}".casefold()
+        status_code = _status_code(exc)
         if any(marker in details for marker in _AUTHENTICATION_MARKERS):
             return AgentProviderError(
                 "Gemini Vertex authentication or authorization failed. Configure Google "
                 "Application Default Credentials (ADC), for example with "
-                "`gcloud auth application-default login`, and verify Vertex AI access."
+                "`gcloud auth application-default login`, and verify Vertex AI access.",
+                category="authentication",
+            )
+        if any(marker in details for marker in _CONTENT_POLICY_MARKERS):
+            return AgentProviderError(
+                "Gemini Vertex refused the request under its content policy.",
+                category="content_policy",
+            )
+        if status_code == 429 or "rate limit" in details or "resource_exhausted" in details:
+            category = "quota" if "quota" in details else "rate_limit"
+            return AgentProviderError(
+                "Gemini Vertex quota or rate limit was reached.", category=category
+            )
+        if "quota" in details:
+            return AgentProviderError(
+                "Gemini Vertex quota or usage limit was exhausted.", category="quota"
+            )
+        if status_code == 503 or any(
+            marker in details
+            for marker in ("capacity", "overloaded", "temporarily unavailable", "unavailable")
+        ):
+            return AgentProviderError(
+                "Gemini Vertex is temporarily unavailable or out of capacity.",
+                category="capacity",
             )
         return AgentProviderError(
             "Gemini Vertex request failed. Verify the configured project, location, model, "
-            "and network connectivity."
+            "and network connectivity.",
+            category="unknown",
         )
 
 
@@ -213,6 +245,25 @@ def _create_vertex_client(
 def _response_text(response: Any) -> str:
     text = getattr(response, "text", None)
     return text if isinstance(text, str) else ""
+
+
+def _status_code(exc: Exception) -> int | None:
+    for value in (
+        getattr(exc, "status_code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+        getattr(exc, "code", None),
+    ):
+        if isinstance(value, int):
+            return value
+        if callable(value):
+            value = value()
+        name = getattr(value, "name", None)
+        if isinstance(name, str):
+            if name.casefold() == "resource_exhausted":
+                return 429
+            if name.casefold() == "unavailable":
+                return 503
+    return None
 
 
 def _validate_schema(value: Any, schema: Mapping[str, Any], path: str = "$") -> None:

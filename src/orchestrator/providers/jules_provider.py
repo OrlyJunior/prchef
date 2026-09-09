@@ -1,4 +1,4 @@
-from orchestrator.clients.exceptions import JulesSessionNeedsHumanError
+from orchestrator.clients.exceptions import JulesClientError, JulesSessionNeedsHumanError
 from orchestrator.clients.jules_client import JulesClient
 from orchestrator.models.agent import (
     AgentExecutionReference,
@@ -7,7 +7,7 @@ from orchestrator.models.agent import (
     AgentStartedCallback,
 )
 from orchestrator.models.jules_session import JulesSession
-from orchestrator.providers.agent_provider import AgentNeedsHumanError
+from orchestrator.providers.agent_provider import AgentNeedsHumanError, AgentProviderError
 
 
 class JulesAgentProvider:
@@ -51,8 +51,30 @@ class JulesAgentProvider:
             )
         except JulesSessionNeedsHumanError as exc:
             raise AgentNeedsHumanError(str(exc), exc.session_id) from exc
+        except JulesClientError as exc:
+            category = _retryable_failure_category(str(exc))
+            if category is None:
+                raise
+            raise AgentProviderError(
+                "Jules provider quota, rate limit, or temporary capacity was exhausted.",
+                category=category,
+            ) from None
         return AgentResult(
             output=operation.result_text,
             execution=reference,
             metadata={"session_state": operation.session.state},
         )
+
+
+def _retryable_failure_category(message: str) -> str | None:
+    details = message.casefold()
+    if "quota" in details:
+        return "quota"
+    if "http 429" in details or "rate limit" in details:
+        return "rate_limit"
+    if any(
+        marker in details
+        for marker in ("http 503", "capacity", "overloaded", "temporarily unavailable")
+    ):
+        return "capacity"
+    return None

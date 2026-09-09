@@ -236,7 +236,10 @@
 - Modern configuration is an all-or-nothing pair: both `agents` and `providers` must be present,
   and all three roles must be assigned. Its roles are authoritative; legacy `roles` plus
   `integrations.jules/codex` are normalized only when modern configuration is absent. Never add a
-  silent provider fallback.
+  silent provider fallback. A role may explicitly name one role-local `fallback_preset`; the
+  primary remains the first attempt and the fallback is attempted exactly once only for normalized
+  quota, rate-limit, or temporary-capacity provider failures. Authentication, configuration,
+  validation/schema, policy, and other request failures never trigger failover.
 - Safety defaults: direct merge is rejected, protected branches include main/master/develop unless
   changed, and tests are required unless deliberately disabled. Repository-specific settings,
   including TUI edits, are stored in the corresponding `repositories.<key>` entry of the resolved
@@ -248,7 +251,11 @@
   applies its preset to that one run. Editing a selected role's launcher settings returns that
   role to Manual, while choosing Manual restores its configured provider/YAML defaults. Presets
   never alter or remove provider definitions. A preset with a missing provider remains persisted
-  and is shown as an actionable launcher warning.
+  and is shown as an actionable launcher warning unless it is selected as a fallback, in which
+  case configuration validation rejects it before execution. The Agent Presets screen also views,
+  enables, changes, and disables each role's fallback. Fallback activation is persisted as a
+  sanitized workflow diagnostic/event containing the role and primary/fallback provider and preset
+  identities, and is shown in the live TUI timeline.
 - Notifications are opt-in per resolved project configuration through `notifications.enabled`
   (default `false`) and `notifications.channel` (currently `desktop`). Workflow policy emits one
   best-effort alert only for terminal `APPROVED`, `FAILED`, `CANCELLED`, `NEEDS_HUMAN`, or exhausted-review
