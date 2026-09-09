@@ -9,7 +9,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus, Resize
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, Static, TextArea
 
 from orchestrator.config.project_config import AgentPresetConfig
@@ -34,6 +34,26 @@ if TYPE_CHECKING:
 
 
 _MANUAL_PRESET = object()
+
+
+class StopWorkflowConfirmation(ModalScreen[bool]):
+    """Small guard against stopping a workflow by accident."""
+
+    CSS = """
+    StopWorkflowConfirmation { align: center middle; }
+    #stop-workflow-confirmation { width: 60; height: auto; padding: 1 2; border: round $warning; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="stop-workflow-confirmation"):
+            yield Static("Stop this workflow?", classes="screen-title")
+            yield Static("The current worktree, branch, commits, and pull request will be kept.")
+            with Horizontal(classes="screen-actions"):
+                yield Button("Stop workflow", variant="error", id="confirm-stop-workflow")
+                yield Button("Keep running", id="dismiss-stop-workflow")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm-stop-workflow")
 
 
 class WorkflowRunnerScreen(Screen[None]):
@@ -178,6 +198,8 @@ class WorkflowRunnerScreen(Screen[None]):
                                             id=f"{prefix}-max-output-tokens-source",
                                         )
             yield Static("No workflow running.", id="workflow-progress")
+            with Horizontal(classes="screen-actions", id="workflow-stop-actions"):
+                yield Button("Stop workflow", variant="error", id="stop-workflow")
             with Vertical(id="human-input-panel"):
                 yield Static("Human input required", id="human-input-title")
                 yield Static("", id="human-input-prompt")
@@ -209,6 +231,7 @@ class WorkflowRunnerScreen(Screen[None]):
 
     def on_mount(self) -> None:
         self._set_layout_mode(self.size.width)
+        self.query_one("#workflow-stop-actions", Horizontal).display = False
         try:
             repositories = self.controller.repositories()
         except Exception as exc:
@@ -758,6 +781,8 @@ class WorkflowRunnerScreen(Screen[None]):
             self._request_task_load(repository, provider)
         elif event.button.id == "start-workflow":
             self._start_selected_workflow()
+        elif event.button.id == "stop-workflow":
+            self._request_stop_workflow()
         elif event.button.id == "resume-workflow":
             self._resume_active_workflow()
         elif event.button.id == "return-later":
@@ -871,6 +896,7 @@ class WorkflowRunnerScreen(Screen[None]):
             },
         )
         self.query_one("#start-workflow", Button).disabled = True
+        self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.query_one("#workflow-progress", Static).update("Starting workflow…")
         self._event_lines.clear()
         self._raw_event_lines.clear()
@@ -899,7 +925,19 @@ class WorkflowRunnerScreen(Screen[None]):
         self.app.call_from_thread(self._render_workflow_event, event)
 
     def _render_workflow_event(self, event: WorkflowEvent) -> None:
-        self._active_execution_id = event.execution_id
+        if event.kind is WorkflowEventKind.EXECUTION_CREATED:
+            self._active_execution_id = event.execution_id
+        elif self._active_execution_id is None:
+            self._active_execution_id = event.execution_id
+        if (
+            event.kind is WorkflowEventKind.STATUS_CHANGED
+            and event.execution_id == self._active_execution_id
+            and event.status is WorkflowStatus.RUNNING
+        ):
+            self.query_one("#workflow-stop-actions", Horizontal).display = True
+            stop = self.query_one("#stop-workflow", Button)
+            stop.disabled = False
+            stop.label = "Stop workflow"
         self._append_raw_event(event)
         self._append_live_diagnostic(event)
         message = self._timeline_message(event)
@@ -1022,6 +1060,8 @@ class WorkflowRunnerScreen(Screen[None]):
         if event.kind == WorkflowEventKind.STAGE_STARTED:
             return f"● {self._stage_activity(stage, attempt)}{self._agent_stage_context(stage)}…"
         if event.kind == WorkflowEventKind.STAGE_FINISHED:
+            if event.step_status is not None and event.step_status.value == "CANCELLED":
+                return f"! {self._stage_activity(stage, attempt)} cancelled"
             return f"✓ {self._stage_complete(stage)}"
         if event.kind == WorkflowEventKind.STAGE_FAILED:
             detail = f": {event.message}" if event.message else ""
@@ -1060,6 +1100,7 @@ class WorkflowRunnerScreen(Screen[None]):
             WorkflowStatus.APPROVED: "✓ Workflow approved",
             WorkflowStatus.CHANGES_REQUESTED: "• Review changes requested",
             WorkflowStatus.NEEDS_HUMAN: "! Waiting for human input",
+            WorkflowStatus.CANCELLED: "! Workflow cancelled",
             WorkflowStatus.FAILED: "✗ Workflow failed",
         }
         return messages.get(status, "Workflow status updated")
@@ -1109,9 +1150,10 @@ class WorkflowRunnerScreen(Screen[None]):
     def _workflow_finished(self, execution: WorkflowExecution) -> None:
         self._active_execution_id = execution.id
         self.query_one("#start-workflow", Button).disabled = False
-        self.query_one("#workflow-progress", Static).update(
-            self._status_message(execution.status)
-        )
+        progress = self.query_one("#workflow-progress", Static)
+        progress.update(self._status_message(execution.status))
+        progress.set_class(execution.status is WorkflowStatus.CANCELLED, "cancelled")
+        self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.notify(self._status_message(execution.status))
         if execution.status is WorkflowStatus.NEEDS_HUMAN:
             self._show_human_panel(execution)
@@ -1143,6 +1185,33 @@ class WorkflowRunnerScreen(Screen[None]):
     def _hide_human_panel(self) -> None:
         self.query_one("#human-input-panel", Vertical).display = False
 
+    def _request_stop_workflow(self) -> None:
+        if self._active_execution_id is None:
+            self.notify("No active workflow is available to stop.", severity="warning")
+            return
+        self.app.push_screen(StopWorkflowConfirmation(), self._confirm_stop_workflow)
+
+    def _confirm_stop_workflow(self, confirmed: bool | None) -> None:
+        if not confirmed or self._active_execution_id is None:
+            return
+        stop = self.query_one("#stop-workflow", Button)
+        stop.disabled = True
+        stop.label = "Cancellation requested"
+        progress = self.query_one("#workflow-progress", Static)
+        progress.update("Cancellation requested; stopping after the current operation...")
+        progress.add_class("cancelled")
+        try:
+            accepted = self.controller.cancel_workflow(self._active_execution_id)
+        except Exception as exc:
+            stop.disabled = False
+            stop.label = "Stop workflow"
+            progress.remove_class("cancelled")
+            self.notify(f"Could not request cancellation: {exc}", severity="error")
+            return
+        if not accepted:
+            self.query_one("#workflow-stop-actions", Horizontal).display = False
+            self.notify("This workflow has already finished.", severity="warning")
+
     def _resume_active_workflow(self) -> None:
         if self._active_execution_id is None:
             return
@@ -1166,6 +1235,7 @@ class WorkflowRunnerScreen(Screen[None]):
 
     def _workflow_failed(self, message: str) -> None:
         self.query_one("#start-workflow", Button).disabled = False
+        self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.query_one("#workflow-progress", Static).update(f"Could not start workflow: {message}")
         self.notify(f"Could not start workflow: {message}", severity="error")
 

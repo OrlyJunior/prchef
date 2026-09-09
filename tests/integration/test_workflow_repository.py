@@ -105,6 +105,31 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     assert persisted_polish.polish_skip_comment_attempted is True
 
 
+def test_cancelled_execution_persists_across_repository_restart(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    execution = repository.create_execution("card-cancelled")
+    repository.update_status(execution.id, WorkflowStatus.RUNNING)
+    repository.record_workspace(execution.id, "/workspaces/cancelled")
+    repository.record_branch(execution.id, "orchestrator/cancelled")
+
+    assert repository.request_cancellation(execution.id) is True
+    repository.finish(execution.id, WorkflowStatus.CANCELLED)
+
+    restarted = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    persisted = restarted.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.CANCELLED
+    assert persisted.cancellation_requested_at is not None
+    assert persisted.workspace_path == "/workspaces/cancelled"
+    assert persisted.working_branch == "orchestrator/cancelled"
+    assert restarted.request_cancellation(execution.id) is False
+
+
 def test_human_interactions_persist_response_and_resume_state(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
     database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"

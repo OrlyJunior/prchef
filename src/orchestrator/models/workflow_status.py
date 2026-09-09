@@ -7,6 +7,7 @@ class WorkflowStatus(StrEnum):
     APPROVED = "APPROVED"
     CHANGES_REQUESTED = "CHANGES_REQUESTED"
     NEEDS_HUMAN = "NEEDS_HUMAN"
+    CANCELLED = "CANCELLED"
     FAILED = "FAILED"
 
 
@@ -29,6 +30,7 @@ class StepStatus(StrEnum):
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
     SKIPPED = "SKIPPED"
 
 

@@ -16,6 +16,7 @@ _RELEVANT_STATUSES = frozenset(
         WorkflowStatus.APPROVED,
         WorkflowStatus.CHANGES_REQUESTED,
         WorkflowStatus.NEEDS_HUMAN,
+        WorkflowStatus.CANCELLED,
         WorkflowStatus.FAILED,
     }
 )
@@ -24,6 +25,7 @@ _STATUS_TITLES = {
     WorkflowStatus.APPROVED: "Workflow approved",
     WorkflowStatus.CHANGES_REQUESTED: "Workflow needs changes",
     WorkflowStatus.NEEDS_HUMAN: "Workflow needs your input",
+    WorkflowStatus.CANCELLED: "Workflow cancelled",
     WorkflowStatus.FAILED: "Workflow failed",
 }
 

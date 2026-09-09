@@ -54,6 +54,7 @@ def test_inspect_retains_active_and_recovery_workspaces_by_default(tmp_path: Pat
         _execution(base / "approved", WorkflowStatus.APPROVED),
         _execution(base / "changes", WorkflowStatus.CHANGES_REQUESTED),
         _execution(base / "failed", WorkflowStatus.FAILED),
+        _execution(base / "cancelled", WorkflowStatus.CANCELLED),
         _execution(base / "human", WorkflowStatus.NEEDS_HUMAN),
         _execution(base / "pending", WorkflowStatus.PENDING),
         _execution(base / "running", WorkflowStatus.RUNNING),
@@ -67,6 +68,8 @@ def test_inspect_retains_active_and_recovery_workspaces_by_default(tmp_path: Pat
     assert items["changes"].eligible
     assert items["failed"].retention is WorkspaceRetention.RECOVERY_PRESERVED
     assert not items["failed"].eligible
+    assert items["cancelled"].retention is WorkspaceRetention.RECOVERY_PRESERVED
+    assert not items["cancelled"].eligible
     assert items["human"].retention is WorkspaceRetention.RECOVERY_PRESERVED
     assert not items["human"].eligible
     assert items["pending"].retention is WorkspaceRetention.ACTIVE_PROTECTED
@@ -79,6 +82,7 @@ def test_include_failed_keeps_active_workspaces_protected(tmp_path: Path) -> Non
     base = tmp_path / "workspaces" / "control"
     executions = [
         _execution(base / "failed", WorkflowStatus.FAILED),
+        _execution(base / "cancelled", WorkflowStatus.CANCELLED),
         _execution(base / "human", WorkflowStatus.NEEDS_HUMAN),
         _execution(base / "pending", WorkflowStatus.PENDING),
         _execution(base / "running", WorkflowStatus.RUNNING),
@@ -88,6 +92,7 @@ def test_include_failed_keeps_active_workspaces_protected(tmp_path: Path) -> Non
     items = {item.execution_id: item for item in service.inspect(include_failed=True).workspaces}
 
     assert items["failed"].eligible
+    assert items["cancelled"].eligible
     assert items["human"].eligible
     assert not items["pending"].eligible
     assert not items["running"].eligible
