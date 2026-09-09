@@ -16,7 +16,14 @@ class CodexAgentProvider:
         del on_started
         if request.workspace_path is None:
             raise ValueError("Codex CLI provider requires a workspace path")
-        result = self._client.implement(request.instructions, request.workspace_path)
+        if request.structured_output is None:
+            result = self._client.implement(request.instructions, request.workspace_path)
+        else:
+            result = self._client.implement(
+                request.instructions,
+                request.workspace_path,
+                output_schema=request.structured_output.schema,
+            )
         retryable = _retryable_failure_category(result.error_message)
         if not result.success and retryable is not None:
             raise AgentProviderError(
