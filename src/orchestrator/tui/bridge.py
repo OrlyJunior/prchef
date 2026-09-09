@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,7 @@ from orchestrator.services.workflow_service import WorkflowService
 
 TaskProviderFactory = Callable[[str, str], TaskProvider]
 WorkflowServiceFactory = Callable[[TaskProvider], WorkflowService]
+logger = logging.getLogger("orchestrator")
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,10 +252,26 @@ class WorkflowController:
         # Validate selections through the core configuration model before a
         # potentially long-running workflow begins. WorkflowService resolves
         # the configuration again as part of its normal persisted pipeline.
-        self.project_config(launch.repository).with_agent_runtime_overrides(
+        base_config = self.project_config(launch.repository)
+        resolved_config = base_config.with_agent_runtime_overrides(
             {role.value: provider for role, provider in launch.agent_providers.items()},
             {role.value: options for role, options in launch.agent_runtime_options.items()},
         )
+        if self._verbose:
+            resolutions: list[str] = []
+            for role in AgentRole:
+                configured = launch.agent_providers.get(
+                    role, getattr(base_config.agents, role.value).provider
+                )
+                effective = getattr(resolved_config.agents, role.value).provider
+                provider_type = resolved_config.providers[effective].type
+                runtime_note = (
+                    f" [runtime={effective}]" if effective != configured else ""
+                )
+                resolutions.append(
+                    f"{role.value} -> {configured} ({provider_type}){runtime_note}"
+                )
+            logger.debug("[config] TUI agent resolution: %s", "; ".join(resolutions))
         provider = self._task_provider_factory(launch.task_provider, launch.repository)
         service = (
             self._workflow_service_factory(provider)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from textual.widgets import Button, Input, Select, Static, TextArea
 
 from orchestrator.config.project_config import (
     AgentPresetConfig,
+    AgentProviderSettings,
     ConfiguredRepository,
     GitHubAppSettings,
     ProjectConfig,
@@ -359,6 +361,44 @@ def test_controller_passes_validated_role_runtime_overrides_without_mutating_def
             "reasoning_effort": "high",
         }
     }
+
+
+def test_controller_logs_tui_role_resolution_with_selected_backend(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    controller._verbose = True
+    config = controller.project_config("example")
+    config.providers["vertex-gemini-litellm"] = AgentProviderSettings.model_validate(
+        {
+            "type": "litellm",
+            "model": "vertex_ai/gemini-3.8-flash",
+            "generation": {
+                "vertex_project": "agents-orchestrator-507215",
+                "vertex_location": "global",
+            },
+        }
+    )
+    config.agents.planner.provider = "vertex-gemini-litellm"
+    config.agents.reviewer.provider = "vertex-gemini-litellm"
+
+    with caplog.at_level(logging.DEBUG, logger="orchestrator"):
+        controller.start_workflow(
+            WorkflowLaunch(
+                repository="example",
+                task_provider="github",
+                task_id="12",
+                agent_providers={
+                    AgentRole.PLANNER: "vertex-gemini-litellm",
+                    AgentRole.IMPLEMENTER: "implementer",
+                    AgentRole.REVIEWER: "vertex-gemini-litellm",
+                },
+            )
+        )
+
+    assert "planner -> vertex-gemini-litellm (litellm)" in caplog.text
+    assert "reviewer -> vertex-gemini-litellm (litellm)" in caplog.text
+    assert "implementer -> implementer (codex-cli)" in caplog.text
 
 
 def test_controller_rejects_runtime_options_not_supported_by_selected_provider(

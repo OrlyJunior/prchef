@@ -45,6 +45,10 @@
   provider/model/runtime summaries; role configuration and generation controls are progressive,
   and generation fields identify Provider/YAML defaults versus temporary overrides. GitHub App
   identities remain separately persisted, inspectable configuration.
+- With `--verbose`, TUI startup logs each role's configured provider and backend type before the
+  workflow begins; a synthetic `__tui_runtime_*` name indicates only an in-memory override and
+  never changes the selected backend. Provider type is always taken from the configured provider,
+  not inferred from its model name.
 - The TUI launcher automatically browses tasks for its selected repository and task provider.
   Users choose a displayed task; its provider-specific identifier remains internal to the launch
   data. The interactive selector exposes refresh, loading, and inline-error states, while explicit
