@@ -694,6 +694,65 @@ def test_format_diagnostics_for_export_keeps_sections_metadata_and_redaction() -
     assert "not-safe" not in rendered
 
 
+def test_format_diagnostics_for_export_collapses_legacy_duplicate_agent_prompts() -> None:
+    prompt = "Authorization: Bearer very-secret\nunique agent prompt"
+    rendered = format_diagnostics_for_export(
+        [
+            ExecutionDiagnostic(
+                execution_id="execution-1",
+                category=DiagnosticCategory.REQUEST,
+                payload={
+                    "effective_instructions": prompt,
+                    "instructions": prompt,
+                },
+            )
+        ]
+    )
+
+    assert rendered.count("unique agent prompt") == 1
+    assert '"effective_instructions"' in rendered
+    assert '"instructions"' not in rendered
+    assert "very-secret" not in rendered
+    assert "[REDACTED]" in rendered
+
+
+def test_format_diagnostics_for_export_keeps_distinct_agent_prompt_fields() -> None:
+    rendered = format_diagnostics_for_export(
+        [
+            ExecutionDiagnostic(
+                execution_id="execution-1",
+                category=DiagnosticCategory.REQUEST,
+                payload={
+                    "effective_instructions": "final prompt sent to provider",
+                    "instructions": "prompt before provider-specific assembly",
+                },
+            )
+        ]
+    )
+
+    assert '"effective_instructions"' in rendered
+    assert '"instructions"' in rendered
+    assert "final prompt sent to provider" in rendered
+    assert "prompt before provider-specific assembly" in rendered
+
+
+def test_format_diagnostics_for_export_supports_single_agent_prompt_fields() -> None:
+    for payload, prompt in (
+        ({"effective_instructions": "canonical prompt"}, "canonical prompt"),
+        ({"instructions": "legacy prompt"}, "legacy prompt"),
+    ):
+        rendered = format_diagnostics_for_export(
+            [
+                ExecutionDiagnostic(
+                    execution_id="execution-1",
+                    category=DiagnosticCategory.REQUEST,
+                    payload=payload,
+                )
+            ]
+        )
+        assert rendered.count(prompt) == 1
+
+
 def test_workflow_runner_copies_complete_live_diagnostics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1582,7 +1641,10 @@ def test_execution_detail_copies_all_persisted_detailed_logs(
             category=DiagnosticCategory.REQUEST,
             stage=WorkflowStage.IMPLEMENT,
             role=AgentRole.IMPLEMENTER,
-            payload={"instructions": "implement the requested change"},
+            payload={
+                "effective_instructions": "implement the requested change",
+                "instructions": "implement the requested change",
+            },
         ),
         ExecutionDiagnostic(
             execution_id=repository.execution.id,
@@ -1601,6 +1663,8 @@ def test_execution_detail_copies_all_persisted_detailed_logs(
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
             await pilot.pause()
             screen = application.screen
+            detailed_logs = str(screen.query_one("#execution-content").renderable)
+            assert detailed_logs.count("implement the requested change") == 1
             copy_button = screen.query_one("#copy-detailed-logs-button", Button)
             assert not copy_button.disabled
             copy_button.press()
@@ -1612,6 +1676,7 @@ def test_execution_detail_copies_all_persisted_detailed_logs(
     assert "=== REQUEST ===" in copied[0]
     assert "=== RESPONSE ===" in copied[0]
     assert "response line 399" in copied[0]
+    assert copied[0].count("implement the requested change") == 1
 
 
 def test_execution_detail_reports_clipboard_failures_without_crashing(
