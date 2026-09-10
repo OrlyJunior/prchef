@@ -17,6 +17,7 @@ dependencies = [
   "PyJWT[crypto]>=2.8,<3",
   "python-dotenv>=1.0,<2",
   "PyYAML>=6.0,<7",
+  "ruamel.yaml>=0.18,<1",
   "SQLAlchemy>=2.0,<3",
   "textual>=0.58,<2",
   "typer>=0.12,<1",

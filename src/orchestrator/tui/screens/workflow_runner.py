@@ -114,6 +114,11 @@ class WorkflowRunnerScreen(Screen[None]):
                         classes="navigation-control",
                     )
                     yield Button(
+                        "Repositories",
+                        id="workflow-repositories",
+                        classes="navigation-control",
+                    )
+                    yield Button(
                         "GitHub Apps",
                         id="workflow-github-apps",
                         classes="navigation-control",
@@ -257,6 +262,21 @@ class WorkflowRunnerScreen(Screen[None]):
 
     def on_resize(self, event: Resize) -> None:
         self._set_layout_mode(event.size.width)
+
+    def on_screen_resume(self) -> None:
+        """Reload repository choices after returning from repository settings."""
+
+        try:
+            repositories = self.controller.repositories()
+        except Exception as exc:
+            self.query_one("#workflow-progress", Static).update(
+                f"Cannot reload configured repositories: {exc}"
+            )
+            return
+        self.query_one("#repository", RepositorySelect).set_repositories(
+            repositories,
+            selected_repository=self.controller.selected_repository,
+        )
 
     def _set_layout_mode(self, width: int) -> None:
         self.set_class(width <= 80, "-narrow")
@@ -821,6 +841,10 @@ class WorkflowRunnerScreen(Screen[None]):
             from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
 
             self.app.push_screen(AgentPresetsScreen(self._selected("#repository")))
+        elif event.button.id == "workflow-repositories":
+            from orchestrator.tui.screens.repository_settings import RepositorySettingsScreen
+
+            self.app.push_screen(RepositorySettingsScreen(self._selected("#repository")))
         elif event.button.id == "workflow-github-apps":
             from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 
