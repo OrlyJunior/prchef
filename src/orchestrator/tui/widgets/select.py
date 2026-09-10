@@ -252,7 +252,6 @@ class RepositorySelect(OrchestratorSelect[str]):
             self._allow_blank = False
             self._setup_variables_for_options(options)
             self._value = value
-            self.call_later(self._restore_options, options, value)
             return value
 
         # Textual's public set_options() always initializes a non-blank Select
@@ -268,16 +267,6 @@ class RepositorySelect(OrchestratorSelect[str]):
         # completed, otherwise a delayed blank update can win the race.
         self.call_later(self._restore_selection, value)
         return value
-
-    def _restore_options(
-        self, options: list[tuple[str, str]], value: str
-    ) -> None:
-        """Populate the overlay once its deferred mount has completed."""
-
-        if not self.is_mounted:
-            return
-        self.set_options(options, allow_blank=False)
-        self._restore_selection(value)
 
     def _restore_selection(self, value: str) -> None:
         """Reapply a valid configured repository after initial mount events."""
