@@ -126,7 +126,8 @@ RISK REVIEW:
   behavior; and regressions in pre-existing flows.
 - Also assess unnecessary work, performance, memory/storage growth, token and prompt efficiency,
   redundant model calls or duplicated context, provider coupling, quota/rate-limit handling,
-  configuration compatibility, migration safety, and consistency with PROJECT.md.
+  configuration compatibility, migration safety, and consistency with durable project context in
+  docs/PROJECT_CONTEXT.md.
 - When the task or diff affects a user-facing surface (CLI, TUI, terminal interface, or
   user-facing messaging), assess usability alongside technical quality. Check label and message
   clarity, action discoverability, unnecessary steps, loading/error/empty/blocked states, and

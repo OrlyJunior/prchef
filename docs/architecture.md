@@ -9,6 +9,8 @@
 - `repositories`: entidades SQLAlchemy, serializacao e `WorkflowRepository`.
 - `config`: settings de ambiente, merge YAML e fabrica de sessoes.
 - `cli`: composicao das dependencias e interface Typer.
+- `docs/PROJECT_CONTEXT.md`: contexto duravel e versionado, compartilhado como informacao
+  complementar com os agentes de planejamento, implementacao e revisao.
 
 ## Sequencia
 
@@ -17,7 +19,8 @@
 3. `task.repository` ou o custom field Trello `Repository` resolve uma entrada do registro global.
 4. Defaults e a configuracao registrada em `repositories.<key>` do `orchestrator.yml` sao
    mesclados. Um `.orchestrator.yml` no alvo e ignorado com aviso.
-5. O provider associado a `agents.planner` recebe um `AgentRequest`. Com Jules, o adaptador cria
+5. O provider associado a `agents.planner` recebe um `AgentRequest`, incluindo o contexto duravel
+   versionado de `docs/PROJECT_CONTEXT.md` quando presente. Com Jules, o adaptador cria
    uma sessao remota read-only com `AUTOMATION_MODE_UNSPECIFIED`; seu ID e URL sao persistidos antes
    do polling. Com `gemini-vertex`, o adaptador faz uma chamada Vertex AI request/response usando
    ADC, sem acesso a filesystem, shell ou ferramentas locais. Com `litellm`, o adaptador faz uma

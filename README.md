@@ -95,6 +95,14 @@ mesma chave no registro `repositories` para associá-la ao checkout local. Antes
 execucao, conecte o repositorio ao Jules. Sem `providers.<nome-jules>.source`, o cliente usa o
 remote `origin` para localizar a source correspondente na API.
 
+## Contexto duravel do projeto
+
+Cada repositorio pode versionar `docs/PROJECT_CONTEXT.md` como contexto duravel do projeto. O
+orquestrador fornece esse arquivo aos agentes de planejamento, implementacao e revisao como
+contexto complementar; a tarefa atual e o estado do repositorio continuam sendo autoritativos.
+O conteudo enviado a cada prompt e limitado a 12.000 caracteres. `IMPLEMENTER.md` e `REVIEWER.md`
+continuam sendo instrucoes locais e opcionais especificas de cada papel.
+
 ## Banco e migrations
 
 No startup, os comandos da CLI aplicam automaticamente todas as migrations pendentes antes de
