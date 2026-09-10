@@ -71,7 +71,9 @@ def _spec() -> RepositorySpec:
 
 
 def _write_project_context(path: Path) -> None:
-    (path / "PROJECT.md").write_text(
+    context_file = path / "docs" / "PROJECT_CONTEXT.md"
+    context_file.parent.mkdir(exist_ok=True)
+    context_file.write_text(
         "# Durable context\nStable architecture rule.", encoding="utf-8"
     )
 
@@ -162,7 +164,7 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     assert "Stable architecture rule." in provider.requests[0].instructions
     assert "LOCAL REPOSITORY CONTEXT" in provider.requests[0].instructions
     assert "src/provider_contract.py" in provider.requests[0].instructions
-    assert "keep\nPROJECT.md accurate" in provider.requests[0].instructions
+    assert "keep\ndocs/PROJECT_CONTEXT.md accurate" in provider.requests[0].instructions
     assert (
         "Treat the TUI as a first-class product\n  interface"
         in provider.requests[0].instructions
@@ -206,7 +208,7 @@ def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> No
     assert result.changed_files == ["src/example.py"]
     assert provider.requests[0].workspace_path == tmp_path
     assert "Stable architecture rule." in provider.requests[0].instructions
-    assert "Keep PROJECT.md accurate" in provider.requests[0].instructions
+    assert "Keep docs/PROJECT_CONTEXT.md accurate" in provider.requests[0].instructions
     assert provider.requests[0].instructions.count("Prefer small, tested changes.") == 1
     assert "Prioritize regression risks." not in provider.requests[0].instructions
 

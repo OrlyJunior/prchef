@@ -135,8 +135,9 @@ USER-FACING PLANNING:
 - Do not invent UX requirements for backend-only changes.
 When writing implementation_proposal, explicitly direct
 the implementation agent to keep
-PROJECT.md accurate when the change affects durable project knowledge (architecture, workflows,
-domain behavior, invariants, configuration, persistence, integrations, or design decisions).
+docs/PROJECT_CONTEXT.md accurate when the change affects durable project knowledge
+(architecture, workflows, domain behavior, invariants, configuration, persistence,
+integrations, or design decisions).
 
 Return exactly one JSON object with this shape:
 {{
