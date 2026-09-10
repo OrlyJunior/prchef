@@ -8,7 +8,7 @@
 - It coordinates providers, Git, GitHub, and persistence. It is **not** a merge bot or a generic
   repository browser/RAG service. Human-blocked executions are resumable using their persisted
   workflow state; this is not a provider-session resume system.
-- `PROJECT.md` is shared supporting context for planning, implementation, and review prompts
+- `docs/PROJECT_CONTEXT.md` is shared supporting context for planning, implementation, and review prompts
   (capped at 12,000 characters). `IMPLEMENTER.md` and `REVIEWER.md` are optional, capped,
   role-specific local
   guidance loaded from the configured repository root at execution time: implementers receive
@@ -120,7 +120,7 @@
    planner/implementer/reviewer instances; a named provider shared by roles is instantiated once.
 3. Generate one structured `RepositorySpec` from the base checkout/base branch. Planning receives
    a bounded, read-only local repository overview and task-matched code excerpts, alongside
-   `PROJECT.md` when present. A blocking spec ambiguity ends the execution as `NEEDS_HUMAN` before
+   `docs/PROJECT_CONTEXT.md` when present. A blocking spec ambiguity ends the execution as `NEEDS_HUMAN` before
    any branch or worktree is created.
 4. Build a unique, non-protected working branch name from configured prefix, task identity/title,
    UTC timestamp, and execution ID. Create a linked worktree from freshly fetched

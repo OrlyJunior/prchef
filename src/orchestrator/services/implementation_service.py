@@ -42,12 +42,13 @@ class ImplementationService:
 REPOSITORY SPEC:
 {spec.as_prompt_context()}
 
-{context}Keep PROJECT.md accurate when this task meaningfully
+{context}Keep docs/PROJECT_CONTEXT.md accurate when this task meaningfully
 changes durable project knowledge:
 architecture, workflows, domain behavior, invariants, configuration, persistence, integrations,
-or important design decisions. Treat any necessary PROJECT.md update as part of the normal diff.
+or important design decisions. Treat any necessary docs/PROJECT_CONTEXT.md update as part of
+the normal diff.
 Do not update it for trivial implementation details. The current repository is authoritative if it
-conflicts with PROJECT.md.
+conflicts with docs/PROJECT_CONTEXT.md.
 
 Implement the original task.
 Use the repository spec only as supporting technical context.
@@ -73,10 +74,10 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
 
 STRICT SAFETY RULES:
 Implement only the requested input in the configured workspace.
-{context}Keep PROJECT.md accurate when the requested change
+{context}Keep docs/PROJECT_CONTEXT.md accurate when the requested change
 meaningfully changes durable project knowledge; include any needed update in the normal diff. Do
 not update it for trivial details, and treat the repository as authoritative if it conflicts with
-PROJECT.md.
+docs/PROJECT_CONTEXT.md.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
         return self._run_prompt(safe_prompt, repository_path)
@@ -102,7 +103,7 @@ REPOSITORY SPEC:
 VALIDATION FAILURES FROM THE CURRENT IMPLEMENTATION:
 {failures}
 
-{context}Keep PROJECT.md accurate if correcting these failures also
+{context}Keep docs/PROJECT_CONTEXT.md accurate if correcting these failures also
 changes durable project knowledge.
 Do not update it for trivial details; current repository behavior is authoritative.
 
@@ -142,7 +143,7 @@ REPOSITORY SPEC:
 REVIEWER CHANGE REQUESTS FOR THE CURRENT IMPLEMENTATION:
 {feedback}
 
-{context}Keep PROJECT.md accurate if addressing these findings also
+{context}Keep docs/PROJECT_CONTEXT.md accurate if addressing these findings also
 changes durable project knowledge.
 Do not update it for trivial details; current repository behavior is authoritative.
 
@@ -207,7 +208,8 @@ comment, so include concise final-facing reasons only. Do not include private re
 commands, credentials, provider metadata, or raw tool output. If no concise reason is available,
 return an empty `skip_reasons` list.
 
-Keep PROJECT.md accurate only if an applied change meaningfully changes durable project knowledge.
+Keep docs/PROJECT_CONTEXT.md accurate only if an applied change meaningfully changes durable
+project knowledge.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
         result = self._run_prompt(prompt, repository_path, allow_no_changes=True)
