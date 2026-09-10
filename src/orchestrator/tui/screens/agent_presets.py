@@ -183,12 +183,12 @@ class AgentPresetsScreen(Screen[None]):
 
     def _load_repository(self, repository: str) -> None:
         try:
-            providers = self.controller.configured_agent_providers(repository)
+            provider_options = self.controller.configured_agent_provider_options(repository)
         except Exception as exc:
             self._status(f"Cannot load agent providers: {exc}")
             return
         provider = self.query_one("#agent-preset-provider", OrchestratorSelect)
-        provider.set_options([(name, name) for name in providers])
+        provider.set_options(provider_options, allow_blank=False)
         role_selector = self.query_one("#agent-preset-role", OrchestratorSelect)
         active_role = self._role() or AgentRole.PLANNER
         # Keep the role-local editor active when navigating between repositories.
@@ -204,7 +204,7 @@ class AgentPresetsScreen(Screen[None]):
         try:
             presets = self.controller.agent_presets(repository, role)
             default_provider = self.controller.agent_providers(repository)[role]
-            providers = self.controller.configured_agent_providers(repository)
+            provider_options = self.controller.configured_agent_provider_options(repository)
             fallback_preset = self.controller.agent_fallback_preset(repository, role)
         except Exception as exc:
             self._status(f"Cannot load {role.value} presets: {exc}")
@@ -224,7 +224,7 @@ class AgentPresetsScreen(Screen[None]):
         selector.value = _NEW_PRESET
         self._clear_values()
         provider = self.query_one("#agent-preset-provider", OrchestratorSelect)
-        provider.set_options([(name, name) for name in providers])
+        provider.set_options(provider_options, allow_blank=False)
         provider.value = default_provider
         self._load_provider_controls(default_provider)
         self._status(

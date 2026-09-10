@@ -241,6 +241,19 @@ class RepositorySelect(OrchestratorSelect[str]):
             else options[0][1]
         )
 
+        # A screen's ``on_mount`` can run after this Select is composed but
+        # before its overlay has completed mounting.  Rendering options in
+        # that window asks Textual to mutate an OptionList that is still
+        # mounting.  Seed the parent Select instead; its own mount handler
+        # will render these options and apply this selected value once the
+        # overlay is ready.
+        overlay = self.query_one(SelectOverlay)
+        if not overlay.is_mounted:
+            self._allow_blank = False
+            self._setup_variables_for_options(options)
+            self._value = value
+            return value
+
         # Textual's public set_options() always initializes a non-blank Select
         # to its first entry. Seed the desired legal value before initializing
         # it so a config reload never flashes a different repository or emits a

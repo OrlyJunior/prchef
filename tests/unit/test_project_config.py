@@ -14,6 +14,7 @@ from orchestrator.config.project_config import (
     GitHubAppSettings,
     ProjectConfig,
     ProjectConfigLoader,
+    ProviderSupportTier,
     resolve_global_config,
 )
 from orchestrator.models.development_task import DevelopmentTask
@@ -60,6 +61,50 @@ def test_default_codex_config_keeps_workspace_write_sandbox(tmp_path: Path) -> N
         "workspace-write",
     ]
     assert "--approve-for-me" not in config.integrations.codex.command
+
+
+def test_provider_options_label_and_deprioritize_deprecated_jules(tmp_path: Path) -> None:
+    with pytest.warns(DeprecationWarning, match="Jules provider"):
+        config = ProjectConfig.model_validate(
+            {
+                "path": tmp_path,
+                "agents": {
+                    "planner": {"provider": "legacy"},
+                    "implementer": {"provider": "codex"},
+                    "reviewer": {"provider": "api"},
+                },
+                "providers": {
+                    "legacy": {"type": "jules"},
+                    "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+                    "api": {"type": "litellm", "model": "openai/example"},
+                    "broken": {"type": "unknown-backend"},
+                },
+            }
+        )
+
+    assert config.provider_options() == [
+        ("api", "api"),
+        ("codex", "codex"),
+        ("legacy (deprecated)", "legacy"),
+        ("broken (unsupported)", "broken"),
+    ]
+    assert ProviderSupportTier.FIRST_CLASS.value == "first-class"
+    assert ProviderSupportTier.OPTIONAL.value == "optional"
+    assert ProviderSupportTier.DEPRECATED.value == "deprecated/legacy"
+    assert ProviderSupportTier.UNSUPPORTED.value == "unsupported"
+
+
+def test_example_configuration_uses_first_class_litellm_and_codex(tmp_path: Path) -> None:
+    example_path = Path(__file__).resolve().parents[2] / "orchestrator.example.yml"
+    example = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+
+    config = ProjectConfig.model_validate({"path": tmp_path, **example["defaults"]})
+
+    assert config.agents.planner.provider == "cloud-api"
+    assert config.agents.implementer.provider == "codex"
+    assert config.agents.reviewer.provider == "cloud-api"
+    assert config.providers["cloud-api"].type == "litellm"
+    assert config.providers["codex"].type == "codex-cli"
 
 
 def test_role_runtime_overrides_are_validated_in_memory_and_keep_defaults(tmp_path: Path) -> None:

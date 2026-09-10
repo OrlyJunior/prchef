@@ -9,8 +9,7 @@ GitHub Issue  ─┘   -> Git branch/commit/push -> GitHub PR -> reviewer
 ```
 
 A V1 nunca faz merge, nunca envia commits diretamente a branches protegidas e encerra em
-`NEEDS_HUMAN` quando a spec informa que uma ambiguidade impede uma implementacao segura ou quando
-o Jules exige uma interação humana. O fluxo é sempre: task -> spec -> branch -> Codex -> validação
+`NEEDS_HUMAN` quando a spec informa que uma ambiguidade impede uma implementacao segura. O fluxo é sempre: task -> spec -> branch -> Codex -> validação
 local -> commit -> push -> PR -> review. O merge continua inteiramente manual.
 
 ## Requisitos
@@ -18,18 +17,17 @@ local -> commit -> push -> PR -> review. O merge continua inteiramente manual.
 - Python 3.11+
 - Git
 - Codex CLI autenticado
-- Jules Tools CLI instalado e autenticado (`npm install -g @google/jules`, `jules login`) para
-  inspecao operacional das sessoes
-- `JULES_API_KEY` em variavel de ambiente para o lifecycle automatizado pela API oficial do Jules
 - GitHub CLI (`gh`) autenticado, usado para GitHub Issues e Pull Requests
+- Uma credencial para o provider API escolhido, por exemplo `OPENAI_API_KEY` para o exemplo
+  LiteLLM incluído
 - credenciais Trello quando esse provider for utilizado
 - Para o provider `gemini-vertex`: projeto Google Cloud com Vertex AI habilitado e credenciais
   Application Default Credentials (ADC), por exemplo `gcloud auth application-default login`.
   Ele usa `google-genai` em modo Vertex AI; `GEMINI_API_KEY` nao e usado nem deve ser configurado.
 
 O adaptador Codex usa o modo oficial nao interativo `codex exec`, com workspace limitado ao
-repositorio. Jules cria uma sessao remota oficial, persiste ID e URL, acompanha a execucao por
-polling e recupera a ultima mensagem do agente quando a sessao chega a `COMPLETED`.
+repositorio. LiteLLM é o backend API-modelo de primeira classe para provedores cloud e endpoints
+locais compatíveis; ele não recebe implicitamente shell, filesystem ou estado de workflow.
 O adaptador `gemini-vertex` faz uma unica chamada request/response ao Vertex AI usando ADC e nao
 recebe acesso ao filesystem, shell ou ferramentas locais.
 
@@ -71,24 +69,24 @@ Qualquer mudanca entre eles deve ser uma decisao explicita do usuario ou adminis
 orquestrador nao faz esse fallback automaticamente. Consulte a documentacao do sandbox Windows do
 [Codex](https://learn.chatgpt.com/docs/windows/windows-sandbox).
 
-O orquestrador nao usa um launcher, `stdin` ou `stdout` para o Jules. A CLI autenticada serve
-para login e inspecao manual; o ciclo programatico usa a API oficial de sessoes, que oferece
-estados e atividades estruturados. Por isso a chave deve estar no ambiente do processo
-(`JULES_API_KEY`, tambem aceito como `ORCHESTRATOR_JULES_API_KEY`), e nao em arquivos versionados.
-O modo de automacao enviado e o modo padrao sem automacao (`AUTOMATION_MODE_UNSPECIFIED`): Jules
-nao recebe autorizacao para criar PR, publicar commits ou alterar o repositorio local durante
-spec/review. Ambas as sessoes tambem definem `requirePlanApproval: false`, para que a API
-auto-aprove o plano em vez de parar por uma aprovação manual.
+Jules permanece somente como integracao legada/depreciada para configuracoes existentes. Seu ciclo
+de sessões remotas não oferece execução interativa no worktree, portanto não acompanha as
+expectativas atuais do workflow. Ao carregar ou instanciar um provider Jules, o orquestrador emite
+um aviso de deprecação; prefira LiteLLM para chamadas de modelo e Codex CLI para implementação local.
 
 ## Instalacao
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
+python -m pip install autonomous-dev-orchestrator
 cp .env.example .env       # Windows: Copy-Item .env.example .env
 cp orchestrator.example.yml orchestrator.yml
 ```
+
+Para contribuir no projeto, instale as ferramentas de desenvolvimento com
+`python -m pip install -e ".[dev]"`. LiteLLM já faz parte das dependências principais; não há
+extra `litellm` para instalar.
 
 Edite `.env` e `orchestrator.yml`. Para Trello, o card deve possuir um custom field chamado
 `Repository` (ou `Repo`) cujo valor corresponda a uma chave em `repositories`; `--repository`
@@ -141,7 +139,7 @@ Para listar as instancias de agent provider configuradas nos defaults globais, u
 
 ```text
 $ orchestrator providers
-jules  jules
+cloud-api  litellm
 codex  codex-cli
 ```
 
@@ -219,7 +217,7 @@ Prompts, respostas completas do Codex/Jules e credenciais nao sao incluidos nos 
 de polling e o timeout do Jules continuam configuraveis no provider Jules (15 s e 1800 s
 por padrao); `--verbose` nao altera o comportamento do workflow.
 
-## Lifecycle do Jules
+## Lifecycle legado do Jules (depreciado)
 
 Para cada spec ou review, o client cria uma unica sessao, persiste imediatamente `session_id` e
 URL e consulta seu estado ate uma decisão. Os estados de processamento (`QUEUED`, `PLANNING` e
@@ -267,11 +265,14 @@ task:
 
 defaults:
   agents:
-    planner: {provider: jules}
+    planner: {provider: cloud-api}
     implementer: {provider: codex}
-    reviewer: {provider: jules}
+    reviewer: {provider: cloud-api}
   providers:
-    jules: {type: jules}
+    cloud-api:
+      type: litellm
+      model: openai/gpt-4.1-mini
+      api_key_env: OPENAI_API_KEY
     codex:
       type: codex-cli
       command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
@@ -295,11 +296,19 @@ Task providers suportados:
 - `trello`: usa `ORCHESTRATOR_TRELLO_API_KEY` e `ORCHESTRATOR_TRELLO_TOKEN`.
 - `github`: executa `gh issue view` com a autenticação já ativa no GitHub CLI.
 
-Agent providers sao instancias nomeadas em `providers`, dos tipos `jules`, `codex-cli`,
-`gemini-vertex` e `litellm`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
+Agent providers sao instancias nomeadas em `providers`, dos tipos `litellm`, `codex-cli`,
+`gemini-vertex` e `jules`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
 do workflow a essas instancias. Mais de um papel pode reutilizar a mesma instancia, ou cada papel
 pode apontar para uma configuracao diferente do mesmo tipo. Opcoes de runtime/modelo permanecem
 dentro da instancia do provider.
+
+| Backend | Status | Uso |
+| --- | --- | --- |
+| `litellm` | primeira classe | APIs de modelos cloud, locais e self-hosted compatíveis; instalado normalmente. |
+| `codex-cli` | primeira classe | agente especializado de implementação no worktree local. |
+| `gemini-vertex` | opcional | integração especializada com Vertex AI/ADC. |
+| `jules` | legado/depreciado | apenas compatibilidade; a API de sessões remotas não oferece o fluxo interativo de worktree atual. |
+| outros tipos | não suportados | rejeitados com erro de configuração. |
 
 No `codex-cli`, `model` e `reasoning_effort` sao opcionais somente para compatibilidade com
 configuracoes legadas. Quando ausentes, a execucao usa o default externo da Codex CLI e o log
@@ -322,8 +331,8 @@ agents:
     provider: vertex-gemini
 ```
 
-`litellm` e um backend API generico opcional (instale com
-`pip install autonomous-dev-orchestrator[litellm]`) para identificadores de modelo livres, incluindo
+`litellm` é o backend API genérico de primeira classe, incluído em uma instalação normal de
+`autonomous-dev-orchestrator`, para identificadores de modelo livres, incluindo
 provedores cloud e endpoints locais/self-hosted compativeis, como Ollama, vLLM e servidores
 OpenAI-compativeis. Configure `api_key_env` somente com o nome da variavel de ambiente; omita-o
 para endpoints sem autenticacao. `temperature`, `max_output_tokens` e `generation` ficam isolados
@@ -332,9 +341,10 @@ edicao de arquivos, um provider LiteLLM pode planejar ou revisar, mas nao substi
 de coding agent do `codex-cli` para implementacao local.
 
 Configuracoes legadas com `roles.spec|implementation|review` e
-`integrations.jules|codex` continuam aceitas e sao normalizadas para os providers `jules` e
-`codex`. Nomes de provider ou tipos desconhecidos produzem um erro de configuracao com os nomes
-disponiveis/suportados.
+`integrations.jules|codex` continuam aceitas sem reescrita automatica e sao normalizadas para os
+providers `jules` e `codex`. Como Jules está depreciado, esse caminho emite um aviso claro na carga
+da configuracao e na instanciacao. Nomes de provider ou tipos desconhecidos produzem um erro de
+configuracao com os nomes disponiveis/suportados.
 
 `allow_direct_merge: true` e rejeitado nesta V1. Credenciais ficam exclusivamente em variaveis
 de ambiente e `.env` nao e versionado.
