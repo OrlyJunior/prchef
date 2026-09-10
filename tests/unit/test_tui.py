@@ -18,6 +18,7 @@ from orchestrator.config.project_config import (
     ConfiguredRepository,
     GitHubAppSettings,
     ProjectConfig,
+    RepositoryConfiguration,
 )
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
@@ -33,6 +34,10 @@ from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
 from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
 from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
+from orchestrator.tui.screens.repository_settings import (
+    DeleteRepositoryConfirmation,
+    RepositorySettingsScreen,
+)
 from orchestrator.tui.screens.task_selector import TaskSelector
 from orchestrator.tui.screens.workflow_runner import StopWorkflowConfirmation, WorkflowRunnerScreen
 from orchestrator.tui.widgets import OrchestratorSelect, RepositorySelect
@@ -100,6 +105,15 @@ class _ConfigLoader:
     def __init__(self, path: Path) -> None:
         self._path = path
         self.saved_github_apps: tuple[str, GitHubAppSettings, GitHubAppSettings] | None = None
+        self.repository_entries = {
+            "example": RepositoryConfiguration(
+                key="example",
+                path=str(path),
+                resolved_path=path,
+                auto_detect=True,
+                commands=[["python", "-m", "pytest"]],
+            )
+        }
         self.config = ProjectConfig.model_validate(
             {
                 "path": path,
@@ -141,7 +155,52 @@ class _ConfigLoader:
         )
 
     def list_repositories(self) -> list[ConfiguredRepository]:
-        return [ConfiguredRepository("example", self._path)]
+        return [
+            ConfiguredRepository(key, settings.resolved_path)
+            for key, settings in self.repository_entries.items()
+        ]
+
+    def repository_settings(self, repository: str) -> RepositoryConfiguration:
+        return self.repository_entries[repository]
+
+    def resolve_repository_path(self, path: str) -> Path:
+        candidate = Path(path)
+        return candidate if candidate.is_absolute() else self._path / candidate
+
+    def save_repository(
+        self,
+        repository_key: str,
+        path: str,
+        auto_detect: bool,
+        commands: list[list[str]],
+        original_key: str | None = None,
+    ) -> Path:
+        source_key = original_key or repository_key
+        if source_key != repository_key and repository_key in self.repository_entries:
+            raise ValueError("repository already exists")
+        resolved = self.resolve_repository_path(path)
+        replacement = RepositoryConfiguration(
+            key=repository_key,
+            path=path,
+            resolved_path=resolved,
+            auto_detect=auto_detect,
+            commands=commands,
+        )
+        if source_key in self.repository_entries:
+            updated = {
+                (repository_key if key == source_key else key): (
+                    replacement if key == source_key else value
+                )
+                for key, value in self.repository_entries.items()
+            }
+            self.repository_entries = updated
+        else:
+            self.repository_entries[repository_key] = replacement
+        return self._path / "orchestrator.yml"
+
+    def delete_repository(self, repository_key: str) -> Path:
+        del self.repository_entries[repository_key]
+        return self._path / "orchestrator.yml"
 
     def load(self, task: DevelopmentTask, repository: str | None = None) -> ProjectConfig:
         assert task.repository == repository == "example"
@@ -311,6 +370,30 @@ def test_controller_browses_selections_and_delegates_workflow_start(tmp_path: Pa
     ]
 
 
+def test_controller_saves_renames_and_deletes_repository_configuration(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+
+    controller.save_repository(
+        "renamed",
+        "renamed-path",
+        False,
+        [["python", "-m", "ruff", "check", "."]],
+        original_key="example",
+    )
+
+    assert controller.selected_repository == "renamed"
+    assert [repository.key for repository in controller.repositories()] == ["renamed"]
+    assert controller.repository_settings("renamed").commands == [
+        ["python", "-m", "ruff", "check", "."]
+    ]
+
+    controller.delete_repository("renamed")
+    assert controller.repositories() == []
+    assert controller.selected_repository is None
+
+
 def test_controller_discards_finished_workflow_service(tmp_path: Path) -> None:
     controller, service, _ = _controller(tmp_path)
     service.emit_terminal_event = True
@@ -462,6 +545,7 @@ def test_main_navigation_reflows_compact_controls_without_content_sizing(tmp_pat
     navigation_ids = (
         "new-workflow",
         "history",
+        "repositories",
         "github-apps",
         "agent-instructions-button",
         "agent-presets",
@@ -499,6 +583,7 @@ def test_workflow_runner_navigation_reflows_compact_controls(tmp_path: Path) -> 
     navigation_ids = (
         "start-workflow",
         "workflow-history",
+        "workflow-repositories",
         "workflow-github-apps",
         "workflow-agent-instructions",
         "workflow-agent-presets",
@@ -536,6 +621,7 @@ def test_main_navigation_controls_keep_their_destinations(tmp_path: Path) -> Non
     destinations = (
         ("#new-workflow", WorkflowRunnerScreen),
         ("#history", ExecutionHistoryScreen),
+        ("#repositories", RepositorySettingsScreen),
         ("#github-apps", GitHubAppSettingsScreen),
         ("#agent-instructions-button", AgentInstructionsScreen),
         ("#agent-presets", AgentPresetsScreen),
@@ -549,6 +635,154 @@ def test_main_navigation_controls_keep_their_destinations(tmp_path: Path) -> Non
                 assert isinstance(application.screen, expected_screen)
                 await pilot.press("escape")
                 await pilot.pause()
+
+    asyncio.run(drive())
+
+
+def test_repository_settings_creates_repository_and_reorders_commands(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 60)) as pilot:
+            await pilot.press("r")
+            await pilot.pause()
+            assert isinstance(application.screen, RepositorySettingsScreen)
+            screen = application.screen
+
+            await pilot.click("#add-repository")
+            screen.query_one("#repository-key", Input).value = "owner/new-repository"
+            screen.query_one("#repository-path", Input).value = "missing/repository"
+            await pilot.pause()
+            assert "does not currently exist" in str(
+                screen.query_one("#repository-path-warning", Static).renderable
+            )
+
+            command = screen.query_one("#validation-command-input", Input)
+            command.value = "python -m pytest"
+            await pilot.click("#add-validation-command")
+            await pilot.pause()
+            assert screen._commands == [["python", "-m", "pytest"]]
+            command.value = "python -m mypy 'src/orchestrator package'"
+            screen.query_one("#add-validation-command", Button).press()
+            await pilot.pause()
+            assert screen._commands == [
+                ["python", "-m", "pytest"],
+                ["python", "-m", "mypy", "src/orchestrator package"],
+            ]
+            screen.query_one("#validation-command-list", OrchestratorSelect).value = 1
+            await pilot.pause()
+            screen.query_one("#move-validation-command-up", Button).press()
+            await pilot.pause()
+            screen.query_one("#save-repository", Button).press()
+            await pilot.pause()
+
+            settings = controller.repository_settings("owner/new-repository")
+            assert settings.commands == [
+                ["python", "-m", "mypy", "src/orchestrator package"],
+                ["python", "-m", "pytest"],
+            ]
+            assert controller.selected_repository == "owner/new-repository"
+
+            screen.query_one("#add-repository", Button).press()
+            await pilot.pause()
+            screen.query_one("#repository-key", Input).value = "example"
+            screen.query_one("#repository-path", Input).value = str(tmp_path)
+            screen.query_one("#save-repository", Button).press()
+            await pilot.pause()
+            assert "already configured" in str(
+                screen.query_one("#repository-errors", Static).renderable
+            )
+
+    asyncio.run(drive())
+
+
+def test_repository_deletion_requires_confirmation_and_leaves_path(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 45)) as pilot:
+            await pilot.press("r")
+            await pilot.pause()
+            application.screen.query_one("#delete-repository", Button).press()
+            await pilot.pause()
+            assert isinstance(application.screen, DeleteRepositoryConfirmation)
+            application.screen.query_one("#cancel-delete", Button).press()
+            await pilot.pause()
+            assert [repository.key for repository in controller.repositories()] == ["example"]
+
+            application.screen.query_one("#delete-repository", Button).press()
+            await pilot.pause()
+            application.screen.query_one("#confirm-delete", Button).press()
+            await pilot.pause()
+            assert controller.repositories() == []
+            assert tmp_path.is_dir()
+            assert "files were not deleted" in str(
+                application.screen.query_one("#repository-status", Static).renderable
+            )
+
+    asyncio.run(drive())
+
+
+def test_repository_settings_actions_remain_scrollable_on_small_terminal(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(60, 15)) as pilot:
+            await pilot.press("r")
+            await pilot.pause()
+            content = application.screen.query_one("#repository-settings", VerticalScroll)
+            assert application.screen.has_class("-narrow")
+            assert content.max_scroll_y > 0
+
+            application.screen.query_one("#save-repository", Button).focus()
+            await pilot.pause(delay=0.1)
+            assert content.scroll_y > 0
+
+    asyncio.run(drive())
+
+
+def test_workflow_repository_selector_refreshes_after_repository_settings_save(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 60)) as pilot:
+            await pilot.press("n")
+            await pilot.pause()
+            workflow = application.screen
+            workflow.query_one("#workflow-repositories", Button).press()
+            await pilot.pause(delay=0.1)
+            settings = application.screen
+            assert isinstance(settings, RepositorySettingsScreen)
+
+            settings.query_one("#add-repository", Button).press()
+            await pilot.pause()
+            assert settings._editing_key is None
+            settings.query_one("#repository-key", Input).value = "new"
+            settings.query_one("#repository-path", Input).value = "new-path"
+            settings.query_one("#save-repository", Button).press()
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert application.screen is workflow
+            repository = workflow.query_one("#repository", RepositorySelect)
+            assert [(str(label), value) for label, value in repository._options] == [
+                ("example", "example"),
+                ("new", "new"),
+            ]
+            assert repository.value == "new"
 
     asyncio.run(drive())
 

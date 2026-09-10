@@ -15,6 +15,7 @@ from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
 from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
 from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
+from orchestrator.tui.screens.repository_settings import RepositorySettingsScreen
 from orchestrator.tui.screens.workflow_runner import WorkflowRunnerScreen
 
 
@@ -25,13 +26,13 @@ class OrchestratorApp(App[None]):
     SUB_TITLE = "Interactive workflow control"
     CSS = """
     #home, #workflow-runner, #execution-history, #execution-detail,
-    #github-app-settings, #agent-instructions {
+    #github-app-settings, #agent-instructions, #repository-settings {
         width: 100%;
         height: 1fr;
         padding: 1 2;
     }
     #workflow-runner, #execution-history, #execution-detail,
-    #github-app-settings, #agent-instructions {
+    #github-app-settings, #agent-instructions, #repository-settings {
         overflow-y: auto;
     }
     .screen-title { text-style: bold; margin-bottom: 1; }
@@ -131,6 +132,7 @@ class OrchestratorApp(App[None]):
         Binding("c", "github_apps", "GitHub Apps"),
         Binding("i", "agent_instructions", "Agent instructions"),
         Binding("p", "agent_presets", "Agent presets"),
+        Binding("r", "repositories", "Repositories"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -158,6 +160,9 @@ class OrchestratorApp(App[None]):
                 )
                 yield Button(
                     "Agent presets", id="agent-presets", classes="navigation-control"
+                )
+                yield Button(
+                    "Repositories", id="repositories", classes="navigation-control"
                 )
                 yield Button(
                     "GitHub Apps", id="github-apps", classes="navigation-control"
@@ -188,6 +193,8 @@ class OrchestratorApp(App[None]):
             self.action_history()
         elif event.button.id == "agent-presets":
             self.action_agent_presets()
+        elif event.button.id == "repositories":
+            self.action_repositories()
         elif event.button.id == "github-apps":
             self.action_github_apps()
         elif event.button.id == "agent-instructions-button":
@@ -204,6 +211,9 @@ class OrchestratorApp(App[None]):
 
     def action_agent_presets(self) -> None:
         self.push_screen(AgentPresetsScreen())
+
+    def action_repositories(self) -> None:
+        self.push_screen(RepositorySettingsScreen())
 
     def action_agent_instructions(self) -> None:
         self.push_screen(AgentInstructionsScreen())

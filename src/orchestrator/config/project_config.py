@@ -5,11 +5,14 @@ import os
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError as RoundTripYAMLError
 
 from orchestrator.models.development_task import DevelopmentTask
 
@@ -38,6 +41,26 @@ class ConfiguredRepository:
 
     key: str
     path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryConfiguration:
+    """Repository fields edited by the terminal settings screen.
+
+    ``path`` retains the configured spelling so opening and saving the editor
+    does not silently turn a relative path into an absolute one. ``resolved_path``
+    exists only for the TUI's non-blocking path-existence indicator.
+    """
+
+    key: str
+    path: str
+    resolved_path: Path
+    auto_detect: bool
+    commands: list[list[str]]
+
+    @property
+    def path_exists(self) -> bool:
+        return self.resolved_path.exists()
 
 
 class RepositorySettings(BaseModel):
@@ -844,6 +867,20 @@ def _load_yaml(path: Path, *, required: bool) -> dict[str, Any]:
     return content
 
 
+def _load_yaml_for_update(path: Path) -> dict[str, Any]:
+    """Load editable YAML while retaining comments, ordering, and scalar style."""
+
+    round_trip_yaml = YAML(typ="rt")
+    round_trip_yaml.preserve_quotes = True
+    try:
+        content = round_trip_yaml.load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, RoundTripYAMLError) as exc:
+        raise ConfigurationError(f"Cannot read configuration {path}: {exc}") from exc
+    if not isinstance(content, dict):
+        raise ConfigurationError(f"Configuration root must be a mapping: {path}")
+    return content
+
+
 def resolve_global_config(
     config_file: Path | None = None,
     *,
@@ -962,6 +999,169 @@ class ProjectConfigLoader:
                 path = path.resolve()
             repositories.append(ConfiguredRepository(key=str(key), path=path))
         return repositories
+
+    def repository_settings(self, repository_key: str) -> RepositoryConfiguration:
+        """Return the editable repository fields without requiring the path to exist."""
+
+        configuration = _load_yaml(self._config_file, required=True)
+        self._reject_misplaced_project_settings(configuration)
+        repositories = configuration.get("repositories", {})
+        if not isinstance(repositories, dict):
+            raise ConfigurationError("'repositories' must be a mapping")
+        repository = repositories.get(repository_key)
+        if not isinstance(repository, dict):
+            raise ConfigurationError(f"Repository entry '{repository_key}' must be a mapping")
+        raw_path = repository.get("path")
+        if raw_path is None:
+            raise ConfigurationError(f"Repository entry '{repository_key}' has no path")
+
+        configured_path = str(raw_path)
+        resolved_path = self.resolve_repository_path(configured_path)
+
+        defaults = configuration.get("defaults", {})
+        default_validation = defaults.get("validation", {}) if isinstance(defaults, dict) else {}
+        repository_validation = repository.get("validation", {})
+        if not isinstance(default_validation, dict):
+            raise ConfigurationError("'defaults.validation' must be a mapping")
+        if not isinstance(repository_validation, dict):
+            raise ConfigurationError(
+                f"'repositories.{repository_key}.validation' must be a mapping"
+            )
+        try:
+            validation = ValidationSettings.model_validate(
+                _deep_merge(default_validation, repository_validation)
+            )
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"Invalid validation configuration for repository {repository_key!r}: {exc}"
+            ) from exc
+        return RepositoryConfiguration(
+            key=repository_key,
+            path=configured_path,
+            resolved_path=resolved_path,
+            auto_detect=validation.auto_detect,
+            commands=deepcopy(validation.commands),
+        )
+
+    def resolve_repository_path(self, path: str) -> Path:
+        """Resolve a configured path using the global config directory as its anchor."""
+
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self._config_file.parent / candidate
+        return candidate.resolve()
+
+    def save_repository(
+        self,
+        repository_key: str,
+        path: str,
+        auto_detect: bool,
+        commands: list[list[str]],
+        original_key: str | None = None,
+    ) -> Path:
+        """Create or update one repository entry in the global configuration.
+
+        Existing repository-only settings are retained, including integrations,
+        notifications, and presets. A rename occupies the original entry's
+        position, which keeps selectors stable and diffs small.
+        """
+
+        normalized_key = repository_key.strip()
+        normalized_path = path.strip()
+        if not normalized_key:
+            raise ConfigurationError("Repository key must be non-empty")
+        if not normalized_path:
+            raise ConfigurationError("Repository path must be non-empty")
+        if "\0" in normalized_path:
+            raise ConfigurationError("Repository path contains an invalid null character")
+        try:
+            resolved_path = self.resolve_repository_path(normalized_path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ConfigurationError(f"Repository path is not usable: {exc}") from exc
+        if resolved_path.exists() and not resolved_path.is_dir():
+            raise ConfigurationError("Repository path exists but is not a directory")
+
+        normalized_commands: list[list[str]] = []
+        for index, command in enumerate(commands, start=1):
+            if not isinstance(command, list) or not command:
+                raise ConfigurationError(
+                    f"Validation command {index} must contain at least one argument"
+                )
+            if not all(isinstance(argument, str) for argument in command):
+                raise ConfigurationError(
+                    f"Validation command {index} arguments must all be strings"
+                )
+            if not command[0].strip():
+                raise ConfigurationError(
+                    f"Validation command {index} must start with a program name"
+                )
+            normalized_commands.append(list(command))
+        try:
+            validation = ValidationSettings.model_validate(
+                {"auto_detect": auto_detect, "commands": normalized_commands}
+            )
+        except ValueError as exc:
+            raise ConfigurationError(f"Invalid repository validation settings: {exc}") from exc
+
+        configuration = _load_yaml_for_update(self._config_file)
+        self._reject_misplaced_project_settings(configuration)
+        repositories = configuration.setdefault("repositories", {})
+        if not isinstance(repositories, dict):
+            raise ConfigurationError("'repositories' must be a mapping")
+
+        source_key = original_key.strip() if original_key is not None else normalized_key
+        existing = repositories.get(source_key)
+        if original_key is not None and not isinstance(existing, dict):
+            raise ConfigurationError(f"Repository {source_key!r} is not configured")
+        if source_key != normalized_key and normalized_key in repositories:
+            raise ConfigurationError(f"Repository key {normalized_key!r} is already configured")
+        repository = deepcopy(existing) if isinstance(existing, dict) else {}
+        repository["path"] = normalized_path
+        repository_validation = repository.setdefault("validation", {})
+        if not isinstance(repository_validation, dict):
+            raise ConfigurationError(
+                f"'repositories.{source_key}.validation' must be a mapping"
+            )
+        repository_validation["auto_detect"] = validation.auto_detect
+        repository_validation["commands"] = deepcopy(validation.commands)
+
+        defaults = configuration.get("defaults", {})
+        candidate = _deep_merge(defaults, repository) if isinstance(defaults, dict) else repository
+        candidate["path"] = Path(normalized_path)
+        try:
+            ProjectConfig.model_validate(candidate)
+        except ValueError as exc:
+            raise ConfigurationError(f"Invalid repository configuration: {exc}") from exc
+
+        if source_key == normalized_key:
+            repositories[normalized_key] = repository
+        elif existing is not None:
+            ordered_entries: list[tuple[Any, Any]] = []
+            for key, value in repositories.items():
+                ordered_entries.append(
+                    (normalized_key, repository) if key == source_key else (key, value)
+                )
+            repositories.clear()
+            repositories.update(ordered_entries)
+        else:
+            repositories[normalized_key] = repository
+        return self._write_configuration(configuration)
+
+    def delete_repository(self, repository_key: str) -> Path:
+        """Remove only a global configuration entry; never touch its directory."""
+
+        normalized_key = repository_key.strip()
+        if not normalized_key:
+            raise ConfigurationError("Repository key must be non-empty")
+        configuration = _load_yaml_for_update(self._config_file)
+        self._reject_misplaced_project_settings(configuration)
+        repositories = configuration.get("repositories", {})
+        if not isinstance(repositories, dict):
+            raise ConfigurationError("'repositories' must be a mapping")
+        if normalized_key not in repositories:
+            raise ConfigurationError(f"Repository {normalized_key!r} is not configured")
+        del repositories[normalized_key]
+        return self._write_configuration(configuration)
 
     def load(self, task: DevelopmentTask, repository_override: str | None = None) -> ProjectConfig:
         global_config = _load_yaml(self._config_file, required=True)
@@ -1251,11 +1451,16 @@ class ProjectConfigLoader:
 
     def _write_configuration(self, configuration: dict[str, Any]) -> Path:
         try:
-            serialized = yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False)
+            round_trip_yaml = YAML(typ="rt")
+            round_trip_yaml.preserve_quotes = True
+            round_trip_yaml.default_flow_style = False
+            round_trip_yaml.indent(mapping=2, sequence=4, offset=2)
+            output = StringIO()
+            round_trip_yaml.dump(configuration, output)
             temporary_path = self._config_file.with_suffix(".yml.tmp")
-            temporary_path.write_text(serialized, encoding="utf-8")
+            temporary_path.write_text(output.getvalue(), encoding="utf-8")
             temporary_path.replace(self._config_file)
-        except OSError as exc:
+        except (OSError, RoundTripYAMLError) as exc:
             raise ConfigurationError(
                 f"Cannot write configuration {self._config_file}: {exc}"
             ) from exc
