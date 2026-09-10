@@ -1639,8 +1639,8 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
     controller.task_providers = (  # type: ignore[method-assign]
         lambda repository: ["github", "trello"]
     )
-    controller.configured_agent_providers = (  # type: ignore[method-assign]
-        lambda repository: list(capabilities)
+    controller.configured_agent_provider_options = (  # type: ignore[method-assign]
+        lambda repository: [(provider, provider) for provider in capabilities]
     )
     controller.agent_providers = lambda repository: agent_providers  # type: ignore[method-assign]
     controller.agent_fallback_preset = (  # type: ignore[method-assign]
@@ -1689,6 +1689,26 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
                 ).value
                 == "other"
             )
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_labels_deprecated_jules_provider_choices(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await pilot.pause(delay=0.1)
+            selector = application.screen.query_one("#planner-provider", OrchestratorSelect)
+
+            assert selector._options == [
+                ("implementer", "implementer"),
+                ("vertex", "vertex"),
+                ("planner (deprecated)", "planner"),
+                ("reviewer (deprecated)", "reviewer"),
+            ]
 
     asyncio.run(drive())
 

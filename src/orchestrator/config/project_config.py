@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from enum import StrEnum
 from io import StringIO
 from pathlib import Path
 from typing import Any, Literal
@@ -21,6 +23,46 @@ logger = logging.getLogger(__name__)
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+class ProviderSupportTier(StrEnum):
+    """Published support level for a provider backend."""
+
+    FIRST_CLASS = "first-class"
+    OPTIONAL = "optional"
+    DEPRECATED = "deprecated/legacy"
+    UNSUPPORTED = "unsupported"
+
+
+JULES_DEPRECATION_MESSAGE = (
+    "The Jules provider is deprecated because its legacy remote-session API does not "
+    "provide the interactive worktree execution expected by current workflows. "
+    "Use LiteLLM for API-model requests or Codex CLI for local implementation."
+)
+
+_PROVIDER_SUPPORT_TIERS: dict[str, ProviderSupportTier] = {
+    "litellm": ProviderSupportTier.FIRST_CLASS,
+    "codex-cli": ProviderSupportTier.FIRST_CLASS,
+    "gemini-vertex": ProviderSupportTier.OPTIONAL,
+    "jules": ProviderSupportTier.DEPRECATED,
+}
+
+
+def provider_support_tier(provider_type: str) -> ProviderSupportTier:
+    """Return the support level without inferring it from a model name."""
+
+    return _PROVIDER_SUPPORT_TIERS.get(provider_type, ProviderSupportTier.UNSUPPORTED)
+
+
+def provider_option_label(name: str, provider_type: str) -> str:
+    """Render a configured provider for selection while preserving its name as the value."""
+
+    tier = provider_support_tier(provider_type)
+    if tier is ProviderSupportTier.DEPRECATED:
+        return f"{name} (deprecated)"
+    if tier is ProviderSupportTier.UNSUPPORTED:
+        return f"{name} (unsupported)"
+    return name
 
 
 GLOBAL_CONFIG_FILENAME = "orchestrator.yml"
@@ -426,9 +468,16 @@ class ProviderRuntimeCapabilities:
 
 
 class JulesProviderSettings(JulesIntegrationSettings):
+    """Deprecated compatibility settings for the legacy remote Jules adapter."""
+
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["jules"] = "jules"
+
+    @model_validator(mode="after")
+    def warn_deprecated(self) -> JulesProviderSettings:
+        warnings.warn(JULES_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=2)
+        return self
 
 
 class CodexCliProviderSettings(CodexIntegrationSettings):
@@ -669,7 +718,38 @@ class ProjectConfig(BaseModel):
                 self.with_agent_preset(role, fallback_preset)
             except ConfigurationError as exc:
                 raise ValueError(str(exc)) from exc
+        deprecated = sorted(
+            name for name, settings in self.providers.items() if settings.type == "jules"
+        )
+        if deprecated:
+            rendered = ", ".join(repr(name) for name in deprecated)
+            message = (
+                f"Configured deprecated Jules provider(s): {rendered}. "
+                f"{JULES_DEPRECATION_MESSAGE}"
+            )
+            warnings.warn(message, DeprecationWarning, stacklevel=2)
+            logger.warning(message)
         return self
+
+    def provider_options(self) -> list[tuple[str, str]]:
+        """Return UI labels and stable provider names, with legacy entries last."""
+
+        configured = sorted(
+            self.providers.items(),
+            key=lambda item: (
+                {
+                    ProviderSupportTier.FIRST_CLASS: 0,
+                    ProviderSupportTier.OPTIONAL: 1,
+                    ProviderSupportTier.DEPRECATED: 2,
+                    ProviderSupportTier.UNSUPPORTED: 3,
+                }[provider_support_tier(item[1].type)],
+                item[0],
+            ),
+        )
+        return [
+            (provider_option_label(name, settings.type), name)
+            for name, settings in configured
+        ]
 
     def presets_for_role(self, role: str) -> dict[str, AgentPresetConfig]:
         """Return a copy of the named presets available to one agent role."""

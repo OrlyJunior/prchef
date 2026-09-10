@@ -16,15 +16,15 @@ defaults:
     protected_branches: [main, master, develop]
   agents:
     planner:
-      provider: jules
+      provider: cloud-api
       # Optional one-hop failover to a role-local named preset. It is used only
       # for quota, rate-limit, or temporary provider-capacity failures.
       # fallback_preset: cloud-backup
     implementer:
       provider: codex
     reviewer:
-      provider: jules
-    # Exemplo Vertex AI: a mesma instancia pode atender planner e reviewer.
+      provider: cloud-api
+    # Exemplo optional de Vertex AI: a mesma instancia pode atender planner e reviewer.
     # planner:
     #   provider: vertex-gemini
     # reviewer:
@@ -58,18 +58,6 @@ defaults:
     enabled: false
     channel: desktop
   providers:
-    jules:
-      type: jules
-      # API oficial de sessoes (sem launcher stdin/stdout). Exporte JULES_API_KEY.
-      # A CLI oficial pode ser usada para login e inspecao manual: jules login.
-      # Source opcional; se ausente, resolve pelo remote GitHub de origin.
-      # source: sources/github-owner-repository
-      # Polling dos estados remotos; 1800 s e o timeout global da operacao.
-      # AWAITING_USER_FEEDBACK, PAUSED e AWAITING_PLAN_APPROVAL encerram em NEEDS_HUMAN.
-      poll_interval_seconds: 15
-      timeout_seconds: 1800
-      poll_retry_attempts: 3
-      poll_retry_backoff_seconds: 2
     codex:
       type: codex-cli
       # Fixe estes valores com opcoes suportadas pela sua Codex CLI; nao dependa do default externo.
@@ -90,8 +78,7 @@ defaults:
     #   generation:
     #     temperature: 0.2
     #     # max_output_tokens: 8192
-    # LiteLLM is an optional generic API-model backend. Install with:
-    # pip install autonomous-dev-orchestrator[litellm]
+    # LiteLLM e o backend API-modelo de primeira classe e ja vem na instalacao normal.
     # Model identifiers are free-form. A key is referenced by its environment
     # variable name only; omit api_key_env for local/self-hosted endpoints.
     # local-ollama:
@@ -103,10 +90,17 @@ defaults:
     #   max_output_tokens: 4096
     #   generation:
     #     top_p: 0.9
-    # cloud-api:
-    #   type: litellm
-    #   model: openai/gpt-4.1-mini
-    #   api_key_env: OPENAI_API_KEY
+    cloud-api:
+      type: litellm
+      model: openai/gpt-4.1-mini
+      api_key_env: OPENAI_API_KEY
+    # Legacy/deprecated: Jules remains configurable only for existing setups.
+    # It uses a remote-session API and does not meet current interactive worktree expectations.
+    # jules:
+    #   type: jules
+    #   # source: sources/github-owner-repository
+    #   poll_interval_seconds: 15
+    #   timeout_seconds: 1800
   integrations:
     github:
       command: [gh]

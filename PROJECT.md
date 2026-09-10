@@ -224,9 +224,13 @@
   a sandbox/execution failure. Never infer a failure from free-form command output, diffs, or test
   fixtures. A structured failure after an exit-0 run still inspects Git status so persisted results
   retain any files changed before the failure. Codex may edit only its assigned local workspace.
-  Gemini Vertex uses ADC and has no local shell/filesystem access. LiteLLM is an optional generic
-  cloud/local API-model backend; its configured API key is an environment-variable reference only,
-  and it also has no implicit local shell/filesystem access.
+  Gemini Vertex is an optional specialized backend that uses ADC and has no local shell/filesystem
+  access. LiteLLM is a first-class core dependency and generic cloud/local API-model backend; its
+  configured API key is an environment-variable reference only, and it also has no implicit local
+  shell/filesystem access. Codex CLI is the first-class specialized local-worktree backend. Jules
+  is deprecated/legacy: its remote session API does not provide current interactive worktree
+  execution, so existing Jules configurations warn on load and instantiation and must not be
+  presented as recommended in the TUI or examples. Unknown provider types are unsupported.
 - Jules credentials come from `JULES_API_KEY` or `ORCHESTRATOR_JULES_API_KEY`; GitHub PR creation
   uses ambient `gh` authentication unless a configured implementer App supplies a short-lived,
   process-local installation token. Formal review publication independently uses its configured
