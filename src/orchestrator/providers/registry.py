@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from pydantic import ValidationError
@@ -8,6 +9,7 @@ from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.clients.jules_client import JulesClient
 from orchestrator.config.project_config import (
+    JULES_DEPRECATION_MESSAGE,
     AgentProviderSettings,
     CodexCliProviderSettings,
     ConfigurationError,
@@ -22,6 +24,7 @@ from orchestrator.providers.jules_provider import JulesAgentProvider
 from orchestrator.providers.litellm_provider import LiteLLMAgentProvider
 
 ProviderBuilder = Callable[[str, AgentProviderSettings, CommandClient], AgentProvider]
+logger = logging.getLogger("orchestrator")
 
 
 class AgentProviderRegistry:
@@ -66,6 +69,11 @@ class AgentProviderRegistry:
         self, name: str, settings: AgentProviderSettings, commands: CommandClient
     ) -> AgentProvider:
         del commands
+        logger.warning(
+            "Agent provider %r uses deprecated backend 'jules'. %s",
+            name,
+            JULES_DEPRECATION_MESSAGE,
+        )
         options = JulesProviderSettings.model_validate(settings.model_dump())
         return JulesAgentProvider(name, JulesClient(self._jules_api_key, options))
 

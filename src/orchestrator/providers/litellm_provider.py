@@ -18,8 +18,8 @@ LiteLLMLoader = Callable[[], Any]
 class LiteLLMAgentProvider:
     """Execute an :class:`AgentRequest` through LiteLLM without leaking its SDK.
 
-    LiteLLM is loaded only for an execution. This preserves the standard
-    installation for Codex, Jules, and Vertex-only users.
+    LiteLLM is loaded only for an execution so configuration inspection remains
+    side-effect free. It is a required project dependency for normal installs.
     """
 
     def __init__(
@@ -68,8 +68,8 @@ class LiteLLMAgentProvider:
             return self._litellm_loader()
         except ModuleNotFoundError as exc:
             raise ConfigurationError(
-                "LiteLLM provider requires the optional 'litellm' dependency. "
-                "Install it with `pip install autonomous-dev-orchestrator[litellm]`."
+                "LiteLLM is missing from this installation. Reinstall "
+                "`autonomous-dev-orchestrator` so its required dependencies are installed."
             ) from exc
 
     def _completion_kwargs(self, request: AgentRequest) -> dict[str, Any]:

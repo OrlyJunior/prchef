@@ -28,28 +28,52 @@ def _config(
 
 
 def test_resolves_named_provider_types_and_reuses_shared_instances(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        agents={
-            "planner": {"provider": "remote"},
-            "implementer": {"provider": "local"},
-            "reviewer": {"provider": "remote"},
-        },
-        providers={
-            "remote": {"type": "jules", "poll_interval_seconds": 7},
-            "local": {
-                "type": "codex-cli",
-                "command": ["codex", "exec", "-"],
-                "timeout_seconds": 45,
+    with pytest.warns(DeprecationWarning, match="Jules provider"):
+        config = _config(
+            tmp_path,
+            agents={
+                "planner": {"provider": "remote"},
+                "implementer": {"provider": "local"},
+                "reviewer": {"provider": "remote"},
             },
-        },
-    )
+            providers={
+                "remote": {"type": "jules", "poll_interval_seconds": 7},
+                "local": {
+                    "type": "codex-cli",
+                    "command": ["codex", "exec", "-"],
+                    "timeout_seconds": 45,
+                },
+            },
+        )
 
     clients = ClientFactory("test-key").create(config)
 
     assert isinstance(clients.agent(AgentRole.PLANNER), JulesAgentProvider)
     assert isinstance(clients.agent(AgentRole.IMPLEMENTER), CodexAgentProvider)
     assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.REVIEWER)
+
+
+def test_jules_instantiation_logs_its_deprecated_status(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with pytest.warns(DeprecationWarning, match="Jules provider"):
+        config = _config(
+            tmp_path,
+            agents={
+                "planner": {"provider": "legacy"},
+                "implementer": {"provider": "codex"},
+                "reviewer": {"provider": "legacy"},
+            },
+            providers={
+                "legacy": {"type": "jules"},
+                "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+            },
+        )
+
+    with caplog.at_level(logging.WARNING, logger="orchestrator"):
+        ClientFactory("test-key").create(config, agent_roles={AgentRole.PLANNER})
+
+    assert "uses deprecated backend 'jules'" in caplog.text
 
 
 def test_different_roles_can_reference_different_named_instances(tmp_path: Path) -> None:
