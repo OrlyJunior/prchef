@@ -135,6 +135,11 @@ class WorkflowController:
     def configured_agent_providers(self, repository: str) -> list[str]:
         return list(self.project_config(repository).providers)
 
+    def configured_agent_provider_options(self, repository: str) -> list[tuple[str, str]]:
+        """Return selectable providers with deprecated backends visibly labeled."""
+
+        return self.project_config(repository).provider_options()
+
     def provider_runtime_capabilities(
         self, repository: str, provider: str
     ) -> ProviderRuntimeCapabilities:

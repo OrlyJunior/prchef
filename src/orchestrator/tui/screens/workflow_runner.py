@@ -365,7 +365,7 @@ class WorkflowRunnerScreen(Screen[None]):
     def _load_repository_options(self, repository: str) -> None:
         try:
             providers = self.controller.task_providers(repository)
-            configured_agents = self.controller.configured_agent_providers(repository)
+            configured_agent_options = self.controller.configured_agent_provider_options(repository)
             selected_agents = self.controller.agent_providers(repository)
         except Exception as exc:
             self.notify(f"Could not resolve repository configuration: {exc}", severity="error")
@@ -392,7 +392,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._advanced_open.clear()
         for role, prefix in self._role_fields():
             select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
-            select.set_options([(provider, provider) for provider in configured_agents])
+            select.set_options(configured_agent_options, allow_blank=False)
             select.value = selected_agents[role]
             self._load_role_runtime_controls(role, prefix, selected_agents[role])
             self._load_role_presets(role, prefix)

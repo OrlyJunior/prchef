@@ -108,7 +108,7 @@ def _provider(
     )
 
 
-def test_registry_resolves_litellm_without_importing_optional_dependency(tmp_path: Path) -> None:
+def test_registry_resolves_litellm_without_loading_the_sdk_until_execution(tmp_path: Path) -> None:
     config = ProjectConfig.model_validate(
         {
             "path": tmp_path,
@@ -322,14 +322,14 @@ def test_sdk_failure_does_not_expose_a_resolved_secret() -> None:
     assert caught.value.__cause__ is None
 
 
-def test_missing_optional_dependency_is_actionable() -> None:
+def test_missing_required_dependency_is_actionable() -> None:
     provider = LiteLLMAgentProvider(
         "generic-api",
         _settings(),
         litellm_loader=lambda: (_ for _ in ()).throw(ModuleNotFoundError()),
     )
 
-    with pytest.raises(ConfigurationError, match="\[litellm\]"):
+    with pytest.raises(ConfigurationError, match="Reinstall"):
         provider.execute(_request())
 
 
