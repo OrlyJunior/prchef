@@ -23,6 +23,13 @@ class _OrchestratorSelectCurrent(SelectCurrent):
 
     FOCUS_ON_CLICK = False
 
+    def on_mount(self) -> None:
+        """Notify a repository Select when its current-value control is ready."""
+
+        parent = self.parent
+        if isinstance(parent, RepositorySelect):
+            parent._on_repository_child_mount()
+
     def _on_click(self, event: events.Click) -> None:  # type: ignore[override]
         event.stop()
         event.prevent_default()
@@ -36,6 +43,14 @@ class _OrchestratorSelectCurrent(SelectCurrent):
 
 class _OrchestratorSelectOverlay(SelectOverlay):
     """Close and select without delegating back to Textual's scroll-visible handlers."""
+
+    def on_mount(self, event: events.Mount) -> None:  # type: ignore[override]
+        """Notify a repository Select once its overlay is queryable."""
+
+        parent = self.parent
+        if isinstance(parent, RepositorySelect):
+            parent._on_repository_overlay_mount()
+            event.prevent_default()
 
     def action_dismiss(self) -> None:
         parent = self.parent
@@ -208,7 +223,137 @@ class RepositorySelect(OrchestratorSelect[str]):
     """
 
     def __init__(self, *, prompt: str = "Configured repository", **kwargs: Any) -> None:
+        self._pending_repository_options: list[tuple[Any, str]] | None = None
+        self._pending_selected_value: Any = Select.BLANK
         super().__init__([], prompt=prompt, **kwargs)
+
+    def set_options(
+        self,
+        options: Iterable[tuple[Any, str]],
+        *,
+        allow_blank: bool | None = None,
+    ) -> None:
+        """Set options without touching the overlay before it is mounted."""
+
+        option_list = list(options)
+        overlay = self._mounted_overlay()
+        if overlay is None:
+            effective_allow_blank = (
+                self._allow_blank if allow_blank is None else allow_blank
+            )
+            selected_value: Any = Select.BLANK
+            if not effective_allow_blank and option_list:
+                selected_value = option_list[0][1]
+            self._defer_options(
+                option_list,
+                selected_value,
+                allow_blank=allow_blank,
+            )
+            return
+
+        self._clear_pending_options()
+        super().set_options(option_list, allow_blank=allow_blank)
+
+    def _mounted_overlay(self) -> SelectOverlay | None:
+        """Return the mounted overlay without querying an incomplete DOM."""
+
+        if not self.is_mounted:
+            return None
+        current = next(
+            (child for child in self.children if isinstance(child, SelectCurrent)),
+            None,
+        )
+        for child in self.children:
+            if (
+                isinstance(child, SelectOverlay)
+                and child.is_mounted
+                and current is not None
+                and current.is_mounted
+                and bool(current.children)
+                and all(grandchild.is_mounted for grandchild in current.children)
+            ):
+                return child
+        return None
+
+    def _defer_options(
+        self,
+        options: list[tuple[Any, str]],
+        selected_value: Any,
+        *,
+        allow_blank: bool | None,
+    ) -> None:
+        """Keep Select state ready for its mount handler without rendering yet."""
+
+        if allow_blank is not None:
+            self._allow_blank = allow_blank
+        self._setup_variables_for_options(options)
+        self._value = selected_value
+        self._reactive_value = selected_value
+        self._pending_repository_options = options
+        self._pending_selected_value = selected_value
+        if self.is_mounted:
+            self.call_after_refresh(self._preserve_deferred_selection)
+
+    def _clear_pending_options(self) -> None:
+        self._pending_repository_options = None
+        self._pending_selected_value = Select.BLANK
+
+    def _flush_pending_options(self) -> None:
+        """Render options saved during the Select/overlay mount window."""
+
+        if self._pending_repository_options is None or self._mounted_overlay() is None:
+            return
+
+        selected_value = self._pending_selected_value
+        self._clear_pending_options()
+        self._setup_options_renderables()
+        if selected_value in self._legal_values:
+            # The deferred value was seeded directly to avoid a pre-mount
+            # Changed event. Reset only the reactive storage, then use
+            # Textual's normal initializer to update both internal controls.
+            self._reactive_value = Select.BLANK
+            self._init_selected_option(selected_value)
+            self.call_later(self._restore_selection, selected_value)
+
+    def _preserve_deferred_selection(self) -> None:
+        """Keep the requested value across Textual's remaining mount work."""
+
+        if self._pending_repository_options is None:
+            return
+        selected_value = self._pending_selected_value
+        if selected_value in self._legal_values:
+            self._value = selected_value
+            self._reactive_value = selected_value
+
+    def _on_mount(self, event: events.Mount) -> None:
+        """Let Textual render deferred options once the overlay is mounted."""
+
+        # Select._on_mount immediately queries SelectOverlay, but Textual
+        # dispatches this widget's mount message before mounting its children.
+        # Prevent that inherited default action; the overlay notifies us from
+        # its own mount handler instead.
+        event.prevent_default()
+
+    def _on_repository_overlay_mount(self) -> None:
+        """Initialize Select internals after the overlay has mounted."""
+
+        self.call_later(self._initialize_repository_options)
+
+    def _on_repository_child_mount(self) -> None:
+        """Retry initialization after either internal Select child mounts."""
+
+        self.call_later(self._initialize_repository_options)
+
+    def _initialize_repository_options(self) -> None:
+        """Initialize options after the overlay's mount callback has completed."""
+
+        if self._mounted_overlay() is None:
+            return
+        if self._pending_repository_options is not None:
+            self._flush_pending_options()
+        else:
+            self._setup_options_renderables()
+            self._init_selected_option(self._value)
 
     def set_repositories(
         self,
@@ -247,17 +392,11 @@ class RepositorySelect(OrchestratorSelect[str]):
         # mounting.  Seed the parent Select instead; its own mount handler
         # will render these options and apply this selected value once the
         # overlay is ready.
-        overlay = self.query_one(SelectOverlay)
-        if not overlay.is_mounted:
-            self._allow_blank = False
-            self._setup_variables_for_options(options)
-            self._value = value
+        if self._mounted_overlay() is None:
+            self._defer_options(options, value, allow_blank=False)
             return value
 
-        # Textual's public set_options() always initializes a non-blank Select
-        # to its first entry. Seed the desired legal value before initializing
-        # it so a config reload never flashes a different repository or emits a
-        # transient change event for it.
+        self._clear_pending_options()
         self._allow_blank = False
         self._setup_variables_for_options(options)
         self._setup_options_renderables()

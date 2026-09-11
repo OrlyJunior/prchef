@@ -71,6 +71,15 @@ class _ScrollableSelectApp(App[None]):
             yield Static("", id="select-after")
 
 
+class _RepositorySelectApp(App[None]):
+    def __init__(self, selector: RepositorySelect) -> None:
+        super().__init__()
+        self.selector = selector
+
+    def compose(self) -> ComposeResult:
+        yield self.selector
+
+
 class _Repository:
     def __init__(self) -> None:
         self.execution = WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED)
@@ -531,10 +540,47 @@ def test_agent_instructions_navigation_uses_a_compact_distinct_control(tmp_path:
             assert navigation.size.width < application.size.width
 
             await pilot.click("#agent-instructions-button")
+            await pilot.pause()
             assert isinstance(application.screen, AgentInstructionsScreen)
             assert isinstance(
                 application.screen.query_one("#agent-instructions"), VerticalScroll
             )
+            repository = application.screen.query_one(
+                "#agent-instructions-repository", RepositorySelect
+            )
+            assert repository.value == "example"
+            assert repository._options == [("example", "example")]
+
+    asyncio.run(drive())
+
+
+def test_repository_select_defers_options_until_overlay_mounts(tmp_path: Path) -> None:
+    selector = RepositorySelect()
+    repositories = [
+        ConfiguredRepository("example", tmp_path),
+        ConfiguredRepository("selected", tmp_path),
+    ]
+
+    assert (
+        selector.set_repositories(repositories, selected_repository="selected")
+        == "selected"
+    )
+    application = _RepositorySelectApp(selector)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.pause()
+            overlay = selector.query_one("SelectOverlay")
+
+            assert selector.value == "selected"
+            assert selector._options == [
+                ("example", "example"),
+                ("selected", "selected"),
+            ]
+            assert [str(option.prompt) for option in overlay._options] == [
+                "example",
+                "selected",
+            ]
 
     asyncio.run(drive())
 
