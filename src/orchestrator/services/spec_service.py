@@ -11,7 +11,10 @@ from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.services.exceptions import StructuredOutputError
 from orchestrator.services.project_context import project_context_prompt
-from orchestrator.services.repository_context import repository_context_prompt
+from orchestrator.services.repository_context import (
+    RepositoryContextRequest,
+    RepositoryContextStrategy,
+)
 from orchestrator.services.structured_output import parse_json_object, string_list
 
 _SPEC_OUTPUT = StructuredOutputExpectation(
@@ -46,8 +49,11 @@ _SPEC_OUTPUT = StructuredOutputExpectation(
 
 
 class SpecService:
-    def __init__(self, provider: AgentProvider) -> None:
+    def __init__(
+        self, provider: AgentProvider, repository_context_strategy: RepositoryContextStrategy
+    ) -> None:
         self._provider = provider
+        self._repository_context_strategy = repository_context_strategy
 
     def generate(
         self,
@@ -57,7 +63,7 @@ class SpecService:
         base_branch: str,
         on_execution_started: Callable[[AgentExecutionReference], None],
     ) -> RepositorySpec:
-        prompt = self._build_prompt(task, repository_path)
+        prompt = self._build_prompt(task, repository_path, repository_slug, base_branch)
         result = self._provider.execute(
             AgentRequest(
                 instructions=prompt,
@@ -105,8 +111,22 @@ class SpecService:
             raw_text=raw,
         )
 
-    @staticmethod
-    def _build_prompt(task: DevelopmentTask, repository_path: Path) -> str:
+    def _build_prompt(
+        self,
+        task: DevelopmentTask,
+        repository_path: Path,
+        repository_slug: str,
+        base_branch: str,
+    ) -> str:
+        repository_context = self._repository_context_strategy.render(
+            RepositoryContextRequest(
+                role="planner",
+                repository_path=repository_path,
+                task=task,
+                repository_slug=repository_slug,
+                base_branch=base_branch,
+            )
+        )
         return f"""You are the read-only technical specification role.
 Analyze the repository and the original task below.
 
@@ -119,7 +139,7 @@ ORIGINAL TASK (preserve as authoritative):
 {task.as_original_prompt()}
 
 {project_context_prompt(repository_path)}
-{repository_context_prompt(repository_path, task)}
+{repository_context}
 USER-FACING PLANNING:
 - Apply the following only when the task or repository evidence affects a TUI, CLI, GUI, other
   user-facing interface, or user-facing messaging. Treat the TUI as a first-class product

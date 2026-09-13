@@ -112,6 +112,32 @@ class RepositorySettings(BaseModel):
     branch_prefix: str = "orchestrator"
 
 
+class RepositoryContextSettings(BaseModel):
+    """Selects orchestrator-owned repository retrieval policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: str = "heuristic"
+
+    @field_validator("strategy")
+    @classmethod
+    def validate_strategy(cls, value: str) -> str:
+        # Import lazily so configuration can consult the resolver-owned registry
+        # without introducing a module initialization cycle through services.
+        from orchestrator.services.repository_context import (
+            repository_context_strategy_names,
+        )
+
+        normalized = value.strip().casefold()
+        supported = repository_context_strategy_names()
+        if normalized not in supported:
+            raise ValueError(
+                f"Unknown repository context strategy {value!r}; "
+                f"supported strategies: {', '.join(supported)}"
+            )
+        return normalized
+
+
 class TaskSettings(BaseModel):
     provider: Literal["trello", "github"] | None = None
 
@@ -612,6 +638,9 @@ class ProjectConfig(BaseModel):
     path: Path
     task: TaskSettings = Field(default_factory=TaskSettings)
     repository: RepositorySettings = Field(default_factory=RepositorySettings)
+    repository_context: RepositoryContextSettings = Field(
+        default_factory=RepositoryContextSettings
+    )
     roles: RolesSettings = Field(default_factory=RolesSettings)
     agents: AgentsSettings = Field(default_factory=AgentsSettings)
     agent_presets: dict[str, dict[str, AgentPresetConfig]] = Field(default_factory=dict)
@@ -1588,6 +1617,7 @@ class ProjectConfigLoader:
             "roles",
             "integrations",
             "repository",
+            "repository_context",
             "safety",
             "validation",
             "review",

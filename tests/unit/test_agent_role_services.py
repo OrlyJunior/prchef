@@ -21,6 +21,10 @@ from orchestrator.services.project_context import (
     load_implementer_instructions,
     load_reviewer_instructions,
 )
+from orchestrator.services.repository_context import (
+    HeuristicRepositoryContextStrategy,
+    RepositoryContextRequest,
+)
 from orchestrator.services.review_service import ReviewService, format_pull_request_review
 from orchestrator.services.spec_service import SpecService
 
@@ -34,6 +38,15 @@ class RecordingProvider:
         del on_started
         self.requests.append(request)
         return self.result
+
+
+class MarkerRepositoryContextStrategy:
+    def __init__(self) -> None:
+        self.requests: list[RepositoryContextRequest] = []
+
+    def render(self, request: RepositoryContextRequest) -> str:
+        self.requests.append(request)
+        return f"CUSTOM {request.role.upper()} REPOSITORY CONTEXT\n\n"
 
 
 class ChangedFilesGit:
@@ -154,7 +167,7 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
         )
     )
 
-    spec = SpecService(provider).generate(
+    spec = SpecService(provider, HeuristicRepositoryContextStrategy()).generate(
         _task(), tmp_path, "owner/repo", "develop", lambda reference: None
     )
 
@@ -193,6 +206,33 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
         "Do not invent UX requirements for backend-only changes."
         in provider.requests[0].instructions
     )
+
+
+def test_planner_uses_injected_repository_context_strategy(tmp_path: Path) -> None:
+    provider = RecordingProvider(
+        AgentResult(
+            output="structured",
+            structured_output={
+                "technical_context": "services",
+                "current_behavior": "concrete clients",
+                "involved_artifacts": [],
+                "implementation_proposal": "provider contract",
+                "acceptance_criteria": [],
+                "expected_tests": [],
+                "risks": [],
+                "ambiguities": [],
+                "safe_to_implement": True,
+            },
+        )
+    )
+    strategy = MarkerRepositoryContextStrategy()
+
+    SpecService(provider, strategy).generate(
+        _task(), tmp_path, "owner/repo", "develop", lambda reference: None
+    )
+
+    assert "CUSTOM PLANNER REPOSITORY CONTEXT" in provider.requests[0].instructions
+    assert strategy.requests[0].role == "planner"
 
 
 def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
@@ -419,7 +459,7 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
         )
     )
 
-    review = ReviewService(provider).review(
+    review = ReviewService(provider, HeuristicRepositoryContextStrategy()).review(
         task=_task(),
         spec=_spec(),
         pull_request=PullRequest(
@@ -495,12 +535,52 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     assert "may accompany APPROVED" in provider.requests[0].instructions
     assert provider.requests[0].instructions.count("Prioritize regression risks.") == 1
     assert "Prefer small, tested changes." not in provider.requests[0].instructions
+    assert '"repository": "owner/repo"' in provider.requests[0].instructions
+    assert "LOCAL REPOSITORY CONTEXT" not in provider.requests[0].instructions
+
+
+def test_reviewer_uses_injected_repository_context_strategy(tmp_path: Path) -> None:
+    provider = RecordingProvider(
+        AgentResult(
+            output="structured",
+            structured_output={
+                "decision": "APPROVED",
+                "summary": "Looks good",
+                "findings": [],
+                "blocking_findings": [],
+                "suggestions": [],
+            },
+        )
+    )
+    strategy = MarkerRepositoryContextStrategy()
+
+    ReviewService(provider, strategy).review(
+        task=_task(),
+        spec=_spec(),
+        pull_request=PullRequest(
+            number=5,
+            url="https://github.example/pull/5",
+            title="Provider contracts",
+            base_branch="develop",
+            head_branch="feature/provider-contracts",
+        ),
+        diff="diff --git a/a b/a",
+        validation=ValidationResult(success=True),
+        repository_path=tmp_path,
+        repository_slug="owner/repo",
+        base_branch="develop",
+        feature_branch="feature/provider-contracts",
+        on_execution_started=lambda reference: None,
+    )
+
+    assert "CUSTOM REVIEWER REPOSITORY CONTEXT" in provider.requests[0].instructions
+    assert strategy.requests[0].role == "reviewer"
 
 
 def _review_with_output(tmp_path: Path, output: str) -> CodeReview:
     provider = RecordingProvider(AgentResult(output=output))
 
-    return ReviewService(provider).review(
+    return ReviewService(provider, HeuristicRepositoryContextStrategy()).review(
         task=_task(),
         spec=_spec(),
         pull_request=PullRequest(

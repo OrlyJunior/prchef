@@ -1,13 +1,19 @@
 from pathlib import Path
 
+import pytest
 from pytest import MonkeyPatch
 
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.services.repository_context import (
     IGNORED_DIRECTORY_NAMES,
     MAX_CONTEXT_CHARS,
+    HeuristicRepositoryContextStrategy,
     RepositoryContextCollector,
+    RepositoryContextRequest,
+    RepositoryContextStrategyError,
     collect_repository_context,
+    repository_context_strategy_names,
+    resolve_repository_context_strategy,
 )
 
 
@@ -70,3 +76,54 @@ def test_missing_or_unreadable_repository_context_degrades_to_empty(
     monkeypatch.setattr(RepositoryContextCollector, "_discover_files", inaccessible)
 
     assert collect_repository_context(tmp_path, _task()) == ""
+
+
+def test_resolver_returns_heuristic_strategy() -> None:
+    assert repository_context_strategy_names() == ("heuristic",)
+
+    strategy = resolve_repository_context_strategy("heuristic")
+
+    assert isinstance(strategy, HeuristicRepositoryContextStrategy)
+
+
+def test_heuristic_strategy_preserves_role_specific_default_context(tmp_path: Path) -> None:
+    source = tmp_path / "planner.py"
+    source.write_text("def planner_context():\n    pass\n", encoding="utf-8")
+    strategy = HeuristicRepositoryContextStrategy()
+
+    planner_context = strategy.render(
+        RepositoryContextRequest(
+            role="planner",
+            repository_path=tmp_path,
+            task=_task(),
+            repository_slug="owner/repo",
+            base_branch="develop",
+        )
+    )
+    reviewer_context = strategy.render(
+        RepositoryContextRequest(
+            role="reviewer",
+            repository_path=tmp_path,
+            task=_task(),
+            repository_slug="owner/repo",
+            base_branch="develop",
+            feature_branch="feature/context",
+        )
+    )
+
+    assert "LOCAL REPOSITORY CONTEXT" in planner_context
+    assert "planner.py" in planner_context
+    assert reviewer_context == (
+        'REPOSITORY CONTEXT:\n{\n  "repository": "owner/repo",\n'
+        '  "base_branch": "develop",\n  "feature_branch": "feature/context"\n}\n\n'
+    )
+    assert "LOCAL REPOSITORY CONTEXT" not in reviewer_context
+
+
+def test_resolver_rejects_unknown_strategy_clearly() -> None:
+    with pytest.raises(RepositoryContextStrategyError) as exc_info:
+        resolve_repository_context_strategy("semantic")
+
+    message = str(exc_info.value)
+    assert "semantic" in message
+    assert "heuristic" in message

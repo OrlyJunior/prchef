@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import orchestrator.services.workflow_service as workflow_service_module
 from orchestrator.clients.exceptions import GitHubClientError
 from orchestrator.config.project_config import GitHubAppSettings
 from orchestrator.models import (
@@ -19,6 +20,7 @@ from orchestrator.models import (
 from orchestrator.providers.agent_provider import AgentNeedsHumanError
 from orchestrator.runtime_logging import log_review_summary, log_spec_summary
 from orchestrator.services.notifications import NotificationService
+from orchestrator.services.repository_context import RepositoryContextRequest
 from orchestrator.services.task_provider import GitHubIssueTaskProvider, TrelloTaskProvider
 from orchestrator.services.workflow_service import WorkflowService
 from tests.unit.fakes import (
@@ -69,6 +71,38 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
         }
     ]
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
+
+
+def test_workflow_resolves_once_and_reuses_strategy_during_review_loop(
+    workflow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _, factory = workflow
+    resolved_names: list[str] = []
+    context_requests: list[RepositoryContextRequest] = []
+
+    class Strategy:
+        def render(self, request: RepositoryContextRequest) -> str:
+            context_requests.append(request)
+            return f"WORKFLOW {request.role.upper()} CONTEXT\n\n"
+
+    strategy = Strategy()
+
+    def resolve(name: str) -> Strategy:
+        resolved_names.append(name)
+        return strategy
+
+    monkeypatch.setattr(workflow_service_module, "resolve_repository_context_strategy", resolve)
+    factory.jules.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
+
+    result = service.run("card-context-strategy")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert resolved_names == ["heuristic"]
+    assert [request.role for request in context_requests] == [
+        "planner",
+        "reviewer",
+        "reviewer",
+    ]
 
 
 def test_workflow_assigns_configured_implementer_bot_but_not_reviewer(workflow) -> None:
@@ -315,9 +349,22 @@ def test_blocking_jules_ambiguity_stops_for_human_before_branch(workflow) -> Non
 
 
 def test_planner_human_response_resumes_same_execution_without_prior_workspace(
-    workflow,
+    workflow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, repository, _, factory = workflow
+    resolved_names: list[str] = []
+    context_roles: list[str] = []
+
+    class Strategy:
+        def render(self, request: RepositoryContextRequest) -> str:
+            context_roles.append(request.role)
+            return "RESUME CONTEXT\n\n"
+
+    def resolve(name: str) -> Strategy:
+        resolved_names.append(name)
+        return Strategy()
+
+    monkeypatch.setattr(workflow_service_module, "resolve_repository_context_strategy", resolve)
     factory.jules.ambiguous = True
 
     paused = service.run("card-planner-resume")
@@ -332,10 +379,27 @@ def test_planner_human_response_resumes_same_execution_without_prior_workspace(
     assert factory.jules.spec_calls == 2
     assert resumed.working_branch is not None
     assert repository.stage_changes.count(WorkflowStage.PREPARE_BRANCH) == 1
+    assert resolved_names == ["heuristic", "heuristic"]
+    assert context_roles == ["planner", "planner", "reviewer"]
 
 
-def test_reviewer_human_response_reuses_existing_workspace_branch_and_pr(workflow) -> None:
+def test_reviewer_human_response_reuses_existing_workspace_branch_and_pr(
+    workflow, monkeypatch: pytest.MonkeyPatch
+) -> None:
     service, _, _, factory = workflow
+    resolved_names: list[str] = []
+    context_roles: list[str] = []
+
+    class Strategy:
+        def render(self, request: RepositoryContextRequest) -> str:
+            context_roles.append(request.role)
+            return "RESUME CONTEXT\n\n"
+
+    def resolve(name: str) -> Strategy:
+        resolved_names.append(name)
+        return Strategy()
+
+    monkeypatch.setattr(workflow_service_module, "resolve_repository_context_strategy", resolve)
     factory.jules.malformed_review = True
 
     paused = service.run("card-review-resume")
@@ -352,6 +416,8 @@ def test_reviewer_human_response_reuses_existing_workspace_branch_and_pr(workflo
     assert resumed.workspace_path == workspace
     assert resumed.working_branch == branch
     assert factory.github.create_calls == 1
+    assert resolved_names == ["heuristic", "heuristic"]
+    assert context_roles == ["planner", "reviewer", "reviewer"]
 
 
 def test_execution_can_pause_for_multiple_human_input_cycles(workflow) -> None:

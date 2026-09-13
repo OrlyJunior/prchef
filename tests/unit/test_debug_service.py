@@ -5,6 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+import orchestrator.services.debug_service as debug_service_module
 from orchestrator.config.project_config import ProjectConfig
 from orchestrator.models import (
     AgentRole,
@@ -20,6 +23,7 @@ from orchestrator.services.debug_service import (
     DebugStage,
     parse_debug_stage,
 )
+from orchestrator.services.repository_context import RepositoryContextRequest
 from tests.unit.fakes import FakeClientFactory, FakeConfigLoader, FakeTrelloClient
 
 
@@ -158,6 +162,28 @@ def test_spec_debug_reuses_persisted_task_without_mutating_execution(tmp_path: P
     assert factory.create_calls == 1
 
 
+def test_spec_debug_uses_configured_repository_context_strategy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = _service(tmp_path)
+    requests: list[RepositoryContextRequest] = []
+
+    class Strategy:
+        def render(self, request: RepositoryContextRequest) -> str:
+            requests.append(request)
+            return "DEBUG SPEC CONTEXT\n\n"
+
+    monkeypatch.setattr(
+        debug_service_module,
+        "resolve_repository_context_strategy",
+        lambda name: Strategy(),
+    )
+
+    service.execute(_execution(tmp_path), DebugStage.SPEC_GENERATION)
+
+    assert [request.role for request in requests] == ["planner"]
+
+
 def test_spec_debug_accepts_direct_provider_inputs_without_execution(tmp_path: Path) -> None:
     execution = None
 
@@ -278,6 +304,29 @@ def test_review_debug_reuses_all_persisted_inputs(tmp_path: Path) -> None:
 
     assert result["result"]["review"]["result"] == "APPROVED"
     assert result["result"]["jules_sessions"][0]["id"] == "review-123"
+
+
+def test_review_debug_uses_configured_repository_context_strategy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, factory = _service(tmp_path)
+    factory.git.current_branch = lambda: "orchestrator/debug"  # type: ignore[attr-defined]
+    requests: list[RepositoryContextRequest] = []
+
+    class Strategy:
+        def render(self, request: RepositoryContextRequest) -> str:
+            requests.append(request)
+            return "DEBUG REVIEW CONTEXT\n\n"
+
+    monkeypatch.setattr(
+        debug_service_module,
+        "resolve_repository_context_strategy",
+        lambda name: Strategy(),
+    )
+
+    service.execute(_execution(tmp_path), DebugStage.REVIEW)
+
+    assert [request.role for request in requests] == ["reviewer"]
 
 
 def test_review_debug_explicit_inputs_override_historical_defaults(tmp_path: Path) -> None:

@@ -12,6 +12,13 @@
 - `docs/PROJECT_CONTEXT.md`: contexto duravel e versionado, compartilhado como informacao
   complementar com os agentes de planejamento, implementacao e revisao.
 
+`RepositoryContextStrategy` e a fronteira, de propriedade do orquestrador, entre composicao de
+prompts e recuperacao de contexto do checkout. `SpecService` e `ReviewService` dependem somente
+desse contrato role-aware. O resolver interno atualmente registra `heuristic`: no planejamento
+ele delega ao coletor local limitado existente; no review preserva o bloco historico de metadados,
+sem adicionar excertos. A selecao vem de `repository_context.strategy` (default `heuristic`) apos
+o merge de defaults e override do repositorio e nao faz parte do registry de agent providers.
+
 ## Sequencia
 
 1. A CLI seleciona exatamente um `TaskProvider`: Trello ou GitHub Issues.

@@ -67,6 +67,13 @@
 - `AgentProvider` is the orchestrator's provider boundary. Model-routing libraries such as
   LiteLLM are implementation backends behind that boundary and must not own workflow semantics,
   persistence, scheduling, role behavior, or lifecycle state.
+- `RepositoryContextStrategy` is the separate, orchestrator-owned retrieval-policy boundary used
+  by planner and reviewer prompt composition. The configured strategy is resolved once per
+  workflow/debug invocation and reused across retries and resume paths; it is not an agent
+  provider. `heuristic` is the only registered strategy and the compatibility default: planning
+  keeps the existing bounded local tree and ranked excerpts, while review keeps its existing
+  repository/branch metadata block without local file excerpts. Durable project context remains
+  separate from retrieval strategy output.
 - Database schema changes require versioned Alembic migrations; never add runtime
   `Base.metadata.create_all()`.
 
@@ -240,6 +247,9 @@
 
 ## Configuration precedence
 
+- `repository_context.strategy` is project-scoped, participates in the normal defaults then
+  repository override deep merge, and defaults to `heuristic`. Unknown names are rejected with
+  the supported strategy names.
 - Global `orchestrator.yml` contains top-level task selection and `defaults`; project settings at
   global top level are rejected. For a repository, merge in order: `defaults` → matching
   `repositories.<key>` entry (later wins). Repository-local `.orchestrator.yml` files are ignored
