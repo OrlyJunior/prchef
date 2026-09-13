@@ -176,7 +176,7 @@ def test_spec_debug_uses_configured_repository_context_strategy(
     monkeypatch.setattr(
         debug_service_module,
         "resolve_repository_context_strategy",
-        lambda name: Strategy(),
+        lambda name, **kwargs: Strategy(),
     )
 
     service.execute(_execution(tmp_path), DebugStage.SPEC_GENERATION)
@@ -321,7 +321,7 @@ def test_review_debug_uses_configured_repository_context_strategy(
     monkeypatch.setattr(
         debug_service_module,
         "resolve_repository_context_strategy",
-        lambda name: Strategy(),
+        lambda name, **kwargs: Strategy(),
     )
 
     service.execute(_execution(tmp_path), DebugStage.REVIEW)

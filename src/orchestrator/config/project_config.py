@@ -10,6 +10,7 @@ from enum import StrEnum
 from io import StringIO
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -112,12 +113,77 @@ class RepositorySettings(BaseModel):
     branch_prefix: str = "orchestrator"
 
 
+class EmbeddingSettings(BaseModel):
+    """Provider-neutral embedding identity used by repository retrieval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["fastembed"] = "fastembed"
+    model: str = "BAAI/bge-small-en-v1.5"
+    version: str = "1"
+    dimension: int = Field(default=384, gt=0, le=65_536)
+
+    @field_validator("model", "version")
+    @classmethod
+    def validate_identity_part(cls, value: str, info: ValidationInfo) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"Embedding {info.field_name} must be non-empty")
+        return normalized
+
+
+class QdrantSettings(BaseModel):
+    """Connection settings shared by embedded-local and server Qdrant clients."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["local", "server"] = "local"
+    path: Path | None = None
+    url: str | None = None
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65_535)
+
+    @field_validator("url", "host")
+    @classmethod
+    def normalize_optional_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_mode_fields(self) -> QdrantSettings:
+        if self.mode == "local":
+            if self.url is not None or self.host is not None or self.port is not None:
+                raise ValueError("Local Qdrant mode accepts only 'path'")
+            return self
+        if self.path is not None:
+            raise ValueError("Server Qdrant mode does not accept 'path'")
+        if (self.url is None) == (self.host is None):
+            raise ValueError("Server Qdrant mode requires exactly one of 'url' or 'host'")
+        if self.port is not None and self.host is None:
+            raise ValueError("Qdrant 'port' can only be used with 'host'")
+        if self.url is not None:
+            parsed = urlparse(self.url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("Qdrant 'url' must be an absolute http(s) URL")
+        if self.host is not None and any(character in self.host for character in "/?#"):
+            raise ValueError("Qdrant 'host' must be a hostname without a URL path")
+        return self
+
+
 class RepositoryContextSettings(BaseModel):
     """Selects orchestrator-owned repository retrieval policy."""
 
     model_config = ConfigDict(extra="forbid")
 
     strategy: str = "heuristic"
+    context_budget_chars: int = Field(default=12_000, ge=512, le=100_000)
+    candidate_count: int = Field(default=12, ge=1, le=100)
+    chunk_size_chars: int = Field(default=1_600, ge=256, le=16_000)
+    chunk_overlap_chars: int = Field(default=200, ge=0, le=4_000)
+    embedding: EmbeddingSettings = Field(default_factory=lambda: EmbeddingSettings())
+    qdrant: QdrantSettings = Field(default_factory=lambda: QdrantSettings())
 
     @field_validator("strategy")
     @classmethod
@@ -136,6 +202,14 @@ class RepositoryContextSettings(BaseModel):
                 f"supported strategies: {', '.join(supported)}"
             )
         return normalized
+
+    @model_validator(mode="after")
+    def validate_chunking(self) -> RepositoryContextSettings:
+        if self.chunk_overlap_chars >= self.chunk_size_chars:
+            raise ValueError(
+                "repository_context.chunk_overlap_chars must be smaller than chunk_size_chars"
+            )
+        return self
 
 
 class TaskSettings(BaseModel):
@@ -636,6 +710,7 @@ class IntegrationsSettings(BaseModel):
 
 class ProjectConfig(BaseModel):
     path: Path
+    configured_repository_key: str | None = Field(default=None, exclude=True)
     task: TaskSettings = Field(default_factory=TaskSettings)
     repository: RepositorySettings = Field(default_factory=RepositorySettings)
     repository_context: RepositoryContextSettings = Field(
@@ -1286,6 +1361,7 @@ class ProjectConfigLoader:
             raise ConfigurationError("'repositories' must be a mapping")
 
         entry: dict[str, Any]
+        configured_repository_key: str | None = None
         if repository_ref in registered:
             raw_entry = registered[repository_ref]
             if not isinstance(raw_entry, dict):
@@ -1295,6 +1371,7 @@ class ProjectConfigLoader:
             if raw_path is None:
                 raise ConfigurationError(f"Repository entry '{repository_ref}' has no path")
             repository_path = Path(str(raw_path)).expanduser()
+            configured_repository_key = repository_ref
         else:
             repository_path = Path(repository_ref).expanduser()
             entry = {}
@@ -1319,10 +1396,46 @@ class ProjectConfigLoader:
             )
         merged = _deep_merge(defaults, entry)
         merged["path"] = repository_path
+        merged["configured_repository_key"] = configured_repository_key
         repository_settings = merged.setdefault("repository", {})
         if not isinstance(repository_settings, dict):
             raise ConfigurationError("'repository' must be a mapping")
         repository_settings.setdefault("name", repository_ref)
+
+        repository_context = merged.get("repository_context", {})
+        if repository_context is None:
+            repository_context = {}
+            merged["repository_context"] = repository_context
+        if not isinstance(repository_context, dict):
+            raise ConfigurationError("'repository_context' must be a mapping")
+        if str(repository_context.get("strategy", "heuristic")).strip().casefold() == "qdrant":
+            if configured_repository_key is None:
+                raise ConfigurationError(
+                    "Qdrant repository context requires a registered repository key; "
+                    "a path-only repository override is not sufficient"
+                )
+            qdrant = repository_context.setdefault("qdrant", {})
+            if not isinstance(qdrant, dict):
+                raise ConfigurationError("'repository_context.qdrant' must be a mapping")
+            if str(qdrant.get("mode", "local")).strip().casefold() == "local":
+                raw_index_path = qdrant.get("path")
+                index_path = (
+                    Path.home().expanduser() / ".orchestrator" / "qdrant"
+                    if raw_index_path is None
+                    else Path(str(raw_index_path)).expanduser()
+                )
+                if not index_path.is_absolute():
+                    index_path = self._config_file.parent / index_path
+                index_path = index_path.resolve()
+                try:
+                    index_path.relative_to(repository_path)
+                except ValueError:
+                    pass
+                else:
+                    raise ConfigurationError(
+                        "Qdrant local index path must be outside the repository working tree"
+                    )
+                qdrant["path"] = index_path
 
         try:
             return ProjectConfig.model_validate(merged)

@@ -105,10 +105,42 @@ continuam sendo instrucoes locais e opcionais especificas de cada papel.
 
 A recuperacao de contexto do checkout e uma politica propria do orquestrador, separada dos agent
 providers. Configure-a em `defaults.repository_context.strategy` ou sobrescreva-a em
-`repositories.<chave>.repository_context.strategy`. O valor suportado atualmente e `heuristic`,
-tambem usado quando a secao e omitida. Ele preserva a arvore local limitada e os excertos
-ranqueados do planner; o reviewer continua recebendo apenas metadados de repositorio e branches
-nesse bloco. Nomes desconhecidos falham com a lista de estrategias suportadas.
+`repositories.<chave>.repository_context.strategy`. `heuristic` continua sendo o default: preserva
+a arvore local limitada e os excertos ranqueados do planner; o reviewer continua recebendo apenas
+metadados de repositorio e branches nesse bloco. Nomes desconhecidos falham com a lista de
+estrategias suportadas.
+
+`qdrant` habilita recuperacao semantica densa com o cliente Python oficial e embeddings locais
+FastEmbed. Ela so pode ser usada por uma entrada registrada em `repositories`, cria uma collection
+deterministica por chave/caminho configurado e separa o checkout de controle de cada worktree no
+payload. O orquestrador descobre, filtra, calcula hashes e divide os arquivos; arquivos inalterados
+nao sao re-embeddados, enquanto chunks alterados/removidos sao sincronizados sob demanda. Arquivos
+ignorados pelo Git, binarios, symlinks, artefatos gerados conhecidos, `IMPLEMENTER.md`,
+`REVIEWER.md` e `docs/PROJECT_CONTEXT.md` nao entram no indice.
+
+Exemplo local persistente (o caminho deve ficar fora de todo checkout):
+
+```yaml
+repository_context:
+  strategy: qdrant
+  qdrant:
+    mode: local
+    path: ~/.orchestrator/qdrant
+  embedding:
+    provider: fastembed
+    model: BAAI/bge-small-en-v1.5
+    version: "1"
+    dimension: 384
+```
+
+O primeiro uso pode baixar o modelo e ter custo de inicializacao. O modo local persistente e para
+indices pequenos e um unico processo, pois o storage possui lock exclusivo. Para processos
+concorrentes, execute um servidor Qdrant e configure `mode: server` com `url`, ou com `host` e
+`port`. A mesma estrategia usa a mesma abstracao de cliente nos dois modos. Mudancas de provider,
+modelo, versao, dimensao, distancia ou schema recriam a collection e reindexam. Esta iteracao usa
+somente o vetor nomeado `dense`; vetores esparsos e fusao hibrida ficam para uma extensao futura.
+Falhas de scanning, embedding ou Qdrant produzem um diagnostico limitado ao repositorio solicitado
+e nunca alteram arquivos do checkout.
 
 ## Banco e migrations
 

@@ -7,9 +7,13 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from orchestrator.models.development_task import DevelopmentTask
+
+if TYPE_CHECKING:
+    from orchestrator.config.project_config import RepositoryContextSettings
+    from orchestrator.services.embeddings import EmbeddingProvider
 
 MAX_CONTEXT_CHARS = 12_000
 MAX_TRAVERSAL_DEPTH = 4
@@ -271,10 +275,20 @@ class HeuristicRepositoryContextStrategy:
         ) + "\n\n"
 
 
-RepositoryContextStrategyBuilder = Callable[[], RepositoryContextStrategy]
+RepositoryContextStrategyBuilder = Callable[..., RepositoryContextStrategy]
+
+
+def _build_qdrant_strategy(**kwargs: Any) -> RepositoryContextStrategy:
+    from orchestrator.services.qdrant_repository_context import (
+        QdrantRepositoryContextStrategy,
+    )
+
+    return QdrantRepositoryContextStrategy(**kwargs)
+
 
 _STRATEGY_BUILDERS: dict[str, RepositoryContextStrategyBuilder] = {
     "heuristic": HeuristicRepositoryContextStrategy,
+    "qdrant": _build_qdrant_strategy,
 }
 
 
@@ -284,7 +298,15 @@ def repository_context_strategy_names() -> tuple[str, ...]:
     return tuple(sorted(_STRATEGY_BUILDERS))
 
 
-def resolve_repository_context_strategy(name: str) -> RepositoryContextStrategy:
+def resolve_repository_context_strategy(
+    name: str,
+    *,
+    settings: RepositoryContextSettings | None = None,
+    repository_key: str | None = None,
+    configured_root: Path | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
+    client_factory: Callable[[Any], Any] | None = None,
+) -> RepositoryContextStrategy:
     """Resolve a stable strategy name through the orchestrator-owned registry."""
 
     normalized = name.strip().casefold()
@@ -295,7 +317,23 @@ def resolve_repository_context_strategy(name: str) -> RepositoryContextStrategy:
         raise RepositoryContextStrategyError(
             f"Unknown repository context strategy {name!r}; supported strategies: {supported}"
         ) from exc
-    return builder()
+    if normalized == "heuristic":
+        return builder()
+    if settings is None or repository_key is None or configured_root is None:
+        raise RepositoryContextStrategyError(
+            "Qdrant repository context requires resolved settings, a configured "
+            "repository key, and the configured repository root"
+        )
+    kwargs: dict[str, Any] = {
+        "settings": settings,
+        "repository_key": repository_key,
+        "configured_root": configured_root,
+    }
+    if embedding_provider is not None:
+        kwargs["embedding_provider"] = embedding_provider
+    if client_factory is not None:
+        kwargs["client_factory"] = client_factory
+    return builder(**kwargs)
 
 
 def collect_repository_context(repository_path: Path, task: DevelopmentTask) -> str:

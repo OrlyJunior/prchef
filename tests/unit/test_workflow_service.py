@@ -87,7 +87,7 @@ def test_workflow_resolves_once_and_reuses_strategy_during_review_loop(
 
     strategy = Strategy()
 
-    def resolve(name: str) -> Strategy:
+    def resolve(name: str, **_: object) -> Strategy:
         resolved_names.append(name)
         return strategy
 
@@ -360,7 +360,7 @@ def test_planner_human_response_resumes_same_execution_without_prior_workspace(
             context_roles.append(request.role)
             return "RESUME CONTEXT\n\n"
 
-    def resolve(name: str) -> Strategy:
+    def resolve(name: str, **_: object) -> Strategy:
         resolved_names.append(name)
         return Strategy()
 
@@ -395,7 +395,7 @@ def test_reviewer_human_response_reuses_existing_workspace_branch_and_pr(
             context_roles.append(request.role)
             return "RESUME CONTEXT\n\n"
 
-    def resolve(name: str) -> Strategy:
+    def resolve(name: str, **_: object) -> Strategy:
         resolved_names.append(name)
         return Strategy()
 
