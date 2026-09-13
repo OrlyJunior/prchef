@@ -1121,3 +1121,134 @@ def test_global_config_discovery_reports_every_searched_location(tmp_path: Path)
         str(tmp_path / "home" / ".config" / "orchestrator" / "orchestrator.yml")
         in message
     )
+
+
+def test_qdrant_connection_modes_validate_exclusive_fields(tmp_path: Path) -> None:
+    local = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "repository_context": {
+                "strategy": "qdrant",
+                "qdrant": {"mode": "local", "path": tmp_path / "index"},
+            },
+        }
+    )
+    url_server = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "repository_context": {
+                "strategy": "qdrant",
+                "qdrant": {"mode": "server", "url": "http://localhost:6333"},
+            },
+        }
+    )
+    host_server = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "repository_context": {
+                "strategy": "qdrant",
+                "qdrant": {"mode": "server", "host": "localhost", "port": 6333},
+            },
+        }
+    )
+
+    assert local.repository_context.qdrant.path == tmp_path / "index"
+    assert url_server.repository_context.qdrant.url == "http://localhost:6333"
+    assert host_server.repository_context.qdrant.host == "localhost"
+
+    invalid_settings = [
+        {"mode": "local", "url": "http://localhost:6333"},
+        {"mode": "server"},
+        {"mode": "server", "url": "http://one", "host": "two"},
+        {"mode": "server", "url": "http://one", "port": 6333},
+    ]
+    for qdrant in invalid_settings:
+        with pytest.raises(ValidationError):
+            ProjectConfig.model_validate(
+                {
+                    "path": tmp_path,
+                    "repository_context": {"strategy": "qdrant", "qdrant": qdrant},
+                }
+            )
+
+
+def test_loader_resolves_qdrant_identity_and_external_local_path(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        yaml.safe_dump(
+            {
+                "defaults": {
+                    "repository_context": {
+                        "strategy": "qdrant",
+                        "qdrant": {"mode": "local", "path": "indexes"},
+                    }
+                },
+                "repositories": {"example": {"path": str(repository)}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    task = DevelopmentTask(
+        id="qdrant", source="test", title="", description="", url="", repository="example"
+    )
+
+    config = ProjectConfigLoader(config_file).load(task)
+
+    assert config.configured_repository_key == "example"
+    assert config.repository_context.qdrant.path == (tmp_path / "indexes").resolve()
+
+
+def test_loader_rejects_qdrant_for_path_only_repository_or_index_inside_repo(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    task = DevelopmentTask(id="qdrant", source="test", title="", description="", url="")
+
+    path_only_config = tmp_path / "path-only.yml"
+    path_only_config.write_text(
+        yaml.safe_dump(
+            {
+                "defaults": {"repository_context": {"strategy": "qdrant"}},
+                "repositories": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="registered repository key"):
+        ProjectConfigLoader(path_only_config).load(task, str(repository))
+
+    inside_config = tmp_path / "inside.yml"
+    inside_config.write_text(
+        yaml.safe_dump(
+            {
+                "defaults": {"repository_context": {"strategy": "qdrant"}},
+                "repositories": {
+                    "example": {
+                        "path": str(repository),
+                        "repository_context": {
+                            "qdrant": {
+                                "mode": "local",
+                                "path": str(repository / ".index"),
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    registered_task = DevelopmentTask(
+        id="qdrant",
+        source="test",
+        title="",
+        description="",
+        url="",
+        repository="example",
+    )
+    with pytest.raises(ConfigurationError, match="outside the repository"):
+        ProjectConfigLoader(inside_config).load(registered_task)

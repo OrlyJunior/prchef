@@ -14,10 +14,24 @@
 
 `RepositoryContextStrategy` e a fronteira, de propriedade do orquestrador, entre composicao de
 prompts e recuperacao de contexto do checkout. `SpecService` e `ReviewService` dependem somente
-desse contrato role-aware. O resolver interno atualmente registra `heuristic`: no planejamento
-ele delega ao coletor local limitado existente; no review preserva o bloco historico de metadados,
-sem adicionar excertos. A selecao vem de `repository_context.strategy` (default `heuristic`) apos
-o merge de defaults e override do repositorio e nao faz parte do registry de agent providers.
+desse contrato role-aware. O resolver registra `heuristic` e `qdrant`. `heuristic` continua sendo o
+default e preserva integralmente o comportamento anterior. `qdrant` usa o cliente oficial abaixo
+da fronteira e um `EmbeddingProvider` independente de agent providers; descoberta, elegibilidade,
+hash, chunking e metadados continuam sob responsabilidade do orquestrador.
+
+Cada repositorio registrado recebe uma collection derivada da chave configurada e de um
+identificador criptografico do caminho canonico. Pontos sao filtrados novamente por identidade do
+repositorio e `source_root_id`, isolando o checkout de controle e worktrees vinculadas na mesma
+collection. O indice sincroniza sob demanda por hash completo do arquivo, faz upsert antes de
+remover pontos obsoletos e nao consulta depois de uma sincronizacao incompleta. Um ponto reservado
+registra schema, vetor `dense`, distancia e identidade/dimensao do embedding; incompatibilidade
+recria a collection. O payload e extensivel para vetores esparsos, mas ranking lexical/hibrido nao
+faz parte desta iteracao.
+
+O modo local persiste fora dos worktrees e abre/fecha o cliente por operacao para liberar o lock;
+serve apenas para uso pequeno e single-process. A configuracao por URL ou host usa Qdrant server e
+e obrigatoria para acesso multi-process. Nenhum estado do indice entra no SQLAlchemy, portanto nao
+ha migration. `docs/PROJECT_CONTEXT.md` continua sendo carregado separadamente e nunca e indexado.
 
 ## Sequencia
 

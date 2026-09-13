@@ -70,10 +70,24 @@
 - `RepositoryContextStrategy` is the separate, orchestrator-owned retrieval-policy boundary used
   by planner and reviewer prompt composition. The configured strategy is resolved once per
   workflow/debug invocation and reused across retries and resume paths; it is not an agent
-  provider. `heuristic` is the only registered strategy and the compatibility default: planning
-  keeps the existing bounded local tree and ranked excerpts, while review keeps its existing
-  repository/branch metadata block without local file excerpts. Durable project context remains
-  separate from retrieval strategy output.
+  provider. `heuristic` remains the compatibility default: planning keeps the existing bounded
+  local tree and ranked excerpts, while review keeps its existing repository/branch metadata block.
+  `qdrant` adds dense semantic retrieval below the same boundary through the official client and a
+  provider-neutral, lazy local FastEmbed boundary; workflow services never import either backend.
+- Qdrant uses one collection per registered repository, derived from both its immutable configured
+  key and a canonical-path identifier. Every point operation is additionally scoped by repository,
+  configured-path, and checkout/worktree `source_root_id`. The orchestrator owns Git-aware source
+  eligibility, full-file hashes, language/symbol/location metadata, bounded overlapping chunks,
+  deterministic point IDs, incremental upsert-before-delete, and complete-block prompt budgeting.
+  Private role files and the separately supplied `docs/PROJECT_CONTEXT.md` are never indexed.
+- Qdrant collection metadata records the named `dense` vector, cosine distance, index schema, and
+  embedding provider/model/version/dimension; incompatibility deliberately recreates and fully
+  reindexes the collection. Sparse/hybrid retrieval is not implemented, but the named vector and
+  payload schema leave room for it without changing workflows. Index state is outside SQLAlchemy
+  and outside repositories. Persistent local mode is small/single-process only and clients are
+  closed after operations; concurrent processes require Qdrant server mode. A failed sync is not
+  queried, is idempotently repairable, never mutates repository files, and yields a sanitized
+  repository-context diagnostic without widening collection/filter scope.
 - Database schema changes require versioned Alembic migrations; never add runtime
   `Base.metadata.create_all()`.
 
@@ -126,9 +140,9 @@
 2. Resolve the project configuration and derive the GitHub slug from `origin`. Create configured
    planner/implementer/reviewer instances; a named provider shared by roles is instantiated once.
 3. Generate one structured `RepositorySpec` from the base checkout/base branch. Planning receives
-   a bounded, read-only local repository overview and task-matched code excerpts, alongside
-   `docs/PROJECT_CONTEXT.md` when present. A blocking spec ambiguity ends the execution as `NEEDS_HUMAN` before
-   any branch or worktree is created.
+   bounded, read-only repository context from the configured strategy (`heuristic` tree/excerpts or
+   Qdrant dense chunks), alongside `docs/PROJECT_CONTEXT.md` when present. A blocking spec ambiguity
+   ends the execution as `NEEDS_HUMAN` before any branch or worktree is created.
 4. Build a unique, non-protected working branch name from configured prefix, task identity/title,
    UTC timestamp, and execution ID. Create a linked worktree from freshly fetched
    `origin/<base_branch>`; do not switch, clean, stash, reset, or otherwise mutate the control
@@ -248,8 +262,12 @@
 ## Configuration precedence
 
 - `repository_context.strategy` is project-scoped, participates in the normal defaults then
-  repository override deep merge, and defaults to `heuristic`. Unknown names are rejected with
-  the supported strategy names.
+  repository override deep merge, and defaults to `heuristic`. `qdrant` requires a registered
+  repository key; path-only overrides are rejected. Its local path defaults to
+  `~/.orchestrator/qdrant`, resolves explicit relative paths beside the global config, and must be
+  outside repository/worktree roots. Server mode accepts exactly one of URL or host (plus optional
+  port). Chunk size/overlap, result count, context budget, and explicit embedding identity are
+  validated configuration. Unknown strategy names are rejected with the supported names.
 - Global `orchestrator.yml` contains top-level task selection and `defaults`; project settings at
   global top level are rejected. For a repository, merge in order: `defaults` → matching
   `repositories.<key>` entry (later wins). Repository-local `.orchestrator.yml` files are ignored

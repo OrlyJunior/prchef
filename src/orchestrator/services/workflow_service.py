@@ -196,7 +196,10 @@ class WorkflowService:
                 clients = self._client_factory.create(config)
                 repository_slug = clients.git.github_repository()
                 repository_context_strategy = resolve_repository_context_strategy(
-                    config.repository_context.strategy
+                    config.repository_context.strategy,
+                    settings=config.repository_context,
+                    repository_key=config.configured_repository_key,
+                    configured_root=config.path,
                 )
 
             with self._step(execution.id, WorkflowStage.GENERATE_SPEC):
@@ -503,7 +506,10 @@ class WorkflowService:
             clients = self._client_factory.create(config)
             repository_slug = clients.git.github_repository()
             repository_context_strategy = resolve_repository_context_strategy(
-                config.repository_context.strategy
+                config.repository_context.strategy,
+                settings=config.repository_context,
+                repository_key=config.configured_repository_key,
+                configured_root=config.path,
             )
             previous_responses = [
                 (item.prompt, item.response)
