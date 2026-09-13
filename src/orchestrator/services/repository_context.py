@@ -41,6 +41,10 @@ IGNORED_DIRECTORY_NAMES = frozenset(
     }
 )
 
+# Local role guidance and dot-prefixed paths may contain private instructions
+# or credentials and are outside repository retrieval context.
+PRIVATE_FILE_NAMES = frozenset({"IMPLEMENTER.md", "REVIEWER.md"})
+
 _TEXT_SUFFIXES = frozenset(
     {
         ".c",
@@ -142,7 +146,7 @@ class RepositoryContextCollector:
             except OSError:
                 continue
             for entry in entries:
-                if entry.name in IGNORED_DIRECTORY_NAMES:
+                if is_ignored_repository_path(entry, root):
                     continue
                 try:
                     if entry.is_symlink():
@@ -187,7 +191,7 @@ class RepositoryContextCollector:
             return []
         candidates: list[_Candidate] = []
         for path in files:
-            if not _is_text_file(path):
+            if not is_repository_text_file(path):
                 continue
             try:
                 relative_path = path.relative_to(self._repository_path).as_posix()
@@ -320,8 +324,33 @@ def _task_keywords(task: DevelopmentTask) -> tuple[str, ...]:
     return tuple(keywords)
 
 
-def _is_text_file(path: Path) -> bool:
+def is_ignored_repository_path(path: Path, repository_path: Path) -> bool:
+    """Return whether a path is excluded from local repository context."""
+
+    try:
+        parts = path.relative_to(repository_path).parts
+    except ValueError:
+        return True
+    ignored_directories = {name.casefold() for name in IGNORED_DIRECTORY_NAMES}
+    private_files = {name.casefold() for name in PRIVATE_FILE_NAMES}
+    return any(
+        part.casefold() in ignored_directories
+        or part.casefold() in private_files
+        or part.startswith(".")
+        for part in parts
+    )
+
+
+def is_repository_text_file(path: Path) -> bool:
+    """Return whether a file belongs to the shared source/text allow-list."""
+
     return path.name.lower() in _TEXT_FILENAMES or path.suffix.lower() in _TEXT_SUFFIXES
+
+
+def _is_text_file(path: Path) -> bool:
+    """Backward-compatible private alias for the shared text rule."""
+
+    return is_repository_text_file(path)
 
 
 def _read_text(path: Path) -> str | None:

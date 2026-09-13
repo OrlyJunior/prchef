@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # same stable, cwd-independent location.
     database_url: str | None = None
     database_path: Path | None = None
+    # Semantic indexes use their own repository-isolated SQLite stores.  This
+    # optional root overrides the default ~/.orchestrator/indices directory.
+    semantic_index_path: Path | None = None
     # Environment-based configuration selection is intentionally handled by
     # resolve_global_config(), which preserves its documented precedence. The
     # private validation alias keeps BaseSettings from consuming a public

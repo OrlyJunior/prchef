@@ -6,6 +6,11 @@ from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.jules_session import JulesOperationResult, JulesSession, JulesSessionState
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
+from orchestrator.models.semantic_index import (
+    IndexChunk,
+    IndexRefreshResult,
+    RepositoryIndexIdentity,
+)
 from orchestrator.models.validation_result import ValidationCheck, ValidationResult
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
@@ -28,6 +33,8 @@ __all__ = [
     "DiagnosticCategory",
     "ExecutionDiagnostic",
     "ImplementationResult",
+    "IndexChunk",
+    "IndexRefreshResult",
     "HumanInteraction",
     "JulesOperationResult",
     "JulesSession",
@@ -35,6 +42,7 @@ __all__ = [
     "PullRequest",
     "PolishOutcome",
     "RepositorySpec",
+    "RepositoryIndexIdentity",
     "ReviewDecision",
     "StepStatus",
     "StructuredOutputExpectation",

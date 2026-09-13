@@ -74,6 +74,15 @@
   keeps the existing bounded local tree and ranked excerpts, while review keeps its existing
   repository/branch metadata block without local file excerpts. Durable project context remains
   separate from retrieval strategy output.
+- Persistent semantic source indexes are repository-isolated SQLite stores, managed explicitly
+  rather than by a background job. Each namespace is derived from both the configured repository
+  key and its canonical local path; that identity is also recorded and checked in stored chunk
+  metadata, so retrieval cannot cross repository boundaries. Indexes live outside working trees
+  under `~/.orchestrator/indices/<identity>/index.sqlite3` by default (or the global
+  `ORCHESTRATOR_SEMANTIC_INDEX_PATH`/`Settings.semantic_index_path` override). Refreshes reuse
+  unchanged file hashes, replace changed files, purge deleted files, and atomically commit only a
+  complete scan. Repository-context exclusions for hidden/private paths, generated directories,
+  unsupported text formats, binaries, and symlinks apply to indexing too.
 - Database schema changes require versioned Alembic migrations; never add runtime
   `Base.metadata.create_all()`.
 
