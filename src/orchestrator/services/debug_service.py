@@ -137,7 +137,10 @@ class DebugService:
         )
         config = self._resolve_config(execution, values, task)
         repository_context_strategy = resolve_repository_context_strategy(
-            config.repository_context.strategy
+            config.repository_context.strategy,
+            settings=config.repository_context,
+            repository_key=config.configured_repository_key,
+            configured_root=config.path,
         )
         role_by_stage = {
             DebugStage.SPEC_GENERATION: AgentRole.PLANNER,
