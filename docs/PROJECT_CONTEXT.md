@@ -81,8 +81,11 @@
   under `~/.orchestrator/indices/<identity>/index.sqlite3` by default (or the global
   `ORCHESTRATOR_SEMANTIC_INDEX_PATH`/`Settings.semantic_index_path` override). Refreshes reuse
   unchanged file hashes, replace changed files, purge deleted files, and atomically commit only a
-  complete scan. Repository-context exclusions for hidden/private paths, generated directories,
-  unsupported text formats, binaries, and symlinks apply to indexing too.
+  complete scan. Stored chunk-bound settings participate in incremental reuse: changing them
+  requires an atomic refresh before retrieval and forces every discovered file to be rechunked.
+  Schema creation and identity metadata bootstrap in one transaction. Repository-context
+  exclusions for hidden/private paths, generated directories, unsupported text formats, binaries,
+  and symlinks apply to indexing too.
 - Database schema changes require versioned Alembic migrations; never add runtime
   `Base.metadata.create_all()`.
 

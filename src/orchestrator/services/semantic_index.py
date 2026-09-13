@@ -11,6 +11,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchestrator.config.settings import Settings
 from orchestrator.models.semantic_index import (
     IndexChunk,
     IndexRefreshResult,
@@ -79,13 +80,18 @@ class _PreparedFile:
 def resolve_semantic_index_root(
     index_root: str | Path | None = None,
     *,
+    settings: Settings | None = None,
     environ: Mapping[str, str] | None = None,
     home: Path | None = None,
 ) -> Path:
-    """Resolve the global index root independently of the process cwd."""
+    """Resolve the global index root, including ``Settings`` and its env file."""
 
     environment = os.environ if environ is None else environ
     configured = index_root
+    if configured is None and settings is not None:
+        configured = settings.semantic_index_path
+    if configured is None and environ is None:
+        configured = Settings().semantic_index_path
     if configured is None:
         environment_path = environment.get("ORCHESTRATOR_SEMANTIC_INDEX_PATH", "").strip()
         configured = environment_path or None
@@ -103,6 +109,7 @@ class RepositorySemanticIndex:
         repository_path: str | Path,
         *,
         index_root: str | Path | None = None,
+        settings: Settings | None = None,
         max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
         max_chunk_lines: int = DEFAULT_MAX_CHUNK_LINES,
     ) -> None:
@@ -112,7 +119,7 @@ class RepositorySemanticIndex:
             repository_key, repository_path
         )
         self.repository_path = Path(self.identity.canonical_path)
-        self.index_root = resolve_semantic_index_root(index_root)
+        self.index_root = resolve_semantic_index_root(index_root, settings=settings)
         if _is_within(self.index_root, self.repository_path):
             raise ValueError("semantic index storage must be outside the repository working tree")
         self.storage_directory = self.index_root / self.identity.identifier
@@ -131,13 +138,14 @@ class RepositorySemanticIndex:
             raise SemanticIndexError(
                 f"Repository path is not a directory: {self.repository_path}"
             )
-        connection = self._open()
+        connection = self._open(require_compatible_policy=False)
         try:
             connection.execute("BEGIN IMMEDIATE")
-            existing_hashes = {
+            stored_hashes = {
                 str(row[0]): str(row[1])
                 for row in connection.execute("SELECT path, content_hash FROM files")
             }
+            reusable_hashes = stored_hashes if self._chunk_policy_matches(connection) else {}
             discovered_paths = self._discover_files()
             discovered_names = {
                 path.relative_to(self.repository_path).as_posix()
@@ -152,7 +160,7 @@ class RepositorySemanticIndex:
                     discovered_names.discard(relative_path)
                     continue
                 content_hash = hashlib.sha256(raw).hexdigest()
-                if existing_hashes.get(relative_path) == content_hash:
+                if reusable_hashes.get(relative_path) == content_hash:
                     unchanged += 1
                     continue
                 content = raw.decode("utf-8", errors="replace")
@@ -170,7 +178,7 @@ class RepositorySemanticIndex:
                     )
                 )
 
-            deleted_paths = set(existing_hashes).difference(discovered_names)
+            deleted_paths = set(stored_hashes).difference(discovered_names)
             for relative_path in sorted(deleted_paths):
                 connection.execute("DELETE FROM files WHERE path = ?", (relative_path,))
             indexed_chunks = 0
@@ -206,6 +214,7 @@ class RepositorySemanticIndex:
                 )
                 indexed_chunks += len(source.chunks)
 
+            self._store_chunk_policy(connection)
             total_files = int(connection.execute("SELECT COUNT(*) FROM files").fetchone()[0])
             total_chunks = int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
             connection.commit()
@@ -279,7 +288,7 @@ class RepositorySemanticIndex:
     def search(self, query: str, *, limit: int = 10) -> list[IndexChunk]:
         return self.retrieve(query, limit=limit)
 
-    def _open(self) -> sqlite3.Connection:
+    def _open(self, *, require_compatible_policy: bool = True) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = None
         try:
             self.storage_directory.mkdir(parents=True, exist_ok=True)
@@ -290,10 +299,17 @@ class RepositorySemanticIndex:
             )
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 30000")
+            connection.execute("BEGIN IMMEDIATE")
             self._ensure_schema(connection)
+            if require_compatible_policy and not self._chunk_policy_matches(connection):
+                raise SemanticIndexError(
+                    "Semantic index chunk bounds changed; refresh the index before retrieval"
+                )
+            connection.commit()
             return connection
         except Exception as exc:
             if connection is not None:
+                connection.rollback()
                 connection.close()
             if isinstance(exc, SemanticIndexError):
                 raise
@@ -304,17 +320,21 @@ class RepositorySemanticIndex:
             ) from exc
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
-        connection.executescript(
+        statements = (
             """
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS files (
                 path TEXT PRIMARY KEY,
                 content_hash TEXT NOT NULL,
                 language TEXT
-            );
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS chunks (
                 chunk_id TEXT PRIMARY KEY,
                 repository_key TEXT NOT NULL,
@@ -328,10 +348,12 @@ class RepositorySemanticIndex:
                 end_line INTEGER NOT NULL,
                 chunk_number INTEGER NOT NULL,
                 UNIQUE(path, chunk_number)
-            );
-            CREATE INDEX IF NOT EXISTS ix_chunks_path ON chunks(path);
-            """
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_chunks_path ON chunks(path)",
         )
+        for statement in statements:
+            connection.execute(statement)
         expected = {
             "schema_version": _SCHEMA_VERSION,
             "repository_key": self.identity.repository_key,
@@ -343,20 +365,59 @@ class RepositorySemanticIndex:
             mismatches = {
                 key: (stored.get(key), value)
                 for key, value in expected.items()
-                if stored.get(key) != value
+                if key in stored and stored[key] != value
             }
             if mismatches:
                 raise SemanticIndexError(
                     f"Index identity or schema mismatch at {self.database_path}: {mismatches}"
                 )
-            return
-        connection.executemany(
-            "INSERT OR IGNORE INTO metadata(key, value) VALUES (?, ?)", expected.items()
-        )
+            missing = {key: value for key, value in expected.items() if key not in stored}
+            if missing:
+                has_index_data = any(
+                    int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                    for table in ("files", "chunks")
+                )
+                if has_index_data:
+                    raise SemanticIndexError(
+                        f"Index identity metadata is incomplete at {self.database_path}"
+                    )
+                connection.executemany(
+                    "INSERT INTO metadata(key, value) VALUES (?, ?)", missing.items()
+                )
+        else:
+            connection.executemany(
+                "INSERT INTO metadata(key, value) VALUES (?, ?)",
+                (*expected.items(), *self._chunk_policy().items()),
+            )
         stored = dict(connection.execute("SELECT key, value FROM metadata").fetchall())
         if any(stored.get(key) != value for key, value in expected.items()):
             raise SemanticIndexError(
                 f"Index identity changed while opening {self.database_path}"
+            )
+
+    def _chunk_policy(self) -> dict[str, str]:
+        return {
+            "max_chunk_chars": str(self.max_chunk_chars),
+            "max_chunk_lines": str(self.max_chunk_lines),
+        }
+
+    def _chunk_policy_matches(self, connection: sqlite3.Connection) -> bool:
+        stored = dict(
+            connection.execute(
+                "SELECT key, value FROM metadata WHERE key IN (?, ?)",
+                ("max_chunk_chars", "max_chunk_lines"),
+            ).fetchall()
+        )
+        return stored == self._chunk_policy()
+
+    def _store_chunk_policy(self, connection: sqlite3.Connection) -> None:
+        for key, value in self._chunk_policy().items():
+            connection.execute(
+                """
+                INSERT INTO metadata(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, value),
             )
 
     def _discover_files(self) -> list[Path]:
@@ -473,8 +534,13 @@ class RepositorySemanticIndex:
 class SemanticIndexManager:
     """Small facade for callers managing multiple configured repositories."""
 
-    def __init__(self, index_root: str | Path | None = None) -> None:
-        self.index_root = resolve_semantic_index_root(index_root)
+    def __init__(
+        self,
+        index_root: str | Path | None = None,
+        *,
+        settings: Settings | None = None,
+    ) -> None:
+        self.index_root = resolve_semantic_index_root(index_root, settings=settings)
 
     def for_repository(
         self, repository_key: str, repository_path: str | Path

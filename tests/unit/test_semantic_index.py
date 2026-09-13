@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 from pytest import MonkeyPatch
 
+from orchestrator.config.settings import Settings
 from orchestrator.services.semantic_index import (
     RepositorySemanticIndex,
     SemanticIndexError,
@@ -183,6 +185,143 @@ def test_chunks_are_bounded_and_include_location_language_and_symbol(tmp_path: P
     assert chunks[0].language == "python"
     assert chunks[0].symbol == "bounded"
     assert chunks[0].location.startswith("bounded.py:1-")
+
+
+def test_changed_chunk_bounds_atomically_reindex_unchanged_files(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    _write(repository / "bounded.py", "abcdefghij\n" * 4)
+    root = tmp_path / "indices"
+    RepositorySemanticIndex(
+        "repo",
+        repository,
+        index_root=root,
+        max_chunk_chars=100,
+        max_chunk_lines=100,
+    ).refresh()
+
+    smaller = RepositorySemanticIndex(
+        "repo",
+        repository,
+        index_root=root,
+        max_chunk_chars=12,
+        max_chunk_lines=1,
+    )
+    with pytest.raises(SemanticIndexError, match="refresh"):
+        smaller.chunks()
+
+    result = smaller.refresh()
+
+    assert result.indexed_files == 1
+    assert result.unchanged_files == 0
+    assert all(len(chunk.text) <= 12 for chunk in smaller.chunks())
+    assert all(chunk.end_line == chunk.start_line for chunk in smaller.chunks())
+    assert smaller.refresh().unchanged_files == 1
+
+
+def test_failed_chunk_policy_refresh_preserves_prior_usable_index(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    repository = tmp_path / "repo"
+    _write(repository / "bounded.py", "abcdefghij\n" * 4)
+    root = tmp_path / "indices"
+    original = RepositorySemanticIndex(
+        "repo",
+        repository,
+        index_root=root,
+        max_chunk_chars=100,
+        max_chunk_lines=100,
+    )
+    original.refresh()
+    prior_chunks = original.chunks()
+    smaller = RepositorySemanticIndex(
+        "repo",
+        repository,
+        index_root=root,
+        max_chunk_chars=12,
+        max_chunk_lines=1,
+    )
+
+    def fail(*_: object, **__: object) -> None:
+        raise RuntimeError("simulated policy refresh failure")
+
+    monkeypatch.setattr(smaller, "_chunk_file", fail)
+    with pytest.raises(SemanticIndexError, match="simulated policy refresh failure"):
+        smaller.refresh()
+
+    assert original.chunks() == prior_chunks
+
+
+def test_schema_bootstrap_rolls_back_partial_metadata_on_failure(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    index = RepositorySemanticIndex("repo", repository, index_root=tmp_path / "indices")
+    original_ensure_schema = index._ensure_schema
+
+    def fail_during_bootstrap(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            ("schema_version", "partial"),
+        )
+        raise sqlite3.OperationalError("simulated bootstrap failure")
+
+    monkeypatch.setattr(index, "_ensure_schema", fail_during_bootstrap)
+    with pytest.raises(SemanticIndexError, match="simulated bootstrap failure"):
+        index.chunks()
+
+    with sqlite3.connect(index.storage_path) as connection:
+        tables = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    assert tables == []
+
+    monkeypatch.setattr(index, "_ensure_schema", original_ensure_schema)
+    assert index.refresh().total_files == 0
+
+
+def test_refresh_repairs_legacy_partial_metadata_without_index_data(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    index = RepositorySemanticIndex("repo", repository, index_root=tmp_path / "indices")
+    index.storage_path.parent.mkdir(parents=True)
+    with sqlite3.connect(index.storage_path) as connection:
+        connection.execute(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            ("schema_version", "1"),
+        )
+
+    assert index.refresh().total_files == 0
+    assert index.chunks() == []
+    with sqlite3.connect(index.storage_path) as connection:
+        metadata = dict(connection.execute("SELECT key, value FROM metadata").fetchall())
+    assert metadata["repository_key"] == "repo"
+    assert metadata["repository_identifier"] == index.identity.identifier
+    assert metadata["max_chunk_chars"] == str(index.max_chunk_chars)
+    assert metadata["max_chunk_lines"] == str(index.max_chunk_lines)
+
+
+def test_index_root_uses_explicit_settings_and_dotenv(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    explicit_root = tmp_path / "explicit"
+    settings = Settings(semantic_index_path=explicit_root)
+    assert SemanticIndexManager(settings=settings).index_root == explicit_root.resolve()
+
+    dotenv_root = tmp_path / "from-dotenv"
+    _write(
+        tmp_path / ".env",
+        f"ORCHESTRATOR_SEMANTIC_INDEX_PATH={dotenv_root}\n",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ORCHESTRATOR_SEMANTIC_INDEX_PATH", raising=False)
+    assert SemanticIndexManager().index_root == dotenv_root.resolve()
 
 
 def test_index_root_resolution_and_working_tree_guard(tmp_path: Path) -> None:
