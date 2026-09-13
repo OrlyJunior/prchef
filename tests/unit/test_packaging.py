@@ -19,3 +19,12 @@ def test_litellm_is_a_core_dependency_not_an_optional_extra() -> None:
 
     assert "litellm>=1.0.0" in project["dependencies"]
     assert "litellm" not in project.get("optional-dependencies", {})
+
+
+def test_qdrant_and_local_embeddings_are_core_dependencies() -> None:
+    pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    with pyproject_path.open("rb") as pyproject_file:
+        project = tomllib.load(pyproject_file)["project"]
+
+    assert "qdrant-client[fastembed]>=1.12,<2" in project["dependencies"]
+    assert "numpy>=1.26,<2.5" in project["dependencies"]

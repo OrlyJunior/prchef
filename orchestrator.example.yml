@@ -14,10 +14,31 @@ defaults:
   repository:
     base_branch: develop
     protected_branches: [main, master, develop]
-  # Orchestrator-owned retrieval policy. `heuristic` preserves the existing
-  # bounded planner snapshot and reviewer metadata behavior.
+  # Orchestrator-owned retrieval policy. `heuristic` remains the default and
+  # preserves the existing bounded planner snapshot and reviewer metadata behavior.
   repository_context:
     strategy: heuristic
+    # To enable dense semantic retrieval for a registered repository, use:
+    # strategy: qdrant
+    # context_budget_chars: 12000
+    # candidate_count: 12
+    # chunk_size_chars: 1600
+    # chunk_overlap_chars: 200
+    # embedding:
+    #   provider: fastembed
+    #   model: BAAI/bge-small-en-v1.5
+    #   version: "1"
+    #   dimension: 384
+    # qdrant:
+    #   mode: local
+    #   # Persistent and external to every repository. Omit for
+    #   # ~/.orchestrator/qdrant. Local mode is single-process only.
+    #   path: C:/Users/you/.orchestrator/qdrant
+    # Server mode supports concurrent orchestrator processes instead:
+    # qdrant:
+    #   mode: server
+    #   url: http://127.0.0.1:6333
+    # Or use `host: 127.0.0.1` with optional `port: 6333`, not both URL and host.
   agents:
     planner:
       provider: cloud-api

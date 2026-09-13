@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
+from orchestrator.config.project_config import RepositoryContextSettings
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.services.repository_context import (
     IGNORED_DIRECTORY_NAMES,
@@ -79,11 +80,33 @@ def test_missing_or_unreadable_repository_context_degrades_to_empty(
 
 
 def test_resolver_returns_heuristic_strategy() -> None:
-    assert repository_context_strategy_names() == ("heuristic",)
+    assert repository_context_strategy_names() == ("heuristic", "qdrant")
 
     strategy = resolve_repository_context_strategy("heuristic")
 
     assert isinstance(strategy, HeuristicRepositoryContextStrategy)
+
+
+def test_resolver_constructs_qdrant_strategy_with_repository_identity(tmp_path: Path) -> None:
+    from orchestrator.services.qdrant_repository_context import (
+        QdrantRepositoryContextStrategy,
+    )
+
+    settings = RepositoryContextSettings.model_validate(
+        {
+            "strategy": "qdrant",
+            "qdrant": {"mode": "server", "url": "http://localhost:6333"},
+        }
+    )
+
+    strategy = resolve_repository_context_strategy(
+        "qdrant",
+        settings=settings,
+        repository_key="example",
+        configured_root=tmp_path,
+    )
+
+    assert isinstance(strategy, QdrantRepositoryContextStrategy)
 
 
 def test_heuristic_strategy_preserves_role_specific_default_context(tmp_path: Path) -> None:
