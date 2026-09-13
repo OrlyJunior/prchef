@@ -56,6 +56,10 @@ from orchestrator.runtime_logging import (
 from orchestrator.services.exceptions import WorkflowCancelledError, WorkflowError
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.notifications import NotificationService
+from orchestrator.services.repository_context import (
+    RepositoryContextStrategy,
+    resolve_repository_context_strategy,
+)
 from orchestrator.services.review_service import ReviewService, format_pull_request_review
 from orchestrator.services.spec_service import SpecService
 from orchestrator.services.task_provider import TaskProvider
@@ -191,6 +195,9 @@ class WorkflowService:
                 )
                 clients = self._client_factory.create(config)
                 repository_slug = clients.git.github_repository()
+                repository_context_strategy = resolve_repository_context_strategy(
+                    config.repository_context.strategy
+                )
 
             with self._step(execution.id, WorkflowStage.GENERATE_SPEC):
                 spec = SpecService(
@@ -199,7 +206,8 @@ class WorkflowService:
                         config,
                         AgentRole.PLANNER,
                         execution.id,
-                    )
+                    ),
+                    repository_context_strategy,
                 ).generate(
                     task,
                     config.path,
@@ -311,7 +319,8 @@ class WorkflowService:
                             config,
                             AgentRole.REVIEWER,
                             execution.id,
-                        )
+                        ),
+                        repository_context_strategy,
                     ).review(
                         task=task,
                         spec=spec,
@@ -493,6 +502,9 @@ class WorkflowService:
             )
             clients = self._client_factory.create(config)
             repository_slug = clients.git.github_repository()
+            repository_context_strategy = resolve_repository_context_strategy(
+                config.repository_context.strategy
+            )
             previous_responses = [
                 (item.prompt, item.response)
                 for item in execution.human_interactions
@@ -507,11 +519,21 @@ class WorkflowService:
             )
             if interaction.requesting_stage is WorkflowStage.GENERATE_SPEC:
                 return self._resume_planning(
-                    execution, clarified_task, config, clients, repository_slug
+                    execution,
+                    clarified_task,
+                    config,
+                    clients,
+                    repository_slug,
+                    repository_context_strategy,
                 )
             if interaction.requesting_stage is WorkflowStage.REVIEW:
                 return self._resume_review(
-                    execution, clarified_task, config, clients, repository_slug
+                    execution,
+                    clarified_task,
+                    config,
+                    clients,
+                    repository_slug,
+                    repository_context_strategy,
                 )
             raise WorkflowError(
                 f"Cannot resume human input requested during {interaction.requesting_stage.value}"
@@ -533,13 +555,15 @@ class WorkflowService:
         config: ProjectConfig,
         clients: WorkflowClients,
         repository_slug: str,
+        repository_context_strategy: RepositoryContextStrategy,
     ) -> WorkflowExecution:
         """Repeat only planning, then continue through a newly safe workspace."""
         with self._step(execution.id, WorkflowStage.GENERATE_SPEC):
             spec = SpecService(
                 self._diagnostic_agent(
                     clients.agent(AgentRole.PLANNER), config, AgentRole.PLANNER, execution.id
-                )
+                ),
+                repository_context_strategy,
             ).generate(
                 task,
                 config.path,
@@ -578,6 +602,7 @@ class WorkflowService:
             repository_slug,
             workspace_path,
             working_branch,
+            repository_context_strategy,
         )
 
     def _resume_review(
@@ -587,6 +612,7 @@ class WorkflowService:
         config: ProjectConfig,
         clients: WorkflowClients,
         repository_slug: str,
+        repository_context_strategy: RepositoryContextStrategy,
     ) -> WorkflowExecution:
         if not execution.workspace_path or not execution.working_branch:
             raise WorkflowError(
@@ -618,7 +644,8 @@ class WorkflowService:
                 review = ReviewService(
                     self._diagnostic_agent(
                         clients.agent(AgentRole.REVIEWER), config, AgentRole.REVIEWER, execution.id
-                    )
+                    ),
+                    repository_context_strategy,
                 ).review(
                     task=task,
                     spec=spec,
@@ -689,6 +716,7 @@ class WorkflowService:
         repository_slug: str,
         workspace_path: Path,
         working_branch: str,
+        repository_context_strategy: RepositoryContextStrategy,
     ) -> WorkflowExecution:
         """Continue a resumed planning execution without creating another execution."""
         execution_clients = clients.at_path(workspace_path)
@@ -762,7 +790,8 @@ class WorkflowService:
                             config,
                             AgentRole.REVIEWER,
                             execution_id,
-                        )
+                        ),
+                        repository_context_strategy,
                     ).review(
                         task=task,
                         spec=spec,

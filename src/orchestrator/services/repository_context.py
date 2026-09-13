@@ -1,10 +1,13 @@
-"""Collect compact, read-only repository context for planning prompts."""
+"""Resolve and render provider-neutral repository context strategies."""
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, Protocol
 
 from orchestrator.models.development_task import DevelopmentTask
 
@@ -225,6 +228,68 @@ class RepositoryContextCollector:
             candidates, key=lambda candidate: (-candidate.score, candidate.relative_path)
         )
         return ranked[:MAX_CANDIDATE_FILES]
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryContextRequest:
+    """Role-aware inputs available to repository context strategies."""
+
+    role: Literal["planner", "reviewer"]
+    repository_path: Path
+    task: DevelopmentTask
+    repository_slug: str
+    base_branch: str
+    feature_branch: str | None = None
+
+
+class RepositoryContextStrategy(Protocol):
+    """Orchestrator boundary for role-specific repository context."""
+
+    def render(self, request: RepositoryContextRequest) -> str:
+        """Render the repository context block for one agent request."""
+        ...
+
+
+class RepositoryContextStrategyError(ValueError):
+    """Raised when a configured repository context strategy cannot be resolved."""
+
+
+class HeuristicRepositoryContextStrategy:
+    """Compatibility strategy backed by the existing bounded collector."""
+
+    def render(self, request: RepositoryContextRequest) -> str:
+        if request.role == "planner":
+            return repository_context_prompt(request.repository_path, request.task)
+        return "REPOSITORY CONTEXT:\n" + json.dumps(
+            {
+                "repository": request.repository_slug,
+                "base_branch": request.base_branch,
+                "feature_branch": request.feature_branch,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n\n"
+
+
+RepositoryContextStrategyBuilder = Callable[[], RepositoryContextStrategy]
+
+_STRATEGY_BUILDERS: dict[str, RepositoryContextStrategyBuilder] = {
+    "heuristic": HeuristicRepositoryContextStrategy,
+}
+
+
+def resolve_repository_context_strategy(name: str) -> RepositoryContextStrategy:
+    """Resolve a stable strategy name through the orchestrator-owned registry."""
+
+    normalized = name.strip().casefold()
+    try:
+        builder = _STRATEGY_BUILDERS[normalized]
+    except KeyError as exc:
+        supported = ", ".join(sorted(_STRATEGY_BUILDERS))
+        raise RepositoryContextStrategyError(
+            f"Unknown repository context strategy {name!r}; supported strategies: {supported}"
+        ) from exc
+    return builder()
 
 
 def collect_repository_context(repository_path: Path, task: DevelopmentTask) -> str:

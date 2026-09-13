@@ -63,6 +63,91 @@ def test_default_codex_config_keeps_workspace_write_sandbox(tmp_path: Path) -> N
     assert "--approve-for-me" not in config.integrations.codex.command
 
 
+def test_repository_context_strategy_defaults_to_heuristic(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate({"path": tmp_path})
+
+    assert config.repository_context.strategy == "heuristic"
+
+
+def test_repository_context_strategy_rejects_unknown_name(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        ProjectConfig.model_validate(
+            {"path": tmp_path, "repository_context": {"strategy": "semantic"}}
+        )
+
+    message = str(exc_info.value)
+    assert "semantic" in message
+    assert "heuristic" in message
+
+
+def test_repository_context_strategy_uses_defaults_and_repository_override(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        yaml.safe_dump(
+            {
+                "defaults": {"repository_context": {"strategy": "heuristic"}},
+                "repositories": {
+                    "example": {
+                        "path": str(repository),
+                        "repository_context": {"strategy": "heuristic"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    task = DevelopmentTask(
+        id="context",
+        source="test",
+        title="Context strategy",
+        description="",
+        url="",
+        repository="example",
+    )
+
+    config = ProjectConfigLoader(config_file).load(task)
+
+    assert config.repository_context.strategy == "heuristic"
+
+
+def test_loader_wraps_unknown_repository_context_strategy_as_configuration_error(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        yaml.safe_dump(
+            {
+                "defaults": {"repository_context": {"strategy": "semantic"}},
+                "repositories": {"example": {"path": str(repository)}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    task = DevelopmentTask(
+        id="context",
+        source="test",
+        title="Context strategy",
+        description="",
+        url="",
+        repository="example",
+    )
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        ProjectConfigLoader(config_file).load(task)
+
+    message = str(exc_info.value)
+    assert "semantic" in message
+    assert "heuristic" in message
+
+
 def test_provider_options_label_and_deprioritize_deprecated_jules(tmp_path: Path) -> None:
     with pytest.warns(DeprecationWarning, match="Jules provider"):
         config = ProjectConfig.model_validate(
