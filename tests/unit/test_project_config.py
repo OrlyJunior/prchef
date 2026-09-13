@@ -18,6 +18,7 @@ from orchestrator.config.project_config import (
     resolve_global_config,
 )
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.services.repository_context import repository_context_strategy_names
 
 
 def _config(tmp_path: Path, codex: dict[str, object]) -> ProjectConfig:
@@ -67,6 +68,17 @@ def test_repository_context_strategy_defaults_to_heuristic(tmp_path: Path) -> No
     config = ProjectConfig.model_validate({"path": tmp_path})
 
     assert config.repository_context.strategy == "heuristic"
+
+
+@pytest.mark.parametrize("strategy", repository_context_strategy_names())
+def test_repository_context_strategy_accepts_registered_names(
+    tmp_path: Path, strategy: str
+) -> None:
+    config = ProjectConfig.model_validate(
+        {"path": tmp_path, "repository_context": {"strategy": strategy}}
+    )
+
+    assert config.repository_context.strategy == strategy
 
 
 def test_repository_context_strategy_rejects_unknown_name(tmp_path: Path) -> None:

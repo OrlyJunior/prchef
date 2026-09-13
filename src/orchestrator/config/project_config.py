@@ -122,8 +122,14 @@ class RepositoryContextSettings(BaseModel):
     @field_validator("strategy")
     @classmethod
     def validate_strategy(cls, value: str) -> str:
+        # Import lazily so configuration can consult the resolver-owned registry
+        # without introducing a module initialization cycle through services.
+        from orchestrator.services.repository_context import (
+            repository_context_strategy_names,
+        )
+
         normalized = value.strip().casefold()
-        supported = ("heuristic",)
+        supported = repository_context_strategy_names()
         if normalized not in supported:
             raise ValueError(
                 f"Unknown repository context strategy {value!r}; "

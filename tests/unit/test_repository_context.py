@@ -12,6 +12,7 @@ from orchestrator.services.repository_context import (
     RepositoryContextRequest,
     RepositoryContextStrategyError,
     collect_repository_context,
+    repository_context_strategy_names,
     resolve_repository_context_strategy,
 )
 
@@ -78,6 +79,8 @@ def test_missing_or_unreadable_repository_context_degrades_to_empty(
 
 
 def test_resolver_returns_heuristic_strategy() -> None:
+    assert repository_context_strategy_names() == ("heuristic",)
+
     strategy = resolve_repository_context_strategy("heuristic")
 
     assert isinstance(strategy, HeuristicRepositoryContextStrategy)

@@ -278,6 +278,12 @@ _STRATEGY_BUILDERS: dict[str, RepositoryContextStrategyBuilder] = {
 }
 
 
+def repository_context_strategy_names() -> tuple[str, ...]:
+    """Return the stable names accepted by configuration and resolution."""
+
+    return tuple(sorted(_STRATEGY_BUILDERS))
+
+
 def resolve_repository_context_strategy(name: str) -> RepositoryContextStrategy:
     """Resolve a stable strategy name through the orchestrator-owned registry."""
 
@@ -285,7 +291,7 @@ def resolve_repository_context_strategy(name: str) -> RepositoryContextStrategy:
     try:
         builder = _STRATEGY_BUILDERS[normalized]
     except KeyError as exc:
-        supported = ", ".join(sorted(_STRATEGY_BUILDERS))
+        supported = ", ".join(repository_context_strategy_names())
         raise RepositoryContextStrategyError(
             f"Unknown repository context strategy {name!r}; supported strategies: {supported}"
         ) from exc
