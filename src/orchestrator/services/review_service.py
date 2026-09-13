@@ -20,6 +20,10 @@ from orchestrator.services.project_context import (
     project_context_prompt,
     reviewer_instructions_prompt,
 )
+from orchestrator.services.repository_context import (
+    RepositoryContextRequest,
+    RepositoryContextStrategy,
+)
 from orchestrator.services.structured_output import parse_json_object, string_list
 
 _REVIEW_OUTPUT = StructuredOutputExpectation(
@@ -92,8 +96,11 @@ def format_pull_request_review(review: CodeReview) -> str:
 
 
 class ReviewService:
-    def __init__(self, provider: AgentProvider) -> None:
+    def __init__(
+        self, provider: AgentProvider, repository_context_strategy: RepositoryContextStrategy
+    ) -> None:
         self._provider = provider
+        self._repository_context_strategy = repository_context_strategy
 
     def review(
         self,
@@ -112,6 +119,16 @@ class ReviewService:
     ) -> CodeReview:
         instructions = reviewer_instructions_prompt(
             instructions_repository_path or repository_path, repository_path
+        )
+        repository_context = self._repository_context_strategy.render(
+            RepositoryContextRequest(
+                role="reviewer",
+                repository_path=repository_path,
+                task=task,
+                repository_slug=repository_slug,
+                base_branch=base_branch,
+                feature_branch=feature_branch,
+            )
         )
         prompt = f"""Review this implementation against the original task and technical spec.
 Perform an adversarial, evidence-based risk analysis; do not limit the review to stated
@@ -160,18 +177,7 @@ REPOSITORY SPEC:
 PULL REQUEST:
 {json.dumps(asdict(pull_request), ensure_ascii=False, indent=2)}
 
-REPOSITORY CONTEXT:
-{json.dumps(
-    {
-        "repository": repository_slug,
-        "base_branch": base_branch,
-        "feature_branch": feature_branch,
-    },
-    ensure_ascii=False,
-    indent=2,
-)}
-
-VALIDATION RESULT:
+{repository_context}VALIDATION RESULT:
 {json.dumps(asdict(validation), ensure_ascii=False, indent=2)}
 
 IMPLEMENTATION DIFF:

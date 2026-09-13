@@ -103,6 +103,13 @@ contexto complementar; a tarefa atual e o estado do repositorio continuam sendo 
 O conteudo enviado a cada prompt e limitado a 12.000 caracteres. `IMPLEMENTER.md` e `REVIEWER.md`
 continuam sendo instrucoes locais e opcionais especificas de cada papel.
 
+A recuperacao de contexto do checkout e uma politica propria do orquestrador, separada dos agent
+providers. Configure-a em `defaults.repository_context.strategy` ou sobrescreva-a em
+`repositories.<chave>.repository_context.strategy`. O valor suportado atualmente e `heuristic`,
+tambem usado quando a secao e omitida. Ele preserva a arvore local limitada e os excertos
+ranqueados do planner; o reviewer continua recebendo apenas metadados de repositorio e branches
+nesse bloco. Nomes desconhecidos falham com a lista de estrategias suportadas.
+
 ## Banco e migrations
 
 No startup, os comandos da CLI aplicam automaticamente todas as migrations pendentes antes de

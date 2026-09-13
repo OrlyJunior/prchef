@@ -18,6 +18,10 @@ from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationCheck, ValidationResult
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.services.implementation_service import ImplementationService
+from orchestrator.services.repository_context import (
+    RepositoryContextStrategy,
+    resolve_repository_context_strategy,
+)
 from orchestrator.services.review_service import ReviewService
 from orchestrator.services.spec_service import SpecService
 from orchestrator.services.task_provider import TaskProvider
@@ -132,6 +136,9 @@ class DebugService:
             )
         )
         config = self._resolve_config(execution, values, task)
+        repository_context_strategy = resolve_repository_context_strategy(
+            config.repository_context.strategy
+        )
         role_by_stage = {
             DebugStage.SPEC_GENERATION: AgentRole.PLANNER,
             DebugStage.IMPLEMENTATION: AgentRole.IMPLEMENTER,
@@ -145,7 +152,15 @@ class DebugService:
         if stage is DebugStage.SPEC_GENERATION:
             if task is None:
                 raise DebugExecutionError("spec-generation requires task provider inputs")
-            return self._run_spec(execution, stage, task, config, clients, values)
+            return self._run_spec(
+                execution,
+                stage,
+                task,
+                config,
+                clients,
+                values,
+                repository_context_strategy,
+            )
         if stage is DebugStage.IMPLEMENTATION:
             implementation_service = ImplementationService(
                 clients.agent(AgentRole.IMPLEMENTER), clients.git
@@ -178,7 +193,15 @@ class DebugService:
         if stage is DebugStage.REVIEW:
             if task is None:
                 raise DebugExecutionError("review requires task provider inputs")
-            return self._run_review(execution, stage, task, config, clients, values)
+            return self._run_review(
+                execution,
+                stage,
+                task,
+                config,
+                clients,
+                values,
+                repository_context_strategy,
+            )
         raise DebugExecutionError(f"Unsupported debug stage: {stage}")
 
     def _describe_inputs(
@@ -259,9 +282,12 @@ class DebugService:
         config: ProjectConfig,
         clients: WorkflowClients,
         values: DebugInputs,
+        repository_context_strategy: RepositoryContextStrategy,
     ) -> dict[str, Any]:
         executions: list[AgentExecutionReference] = []
-        spec = SpecService(clients.agent(AgentRole.PLANNER)).generate(
+        spec = SpecService(
+            clients.agent(AgentRole.PLANNER), repository_context_strategy
+        ).generate(
             task,
             config.path,
             clients.git.github_repository(),
@@ -286,6 +312,7 @@ class DebugService:
         config: ProjectConfig,
         clients: WorkflowClients,
         values: DebugInputs,
+        repository_context_strategy: RepositoryContextStrategy,
     ) -> dict[str, Any]:
         spec = self._resolve_spec(execution, values)
         validation = self._resolve_validation(execution, values)
@@ -294,7 +321,9 @@ class DebugService:
         base_branch = self._base_branch(execution, values, config)
         diff = values.diff if values.diff is not None else clients.git.diff(base_branch)
         executions: list[AgentExecutionReference] = []
-        review = ReviewService(clients.agent(AgentRole.REVIEWER)).review(
+        review = ReviewService(
+            clients.agent(AgentRole.REVIEWER), repository_context_strategy
+        ).review(
             task=task,
             spec=spec,
             pull_request=pull_request,

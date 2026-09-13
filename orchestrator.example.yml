@@ -14,6 +14,10 @@ defaults:
   repository:
     base_branch: develop
     protected_branches: [main, master, develop]
+  # Orchestrator-owned retrieval policy. `heuristic` preserves the existing
+  # bounded planner snapshot and reviewer metadata behavior.
+  repository_context:
+    strategy: heuristic
   agents:
     planner:
       provider: cloud-api
