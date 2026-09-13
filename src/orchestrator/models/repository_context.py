@@ -3,6 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
+
+
+class IndexLifecycleState(StrEnum):
+    """User-visible lifecycle state for one configured repository index."""
+
+    NOT_INDEXED = "not_indexed"
+    INDEXING = "indexing"
+    READY = "ready"
+    STALE = "stale"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryIndexStatus:
+    """Inspectable state retained with a repository's semantic collection."""
+
+    strategy: str
+    state: IndexLifecycleState
+    last_indexed_commit: str | None = None
+    last_successful_indexed_at: str | None = None
+    document_count: int | None = None
+    point_count: int | None = None
+    error_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

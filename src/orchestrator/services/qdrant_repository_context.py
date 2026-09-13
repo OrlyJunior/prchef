@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,9 @@ from typing import Any
 from orchestrator.config.project_config import QdrantSettings, RepositoryContextSettings
 from orchestrator.models.repository_context import (
     EmbeddingIdentity,
+    IndexLifecycleState,
     RepositoryChunk,
+    RepositoryIndexStatus,
     RepositorySourceFile,
     RetrievedRepositoryChunk,
 )
@@ -35,6 +38,10 @@ _METADATA_POINT_ID = "00000000-0000-0000-0000-000000000001"
 _BATCH_SIZE = 64
 
 QdrantClientFactory = Callable[[QdrantSettings], Any]
+
+
+class RepositoryIndexOperationError(RuntimeError):
+    """A sanitized, user-displayable index lifecycle operation failure."""
 
 
 def canonical_path_identifier(path: Path) -> str:
@@ -103,13 +110,131 @@ class QdrantRepositoryContextStrategy:
         source_root_id = canonical_path_identifier(source_root)
         try:
             sources = RepositorySourcePipeline(self._repository_key, source_root).discover()
-            self._synchronize(sources, source_root_id)
+            self._synchronize(sources, source_root_id, source_root)
             results = self._query(
                 f"{request.task.title}\n\n{request.task.description}", source_root_id
             )
             return self._render_results(request, results)
         except Exception as exc:
+            self._record_failure(exc)
+            if self._settings.fallback_to_heuristic:
+                from orchestrator.services.repository_context import (
+                    HeuristicRepositoryContextStrategy,
+                )
+
+                return HeuristicRepositoryContextStrategy().render(request)
             return self._diagnostic(exc)
+
+    def inspect_index(self) -> RepositoryIndexStatus:
+        """Inspect the configured root without mutating its collection."""
+
+        source_root_id = canonical_path_identifier(self._configured_root)
+        try:
+            client = self._client_factory(self._settings.qdrant)
+            try:
+                if not client.collection_exists(self._collection_name):
+                    return RepositoryIndexStatus(
+                        strategy="qdrant", state=IndexLifecycleState.NOT_INDEXED
+                    )
+                models = _qdrant_models()
+                metadata_points = client.retrieve(
+                    collection_name=self._collection_name,
+                    ids=[_METADATA_POINT_ID],
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                if not metadata_points or not self._metadata_matches(
+                    metadata_points[0].payload or {}
+                ):
+                    return RepositoryIndexStatus(
+                        strategy="qdrant",
+                        state=IndexLifecycleState.FAILED,
+                        error_message=(
+                            "The semantic index metadata is missing or incompatible. "
+                            "Rebuild it."
+                        ),
+                    )
+                metadata = metadata_points[0].payload or {}
+                points = self._scroll_source_points(client, models, source_root_id)
+                last_error = metadata.get("last_error")
+                last_commit = _string_or_none(metadata.get("last_indexed_commit"))
+                indexed_at = _string_or_none(metadata.get("last_successful_indexed_at"))
+                if isinstance(last_error, str) and last_error:
+                    state = IndexLifecycleState.FAILED
+                    error_message = last_error
+                elif indexed_at is None:
+                    state = IndexLifecycleState.NOT_INDEXED
+                    error_message = None
+                elif _index_is_stale(last_commit, self._configured_root):
+                    state = IndexLifecycleState.STALE
+                    error_message = None
+                else:
+                    state = IndexLifecycleState.READY
+                    error_message = None
+                return RepositoryIndexStatus(
+                    strategy="qdrant",
+                    state=state,
+                    last_indexed_commit=last_commit,
+                    last_successful_indexed_at=indexed_at,
+                    document_count=len(
+                        {
+                            str((point.payload or {}).get("path"))
+                            for point in points
+                            if isinstance((point.payload or {}).get("path"), str)
+                        }
+                    ),
+                    point_count=len(points),
+                    error_message=error_message,
+                )
+            finally:
+                _close_client(client)
+        except Exception as exc:
+            return RepositoryIndexStatus(
+                strategy="qdrant",
+                state=IndexLifecycleState.FAILED,
+                error_message=_safe_error_message(exc),
+            )
+
+    def build_index(self) -> RepositoryIndexStatus:
+        """Fully reindex all eligible files for the configured repository."""
+
+        return self._run_index_operation(rebuild=True)
+
+    def refresh_changed_files(self) -> RepositoryIndexStatus:
+        """Incrementally synchronize changed and deleted eligible files."""
+
+        return self._run_index_operation(rebuild=False)
+
+    def clear_index(self) -> RepositoryIndexStatus:
+        """Delete only this configured repository's deterministic collection."""
+
+        try:
+            client = self._client_factory(self._settings.qdrant)
+            try:
+                if client.collection_exists(self._collection_name):
+                    client.delete_collection(self._collection_name)
+            finally:
+                _close_client(client)
+        except Exception as exc:
+            self._record_failure(exc)
+            raise RepositoryIndexOperationError(_safe_error_message(exc)) from exc
+        return self.inspect_index()
+
+    def _run_index_operation(self, *, rebuild: bool) -> RepositoryIndexStatus:
+        try:
+            sources = RepositorySourcePipeline(
+                self._repository_key, self._configured_root
+            ).discover()
+            self._synchronize(
+                sources,
+                canonical_path_identifier(self._configured_root),
+                self._configured_root,
+                rebuild=rebuild,
+            )
+        except Exception as exc:
+            self._record_failure(exc)
+            raise RepositoryIndexOperationError(_safe_error_message(exc)) from exc
+        return self.inspect_index()
 
     def _validate_request_root(self, requested_root: Path) -> Path:
         source_root = requested_root.resolve()
@@ -136,7 +261,14 @@ class QdrantRepositoryContextStrategy:
             return
         raise ValueError("Qdrant local index path must be outside repository working trees")
 
-    def _synchronize(self, sources: Sequence[RepositorySourceFile], source_root_id: str) -> None:
+    def _synchronize(
+        self,
+        sources: Sequence[RepositorySourceFile],
+        source_root_id: str,
+        source_root: Path,
+        *,
+        rebuild: bool = False,
+    ) -> None:
         client = self._client_factory(self._settings.qdrant)
         try:
             models = _qdrant_models()
@@ -163,7 +295,8 @@ class QdrantRepositoryContextStrategy:
                 records = existing_by_path.get(source.path, [])
                 expected_ids = {chunk.point_id for chunk in chunks}
                 if (
-                    records
+                    not rebuild
+                    and records
                     and all(
                         (point.payload or {}).get("content_hash") == source.content_hash
                         and (point.payload or {}).get("embedding")
@@ -216,6 +349,7 @@ class QdrantRepositoryContextStrategy:
                     points_selector=models.FilterSelector(filter=delete_filter),
                     wait=True,
                 )
+            self._record_success(client, models, source_root)
         finally:
             _close_client(client)
 
@@ -316,8 +450,14 @@ class QdrantRepositoryContextStrategy:
             wait=True,
         )
 
-    def _metadata_payload(self) -> dict[str, Any]:
-        return {
+    def _metadata_payload(
+        self,
+        *,
+        last_indexed_commit: str | None = None,
+        last_successful_indexed_at: str | None = None,
+        last_error: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "kind": "collection_metadata",
             "repository": self._repository_key,
             "configured_path_id": self._configured_path_id,
@@ -326,9 +466,81 @@ class QdrantRepositoryContextStrategy:
             "distance": _DISTANCE,
             "dense_vector_name": DENSE_VECTOR_NAME,
         }
+        if last_indexed_commit is not None:
+            payload["last_indexed_commit"] = last_indexed_commit
+        if last_successful_indexed_at is not None:
+            payload["last_successful_indexed_at"] = last_successful_indexed_at
+        if last_error is not None:
+            payload["last_error"] = last_error
+        return payload
 
     def _metadata_matches(self, payload: dict[str, Any]) -> bool:
-        return payload == self._metadata_payload()
+        expected = self._metadata_payload()
+        return all(payload.get(key) == value for key, value in expected.items())
+
+    def _record_success(self, client: Any, models: Any, source_root: Path) -> None:
+        client.upsert(
+            collection_name=self._collection_name,
+            points=[
+                models.PointStruct(
+                    id=_METADATA_POINT_ID,
+                    vector={
+                        DENSE_VECTOR_NAME: [1.0]
+                        + [0.0] * (self._embedding.identity.dimension - 1)
+                    },
+                    payload=self._metadata_payload(
+                        last_indexed_commit=_git_head(source_root),
+                        last_successful_indexed_at=datetime.now(UTC).isoformat(),
+                    ),
+                )
+            ],
+            wait=True,
+        )
+
+    def _record_failure(self, exc: Exception) -> None:
+        """Best-effort persistent failure state; never masks the original failure."""
+
+        try:
+            client = self._client_factory(self._settings.qdrant)
+            try:
+                models = _qdrant_models()
+                if not client.collection_exists(self._collection_name):
+                    self._ensure_compatible_collection(client, models)
+                points = client.retrieve(
+                    collection_name=self._collection_name,
+                    ids=[_METADATA_POINT_ID],
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                if not points or not self._metadata_matches(points[0].payload or {}):
+                    return
+                prior = points[0].payload or {}
+                client.upsert(
+                    collection_name=self._collection_name,
+                    points=[
+                        models.PointStruct(
+                            id=_METADATA_POINT_ID,
+                            vector={
+                                DENSE_VECTOR_NAME: [1.0]
+                                + [0.0] * (self._embedding.identity.dimension - 1)
+                            },
+                            payload=self._metadata_payload(
+                                last_indexed_commit=_string_or_none(
+                                    prior.get("last_indexed_commit")
+                                ),
+                                last_successful_indexed_at=_string_or_none(
+                                    prior.get("last_successful_indexed_at")
+                                ),
+                                last_error=_safe_error_message(exc),
+                            ),
+                        )
+                    ],
+                    wait=True,
+                )
+            finally:
+                _close_client(client)
+        except Exception:
+            return
 
     def _chunk_payload(self, chunk: RepositoryChunk) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -465,6 +677,40 @@ def _load_optional_module(name: str) -> Any:
     """Load an implementation dependency without importing its types into this boundary."""
 
     return import_module(name)
+
+
+def _safe_error_message(exc: Exception) -> str:
+    """Keep lifecycle diagnostics useful without leaking backend connection details."""
+
+    return f"Semantic index operation failed ({type(exc).__name__})."
+
+
+def _string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _git_head(root: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _index_is_stale(last_indexed_commit: str | None, root: Path) -> bool:
+    """A missing Git revision is inconclusive, not a status-read failure."""
+
+    current_commit = _git_head(root)
+    return current_commit is not None and current_commit != last_indexed_commit
 
 
 def _git_common_directory(root: Path) -> Path | None:

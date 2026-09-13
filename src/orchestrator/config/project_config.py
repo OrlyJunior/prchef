@@ -178,6 +178,7 @@ class RepositoryContextSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strategy: str = "heuristic"
+    fallback_to_heuristic: bool = False
     context_budget_chars: int = Field(default=12_000, ge=512, le=100_000)
     candidate_count: int = Field(default=12, ge=1, le=100)
     chunk_size_chars: int = Field(default=1_600, ge=256, le=16_000)

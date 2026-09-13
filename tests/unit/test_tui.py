@@ -23,6 +23,7 @@ from orchestrator.config.project_config import (
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from orchestrator.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
@@ -401,6 +402,17 @@ def test_controller_saves_renames_and_deletes_repository_configuration(
     controller.delete_repository("renamed")
     assert controller.repositories() == []
     assert controller.selected_repository is None
+
+
+def test_controller_reports_heuristic_context_ready_without_an_index(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+
+    status = controller.repository_index_status("example")
+
+    assert status.strategy == "heuristic"
+    assert status.state is IndexLifecycleState.READY
+    with pytest.raises(ValueError, match="require repository_context.strategy: qdrant"):
+        controller.build_repository_index("example")
 
 
 def test_controller_discards_finished_workflow_service(tmp_path: Path) -> None:
@@ -792,6 +804,58 @@ def test_repository_settings_actions_remain_scrollable_on_small_terminal(
             application.screen.query_one("#save-repository", Button).focus()
             await pilot.pause(delay=0.1)
             assert content.scroll_y > 0
+
+    asyncio.run(drive())
+
+
+def test_repository_index_management_renders_independent_status_and_dispatches_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    controller.save_repository("second", "second", True, [])
+    statuses = {
+        "example": RepositoryIndexStatus(
+            strategy="qdrant",
+            state=IndexLifecycleState.READY,
+            last_successful_indexed_at="2026-09-13T12:00:00+00:00",
+            document_count=2,
+            point_count=4,
+        ),
+        "second": RepositoryIndexStatus(
+            strategy="qdrant",
+            state=IndexLifecycleState.STALE,
+            last_indexed_commit="old-commit",
+        ),
+    }
+    calls: list[tuple[str, str]] = []
+
+    def index_status(repository: str) -> RepositoryIndexStatus:
+        return statuses[repository]
+
+    monkeypatch.setattr(controller, "repository_index_status", index_status)
+
+    def refresh(repository: str) -> RepositoryIndexStatus:
+        calls.append(("refresh", repository))
+        return RepositoryIndexStatus(strategy="qdrant", state=IndexLifecycleState.READY)
+
+    monkeypatch.setattr(controller, "refresh_repository_index", refresh)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 60)) as pilot:
+            await pilot.press("r")
+            await pilot.pause()
+            screen = application.screen
+            assert "READY" in str(screen.query_one("#index-status", Static).renderable)
+            assert "Documents: 2" in str(screen.query_one("#index-metadata", Static).renderable)
+
+            screen.query_one("#repository-picker", RepositorySelect).value = "second"
+            await pilot.pause()
+            assert "STALE" in str(screen.query_one("#index-status", Static).renderable)
+            screen.query_one("#refresh-index", Button).press()
+            await pilot.pause()
+            assert calls == [("refresh", "second")]
+            assert "READY" in str(screen.query_one("#index-status", Static).renderable)
 
     asyncio.run(drive())
 
