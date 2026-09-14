@@ -78,3 +78,23 @@ def test_database_defaults_to_user_state_directory_independent_of_cwd(tmp_path: 
 
     assert _database_path(resolved) == (home / ".orchestrator" / "orchestrator.db").resolve()
     assert (home / ".orchestrator").is_dir()
+
+
+def test_database_uses_global_configuration_not_a_current_directory_file(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    global_config = home / ".orchestrator" / "orchestrator.yml"
+    global_config.parent.mkdir(parents=True)
+    global_config.write_text(
+        "defaults:\n  persistence:\n    database_path: global/workflow.db\n",
+        encoding="utf-8",
+    )
+    working_directory = tmp_path / "repository"
+    working_directory.mkdir()
+    (working_directory / "orchestrator.yml").write_text(
+        "defaults:\n  persistence:\n    database_path: local/workflow.db\n",
+        encoding="utf-8",
+    )
+
+    resolved = resolve_database_url(environ={}, home=home, cwd=working_directory)
+
+    assert _database_path(resolved) == (global_config.parent / "global" / "workflow.db").resolve()

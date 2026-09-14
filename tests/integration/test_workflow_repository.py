@@ -24,7 +24,9 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     database = tmp_path / "workflow.db"
     database_url = f"sqlite:///{database.as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
-    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
 
@@ -109,7 +111,9 @@ def test_cancelled_execution_persists_across_repository_restart(tmp_path: Path) 
     project_root = Path(__file__).resolve().parents[2]
     database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
-    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
     repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
@@ -134,7 +138,9 @@ def test_human_interactions_persist_response_and_resume_state(tmp_path: Path) ->
     project_root = Path(__file__).resolve().parents[2]
     database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
-    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
     repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
@@ -163,7 +169,9 @@ def test_execution_diagnostics_are_redacted_and_available_after_repository_resta
     project_root = Path(__file__).resolve().parents[2]
     database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
-    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
     repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
@@ -191,7 +199,9 @@ def test_migration_backfills_common_identity_for_existing_trello_execution(
     project_root = Path(__file__).resolve().parents[2]
     database_url = f"sqlite:///{(tmp_path / 'legacy.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
-    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "0002")
 

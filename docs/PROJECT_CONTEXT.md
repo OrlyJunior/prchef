@@ -112,7 +112,12 @@
   the discovered global configuration, and finally `~/.orchestrator/orchestrator.db`. Relative
   explicit SQLite locations are anchored to the global configuration directory (or the user state
   directory if no configuration is discovered). Runtime and manual Alembic migrations share this
-  resolver; repository-local configuration never selects persistence.
+  resolver; repository-local configuration never selects persistence. The packaged `orchestrator`
+  console script is intended for an isolated per-user `pipx` installation: discovery considers
+  explicit CLI/environment selection and user-global configuration locations, never the cwd,
+  source checkout, or its `.venv`; packaged migration scripts support both wheel and editable
+  installs without a repository-root path. `pipx ensurepath` is the supported PATH remedy; the
+  application never alters PATH or shell profiles.
 - Runtime logs are UTC ISO-8601 timestamps on stderr. Final `run` execution JSON and all `debug`
   result JSON stay on stdout. Redact secrets before logging.
 - Execution diagnostics are persisted as JSON-safe `execution_diagnostics` rows and must be
@@ -283,9 +288,10 @@
   `repositories.<key>` entry (later wins). Repository-local `.orchestrator.yml` files are ignored
   with a warning and are never created or updated.
 - Global configuration discovery is ordered: explicit `--config`; `ORCHESTRATOR_CONFIG`,
-  `ORCHESTRATOR_CONFIG_PATH`, or legacy `ORCHESTRATOR_CONFIG_FILE`; `orchestrator.yml` in the
-  current directory and its parents; `~/.config/orchestrator/orchestrator.yml`; then
-  `~/.orchestrator/orchestrator.yml` and the installed source checkout. An explicitly selected or
+  `ORCHESTRATOR_CONFIG_PATH`, or legacy `ORCHESTRATOR_CONFIG_FILE`; then
+  `~/.config/orchestrator/orchestrator.yml` and `~/.orchestrator/orchestrator.yml`. It never
+  consults the current directory, a repository checkout, or the installed source tree. An
+  explicitly selected or
   environment-selected missing file is an error; a failed implicit search reports every path tried.
 - Repository selection comes from explicit CLI override when supplied, otherwise normalized task
   repository metadata. A registered entry supplies its local path; an unregistered override is
