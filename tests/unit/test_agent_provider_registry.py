@@ -6,6 +6,7 @@ import pytest
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import ConfigurationError, ProjectConfig
 from orchestrator.models import AgentRole
+from orchestrator.providers.claude_code_provider import ClaudeCodeAgentProvider
 from orchestrator.providers.codex_provider import CodexAgentProvider
 from orchestrator.providers.gemini_vertex_provider import GeminiVertexAgentProvider
 from orchestrator.providers.jules_provider import JulesAgentProvider
@@ -51,6 +52,29 @@ def test_resolves_named_provider_types_and_reuses_shared_instances(tmp_path: Pat
     assert isinstance(clients.agent(AgentRole.PLANNER), JulesAgentProvider)
     assert isinstance(clients.agent(AgentRole.IMPLEMENTER), CodexAgentProvider)
     assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.REVIEWER)
+
+
+def test_resolves_claude_code_provider_for_an_orchestrator_role(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        agents={
+            "planner": {"provider": "claude"},
+            "implementer": {"provider": "claude"},
+            "reviewer": {"provider": "claude"},
+        },
+        providers={
+            "claude": {
+                "type": "claude_code",
+                "executable_path": "claude",
+                "model": "claude-sonnet-test",
+            }
+        },
+    )
+
+    clients = ClientFactory(None).create(config)
+
+    assert isinstance(clients.agent(AgentRole.PLANNER), ClaudeCodeAgentProvider)
+    assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.IMPLEMENTER)
 
 
 def test_jules_instantiation_logs_its_deprecated_status(

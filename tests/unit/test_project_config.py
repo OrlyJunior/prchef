@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import (
     AgentPresetConfig,
+    ClaudeCodeProviderSettings,
     CodexCliProviderSettings,
     ConfigurationError,
     GitHubAppSettings,
@@ -62,6 +63,37 @@ def test_default_codex_config_keeps_workspace_write_sandbox(tmp_path: Path) -> N
         "workspace-write",
     ]
     assert "--approve-for-me" not in config.integrations.codex.command
+
+
+def test_claude_code_provider_configuration_and_runtime_model_override(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "agents": {
+                "planner": {"provider": "claude"},
+                "implementer": {"provider": "claude"},
+                "reviewer": {"provider": "claude"},
+            },
+            "providers": {
+                "claude": {
+                    "type": "claude_code",
+                    "executable_path": "claude",
+                    "model": "claude-sonnet-test",
+                    "timeout_seconds": 45,
+                    "max_turns": 3,
+                }
+            },
+        }
+    )
+
+    options = ClaudeCodeProviderSettings.model_validate(config.providers["claude"].model_dump())
+    assert options.permission_mode == "acceptEdits"
+    assert config.provider_runtime_capabilities("claude").supports_model
+    overridden = config.with_agent_runtime_overrides({}, {"planner": {"model": "claude-opus-test"}})
+    planner_options = ClaudeCodeProviderSettings.model_validate(
+        overridden.providers[overridden.agents.planner.provider].model_dump()
+    )
+    assert planner_options.model == "claude-opus-test"
 
 
 def test_repository_context_strategy_defaults_to_heuristic(tmp_path: Path) -> None:

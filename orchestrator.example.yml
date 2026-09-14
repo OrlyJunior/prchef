@@ -93,6 +93,14 @@ defaults:
       # Opcional: usa o modo de revisao automatica do Codex CLI.
       # Ele implica workspace-write e nao pode ser combinado com --sandbox.
       # approval_policy: approve-for-me
+    # Claude Code is a local non-interactive provider. Authenticate the `claude` CLI separately.
+    # claude:
+    #   type: claude_code
+    #   executable_path: claude
+    #   # model: claude-sonnet-4-5
+    #   timeout_seconds: 900
+    #   # permission_mode: acceptEdits  # use plan for read-only execution
+    #   # max_turns: 12
     # Requer ADC (por exemplo, `gcloud auth application-default login`), nao uma API key.
     # vertex-gemini:
     #   type: gemini-vertex

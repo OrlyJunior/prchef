@@ -3,6 +3,7 @@ from orchestrator.providers.agent_provider import (
     AgentProvider,
     AgentProviderError,
 )
+from orchestrator.providers.claude_code_provider import ClaudeCodeAgentProvider
 from orchestrator.providers.codex_provider import CodexAgentProvider
 from orchestrator.providers.gemini_vertex_provider import GeminiVertexAgentProvider
 from orchestrator.providers.jules_provider import JulesAgentProvider
@@ -14,6 +15,7 @@ __all__ = [
     "AgentProviderError",
     "AgentProviderRegistry",
     "CodexAgentProvider",
+    "ClaudeCodeAgentProvider",
     "GeminiVertexAgentProvider",
     "JulesAgentProvider",
 ]

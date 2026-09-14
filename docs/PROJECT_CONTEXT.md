@@ -69,6 +69,11 @@
 - Provider-specific commands, polling, credentials, or API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Planner/implementer/reviewer services stay provider
   neutral.
+- `claude_code` is a first-class local CLI provider. It runs `claude --print` with JSON output
+  from the exact workspace supplied by `AgentRequest`; its authentication, model, timeout,
+  permission mode, output-schema invocation, and CLI diagnostics stay behind the provider/client
+  boundary. It never enables Claude Code's dangerous permission-skip mode, and structured
+  requests use the CLI's native JSON-schema output before being mapped to `AgentResult`.
 - `AgentProvider` is the orchestrator's provider boundary. Model-routing libraries such as
   LiteLLM are implementation backends behind that boundary and must not own workflow semantics,
   persistence, scheduling, role behavior, or lifecycle state.
