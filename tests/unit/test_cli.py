@@ -99,25 +99,33 @@ def test_cli_providers_succeeds_without_configured_providers(tmp_path: Path) -> 
     assert result.stdout == ""
 
 
-def test_cli_providers_discovers_config_from_a_parent_of_an_isolated_cwd(
+def test_cli_providers_uses_global_config_from_an_isolated_cwd(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
-    for variable in (
-        "ORCHESTRATOR_CONFIG",
-        "ORCHESTRATOR_CONFIG_PATH",
-        "ORCHESTRATOR_CONFIG_FILE",
-    ):
+    for variable in ("ORCHESTRATOR_CONFIG", "ORCHESTRATOR_CONFIG_FILE"):
         monkeypatch.delenv(variable, raising=False)
     config = tmp_path / "orchestrator.yml"
     config.write_text("defaults: {}\n", encoding="utf-8")
     isolated_cwd = tmp_path / "unrelated" / "directory"
     isolated_cwd.mkdir(parents=True)
     monkeypatch.chdir(isolated_cwd)
+    monkeypatch.setenv("ORCHESTRATOR_CONFIG_PATH", str(config))
 
     result = runner.invoke(main.app, ["providers"])
 
     assert result.exit_code == 0, result.output
     assert result.stdout == "jules  jules\ncodex  codex-cli\n"
+
+
+def test_cli_help_starts_from_an_arbitrary_directory_without_configuration(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(main.app, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "Autonomous development workflow" in result.output
 
 
 def test_cli_providers_reports_config_discovery_failure(
@@ -132,6 +140,29 @@ def test_cli_providers_reports_config_discovery_failure(
 
     assert result.exit_code == 2
     assert "Global configuration not found. Searched: test paths" in result.output
+
+
+def test_cli_run_reports_missing_global_configuration_before_accessing_persistence(
+    monkeypatch: Any,
+) -> None:
+    persistence_accessed = False
+
+    def missing_config(_: Path | None) -> object:
+        raise main.ConfigurationError("Global configuration not found. Searched: test paths")
+
+    def persistence_should_not_run(_: Settings) -> object:
+        nonlocal persistence_accessed
+        persistence_accessed = True
+        return object()
+
+    monkeypatch.setattr(main, "ProjectConfigLoader", missing_config)
+    monkeypatch.setattr(main, "_migrated_repository", persistence_should_not_run)
+
+    result = runner.invoke(main.app, ["run", "--trello-card", "card-1"])
+
+    assert result.exit_code == 2
+    assert "Global configuration not found. Searched: test paths" in result.output
+    assert not persistence_accessed
 
 
 class StubWorkflowService:
@@ -181,6 +212,14 @@ def _stub_runtime(monkeypatch: Any) -> None:
     monkeypatch.setattr(main, "WorkflowService", StubWorkflowService)
     monkeypatch.setattr(main, "_repository", lambda settings: object())
     monkeypatch.setattr(main, "_apply_pending_migrations", lambda settings: None)
+    monkeypatch.setattr(
+        main,
+        "_config_loader",
+        lambda path: SimpleNamespace(
+            load_defaults=lambda: None,
+            default_task_provider=lambda: "github",
+        ),
+    )
     monkeypatch.setattr(main, "ClientFactory", lambda api_key: object())
 
 
@@ -333,9 +372,12 @@ def test_cli_respond_uses_same_execution_and_service_logic(monkeypatch: Any) -> 
     assert calls == [("execution-human", "Use the configured default.")]
 
 
-def test_cli_launches_textual_tui_after_migrations(monkeypatch: Any) -> None:
+def test_cli_launches_textual_tui_after_migrations(monkeypatch: Any, tmp_path: Path) -> None:
     _stub_runtime(monkeypatch)
     launched = False
+    config = tmp_path / "orchestrator.yml"
+    config.write_text("defaults: {}\n", encoding="utf-8")
+    monkeypatch.setattr(main, "_config_loader", lambda path: main.ProjectConfigLoader(path))
 
     class TuiApp:
         def __init__(self, controller: Any) -> None:
@@ -347,7 +389,7 @@ def test_cli_launches_textual_tui_after_migrations(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(main, "OrchestratorApp", TuiApp)
 
-    result = runner.invoke(main.app, ["tui"])
+    result = runner.invoke(main.app, ["tui", "--config", str(config)])
 
     assert result.exit_code == 0, result.output
     assert launched

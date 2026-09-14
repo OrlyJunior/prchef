@@ -1074,18 +1074,30 @@ def resolve_global_config(
     home: Path | None = None,
     installation_dir: Path | None = None,
 ) -> Path:
-    """Resolve the global configuration using the CLI's documented precedence."""
-    working_directory = (cwd or Path.cwd()).expanduser().resolve()
-    environment = os.environ if environ is None else environ
+    """Resolve the global configuration without consulting the process cwd.
 
-    def resolve_candidate(path: Path) -> Path:
+    The configuration is application state, rather than state owned by the
+    repository from which the command happens to be run.  Explicit ``--config``
+    values retain normal command-line relative-path behavior; environment
+    values and automatic discovery are anchored outside the working directory.
+    """
+    environment = os.environ if environ is None else environ
+    user_home = (home or Path.home()).expanduser().resolve()
+
+    def resolve_explicit_candidate(path: Path) -> Path:
         expanded = path.expanduser()
         if expanded.is_absolute():
             return expanded.resolve()
-        return (working_directory / expanded).resolve()
+        return ((cwd or Path.cwd()).expanduser().resolve() / expanded).resolve()
+
+    def resolve_environment_candidate(path: Path) -> Path:
+        expanded = path.expanduser()
+        if expanded.is_absolute():
+            return expanded.resolve()
+        return (user_home / expanded).resolve()
 
     if config_file is not None:
-        explicit_path = resolve_candidate(config_file)
+        explicit_path = resolve_explicit_candidate(config_file)
         if explicit_path.is_file():
             return explicit_path
         raise ConfigurationError(f"Explicit configuration file not found: {explicit_path}")
@@ -1094,26 +1106,21 @@ def resolve_global_config(
         configured = environment.get(variable)
         if not configured:
             continue
-        environment_path = resolve_candidate(Path(configured))
+        environment_path = resolve_environment_candidate(Path(configured))
         if environment_path.is_file():
             return environment_path
         raise ConfigurationError(
             f"Configuration file from {variable} not found: {environment_path}"
         )
 
+    # ``installation_dir`` remains an accepted parameter for backwards
+    # compatible callers, but a pipx environment and an editable source tree
+    # must never supply configuration implicitly.
+    del installation_dir
     candidates = [
-        directory / GLOBAL_CONFIG_FILENAME
-        for directory in (working_directory, *working_directory.parents)
+        user_home / ".config" / "orchestrator" / GLOBAL_CONFIG_FILENAME,
+        user_home / ".orchestrator" / GLOBAL_CONFIG_FILENAME,
     ]
-    user_home = (home or Path.home()).expanduser()
-    candidates.extend(
-        [
-            user_home / ".config" / "orchestrator" / GLOBAL_CONFIG_FILENAME,
-            user_home / ".orchestrator" / GLOBAL_CONFIG_FILENAME,
-        ]
-    )
-    package_root = installation_dir or Path(__file__).resolve().parents[3]
-    candidates.append(package_root / GLOBAL_CONFIG_FILENAME)
 
     searched: list[Path] = []
     for candidate in candidates:
