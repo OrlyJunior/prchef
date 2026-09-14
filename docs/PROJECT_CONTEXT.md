@@ -43,6 +43,11 @@
   repository ordering, stores validation commands as argument lists, and reports missing paths
   without preventing deliberate configuration. Removing an entry never removes its directory,
   changes Git state, or creates repository-local configuration.
+- That same dedicated Repositories screen is the index-management surface: it shows each selected
+  repository's context strategy and independent semantic-index lifecycle (`not indexed`,
+  `indexing`, `ready`, `stale`, or `failed`), last successful commit/timestamp and counts, and
+  manual build/rebuild, changed-file refresh, and clear actions. Its operations run in TUI workers;
+  the workflow launcher deliberately has no index controls.
 - The TUI launcher may select configured provider instances and role-local runtime settings
   (model, reasoning, and exposed provider generation options) for one run. These overrides are
   schema-validated in memory, never alter YAML defaults, and may give roles sharing a configured
@@ -80,6 +85,11 @@
   eligibility, full-file hashes, language/symbol/location metadata, bounded overlapping chunks,
   deterministic point IDs, incremental upsert-before-delete, and complete-block prompt budgeting.
   Private role files and the separately supplied `docs/PROJECT_CONTEXT.md` are never indexed.
+- Collection metadata retains the latest successful index timestamp and Git HEAD, plus sanitized
+  lifecycle failures. Status inspection compares the stored commit with the current HEAD (an
+  unavailable Git revision is inconclusive rather than an inspection error); a configured
+  `repository_context.fallback_to_heuristic` allows a failed semantic lookup to use the bounded
+  heuristic strategy without preventing the workflow.
 - Qdrant collection metadata records the named `dense` vector, cosine distance, index schema, and
   embedding provider/model/version/dimension; incompatibility deliberately recreates and fully
   reindexes the collection. Sparse/hybrid retrieval is not implemented, but the named vector and

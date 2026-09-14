@@ -6,12 +6,14 @@ import shlex
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
+from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus, Resize
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Input, Static
 
+from orchestrator.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
 from orchestrator.tui.bridge import WorkflowController
 from orchestrator.tui.widgets import (
     OrchestratorSelect,
@@ -108,21 +110,23 @@ class RepositorySettingsScreen(Screen[None]):
         width: 100%;
     }
     #repository-path-warning { color: $warning; }
-    #repository-errors { color: $error; }
-    #validation-command-actions, #repository-actions {
+    #repository-errors, #index-errors { color: $error; }
+    #validation-command-actions, #repository-actions, #index-actions {
         height: auto;
         margin-top: 1;
     }
-    #validation-command-actions Button, #repository-actions Button {
+    #validation-command-actions Button, #repository-actions Button, #index-actions Button {
         width: auto;
         margin-right: 1;
     }
     RepositorySettingsScreen.-narrow #validation-command-actions,
-    RepositorySettingsScreen.-narrow #repository-actions {
+    RepositorySettingsScreen.-narrow #repository-actions,
+    RepositorySettingsScreen.-narrow #index-actions {
         layout: vertical;
     }
     RepositorySettingsScreen.-narrow #validation-command-actions Button,
-    RepositorySettingsScreen.-narrow #repository-actions Button {
+    RepositorySettingsScreen.-narrow #repository-actions Button,
+    RepositorySettingsScreen.-narrow #index-actions Button {
         width: 100%;
         margin: 0 0 1 0;
     }
@@ -135,6 +139,7 @@ class RepositorySettingsScreen(Screen[None]):
         self._creating_repository = False
         self._commands: list[list[str]] = []
         self._selected_command: int | None = None
+        self._index_status_token = 0
 
     @property
     def controller(self) -> WorkflowController:
@@ -169,6 +174,15 @@ class RepositorySettingsScreen(Screen[None]):
                         value=True,
                         id="repository-auto-detect",
                     )
+                    yield Static("Index management", classes="field-label")
+                    yield Static("Context strategy: checking…", id="index-context-strategy")
+                    yield Static("Index status: checking…", id="index-status")
+                    yield Static("", id="index-metadata")
+                    yield Static("", id="index-errors")
+                    with Horizontal(id="index-actions"):
+                        yield Button("Build / Rebuild", id="build-index")
+                        yield Button("Refresh changed files", id="refresh-index")
+                        yield Button("Clear index", variant="error", id="clear-index")
                     yield Static("Validation commands", classes="field-label")
                     yield Static(
                         "Commands the orchestrator runs to verify changes before commit/PR. "
@@ -256,6 +270,9 @@ class RepositorySettingsScreen(Screen[None]):
             "remove-validation-command": self._remove_command,
             "move-validation-command-up": lambda: self._move_command(-1),
             "move-validation-command-down": lambda: self._move_command(1),
+            "build-index": lambda: self._start_index_action("build"),
+            "refresh-index": lambda: self._start_index_action("refresh"),
+            "clear-index": lambda: self._start_index_action("clear"),
         }
         action = actions.get(event.button.id or "")
         if action is not None:
@@ -299,6 +316,7 @@ class RepositorySettingsScreen(Screen[None]):
         self.query_one("#delete-repository", Button).disabled = False
         self._error("")
         self._update_path_warning(settings.path)
+        self._load_index_status(repository)
         self._status(f"Editing repository {repository!r}.")
 
     def _new_repository(self) -> None:
@@ -311,6 +329,14 @@ class RepositorySettingsScreen(Screen[None]):
         self.query_one("#repository-auto-detect", Checkbox).value = True
         self.query_one("#validation-command-input", Input).value = ""
         self.query_one("#delete-repository", Button).disabled = True
+        self._index_status_token += 1
+        self._render_index_status(
+            RepositoryIndexStatus(
+                strategy="unavailable",
+                state=IndexLifecycleState.NOT_INDEXED,
+                error_message="Save this repository before managing an index.",
+            )
+        )
         self._refresh_command_list()
         self._error("")
         self._status("Enter repository settings, then save.")
@@ -387,6 +413,104 @@ class RepositorySettingsScreen(Screen[None]):
         selector.set_options(options, allow_blank=True)
         if selected is not None:
             selector.value = selected
+
+    def _load_index_status(self, repository: str) -> None:
+        self._index_status_token += 1
+        token = self._index_status_token
+        self.query_one("#index-context-strategy", Static).update("Context strategy: checking…")
+        self.query_one("#index-status", Static).update("Index status: checking…")
+        self.query_one("#index-metadata", Static).update("")
+        self.query_one("#index-errors", Static).update("")
+        self._set_index_buttons_disabled(True)
+        self._fetch_index_status(repository, token)
+
+    @work(thread=True, exclusive=True)
+    def _fetch_index_status(self, repository: str, token: int) -> None:
+        try:
+            status = self.controller.repository_index_status(repository)
+        except Exception as exc:
+            status = RepositoryIndexStatus(
+                strategy="qdrant",
+                state=IndexLifecycleState.FAILED,
+                error_message=f"Could not inspect the semantic index: {exc}",
+            )
+        self.app.call_from_thread(self._receive_index_status, repository, token, status)
+
+    def _receive_index_status(
+        self, repository: str, token: int, status: RepositoryIndexStatus
+    ) -> None:
+        if token != self._index_status_token or repository != self._editing_key:
+            return
+        self._render_index_status(status)
+
+    def _render_index_status(self, status: RepositoryIndexStatus) -> None:
+        strategy_label = status.strategy.replace("_", " ").title()
+        state_label = status.state.value.replace("_", " ").upper()
+        self.query_one("#index-context-strategy", Static).update(
+            f"Context strategy: {strategy_label}"
+        )
+        self.query_one("#index-status", Static).update(f"Index status: {state_label}")
+        details: list[str] = []
+        if status.last_successful_indexed_at:
+            details.append(f"Last successful index: {status.last_successful_indexed_at}")
+        if status.last_indexed_commit:
+            details.append(f"Commit: {status.last_indexed_commit}")
+        if status.document_count is not None:
+            details.append(f"Documents: {status.document_count}")
+        if status.point_count is not None:
+            details.append(f"Chunks: {status.point_count}")
+        self.query_one("#index-metadata", Static).update(" • ".join(details))
+        self.query_one("#index-errors", Static).update(status.error_message or "")
+        self._set_index_buttons_disabled(
+            self._editing_key is None
+            or status.strategy != "qdrant"
+            or status.state is IndexLifecycleState.INDEXING
+        )
+
+    def _set_index_buttons_disabled(self, disabled: bool) -> None:
+        for button_id in ("#build-index", "#refresh-index", "#clear-index"):
+            self.query_one(button_id, Button).disabled = disabled
+
+    def _start_index_action(self, action: str) -> None:
+        repository = self._editing_key
+        if repository is None:
+            self._error("Save this repository before managing an index.")
+            return
+        self._render_index_status(
+            RepositoryIndexStatus(strategy="qdrant", state=IndexLifecycleState.INDEXING)
+        )
+        self._run_index_action(repository, action)
+
+    @work(thread=True, exclusive=True)
+    def _run_index_action(self, repository: str, action: str) -> None:
+        try:
+            methods = {
+                "build": self.controller.build_repository_index,
+                "refresh": self.controller.refresh_repository_index,
+                "clear": self.controller.clear_repository_index,
+            }
+            status = methods[action](repository)
+        except Exception as exc:
+            self.app.call_from_thread(self._index_action_failed, repository, str(exc))
+            return
+        self.app.call_from_thread(self._index_action_finished, repository, status)
+
+    def _index_action_finished(self, repository: str, status: RepositoryIndexStatus) -> None:
+        if repository != self._editing_key:
+            return
+        self._render_index_status(status)
+        self._status(f"Index operation completed for {repository!r}.")
+
+    def _index_action_failed(self, repository: str, message: str) -> None:
+        if repository != self._editing_key:
+            return
+        self._render_index_status(
+            RepositoryIndexStatus(
+                strategy="qdrant",
+                state=IndexLifecycleState.FAILED,
+                error_message=message or "Semantic index operation failed.",
+            )
+        )
 
     def _save_repository(self) -> None:
         key = self.query_one("#repository-key", Input).value.strip()
