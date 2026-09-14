@@ -76,19 +76,78 @@ um aviso de deprecação; prefira LiteLLM para chamadas de modelo e Codex CLI pa
 
 ## Instalacao
 
+Instale a CLI isoladamente com [pipx](https://pipx.pypa.io/). Isso cria um ambiente virtual
+gerenciado pelo pipx, mas disponibiliza o comando `orchestrator` para o seu usuario, sem ativar
+uma `.venv` do projeto:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install autonomous-dev-orchestrator
-cp .env.example .env       # Windows: Copy-Item .env.example .env
-cp orchestrator.example.yml orchestrator.yml
+pipx install autonomous-dev-orchestrator
+pipx ensurepath
 ```
 
-Para contribuir no projeto, instale as ferramentas de desenvolvimento com
+Quando a distribuicao for fornecida como wheel ou diretorio-fonte, substitua o nome do pacote pelo
+caminho recebido, por exemplo `pipx install C:\Downloads\autonomous_dev_orchestrator-0.1.0-py3-none-any.whl`.
+
+Feche e abra o terminal depois de `pipx ensurepath`, entao valide fora de qualquer checkout:
+
+```bash
+orchestrator --help
+orchestrator tui
+```
+
+O arquivo de configuracao global e descoberto em `~/.config/orchestrator/orchestrator.yml` ou,
+como alternativa compativel, em `~/.orchestrator/orchestrator.yml` (no Windows,
+`$HOME\.orchestrator\orchestrator.yml`). Salve a configuracao e os caminhos dos repositorios em
+uma dessas localizacoes; o `orchestrator.example.yml` e um ponto de partida. Caminhos relativos de
+repositorios, banco e Qdrant no YAML sao ancorados ao diretorio desse arquivo global, nunca ao
+diretorio em que o comando foi iniciado. Para selecionar outro arquivo global, defina
+`ORCHESTRATOR_CONFIG_PATH` como um caminho absoluto ou use `--config` explicitamente.
+
+Credenciais devem ser variaveis de ambiente. Como conveniencia, o aplicativo tambem le
+`~/.orchestrator/.env`; ele nao le `.env` do checkout ou do diretorio atual. Voce pode copiar
+`.env.example` para essa localizacao e preencher apenas as credenciais necessarias.
+
+### Desenvolvimento com instalacao editavel
+
+Contribuidores podem manter o mesmo comando global apontando para o clone atual:
+
+```powershell
+pipx install --editable C:\Git\agents-orchestrator
+pipx ensurepath
+```
+
+Em macOS/Linux, use o caminho do clone, por exemplo
+`pipx install --editable ~/src/agents-orchestrator`. Alteracoes em `src/` passam a ser usadas
+imediatamente. Se mudar dependencias ou metadados de empacotamento, atualize o ambiente pipx:
+
+```bash
+pipx reinstall autonomous-dev-orchestrator
+```
+
+### Atualizacao, desinstalacao e PATH
+
+Para uma instalacao publicada, execute `pipx upgrade autonomous-dev-orchestrator`. Para uma
+instalacao a partir de clone ou wheel, repita `pipx install` com a origem desejada ou use
+`pipx reinstall autonomous-dev-orchestrator`.
+
+O pipx informa ao final da instalacao quando o diretorio de binarios dele nao esta no `PATH`.
+Trate esse aviso como bloqueante: rode `pipx ensurepath`, abra um novo terminal e confira
+`Get-Command orchestrator` no PowerShell ou `command -v orchestrator` em shells POSIX. No Windows,
+o diretorio normalmente e `%USERPROFILE%\.local\bin`; nao adicione
+`.venv\Scripts` do checkout ao `PATH`. O orquestrador nao altera PATH, perfis de shell ou
+configuracoes de sistema.
+
+Remova a CLI e seu ambiente isolado com:
+
+```bash
+pipx uninstall autonomous-dev-orchestrator
+```
+
+Para executar testes e ferramentas de desenvolvimento no clone, instale o extra de desenvolvimento com
 `python -m pip install -e ".[dev]"`. LiteLLM já faz parte das dependências principais; não há
 extra `litellm` para instalar.
 
-Edite `.env` e `orchestrator.yml`. Para Trello, o card deve possuir um custom field chamado
+Edite o `orchestrator.yml` global. Para Trello, o card deve possuir um custom field chamado
 `Repository` (ou `Repo`) cujo valor corresponda a uma chave em `repositories`; `--repository`
 continua podendo sobrescrevê-lo. Para GitHub Issues, informe `--repository owner/repo` e use essa
 mesma chave no registro `repositories` para associá-la ao checkout local. Antes da primeira
@@ -146,7 +205,7 @@ e nunca alteram arquivos do checkout.
 
 No startup, os comandos da CLI aplicam automaticamente todas as migrations pendentes antes de
 acessar o banco. Se uma migration falhar, o comando aborta com erro claro. O Alembic le
-`ORCHESTRATOR_DATABASE_URL` do ambiente ou do arquivo `.env`.
+`ORCHESTRATOR_DATABASE_URL` do ambiente ou de `~/.orchestrator/.env`.
 
 O comando manual continua disponível para provisionamento e diagnóstico:
 
@@ -302,7 +361,9 @@ mudanças no próprio PR, então use uma identidade de App separada quando neces
 
 ## Configuracao por repositorio
 
-O `orchestrator.yml` e a unica fonte persistente de configuracao. Os defaults sao mesclados com a
+O `orchestrator.yml` global e a unica fonte persistente de configuracao. Ele e descoberto em
+`~/.config/orchestrator/orchestrator.yml` ou `~/.orchestrator/orchestrator.yml`, sem procurar no
+checkout nem no diretorio atual. Os defaults sao mesclados com a
 entrada correspondente em `repositories.<owner/repository>`; `.orchestrator.yml` no repositorio e
 ignorado com um aviso. Exemplo:
 

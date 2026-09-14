@@ -6,7 +6,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # A repository-local .env would make a pipx-installed command behave
+        # differently for every working directory.  Keep optional dotenv
+        # credentials in the same user-global state directory as persistence.
+        env_file=Path.home() / ".orchestrator" / ".env",
         env_prefix="ORCHESTRATOR_",
         extra="ignore",
     )
