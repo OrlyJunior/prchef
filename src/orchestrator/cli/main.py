@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -123,11 +124,13 @@ def _database_url(settings: Settings) -> str:
 
 def _apply_pending_migrations(settings: Settings) -> None:
     try:
-        project_root = Path(__file__).resolve().parents[3]
-        alembic_config = Config(str(project_root / "alembic.ini"))
-        alembic_config.set_main_option("script_location", str(project_root / "migrations"))
-        alembic_config.set_main_option("sqlalchemy.url", _database_url(settings))
-        command.upgrade(alembic_config, "head")
+        # Migration scripts are package resources so normal wheels and pipx
+        # editable installations do not depend on a repository checkout.
+        with as_file(files("orchestrator.migrations")) as migrations_directory:
+            alembic_config = Config()
+            alembic_config.set_main_option("script_location", str(migrations_directory))
+            alembic_config.set_main_option("sqlalchemy.url", _database_url(settings))
+            command.upgrade(alembic_config, "head")
     except Exception as exc:
         raise MigrationError(f"Could not apply pending database migrations: {exc}") from exc
 
@@ -351,13 +354,18 @@ def tui(
     if config is not None:
         settings.config_file = config
     configure_logging(verbose=verbose, configured_level=settings.log_level)
+    config_loader = _config_loader(settings.config_file)
+    try:
+        config_loader.load_defaults()
+    except ConfigurationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
     try:
         application_type = _orchestrator_app_type()
     except TextualDependencyError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     workflow_repository = _migrated_repository(settings)
-    config_loader = _config_loader(settings.config_file)
     controller = WorkflowController(
         workflow_repository=workflow_repository,
         config_loader=config_loader,
@@ -400,8 +408,13 @@ def run(
     if config is not None:
         settings.config_file = config
     configure_logging(verbose=verbose, configured_level=settings.log_level)
-    workflow_repository = _migrated_repository(settings)
     config_loader = _config_loader(settings.config_file)
+    try:
+        config_loader.load_defaults()
+    except ConfigurationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    workflow_repository = _migrated_repository(settings)
     selected_id, provider = _task_provider(
         settings=settings,
         config_loader=config_loader,

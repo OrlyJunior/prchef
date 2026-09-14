@@ -3,7 +3,6 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from dotenv import load_dotenv
 from sqlalchemy import engine_from_config, pool
 
 from orchestrator.config.database import Base, resolve_database_url
@@ -11,11 +10,11 @@ from orchestrator.repositories import orm_models  # noqa: F401
 
 config = context.config
 
-load_dotenv()
 # ``sqlalchemy.url`` is populated by the application for programmatic runs.
 # Manual Alembic commands leave it blank, in which case this uses the exact
 # same global resolver as the application instead of the process cwd.
-if not config.get_main_option("sqlalchemy.url").strip():
+sqlalchemy_url = config.get_main_option("sqlalchemy.url") or ""
+if not sqlalchemy_url.strip():
     config.set_main_option("sqlalchemy.url", resolve_database_url())
 
 if config.config_file_name is not None:
