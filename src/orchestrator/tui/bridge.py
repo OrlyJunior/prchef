@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from orchestrator.config.project_config import (
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
+from orchestrator.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
 from orchestrator.models.workflow_event import (
     WorkflowEvent,
     WorkflowEventKind,
@@ -35,6 +37,7 @@ from orchestrator.services.project_context import (
     load_implementer_instructions,
     load_reviewer_instructions,
 )
+from orchestrator.services.repository_context import resolve_repository_context_strategy
 from orchestrator.services.task_provider import TaskProvider
 from orchestrator.services.workflow_service import WorkflowService
 
@@ -82,6 +85,8 @@ class WorkflowController:
         self._workflow_service_factory = workflow_service_factory
         self._selected_repository: str | None = None
         self._active_services: dict[str, WorkflowService] = {}
+        self._index_operations: set[str] = set()
+        self._index_operation_lock = threading.RLock()
 
     def repositories(self) -> list[ConfiguredRepository]:
         repositories = self._config_loader.list_repositories()
@@ -228,6 +233,80 @@ class WorkflowController:
         """Load the repository fields supported by the dedicated settings screen."""
 
         return self._config_loader.repository_settings(repository)
+
+    def repository_index_status(self, repository: str) -> RepositoryIndexStatus:
+        """Return a repository-scoped index status without starting a workflow."""
+
+        config = self.project_config(repository)
+        if config.repository_context.strategy == "heuristic":
+            status = RepositoryIndexStatus(
+                strategy="heuristic",
+                state=IndexLifecycleState.READY,
+            )
+        else:
+            strategy = resolve_repository_context_strategy(
+                config.repository_context.strategy,
+                settings=config.repository_context,
+                repository_key=config.configured_repository_key,
+                configured_root=config.path,
+            )
+            inspect = getattr(strategy, "inspect_index", None)
+            if not callable(inspect):
+                raise ValueError(
+                    f"Repository context strategy {config.repository_context.strategy!r} "
+                    "does not expose index lifecycle management"
+                )
+            status = inspect()
+        with self._index_operation_lock:
+            if repository in self._index_operations:
+                return replace(status, state=IndexLifecycleState.INDEXING, error_message=None)
+        return status
+
+    def build_repository_index(self, repository: str) -> RepositoryIndexStatus:
+        """Build or rebuild one configured repository's semantic index."""
+
+        return self._run_repository_index_operation(repository, "build_index")
+
+    def refresh_repository_index(self, repository: str) -> RepositoryIndexStatus:
+        """Synchronize changed files for one configured repository index."""
+
+        return self._run_repository_index_operation(repository, "refresh_changed_files")
+
+    def clear_repository_index(self, repository: str) -> RepositoryIndexStatus:
+        """Drop one configured repository's semantic collection."""
+
+        return self._run_repository_index_operation(repository, "clear_index")
+
+    def _run_repository_index_operation(
+        self, repository: str, operation: str
+    ) -> RepositoryIndexStatus:
+        config = self.project_config(repository)
+        if config.repository_context.strategy != "qdrant":
+            raise ValueError(
+                "Semantic index actions require repository_context.strategy: qdrant; "
+                "heuristic context is already available without an index."
+            )
+        with self._index_operation_lock:
+            if repository in self._index_operations:
+                raise RuntimeError(f"An index operation is already running for {repository!r}")
+            self._index_operations.add(repository)
+        try:
+            strategy = resolve_repository_context_strategy(
+                config.repository_context.strategy,
+                settings=config.repository_context,
+                repository_key=config.configured_repository_key,
+                configured_root=config.path,
+            )
+            action = getattr(strategy, operation, None)
+            if not callable(action):
+                raise ValueError("The configured context strategy cannot manage an index")
+            result = action()
+            if isinstance(result, RepositoryIndexStatus):
+                return result
+            raise ValueError("The configured context strategy returned an invalid index status")
+        finally:
+            with self._index_operation_lock:
+                self._index_operations.discard(repository)
 
     def resolve_repository_path(self, path: str) -> Path:
         """Resolve an editor path exactly as normal configuration loading will."""
