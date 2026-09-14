@@ -254,6 +254,26 @@ class RepositoryContextStrategy(Protocol):
         ...
 
 
+class RepositoryIndexLifecycle(Protocol):
+    """Optional management boundary implemented by index-backed strategies."""
+
+    def inspect_index(self) -> Any:
+        """Return the current index lifecycle status."""
+        ...
+
+    def build_index(self) -> Any:
+        """Build a fresh index for the configured repository root."""
+        ...
+
+    def refresh_changed_files(self) -> Any:
+        """Synchronize changed and deleted files without a full rebuild."""
+        ...
+
+    def clear_index(self) -> Any:
+        """Drop the configured repository's index."""
+        ...
+
+
 class RepositoryContextStrategyError(ValueError):
     """Raised when a configured repository context strategy cannot be resolved."""
 
