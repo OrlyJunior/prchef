@@ -5,7 +5,7 @@
 - `models`: dataclasses e enums do dominio, sem dependencias de infraestrutura.
 - `services`: providers de task, prompts, parsing de resultados, validacao, debug isolado e maquina de workflow.
 - `providers`: contrato comum de agentes, adaptadores e registry explicito por tipo.
-- `clients`: Trello HTTP, GitHub Issues/PRs via `gh`, API de sessoes Jules, Codex e Git.
+- `clients`: Trello HTTP, GitHub Issues/PRs via `gh`, API de sessoes Jules, Codex, Claude Code e Git.
 - `repositories`: entidades SQLAlchemy, serializacao e `WorkflowRepository`.
 - `config`: settings de ambiente, merge YAML e fabrica de sessoes.
 - `cli`: composicao das dependencias e interface Typer.
@@ -51,7 +51,8 @@ ha migration. `docs/PROJECT_CONTEXT.md` continua sendo carregado separadamente e
 6. Ambiguidade bloqueante encerra em `NEEDS_HUMAN`.
 7. Git cria uma branch nova a partir da branch base, recusando qualquer branch protegida.
 8. O provider associado a `agents.implementer` recebe a task original e a spec, e trabalha apenas
-   nessa branch. O adaptador Codex preserva o sandbox e o subprocesso existentes.
+   nessa branch. Adaptadores locais como Codex e Claude Code recebem somente o worktree criado pelo
+   orquestrador; eles nao criam branches, commits, pushes ou PRs.
 9. Validacoes configuradas/detectadas rodam antes de commit e push.
 10. Git cria commit e push; o `gh` autenticado cria o PR; o provider associado a
     `agents.reviewer` revisa task, spec, diff, PR e checks.
@@ -76,7 +77,7 @@ Spec/Implementation/Review service
 AgentProvider.execute(AgentRequest) -> AgentResult
               |
               v
-JulesClient (REST/polling), CodexClient (CLI/subprocesso), Gemini Vertex ou LiteLLM (SDK/API)
+JulesClient (REST/polling), CodexClient/ClaudeCodeClient (CLI/subprocesso), Gemini Vertex ou LiteLLM (SDK/API)
 ```
 
 O papel define as instrucoes e a expectativa de output estruturado. O provider resolve o mecanismo
@@ -86,6 +87,18 @@ providers de GitHub/Trello continuam sendo um dominio separado.
 O provider `codex-cli` recebe `model` e `reasoning_effort` somente na sua propria configuracao e
 os traduz para argumentos da CLI. Os services continuam conhecendo apenas `AgentProvider`; eles nao
 selecionam modelo, esforco de raciocinio ou fallback de runtime.
+
+O provider `claude-code` usa `claude --print --output-format json` no worktree recebido, por padrao
+com `--bare` e `permission_mode: plan`. Sua configuracao permite apenas o executavel, modelo,
+modo de permissao seguro (`default`, `plan` ou `acceptEdits`), limites de turnos/custo, timeout e
+bare mode; nunca aceita diretorios extras, retoma sessoes ou habilita bypass de permissoes. Para
+JSON estruturado, ele passa o schema de `StructuredOutputExpectation` por `--json-schema`, le
+`structured_output` do envelope e valida o objeto antes de devolver `AgentResult`. Autenticacao e
+externa: no bare mode a CLI requer `ANTHROPIC_API_KEY` (ou credenciais de runtime equivalentes); o
+orquestrador nunca armazena valores de credenciais. O `session_id` e apenas metadado diagnostico
+apos o subprocesso terminar; nao ha retomada automatica de sessao. A versao minima suportada e
+Claude Code 2.1.259, pois a invocacao usa `--permission-prompts none`; flags ausentes recebem um
+erro de runtime orientando a atualizacao.
 
 O adapter `gemini-vertex` traduz `StructuredOutputExpectation` para `application/json` e
 `response_json_schema` nativos do `google-genai`. Tipos e excecoes do SDK permanecem dentro do

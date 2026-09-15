@@ -49,6 +49,11 @@ defaults:
       provider: codex
     reviewer:
       provider: cloud-api
+    # To use Claude Code for read-only planning/review, select claude-plan for
+    # planner and reviewer. Select claude-edit only for deliberate mutable work.
+    # planner: {provider: claude-plan}
+    # implementer: {provider: claude-edit}
+    # reviewer: {provider: claude-plan}
     # Exemplo optional de Vertex AI: a mesma instancia pode atender planner e reviewer.
     # planner:
     #   provider: vertex-gemini
@@ -93,6 +98,27 @@ defaults:
       # Opcional: usa o modo de revisao automatica do Codex CLI.
       # Ele implica workspace-write e nao pode ser combinado com --sandbox.
       # approval_policy: approve-for-me
+    # Claude Code always receives the orchestrator-supplied workspace as cwd
+    # and never owns Git, commits, pushes, PRs, or review publication.
+    # Bare mode avoids project/user hooks, MCP, plugins and CLAUDE.md discovery.
+    # It requires ANTHROPIC_API_KEY (or another supported runtime credential).
+    # claude-plan:
+    #   type: claude-code
+    #   command: [claude]
+    #   model: sonnet
+    #   permission_mode: plan
+    #   bare: true
+    #   max_turns: 8
+    #   timeout_seconds: 900
+    # Use a separately named mutable provider deliberately; roles do not infer
+    # permissions. Never use bypassPermissions or dangerous CLI flags.
+    # claude-edit:
+    #   type: claude-code
+    #   command: [claude]
+    #   model: sonnet
+    #   permission_mode: acceptEdits
+    #   bare: true
+    #   timeout_seconds: 1800
     # Requer ADC (por exemplo, `gcloud auth application-default login`), nao uma API key.
     # vertex-gemini:
     #   type: gemini-vertex

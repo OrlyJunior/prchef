@@ -405,13 +405,14 @@ Task providers suportados:
 - `github`: executa `gh issue view` com a autenticação já ativa no GitHub CLI.
 
 Agent providers sao instancias nomeadas em `providers`, dos tipos `litellm`, `codex-cli`,
-`gemini-vertex` e `jules`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
+`claude-code`, `gemini-vertex` e `jules`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
 do workflow a essas instancias. Mais de um papel pode reutilizar a mesma instancia, ou cada papel
 pode apontar para uma configuracao diferente do mesmo tipo. Opcoes de runtime/modelo permanecem
 dentro da instancia do provider.
 
 | Backend | Status | Uso |
 | --- | --- | --- |
+| `claude-code` | primeira classe | Claude Code em print mode no worktree local. |
 | `litellm` | primeira classe | APIs de modelos cloud, locais e self-hosted compatíveis; instalado normalmente. |
 | `codex-cli` | primeira classe | agente especializado de implementação no worktree local. |
 | `gemini-vertex` | opcional | integração especializada com Vertex AI/ADC. |
@@ -423,6 +424,20 @@ configuracoes legadas. Quando ausentes, a execucao usa o default externo da Code
 verbose mostra `<external-default>`. Prefira fixa-los para controle de reproducibilidade, quota e
 custo. Em comandos customizados, o orquestrador injeta cada opcao apenas se a flag correspondente
 nao existir; uma flag existente com valor diferente e rejeitada antes do subprocesso.
+
+`claude-code` executa somente no `workspace_path` recebido pelo `AgentRequest`; o provider nao
+cria branch, commit, push, PR ou review. A configuracao aceita o caminho do executavel (`command`
+com um unico item), `model`, `permission_mode` (`plan`, `default` ou `acceptEdits`), `max_turns`,
+`max_budget_usd`, `timeout_seconds` e `bare`. O default e `bare: true` e `permission_mode: plan`;
+esse modo evita hooks, MCP, plugins e configuracao descoberta, mas requer `ANTHROPIC_API_KEY` (ou
+credenciais equivalentes do runtime) em vez do login da assinatura. Nunca configure
+`--dangerously-skip-permissions`: ele e rejeitado pelo schema. Requests estruturados usam
+`--json-schema` e o campo nativo `structured_output`; o provider tambem valida o objeto antes de
+devolve-lo ao workflow. IDs de sessao so ficam como diagnostico apos a conclusao do subprocesso;
+o orquestrador nao retoma sessoes Claude automaticamente. Para verificar credenciais sem efeitos
+de Git/PR, configure um provider read-only e execute `orchestrator debug --stage spec-generation`.
+O provider requer Claude Code 2.1.259 ou mais recente; uma flag nao suportada gera um diagnostico
+de runtime com essa orientacao.
 
 `gemini-vertex` exige `project` e `model`; `location` tem default `global`. A autenticacao e sempre
 via ADC, nunca por API key. Quando uma etapa solicita JSON estruturado, o adapter usa

@@ -40,6 +40,18 @@ class RecordingProvider:
         return self.result
 
 
+def test_workflow_role_services_do_not_depend_on_claude_code() -> None:
+    services = Path(__file__).parents[2] / "src" / "orchestrator" / "services"
+
+    for filename in (
+        "spec_service.py",
+        "implementation_service.py",
+        "review_service.py",
+        "workflow_service.py",
+    ):
+        assert "claude" not in (services / filename).read_text(encoding="utf-8").casefold()
+
+
 class MarkerRepositoryContextStrategy:
     def __init__(self) -> None:
         self.requests: list[RepositoryContextRequest] = []

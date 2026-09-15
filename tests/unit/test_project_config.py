@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.config.project_config import (
     AgentPresetConfig,
+    ClaudeCodeProviderSettings,
     CodexCliProviderSettings,
     ConfigurationError,
     GitHubAppSettings,
@@ -869,6 +870,49 @@ def test_codex_approval_policy_accepts_approve_for_me(tmp_path: Path) -> None:
 def test_codex_approval_policy_rejects_unknown_values(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="approval_policy"):
         _config(tmp_path, {"approval_policy": "always-approve"})
+
+
+def test_claude_code_provider_configuration_and_runtime_model_override(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "agents": {
+                "planner": {"provider": "claude"},
+                "implementer": {"provider": "codex"},
+                "reviewer": {"provider": "claude"},
+            },
+            "providers": {
+                "claude": {
+                    "type": "claude-code",
+                    "command": ["C:/tools/claude.exe"],
+                    "model": "sonnet",
+                    "permission_mode": "plan",
+                    "max_turns": 5,
+                },
+                "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+            },
+        }
+    )
+
+    assert config.provider_runtime_capabilities("claude").supports_model
+    assert config.provider_runtime_values("claude") == {"model": "sonnet"}
+    overridden = config.with_agent_runtime_overrides({}, {"planner": {"model": "opus"}})
+    assert overridden.providers[overridden.agents.planner.provider].model_dump()["model"] == "opus"
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"command": ["claude", "--dangerously-skip-permissions"]},
+        {"command": []},
+        {"permission_mode": "bypassPermissions"},
+    ],
+)
+def test_claude_code_provider_rejects_unsafe_or_invalid_settings(
+    settings: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        ClaudeCodeProviderSettings.model_validate({"type": "claude-code", **settings})
 
 
 def test_approve_for_me_rejects_a_non_workspace_write_sandbox(tmp_path: Path) -> None:

@@ -69,6 +69,11 @@
 - Provider-specific commands, polling, credentials, or API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Planner/implementer/reviewer services stay provider
   neutral.
+- `claude-code` is a first-class local CLI provider behind that same boundary. It runs only with
+  the supplied workspace as cwd, has no Git/GitHub orchestration authority, defaults to Claude
+  Code bare print mode and a read-only `plan` permission mode, and accepts only safe provider-local
+  options. Its native JSON Schema output is translated to `StructuredOutputExpectation`; CLI
+  session IDs are diagnostic metadata only and are never resumed by the workflow.
 - `AgentProvider` is the orchestrator's provider boundary. Model-routing libraries such as
   LiteLLM are implementation backends behind that boundary and must not own workflow semantics,
   persistence, scheduling, role behavior, or lifecycle state.
