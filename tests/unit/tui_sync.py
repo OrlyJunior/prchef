@@ -9,7 +9,7 @@ screen's workers and then drain those callbacks before inspecting UI state.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from textual.css.query import NoMatches
@@ -17,15 +17,6 @@ from textual.pilot import Pilot
 from textual.worker import Worker, WorkerCancelled
 
 DEFAULT_TIMEOUT = 2.0
-
-
-def _consume_late_result(task: asyncio.Future[list[Any]]) -> None:
-    """Retrieve a timed-out wait task's result without raising from its callback."""
-
-    try:
-        task.result()
-    except BaseException:
-        pass
 
 
 def _screen_workers(pilot: Pilot[Any]) -> list[Worker[Any]]:
@@ -40,24 +31,62 @@ def _screen_workers(pilot: Pilot[Any]) -> list[Worker[Any]]:
     return [worker for worker in pilot.app.workers if worker.node is screen]
 
 
+def _was_superseded(worker: Worker[Any], workers: Sequence[Worker[Any]]) -> bool:
+    """Return whether a newer worker in the same exclusive group replaced ``worker``.
+
+    Textual does not retain the ``exclusive`` flag on a ``Worker``. Its worker
+    manager does, however, expose workers in creation order, and exclusive
+    work cancels older workers with the same node and group before adding the
+    replacement. That lets the test helper accept only this specific expected
+    cancellation, rather than treating every ``WorkerCancelled`` as settled.
+    """
+
+    try:
+        worker_index = workers.index(worker)
+    except ValueError:
+        return False
+    return any(
+        replacement.node is worker.node
+        and replacement.group == worker.group
+        and not replacement.is_cancelled
+        for replacement in workers[worker_index + 1 :]
+    )
+
+
+async def _cancel_workers(workers: Iterable[Worker[Any]]) -> None:
+    """Cancel timed-out workers and reap their Textual tasks.
+
+    Thread workers cannot be forcibly stopped by Python, but ``cancel`` sets
+    Textual's cooperative cancellation event and stops their Textual task.
+    Reaping that task avoids leaving cancelled tasks or their exceptions behind
+    after a failed test. Application worker functions must still honour the
+    cancellation event before posting a late callback from long-running work.
+    """
+
+    workers = tuple(workers)
+    for worker in workers:
+        worker.cancel()
+    await asyncio.gather(*(worker.wait() for worker in workers), return_exceptions=True)
+
+
 async def _wait_for_workers(
     workers: Iterable[Worker[Any]], *, timeout: float, description: str
 ) -> None:
-    """Wait for workers without hiding failures or cancelling them on timeout."""
+    """Wait for workers, surfacing failures and cleaning up a timeout."""
 
+    workers = tuple(workers)
     wait_task = asyncio.gather(*(worker.wait() for worker in workers), return_exceptions=True)
     try:
-        results = await asyncio.wait_for(asyncio.shield(wait_task), timeout)
+        results = await asyncio.wait_for(wait_task, timeout)
     except TimeoutError as exc:
-        # ``shield`` leaves the UI worker running. Retrieve its result later so
-        # asyncio does not report an unobserved exception while the test fails.
-        wait_task.add_done_callback(_consume_late_result)
+        await _cancel_workers(workers)
         raise AssertionError(f"Timed out waiting for {description} workers") from exc
 
-    for result in results:
+    for worker, result in zip(workers, results, strict=True):
         # Exclusive Textual workers are intentionally superseded by a newer
-        # request. All other worker failures are surfaced to the test.
-        if isinstance(result, WorkerCancelled):
+        # request. All other cancellations and failures are surfaced to the
+        # test, because their callbacks may not have updated the asserted UI.
+        if isinstance(result, WorkerCancelled) and _was_superseded(worker, workers):
             continue
         if isinstance(result, BaseException):
             raise result
