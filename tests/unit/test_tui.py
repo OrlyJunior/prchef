@@ -42,6 +42,7 @@ from orchestrator.tui.screens.repository_settings import (
 from orchestrator.tui.screens.task_selector import TaskSelector
 from orchestrator.tui.screens.workflow_runner import StopWorkflowConfirmation, WorkflowRunnerScreen
 from orchestrator.tui.widgets import OrchestratorSelect, RepositorySelect
+from tests.unit.tui_sync import settle_tui, wait_for_tui
 
 
 class _ScrollableSelectApp(App[None]):
@@ -552,7 +553,7 @@ def test_agent_instructions_navigation_uses_a_compact_distinct_control(tmp_path:
             assert navigation.size.width < application.size.width
 
             await pilot.click("#agent-instructions-button")
-            await pilot.pause()
+            await settle_tui(pilot)
             assert isinstance(application.screen, AgentInstructionsScreen)
             assert isinstance(
                 application.screen.query_one("#agent-instructions"), VerticalScroll
@@ -581,7 +582,11 @@ def test_repository_select_defers_options_until_overlay_mounts(tmp_path: Path) -
 
     async def drive() -> None:
         async with application.run_test() as pilot:
-            await pilot.pause()
+            await wait_for_tui(
+                pilot,
+                lambda: selector.value == "selected" and bool(selector._options),
+                description="RepositorySelect options and selected value",
+            )
             overlay = selector.query_one("SelectOverlay")
 
             assert selector.value == "selected"
@@ -625,7 +630,7 @@ def test_main_navigation_reflows_compact_controls_without_content_sizing(tmp_pat
             assert all(str(control.styles.width) != "1fr" for control in controls)
 
             await pilot.resize_terminal(70, 50)
-            await pilot.pause()
+            await settle_tui(pilot)
 
             assert len({control.region.y for control in controls}) > 1
             assert len({control.size.height for control in controls}) == 1
@@ -650,7 +655,7 @@ def test_workflow_runner_navigation_reflows_compact_controls(tmp_path: Path) -> 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
             application.push_screen(WorkflowRunnerScreen())
-            await pilot.pause()
+            await settle_tui(pilot)
             controls = [
                 application.screen.query_one(f"#{control_id}", Button)
                 for control_id in navigation_ids
@@ -663,7 +668,7 @@ def test_workflow_runner_navigation_reflows_compact_controls(tmp_path: Path) -> 
             assert all(str(control.styles.width) != "1fr" for control in controls)
 
             await pilot.resize_terminal(70, 50)
-            await pilot.pause()
+            await settle_tui(pilot)
 
             assert len({control.region.y for control in controls}) > 1
             assert len({control.size.height for control in controls}) == 1
@@ -689,10 +694,10 @@ def test_main_navigation_controls_keep_their_destinations(tmp_path: Path) -> Non
         async with application.run_test(size=(120, 50)) as pilot:
             for selector, expected_screen in destinations:
                 await pilot.click(selector)
-                await pilot.pause()
+                await settle_tui(pilot)
                 assert isinstance(application.screen, expected_screen)
                 await pilot.press("escape")
-                await pilot.pause()
+                await settle_tui(pilot)
 
     asyncio.run(drive())
 
@@ -706,14 +711,14 @@ def test_repository_settings_creates_repository_and_reorders_commands(
     async def drive() -> None:
         async with application.run_test(size=(120, 60)) as pilot:
             await pilot.press("r")
-            await pilot.pause()
+            await settle_tui(pilot)
             assert isinstance(application.screen, RepositorySettingsScreen)
             screen = application.screen
 
             await pilot.click("#add-repository")
             screen.query_one("#repository-key", Input).value = "owner/new-repository"
             screen.query_one("#repository-path", Input).value = "missing/repository"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert "does not currently exist" in str(
                 screen.query_one("#repository-path-warning", Static).renderable
             )
@@ -721,21 +726,21 @@ def test_repository_settings_creates_repository_and_reorders_commands(
             command = screen.query_one("#validation-command-input", Input)
             command.value = "python -m pytest"
             await pilot.click("#add-validation-command")
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen._commands == [["python", "-m", "pytest"]]
             command.value = "python -m mypy 'src/orchestrator package'"
             screen.query_one("#add-validation-command", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen._commands == [
                 ["python", "-m", "pytest"],
                 ["python", "-m", "mypy", "src/orchestrator package"],
             ]
             screen.query_one("#validation-command-list", OrchestratorSelect).value = 1
-            await pilot.pause()
+            await settle_tui(pilot)
             screen.query_one("#move-validation-command-up", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             screen.query_one("#save-repository", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
 
             settings = controller.repository_settings("owner/new-repository")
             assert settings.commands == [
@@ -745,11 +750,11 @@ def test_repository_settings_creates_repository_and_reorders_commands(
             assert controller.selected_repository == "owner/new-repository"
 
             screen.query_one("#add-repository", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             screen.query_one("#repository-key", Input).value = "example"
             screen.query_one("#repository-path", Input).value = str(tmp_path)
             screen.query_one("#save-repository", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert "already configured" in str(
                 screen.query_one("#repository-errors", Static).renderable
             )
@@ -766,18 +771,37 @@ def test_repository_deletion_requires_confirmation_and_leaves_path(
     async def drive() -> None:
         async with application.run_test(size=(100, 45)) as pilot:
             await pilot.press("r")
-            await pilot.pause()
+            await wait_for_tui(
+                pilot,
+                lambda: isinstance(application.screen, RepositorySettingsScreen),
+                description="repository settings screen",
+            )
             application.screen.query_one("#delete-repository", Button).press()
-            await pilot.pause()
-            assert isinstance(application.screen, DeleteRepositoryConfirmation)
+            await wait_for_tui(
+                pilot,
+                lambda: isinstance(application.screen, DeleteRepositoryConfirmation),
+                description="repository deletion confirmation",
+            )
             application.screen.query_one("#cancel-delete", Button).press()
-            await pilot.pause()
+            await wait_for_tui(
+                pilot,
+                lambda: isinstance(application.screen, RepositorySettingsScreen),
+                description="repository settings after cancelling deletion",
+            )
             assert [repository.key for repository in controller.repositories()] == ["example"]
 
             application.screen.query_one("#delete-repository", Button).press()
-            await pilot.pause()
+            await wait_for_tui(
+                pilot,
+                lambda: isinstance(application.screen, DeleteRepositoryConfirmation),
+                description="repository deletion confirmation",
+            )
             application.screen.query_one("#confirm-delete", Button).press()
-            await pilot.pause()
+            await wait_for_tui(
+                pilot,
+                lambda: controller.repositories() == [],
+                description="repository configuration removal",
+            )
             assert controller.repositories() == []
             assert tmp_path.is_dir()
             assert "files were not deleted" in str(
@@ -796,13 +820,13 @@ def test_repository_settings_actions_remain_scrollable_on_small_terminal(
     async def drive() -> None:
         async with application.run_test(size=(60, 15)) as pilot:
             await pilot.press("r")
-            await pilot.pause()
+            await settle_tui(pilot)
             content = application.screen.query_one("#repository-settings", VerticalScroll)
             assert application.screen.has_class("-narrow")
             assert content.max_scroll_y > 0
 
             application.screen.query_one("#save-repository", Button).focus()
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             assert content.scroll_y > 0
 
     asyncio.run(drive())
@@ -844,16 +868,30 @@ def test_repository_index_management_renders_independent_status_and_dispatches_a
     async def drive() -> None:
         async with application.run_test(size=(120, 60)) as pilot:
             await pilot.press("r")
-            await pilot.pause()
+            await wait_for_tui(
+                pilot,
+                lambda: "READY"
+                in str(application.screen.query_one("#index-status", Static).renderable),
+                description="initial repository index status",
+            )
             screen = application.screen
             assert "READY" in str(screen.query_one("#index-status", Static).renderable)
             assert "Documents: 2" in str(screen.query_one("#index-metadata", Static).renderable)
 
             screen.query_one("#repository-picker", RepositorySelect).value = "second"
-            await pilot.pause()
+            await wait_for_tui(
+                pilot,
+                lambda: "STALE" in str(screen.query_one("#index-status", Static).renderable),
+                description="selected repository index status",
+            )
             assert "STALE" in str(screen.query_one("#index-status", Static).renderable)
             screen.query_one("#refresh-index", Button).press()
-            await pilot.pause()
+            await wait_for_tui(
+                pilot,
+                lambda: calls == [("refresh", "second")]
+                and "READY" in str(screen.query_one("#index-status", Static).renderable),
+                description="repository index refresh result",
+            )
             assert calls == [("refresh", "second")]
             assert "READY" in str(screen.query_one("#index-status", Static).renderable)
 
@@ -869,22 +907,22 @@ def test_workflow_repository_selector_refreshes_after_repository_settings_save(
     async def drive() -> None:
         async with application.run_test(size=(120, 60)) as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             workflow = application.screen
             workflow.query_one("#workflow-repositories", Button).press()
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             settings = application.screen
             assert isinstance(settings, RepositorySettingsScreen)
 
             settings.query_one("#add-repository", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert settings._editing_key is None
             settings.query_one("#repository-key", Input).value = "new"
             settings.query_one("#repository-path", Input).value = "new-path"
             settings.query_one("#save-repository", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             await pilot.press("escape")
-            await pilot.pause()
+            await settle_tui(pilot)
 
             assert application.screen is workflow
             repository = workflow.query_one("#repository", RepositorySelect)
@@ -906,10 +944,17 @@ def test_tui_buttons_activate_on_initial_click(tmp_path: Path) -> None:
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
             await pilot.click("#new-workflow")
-            assert isinstance(application.screen, WorkflowRunnerScreen)
-            await pilot.pause()
+            await wait_for_tui(
+                pilot,
+                lambda: isinstance(application.screen, WorkflowRunnerScreen),
+                description="workflow runner after first click",
+            )
             await pilot.click("#workflow-history")
-            assert isinstance(application.screen, ExecutionHistoryScreen)
+            await wait_for_tui(
+                pilot,
+                lambda: isinstance(application.screen, ExecutionHistoryScreen),
+                description="workflow history after first click",
+            )
 
     asyncio.run(drive())
 
@@ -921,7 +966,7 @@ def test_select_opens_on_first_click_and_restores_focus_when_closed(tmp_path: Pa
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             select = screen.query_one("#repository", Select)
             await pilot.click("#repository")
@@ -942,12 +987,12 @@ def test_orchestrator_select_keeps_overlay_visible_in_scrolled_viewport() -> Non
         async with application.run_test(size=(80, 10)) as pilot:
             content = application.query_one("#select-viewport", VerticalScroll)
             select = application.query_one("#viewport-select", OrchestratorSelect)
-            await pilot.pause()
+            await settle_tui(pilot)
             assert content.max_scroll_y > 0
 
             before_open = content.scroll_y
             await pilot.click("#viewport-select")
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             overlay = select.query_one("SelectOverlay")
             assert select.expanded is True
             assert content.scroll_y >= before_open
@@ -956,13 +1001,13 @@ def test_orchestrator_select_keeps_overlay_visible_in_scrolled_viewport() -> Non
 
             opened_scroll = content.scroll_y
             await pilot.press("escape")
-            await pilot.pause()
+            await settle_tui(pilot)
             assert select.expanded is False
             assert application.screen.focused is select
             assert content.scroll_y == opened_scroll
 
             await pilot.press("enter", "down", "enter")
-            await pilot.pause()
+            await settle_tui(pilot)
             assert select.value == "one"
             assert application.screen.focused is select
 
@@ -976,16 +1021,16 @@ def test_select_focus_scrolls_the_control_into_view_on_small_terminals(tmp_path:
     async def drive() -> None:
         async with application.run_test(size=(80, 20)) as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             screen.query_one("#planner-configure", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             select = screen.query_one("#planner-provider", Select)
             select.focus()
-            await pilot.pause()
+            await settle_tui(pilot)
             content = screen.query_one("#workflow-runner", VerticalScroll)
             await pilot.press("enter")
-            await pilot.pause()
+            await settle_tui(pilot)
             overlay = select.query_one("SelectOverlay")
             assert content.scroll_y > 0
             assert overlay.region.y >= screen.region.y
@@ -1109,7 +1154,7 @@ def test_workflow_runner_copies_complete_live_diagnostics(
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
             application.push_screen(WorkflowRunnerScreen())
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             payload = "\n".join(f"request line {number}" for number in range(400))
             screen._render_workflow_event(
@@ -1124,7 +1169,7 @@ def test_workflow_runner_copies_complete_live_diagnostics(
             copy_button = screen.query_one("#copy-detailed-logs-button", Button)
             assert not copy_button.disabled
             copy_button.press()
-            await pilot.pause()
+            await settle_tui(pilot)
 
     asyncio.run(drive())
 
@@ -1144,7 +1189,7 @@ def test_workflow_runner_detailed_logs_expand_the_main_scroll_region_and_collaps
     async def drive() -> None:
         async with application.run_test(size=(120, 200)) as pilot:
             application.push_screen(WorkflowRunnerScreen())
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             content = screen.query_one("#workflow-runner", VerticalScroll)
             raw_events = screen.query_one("#workflow-raw-events", Static)
@@ -1190,7 +1235,7 @@ def test_workflow_runner_detailed_logs_expand_the_main_scroll_region_and_collaps
                 "REQUEST\n" + "\n".join(f"prompt line {number}" for number in range(300))
             )
             screen.query_one("#toggle-workflow-logs", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert raw_events.display is True
             assert raw_events_title.display is True
             assert (
@@ -1200,7 +1245,7 @@ def test_workflow_runner_detailed_logs_expand_the_main_scroll_region_and_collaps
             assert raw_events.size.height > 200
             assert content.max_scroll_y > 0
             content.scroll_end(animate=False)
-            await pilot.pause()
+            await settle_tui(pilot)
             assert content.scroll_y > 0
             raw_log = str(raw_events.renderable)
             assert "STAGE_STARTED" in raw_log
@@ -1209,7 +1254,7 @@ def test_workflow_runner_detailed_logs_expand_the_main_scroll_region_and_collaps
             assert "REQUEST" in raw_log
 
             screen.query_one("#toggle-workflow-logs", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert raw_events.display is False
             assert raw_events_title.display is False
             assert (
@@ -1231,7 +1276,7 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
             screen = application.screen
             repository = screen.query_one("#repository")
             repository.value = "example"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen.query_one("#planner-config").display is False
             assert screen.query_one("#planner-advanced").display is False
             assert "planner (Provider/YAML default)" in str(
@@ -1244,7 +1289,7 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
             assert screen.query_one("#implementer-model").value == ""
 
             screen.query_one("#planner-provider").value = "implementer"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen.query_one("#planner-model").display is True
             assert screen.query_one("#planner-reasoning").display is True
 
@@ -1265,13 +1310,13 @@ def test_workflow_runner_clarifies_configured_fallback_during_primary_override(
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             summary = application.screen.query_one("#implementer-summary", Static)
             assert "fallback: vertex/backup" in str(summary.renderable)
             assert "repository setting; unchanged" not in str(summary.renderable)
 
             application.screen.query_one("#implementer-model", Input).value = "temporary-model"
-            await pilot.pause()
+            await settle_tui(pilot)
 
             assert "fallback: vertex/backup" in str(summary.renderable)
             assert "repository setting; unchanged" in str(summary.renderable)
@@ -1295,10 +1340,10 @@ def test_workflow_runner_selects_role_local_presets_without_crud_controls(tmp_pa
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             screen.query_one("#implementer-preset", Select).value = "deep"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert list(screen.query("#implementer-preset-name")) == []
             assert list(screen.query("#implementer-preset-create")) == []
             assert list(screen.query("#implementer-preset-update")) == []
@@ -1311,14 +1356,14 @@ def test_workflow_runner_selects_role_local_presets_without_crud_controls(tmp_pa
                 screen.query_one("#implementer-preset-source", Static).renderable
             )
             screen.query_one("#implementer-model", Input).value = "temporary-model"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen.query_one("#implementer-preset", Select).value != "deep"
             assert "Manual configuration; temporary this-run overrides" in str(
                 screen.query_one("#implementer-preset-source", Static).renderable
             )
             screen.query_one("#available-tasks", Select).value = "12"
             screen.query_one("#start-workflow", Button).press()
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             assert service.calls[-1][3][AgentRole.IMPLEMENTER] == {
                 "model": "temporary-model",
                 "reasoning_effort": "xhigh",
@@ -1345,7 +1390,7 @@ def test_workflow_runner_applies_and_resets_reviewer_preset_independently(tmp_pa
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             reviewer_preset = screen.query_one("#reviewer-preset", Select)
             assert {option[1] for option in reviewer_preset._options} == {
@@ -1355,13 +1400,13 @@ def test_workflow_runner_applies_and_resets_reviewer_preset_independently(tmp_pa
             assert "deep" not in {option[1] for option in reviewer_preset._options}
 
             reviewer_preset.value = "thorough"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen.query_one("#reviewer-provider", Select).value == "vertex"
             assert screen.query_one("#reviewer-model", Input).value == "review-model"
             assert screen.query_one("#reviewer-temperature", Input).value == "0.4"
 
             reviewer_preset.value = reviewer_preset._options[0][1]
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen.query_one("#reviewer-provider", Select).value == "reviewer"
             assert screen.query_one("#reviewer-model", Input).value == ""
             assert screen.query_one("#reviewer-temperature", Input).value == ""
@@ -1383,66 +1428,66 @@ def test_agent_presets_screen_manages_all_role_presets(tmp_path: Path) -> None:
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("p")
-            await pilot.pause()
+            await settle_tui(pilot)
             assert isinstance(application.screen, AgentPresetsScreen)
             screen = application.screen
             repository = screen.query_one("#agent-presets-repository", Select)
             repository.value = "example"
-            await pilot.pause()
+            await settle_tui(pilot)
             role = screen.query_one("#agent-preset-role", Select)
             assert {option[1] for option in role._options} == {
                 "planner", "implementer", "reviewer"
             }
 
             role.value = "implementer"
-            await pilot.pause()
+            await settle_tui(pilot)
             screen.query_one("#agent-preset-select", Select).value = "deep"
-            await pilot.pause()
+            await settle_tui(pilot)
             fallback = screen.query_one("#agent-fallback-preset", Select)
             fallback.value = "deep"
             screen.query_one("#save-agent-fallback", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert config.agents.implementer.fallback_preset == "deep"
             screen.query_one("#agent-preset-model", Input).value = "updated"
             screen.query_one("#update-agent-preset", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert config.agent_presets["implementer"]["deep"].model == "updated"
 
             screen.query_one("#agent-preset-name", Input).value = "renamed"
             screen.query_one("#rename-agent-preset", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert "renamed" in config.agent_presets["implementer"]
             fallback.value = fallback._options[0][1]
             screen.query_one("#save-agent-fallback", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert config.agents.implementer.fallback_preset is None
             screen.query_one("#delete-agent-preset", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert "implementer" not in config.agent_presets
 
             role.value = "planner"
-            await pilot.pause()
+            await settle_tui(pilot)
             screen.query_one("#agent-preset-name", Input).value = "fast"
             screen.query_one("#agent-preset-provider", Select).value = "planner"
             screen.query_one("#create-agent-preset", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert config.agent_presets["planner"]["fast"].provider == "planner"
 
             role.value = "reviewer"
-            await pilot.pause()
+            await settle_tui(pilot)
             preset_selector = screen.query_one("#agent-preset-select", Select)
             assert "fast" not in {option[1] for option in preset_selector._options}
             screen.query_one("#agent-preset-name", Input).value = "focused"
             screen.query_one("#agent-preset-provider", Select).value = "reviewer"
             screen.query_one("#create-agent-preset", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert config.agent_presets["reviewer"]["focused"].provider == "reviewer"
             screen.query_one("#agent-preset-name", Input).value = "focused-review"
             screen.query_one("#rename-agent-preset", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert "focused-review" in config.agent_presets["reviewer"]
             screen.query_one("#delete-agent-preset", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert "reviewer" not in config.agent_presets
             assert "fast" in config.agent_presets["planner"]
 
@@ -1458,7 +1503,7 @@ def test_agent_presets_role_selector_shows_all_roles_and_supports_keyboard_and_m
     async def drive() -> None:
         async with application.run_test(size=(80, 24)) as pilot:
             await pilot.press("p")
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             role = screen.query_one("#agent-preset-role", Select)
 
@@ -1471,14 +1516,14 @@ def test_agent_presets_role_selector_shows_all_roles_and_supports_keyboard_and_m
 
             role.focus()
             await pilot.press("enter", "down", "enter")
-            await pilot.pause()
+            await settle_tui(pilot)
             assert role.value == "implementer"
             assert "Implementer presets loaded" in str(
                 screen.query_one("#agent-presets-status", Static).renderable
             )
 
             await pilot.click("#agent-preset-role")
-            await pilot.pause()
+            await settle_tui(pilot)
             overlay = role.query_one("SelectOverlay")
             assert role.expanded is True
             # The menu includes a top and bottom border plus all three rows.
@@ -1486,7 +1531,7 @@ def test_agent_presets_role_selector_shows_all_roles_and_supports_keyboard_and_m
 
             # The third option is visible and selectable directly by mouse.
             await pilot.click(overlay, offset=(2, 3))
-            await pilot.pause()
+            await settle_tui(pilot)
             assert role.value == "reviewer"
             assert role.expanded is False
             assert "Reviewer presets loaded" in str(
@@ -1506,7 +1551,7 @@ def test_workflow_runner_preselects_matching_configured_preset(tmp_path: Path) -
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             assert screen.query_one("#implementer-preset", Select).value == "configured"
             assert screen.query_one("#planner-preset", Select).value is not None
@@ -1524,11 +1569,11 @@ def test_workflow_runner_warns_when_a_preset_provider_is_missing(tmp_path: Path)
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             screen.query_one("#planner-configure", Button).press()
             screen.query_one("#planner-preset", Select).value = "retired"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert "unavailable provider" in str(
                 screen.query_one("#planner-preset-source", Static).renderable
             )
@@ -1546,7 +1591,7 @@ def test_workflow_runner_expands_advanced_controls_and_preserves_overrides(
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             configure = screen.query_one("#planner-configure", Button)
             configure.focus()
@@ -1554,7 +1599,7 @@ def test_workflow_runner_expands_advanced_controls_and_preserves_overrides(
             assert screen.query_one("#planner-config").display is True
 
             screen.query_one("#planner-provider", Select).value = "vertex"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert "vertex (this-run provider override)" in str(
                 screen.query_one("#planner-summary").renderable
             )
@@ -1563,7 +1608,7 @@ def test_workflow_runner_expands_advanced_controls_and_preserves_overrides(
 
             advanced = screen.query_one("#planner-advanced-toggle", Button)
             advanced.press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen.query_one("#planner-advanced").display is True
             assert screen.query_one("#planner-temperature", Input).value == "0.2"
             assert "Provider/YAML default" in str(
@@ -1575,21 +1620,21 @@ def test_workflow_runner_expands_advanced_controls_and_preserves_overrides(
 
             screen.query_one("#planner-temperature", Input).value = "0.8"
             screen.query_one("#planner-max-output-tokens", Input).value = "512"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert "This-run override" in str(
                 screen.query_one("#planner-temperature-source").renderable
             )
 
             advanced.press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen.query_one("#planner-advanced").display is False
             assert screen.query_one("#planner-temperature", Input).value == "0.8"
 
             screen.query_one("#available-tasks", Select).value = "12"
-            await pilot.pause()
+            await settle_tui(pilot)
             screen.query_one("#start-workflow", Button).focus()
             await pilot.press("enter")
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             assert service.calls[0][3][AgentRole.PLANNER]["generation"] == {
                 "temperature": "0.8",
                 "max_output_tokens": "512",
@@ -1605,7 +1650,7 @@ def test_workflow_runner_role_configuration_uses_responsive_rows(tmp_path: Path)
         narrow_application = OrchestratorApp(controller)
         async with narrow_application.run_test(size=(70, 50)) as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = narrow_application.screen
             screen.query_one("#implementer-configure", Button).focus()
             await pilot.press("enter")
@@ -1618,7 +1663,7 @@ def test_workflow_runner_role_configuration_uses_responsive_rows(tmp_path: Path)
         wide_application = OrchestratorApp(controller)
         async with wide_application.run_test(size=(120, 50)) as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = wide_application.screen
             screen.query_one("#implementer-configure", Button).focus()
             await pilot.press("enter")
@@ -1643,7 +1688,7 @@ def test_workflow_runner_auto_loads_tasks_on_mount(tmp_path: Path) -> None:
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             screen = application.screen
             assert task_loads == [("example", "github")]
             assert screen.query_one("#available-tasks", Select).value == Select.BLANK
@@ -1668,7 +1713,7 @@ def test_workflow_runner_repository_selector_uses_configured_non_blank_options(
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause()
+            await settle_tui(pilot)
             selector = application.screen.query_one("#repository", OrchestratorSelect)
             options = selector._options
 
@@ -1712,7 +1757,7 @@ def test_repository_select_populates_mounted_overlay_from_configured_repository(
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press(key)
-            await pilot.pause()
+            await settle_tui(pilot)
             selector = application.screen.query_one(selector_id, RepositorySelect)
             overlay = selector.query_one("SelectOverlay")
 
@@ -1776,12 +1821,26 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause(delay=0.1)
+            await wait_for_tui(
+                pilot,
+                lambda: task_loads == [("example", "github")],
+                description="initial task load",
+            )
             screen = application.screen
             screen.query_one("#task-provider", Select).value = "trello"
-            await pilot.pause(delay=0.1)
+            await wait_for_tui(
+                pilot,
+                lambda: task_loads == [("example", "github"), ("example", "trello")],
+                description="task reload after provider change",
+            )
             screen.query_one("#repository", Select).value = "other"
-            await pilot.pause(delay=0.1)
+            await wait_for_tui(
+                pilot,
+                lambda: controller.selected_repository == "other"
+                and task_loads
+                == [("example", "github"), ("example", "trello"), ("other", "github")],
+                description="task reload after repository change",
+            )
             assert controller.selected_repository == "other"
             assert task_loads == [
                 ("example", "github"),
@@ -1789,10 +1848,15 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
                 ("other", "github"),
             ]
             screen.query_one("#workflow-agent-instructions", Button).press()
-            # The pushed screen's nested Select mounts asynchronously. Wait
-            # for its retained repository selection to finish restoring.
-            await pilot.pause(delay=0.1)
-            assert isinstance(application.screen, AgentInstructionsScreen)
+            await wait_for_tui(
+                pilot,
+                lambda: isinstance(application.screen, AgentInstructionsScreen)
+                and application.screen.query_one(
+                    "#agent-instructions-repository", OrchestratorSelect
+                ).value
+                == "other",
+                description="agent instructions repository selection",
+            )
             assert (
                 application.screen.query_one(
                     "#agent-instructions-repository", OrchestratorSelect
@@ -1810,7 +1874,7 @@ def test_workflow_runner_labels_deprecated_jules_provider_choices(tmp_path: Path
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             selector = application.screen.query_one("#planner-provider", OrchestratorSelect)
 
             assert selector._options == [
@@ -1837,11 +1901,11 @@ def test_workflow_runner_manual_refresh_tasks(tmp_path: Path) -> None:
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             screen = application.screen
             screen.query_one("#refresh-tasks", Button).focus()
             await pilot.press("enter")
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             assert task_loads == [("example", "github"), ("example", "github")]
 
     asyncio.run(drive())
@@ -1860,7 +1924,7 @@ def test_workflow_runner_displays_inline_task_load_error(tmp_path: Path) -> None
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             screen = application.screen
             assert "credentials rejected" in str(
                 screen.query_one("#task-error").renderable
@@ -1880,14 +1944,14 @@ def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path
             assert isinstance(application.screen, GitHubAppSettingsScreen)
             repository = application.screen.query_one("#github-app-repository")
             repository.value = "example"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert application.screen.query_one("#implementer-app-id").value == "56"
             assert application.screen.query_one("#reviewer-app-id").value == "12"
             application.screen.query_one("#implementer-app-id").value = "123"
             application.screen.query_one("#implementer-installation-id").value = "456"
             application.screen.query_one("#implementer-key-env").value = "IMPLEMENTER_KEY"
             application.screen.query_one("#save-github-apps", Button).focus()
-            await pilot.pause()
+            await settle_tui(pilot)
             await pilot.press("enter")
             assert "Saved App references" in str(
                 application.screen.query_one("#github-app-status").renderable
@@ -1913,7 +1977,7 @@ def test_tui_creates_updates_and_switches_agent_instruction_files(tmp_path: Path
             screen = application.screen
             repository = screen.query_one("#agent-instructions-repository", OrchestratorSelect)
             repository.value = "example"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert "No IMPLEMENTER.md yet" in str(
                 screen.query_one("#implementer-instructions-status", Static).renderable
             )
@@ -1922,20 +1986,20 @@ def test_tui_creates_updates_and_switches_agent_instruction_files(tmp_path: Path
 
             screen.query_one("#implementer-instructions", TextArea).text = "Use focused tests."
             screen.query_one("#save-implementer-instructions", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert (tmp_path / "IMPLEMENTER.md").read_text(encoding="utf-8") == "Use focused tests."
             assert not (tmp_path / "REVIEWER.md").exists()
 
             screen.query_one("#reviewer-instructions", TextArea).text = "Check retries."
             screen.query_one("#save-reviewer-instructions", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert (tmp_path / "REVIEWER.md").read_text(encoding="utf-8") == "Check retries."
             assert "Git was not changed" in str(
                 screen.query_one("#agent-instructions-status", Static).renderable
             )
 
             repository.value = "other"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen.query_one("#implementer-instructions", TextArea).text == ""
             assert "No REVIEWER.md yet" in str(
                 screen.query_one("#reviewer-instructions-status", Static).renderable
@@ -1984,7 +2048,7 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.push_screen(ExecutionDetailScreen(execution.id))
-            await pilot.pause()
+            await settle_tui(pilot)
             assert isinstance(application.screen, ExecutionDetailScreen)
             rendered = str(application.screen.query_one("#execution-content").renderable)
             assert '"validation_snapshot": {' in rendered
@@ -2025,14 +2089,14 @@ def test_execution_detail_copies_all_persisted_detailed_logs(
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             detailed_logs = str(screen.query_one("#execution-content").renderable)
             assert detailed_logs.count("implement the requested change") == 1
             copy_button = screen.query_one("#copy-detailed-logs-button", Button)
             assert not copy_button.disabled
             copy_button.press()
-            await pilot.pause()
+            await settle_tui(pilot)
 
     asyncio.run(drive())
 
@@ -2071,9 +2135,9 @@ def test_execution_detail_reports_clipboard_failures_without_crashing(
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
-            await pilot.pause()
+            await settle_tui(pilot)
             application.screen.query_one("#copy-detailed-logs-button", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
 
     asyncio.run(drive())
 
@@ -2095,15 +2159,15 @@ def test_workflow_runner_submits_selected_task_id_in_workflow_launch(
             content = screen.query_one("#workflow-runner", VerticalScroll)
             assert content.max_scroll_y > 0
 
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             screen.query_one("#available-tasks", Select).value = "12"
-            await pilot.pause()
+            await settle_tui(pilot)
             assert screen.query_one("#task-selector", TaskSelector).selected_task_id == "12"
             screen.query_one("#start-workflow", Button).focus()
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             assert content.scroll_y > 0
             await pilot.press("enter")
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             assert service.calls[0][0:2] == ("12", "example")
 
     asyncio.run(drive())
@@ -2117,12 +2181,12 @@ def test_execution_history_and_detail_display_cancelled_status(tmp_path: Path) -
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.push_screen(ExecutionHistoryScreen())
-            await pilot.pause()
+            await settle_tui(pilot)
             picker = application.screen.query_one("#execution-picker", OrchestratorSelect)
             assert "CANCELLED" in str(picker._options)
 
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
-            await pilot.pause()
+            await settle_tui(pilot)
             status = application.screen.query_one("#execution-status", Static)
             assert str(status.renderable) == "CANCELLED"
             assert status.has_class("cancelled")
@@ -2138,7 +2202,7 @@ def test_workflow_runner_confirms_and_requests_cancellation(tmp_path: Path) -> N
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.push_screen(WorkflowRunnerScreen())
-            await pilot.pause()
+            await settle_tui(pilot)
             screen = application.screen
             assert isinstance(screen, WorkflowRunnerScreen)
             screen._render_workflow_event(
@@ -2157,10 +2221,10 @@ def test_workflow_runner_confirms_and_requests_cancellation(tmp_path: Path) -> N
             )
             assert screen.query_one("#workflow-stop-actions", Horizontal).display is True
             screen.query_one("#stop-workflow", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert isinstance(application.screen, StopWorkflowConfirmation)
             application.screen.query_one("#confirm-stop-workflow", Button).press()
-            await pilot.pause()
+            await settle_tui(pilot)
             assert repository.cancellation_requests == [repository.execution.id]
             assert "Cancellation requested" in str(
                 screen.query_one("#workflow-progress", Static).renderable
@@ -2176,7 +2240,7 @@ def test_workflow_runner_does_not_need_to_scroll_in_a_tall_terminal(tmp_path: Pa
     async def drive() -> None:
         async with application.run_test(size=(120, 200)) as pilot:
             application.push_screen(WorkflowRunnerScreen())
-            await pilot.pause()
+            await settle_tui(pilot)
             content = application.screen.query_one("#workflow-runner", VerticalScroll)
             assert content.max_scroll_y == 0
 
@@ -2195,26 +2259,26 @@ def test_secondary_screens_keep_content_in_scrollable_regions_in_small_terminals
     async def drive() -> None:
         async with application.run_test(size=(80, 20)) as pilot:
             application.push_screen(ExecutionHistoryScreen())
-            await pilot.pause()
+            await settle_tui(pilot)
             assert isinstance(application.screen.query_one("#execution-history"), VerticalScroll)
 
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
-            await pilot.pause()
+            await settle_tui(pilot)
             detail = application.screen.query_one("#execution-detail", VerticalScroll)
             detail_content = application.screen.query_one("#execution-content", Static)
             assert detail.max_scroll_y > 0
             assert detail_content.size.height > 20
             detail.scroll_end(animate=False)
-            await pilot.pause()
+            await settle_tui(pilot)
             assert detail.scroll_y > 0
 
             await pilot.press("escape")
             application.push_screen(GitHubAppSettingsScreen())
-            await pilot.pause()
+            await settle_tui(pilot)
             settings = application.screen.query_one("#github-app-settings", VerticalScroll)
             assert settings.max_scroll_y > 0
             application.screen.query_one("#save-github-apps", Button).focus()
-            await pilot.pause(delay=0.1)
+            await settle_tui(pilot)
             assert settings.scroll_y > 0
 
     asyncio.run(drive())
