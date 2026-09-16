@@ -143,8 +143,12 @@ class ExecutionDetailScreen(Screen[None]):
             self.app.call_from_thread(
                 self.notify, f"Could not continue execution: {exc}", severity="error"
             )
+            self.app.call_from_thread(self._reenable_continue_button)
             return
         self.app.call_from_thread(self._render_execution, execution, steps, diagnostics)
+
+    def _reenable_continue_button(self) -> None:
+        self.query_one("#execution-continue", Button).disabled = False
 
     def _render_execution(
         self,

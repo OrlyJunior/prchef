@@ -300,6 +300,7 @@ class _WorkflowService:
         self.calls: list[tuple[str, str | None, dict[AgentRole, str], dict[AgentRole, Any]]] = []
         self.emit_terminal_event = False
         self.continuations: list[tuple[str, str]] = []
+        self.continuation_error: Exception | None = None
 
     def run(
         self,
@@ -341,6 +342,8 @@ class _WorkflowService:
     ) -> WorkflowExecution:
         del event_listener
         self.continuations.append((execution_id, feedback))
+        if self.continuation_error is not None:
+            raise self.continuation_error
         return WorkflowExecution(id=execution_id, status=WorkflowStatus.APPROVED)
 
 
@@ -2217,6 +2220,28 @@ def test_execution_detail_offers_editable_terminal_continuation(tmp_path: Path) 
     asyncio.run(drive())
 
     assert service.continuations == [("execution-1", "Edited continuation feedback")]
+
+
+def test_execution_detail_reenables_continue_after_continuation_error(tmp_path: Path) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.CHANGES_REQUESTED
+    repository.execution.workspace_path = str(tmp_path / "worktree")
+    repository.execution.working_branch = "workflow/12"
+    service.continuation_error = RuntimeError("workspace is unavailable")
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            button = screen.query_one("#execution-continue", Button)
+            assert button.disabled is False
+            button.press()
+            await wait_for_tui(pilot, lambda: bool(service.continuations))
+            await wait_for_tui(pilot, lambda: button.disabled is False)
+
+    asyncio.run(drive())
 
 
 def test_execution_detail_copies_all_persisted_detailed_logs(
