@@ -1570,6 +1570,15 @@ def test_agent_presets_screen_manages_claude_permission_mode(tmp_path: Path) -> 
             await settle_tui(pilot)
             assert permission.display is True
             assert permission.value == "acceptEdits"
+
+            # A delayed provider event from an earlier switch must not reload
+            # permission controls for a provider the selector no longer names.
+            provider_select = screen.query_one("#agent-preset-provider", OrchestratorSelect)
+            screen.on_select_changed(OrchestratorSelect.Changed(provider_select, "planner"))
+            await settle_tui(pilot)
+            assert permission.display is True
+            assert permission.value == "acceptEdits"
+
             permission.value = permission._options[0][1]
             screen.query_one("#update-agent-preset", Button).press()
             await settle_tui(pilot)

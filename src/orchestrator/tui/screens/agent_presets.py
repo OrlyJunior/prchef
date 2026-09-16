@@ -180,6 +180,12 @@ class AgentPresetsScreen(Screen[None]):
             elif event.value is _NEW_PRESET:
                 self._new_preset()
         elif event.select.id == "agent-preset-provider" and isinstance(event.value, str):
+            # Provider changes can be posted after a preset or role switch has
+            # already changed the control again. Applying an older event here
+            # would reload permission controls for a provider the selector no
+            # longer names, dropping or misapplying the preset's override.
+            if event.select.value != event.value:
+                return
             preset = self._selected_agent_preset()
             self._load_provider_controls(
                 event.value,

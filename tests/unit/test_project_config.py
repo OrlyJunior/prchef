@@ -204,6 +204,22 @@ def test_example_configuration_uses_first_class_litellm_and_codex(tmp_path: Path
     assert config.providers["codex"].type == "codex-cli"
 
 
+def test_example_agent_presets_block_keeps_every_preset_when_uncommented() -> None:
+    example_path = Path(__file__).resolve().parents[2] / "orchestrator.example.yml"
+    lines = example_path.read_text(encoding="utf-8").splitlines()
+    start = lines.index("  # agent_presets:")
+    block: list[str] = []
+    for line in lines[start:]:
+        if not line.startswith("  #"):
+            break
+        block.append("  " + line[len("  # ") :])
+
+    presets = yaml.safe_load("\n".join(block))["agent_presets"]
+
+    assert set(presets["planner"]) == {"cloud-backup", "claude-read-only"}
+    assert set(presets["implementer"]) == {"focused", "claude-edit"}
+
+
 def test_role_runtime_overrides_are_validated_in_memory_and_keep_defaults(tmp_path: Path) -> None:
     config = ProjectConfig.model_validate(
         {
