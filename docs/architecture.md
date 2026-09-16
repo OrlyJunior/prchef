@@ -87,7 +87,7 @@ O provider `claude-code` usa apenas o CLI em print mode (`claude -p --output-for
 uma superficie segura de configuracao: um executavel, timeout, modelo opcional, modo de permissao,
 limites de turnos/orcamento e bare mode. Nao aceita uma lista livre de argumentos. O cliente usa
 exatamente `AgentRequest.workspace_path` como cwd, sempre adiciona `--restricted` e limita as
-ferramentas internas a `Read,Edit,Glob,Grep`. Assim, configuracoes de usuario/projeto nao sao
+ferramentas internas a `Read,Edit,Write,Glob,Grep`. Assim, configuracoes de usuario/projeto nao sao
 carregadas, as ferramentas de arquivo ficam confinadas ao workspace, e shell, MCP e execucao cloud
 nao ficam disponiveis. `bare_mode: true` tambem desabilita a auto-descoberta de hooks, plugins,
 skills e MCP; mesmo com `bare_mode: false`, `--restricted` mantem a fronteira. O cliente nunca

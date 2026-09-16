@@ -34,7 +34,7 @@ recebe acesso ao filesystem, shell ou ferramentas locais.
 
 O provider opcional `claude-code` usa somente `claude -p --output-format json` no workspace que o
 orquestrador forneceu. Cada execucao tambem usa `--restricted` e um conjunto fixo de ferramentas
-de arquivo (`Read,Edit,Glob,Grep`): isso ignora configuracoes de usuario/projeto, confina as
+de arquivo (`Read,Edit,Write,Glob,Grep`): isso ignora configuracoes de usuario/projeto, confina as
 ferramentas de arquivo ao workspace e nao disponibiliza shell/Bash, MCP ou execucao cloud. Para
 respostas estruturadas, ele encaminha o schema existente por
 `--json-schema`, consome o envelope JSON (incluindo `result`, `structured_output` e metadados de

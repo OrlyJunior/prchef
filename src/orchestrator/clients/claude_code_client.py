@@ -206,7 +206,7 @@ class ClaudeCodeClient:
             # particular, do not re-add Bash: otherwise a model could bypass
             # orchestrator-owned Git/GitHub lifecycle policy with a shell.
             "--tools",
-            "Read,Edit,Glob,Grep",
+            "Read,Edit,Write,Glob,Grep",
             # --tools does not limit MCP tools. Deny them explicitly so the
             # boundary holds even if an administrator supplies one.
             "--disallowedTools",

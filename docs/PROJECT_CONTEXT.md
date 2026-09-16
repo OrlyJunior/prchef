@@ -254,7 +254,7 @@
 - Claude Code is a first-class local-workspace CLI provider. Its safe configuration accepts one
   executable, timeout, optional model, `dontAsk`/`acceptEdits`/`auto` permission mode, optional
   turn/budget limits, and bare mode, never arbitrary flags. The provider constructs `claude -p`
-  with JSON output itself, always adds Claude's `--restricted` mode and fixed `Read,Edit,Glob,Grep`
+  with JSON output itself, always adds Claude's `--restricted` mode and fixed `Read,Edit,Write,Glob,Grep`
   tool set, passes request instructions on stdin, and uses exactly the supplied workspace as cwd.
   Restricted mode ignores user/project settings, confines file tools to cwd, and prevents shell,
   MCP, and cloud execution; `bare_mode: true` additionally skips auto-discovery. It never creates

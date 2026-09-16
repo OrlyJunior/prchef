@@ -57,7 +57,7 @@ def test_claude_code_client_uses_only_safe_print_mode_arguments_and_workspace(
         "json",
         "--restricted",
         "--tools",
-        "Read,Edit,Glob,Grep",
+        "Read,Edit,Write,Glob,Grep",
         "--disallowedTools",
         "mcp__*",
         "--permission-mode",
@@ -316,7 +316,7 @@ def test_claude_code_is_restricted_even_when_bare_mode_is_disabled(tmp_path: Pat
     command, _ = commands.calls[0]
     assert "--restricted" in command
     assert "--bare" not in command
-    assert command[command.index("--tools") + 1] == "Read,Edit,Glob,Grep"
+    assert command[command.index("--tools") + 1] == "Read,Edit,Write,Glob,Grep"
 
 
 def test_claude_settings_support_runtime_model_override_and_first_class_label(
