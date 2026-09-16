@@ -185,6 +185,25 @@ def test_create_pull_request_uses_implementer_app_token(tmp_path: Path) -> None:
     assert all(call["env"]["GH_TOKEN"] == "ghs_implementer" for call in commands.calls)
 
 
+def test_is_pull_request_open_uses_persisted_pull_request_number(tmp_path: Path) -> None:
+    class OpenPullRequestCommands(RecordingCommands):
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            self.calls.append({"command": command, **kwargs})
+            return CommandResult(command, 0, "open\n", "", 0.01)
+
+    commands = OpenPullRequestCommands()
+    client = GitHubClient(commands, tmp_path, ["gh"], 120)
+
+    assert client.is_pull_request_open("owner/repository", 42) is True
+    assert commands.calls[0]["command"] == [
+        "gh",
+        "api",
+        "repos/owner/repository/pulls/42",
+        "--jq",
+        ".state",
+    ]
+
+
 def test_comment_pull_request_uses_implementer_app_token(tmp_path: Path) -> None:
     commands = RecordingCommands()
     client = GitHubClient(commands, tmp_path, ["gh"], 120)

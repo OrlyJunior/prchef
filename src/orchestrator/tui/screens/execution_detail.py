@@ -48,6 +48,15 @@ class ExecutionDetailScreen(Screen[None]):
                 yield Button(
                     "Copy detailed logs", id="copy-detailed-logs-button", disabled=True
                 )
+            yield Static("", id="execution-continuation-title")
+            yield TextArea("", id="execution-continuation-feedback")
+            with Horizontal(classes="screen-actions", id="execution-continuation-actions"):
+                yield Button(
+                    "Continue Execution",
+                    variant="primary",
+                    id="execution-continue",
+                    disabled=True,
+                )
             yield Static("", id="execution-human-title")
             yield Static("", id="execution-human-prompt")
             yield TextArea("", id="execution-human-response")
@@ -87,6 +96,12 @@ class ExecutionDetailScreen(Screen[None]):
                 event.button.disabled = True
                 self._resume_execution(response)
             return
+        if event.button.id == "execution-continue":
+            feedback = self.query_one("#execution-continuation-feedback", TextArea).text.strip()
+            if feedback:
+                event.button.disabled = True
+                self._continue_execution(feedback)
+            return
         if event.button.id == "copy-detailed-logs-button":
             self._copy_detailed_logs()
             return
@@ -100,6 +115,10 @@ class ExecutionDetailScreen(Screen[None]):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id == "execution-human-response":
             self.query_one("#execution-resume", Button).disabled = not event.text_area.text.strip()
+        if event.text_area.id == "execution-continuation-feedback":
+            self.query_one("#execution-continue", Button).disabled = (
+                not event.text_area.text.strip()
+            )
 
     @work(thread=True, exclusive=True)
     def _resume_execution(self, response: str) -> None:
@@ -113,6 +132,23 @@ class ExecutionDetailScreen(Screen[None]):
             )
             return
         self.app.call_from_thread(self._render_execution, execution, steps, diagnostics)
+
+    @work(thread=True, exclusive=True)
+    def _continue_execution(self, feedback: str) -> None:
+        try:
+            execution = self.controller.continue_execution(self.execution_id, feedback)
+            _, steps = self.controller.execution_detail(self.execution_id)
+            diagnostics = self.controller.execution_diagnostics(self.execution_id)
+        except Exception as exc:
+            self.app.call_from_thread(
+                self.notify, f"Could not continue execution: {exc}", severity="error"
+            )
+            self.app.call_from_thread(self._reenable_continue_button)
+            return
+        self.app.call_from_thread(self._render_execution, execution, steps, diagnostics)
+
+    def _reenable_continue_button(self) -> None:
+        self.query_one("#execution-continue", Button).disabled = False
 
     def _render_execution(
         self,
@@ -163,6 +199,30 @@ class ExecutionDetailScreen(Screen[None]):
             response = self.query_one("#execution-human-response", TextArea)
             response.text = ""
             self.query_one("#execution-resume", Button).disabled = True
+
+        continuation_eligible = execution.status.value == "CHANGES_REQUESTED" or (
+            execution.status.value == "FAILED"
+            and execution.workspace_path is not None
+            and execution.working_branch is not None
+        )
+        for widget_id in (
+            "execution-continuation-title",
+            "execution-continuation-feedback",
+            "execution-continuation-actions",
+        ):
+            self.query_one(f"#{widget_id}").display = continuation_eligible
+        if continuation_eligible:
+            feedback = self.query_one("#execution-continuation-feedback", TextArea)
+            self.query_one("#execution-continuation-title", Static).update(
+                "Edit the feedback sent to a fresh implementer invocation:"
+            )
+            try:
+                feedback.text = self.controller.continuation_feedback(execution.id)
+                self.query_one("#execution-continue", Button).disabled = not feedback.text.strip()
+            except Exception as exc:
+                feedback.text = ""
+                self.query_one("#execution-continue", Button).disabled = True
+                self.notify(f"Could not prepare continuation feedback: {exc}", severity="error")
 
         details = {
             "execution": asdict(execution),

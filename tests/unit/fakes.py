@@ -35,6 +35,7 @@ class FakeWorkflowRepository:
         self.steps: dict[int, dict[str, Any]] = {}
         self.stage_changes: list[WorkflowStage] = []
         self.next_step = 1
+        self.diagnostics: list[Any] = []
 
     def create_execution(self, task_id: str, task_source: str = "trello") -> WorkflowExecution:
         self.execution = WorkflowExecution(
@@ -142,6 +143,10 @@ class FakeWorkflowRepository:
 
     def record_error(self, execution_id: str, message: str) -> None:
         self._execution().error_message = message
+
+    def record_diagnostic(self, diagnostic: Any) -> Any:
+        self.diagnostics.append(diagnostic)
+        return diagnostic
 
     def request_human_input(
         self, execution_id: str, stage: WorkflowStage, prompt: str
@@ -380,6 +385,13 @@ class FakeGitClient:
         self.workspace_path = repository_path
         return self
 
+    def verify_worktree_branch(self, working_branch: str, expected_commit: str | None) -> None:
+        del expected_commit
+        if self.workspace_path is None or not self.workspace_path.is_dir():
+            raise RuntimeError("Workflow workspace is unavailable")
+        if self.branch != working_branch:
+            raise RuntimeError("Workflow workspace is on the wrong branch")
+
     def changed_files(self) -> list[str]:
         self.operation_paths.append(self.workspace_path)
         if self.changed_files_results:
@@ -421,6 +433,14 @@ class FakeGitHubClient:
         self.assignment_calls: list[dict[str, Any]] = []
         self.comment_error: Exception | None = None
         self.comment_calls: list[dict[str, Any]] = []
+        self.pr_open = True
+        self.pr_open_calls: list[dict[str, Any]] = []
+
+    def is_pull_request_open(self, repository: str, pull_request_number: int) -> bool:
+        self.pr_open_calls.append(
+            {"repository": repository, "pull_request_number": pull_request_number}
+        )
+        return self.pr_open
 
     def create_pull_request(self, **kwargs: Any) -> PullRequest:
         self.create_calls += 1
