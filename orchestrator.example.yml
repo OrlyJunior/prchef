@@ -65,6 +65,15 @@ defaults:
   #       provider: codex
   #       model: <your-supported-codex-model>
   #       reasoning_effort: medium
+  #   # One Claude provider can use role-local permission modes without duplicate definitions.
+  #   planner:
+  #     claude-read-only:
+  #       provider: claude
+  #       permission_mode: dontAsk
+  #   implementer:
+  #     claude-edit:
+  #       provider: claude
+  #       permission_mode: acceptEdits
   safety:
     allow_direct_merge: false
     require_tests: true
@@ -105,8 +114,9 @@ defaults:
     #   executable: claude
     #   timeout_seconds: 1800
     #   # model: <your-supported-claude-model>
-    #   # `dontAsk` is suitable for read-only roles. Use `acceptEdits` only for
-    #   # a role permitted to edit the orchestrator-created workspace.
+    #   # Default for roles without a preset/TUI runtime override. `dontAsk` is
+    #   # suitable for read-only roles; use `acceptEdits` only for a role
+    #   # permitted to edit the orchestrator-created workspace.
     #   permission_mode: dontAsk
     #   bare_mode: true
     #   # max_turns: 12

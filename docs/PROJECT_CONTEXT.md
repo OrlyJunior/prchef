@@ -49,7 +49,7 @@
   manual build/rebuild, changed-file refresh, and clear actions. Its operations run in TUI workers;
   the workflow launcher deliberately has no index controls.
 - The TUI launcher may select configured provider instances and role-local runtime settings
-  (model, reasoning, and exposed provider generation options) for one run. These overrides are
+  (model, reasoning, Claude permission mode, and exposed provider generation options) for one run. These overrides are
   schema-validated in memory, never alter YAML defaults, and may give roles sharing a configured
   provider independent runtime settings. Its default launcher view presents compact per-role
   provider/model/runtime summaries; role configuration and generation controls are progressive,
@@ -262,7 +262,10 @@
   branches/commits/pushes/PRs/reviews. Native `--json-schema` structured output is parsed and
   validated locally before `AgentResult`; a successful envelope requires `type=result`,
   `subtype=success`, and non-empty result text. Completion session IDs, whitelisted usage/cost, and
-  selected terminal error fields are diagnostic-only and never resume. Its unavailable CLI,
+  selected terminal error fields are diagnostic-only and never resume. Permission mode is exposed
+  as a schema-validated role-local preset/per-run override; one named Claude provider can therefore
+  give planner/reviewer read-only and implementer editing access without duplicate definitions.
+  Provider YAML remains the default whenever that role-local value is omitted. Its unavailable CLI,
   authentication, timeout, malformed envelope/schema, invalid model, quota, rate-limit, and capacity
   failures remain provider-local; only normalized quota/rate-limit/capacity errors participate in
   existing one-hop fallback. Claude Code v2.1.259+ and externally supplied authentication are required.
@@ -323,7 +326,7 @@
   including TUI edits, are stored in the corresponding `repositories.<key>` entry of the resolved
   global configuration; keep examples generic.
 - `agent_presets` contains named, role-scoped (`planner`, `implementer`, `reviewer`) templates of
-  a configured provider plus the launcher-exposed model, reasoning, and generation options. The
+  a configured provider plus the launcher-exposed model, reasoning, Claude permission mode, and generation options. The
   dedicated TUI Agent Presets screen creates, updates, renames, and deletes them in the resolved
   global configuration; the compact launcher exposes an independent selector per role and only
   applies its preset to that one run. Editing a selected role's launcher settings returns that

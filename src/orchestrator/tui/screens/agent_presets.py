@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 _NEW_PRESET = object()
 _NO_FALLBACK = object()
+_PROVIDER_DEFAULT_PERMISSION = object()
+_PERMISSION_MODES = ("dontAsk", "acceptEdits", "auto")
+_PermissionMode = Literal["dontAsk", "acceptEdits", "auto"]
 
 
 class AgentPresetsScreen(Screen[None]):
@@ -106,6 +109,13 @@ class AgentPresetsScreen(Screen[None]):
                             placeholder="Provider/YAML default", id="agent-preset-reasoning"
                         )
                     with Vertical(classes="role-field"):
+                        yield Static("Permission mode", id="agent-preset-permission-label")
+                        yield OrchestratorSelect(
+                            [],
+                            prompt="Provider/YAML default",
+                            id="agent-preset-permission",
+                        )
+                    with Vertical(classes="role-field"):
                         yield Static("Temperature", id="agent-preset-temperature-label")
                         yield Input(
                             placeholder="Provider default", id="agent-preset-temperature"
@@ -167,7 +177,15 @@ class AgentPresetsScreen(Screen[None]):
             elif event.value is _NEW_PRESET:
                 self._new_preset()
         elif event.select.id == "agent-preset-provider" and isinstance(event.value, str):
-            self._load_provider_controls(event.value)
+            preset = self._selected_agent_preset()
+            self._load_provider_controls(
+                event.value,
+                permission_mode=(
+                    preset.permission_mode
+                    if preset is not None and preset.provider == event.value
+                    else None
+                ),
+            )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         actions = {
@@ -245,7 +263,9 @@ class AgentPresetsScreen(Screen[None]):
         provider = self.query_one("#agent-preset-provider", OrchestratorSelect)
         try:
             provider.value = preset.provider
-            self._load_provider_controls(preset.provider)
+            self._load_provider_controls(
+                preset.provider, permission_mode=preset.permission_mode
+            )
         except Exception as exc:
             self._status(
                 f"Preset {name!r} references unavailable provider {preset.provider!r}: {exc}"
@@ -253,6 +273,13 @@ class AgentPresetsScreen(Screen[None]):
             return
         self.query_one("#agent-preset-model", Input).value = preset.model or ""
         self.query_one("#agent-preset-reasoning", Input).value = preset.reasoning_effort or ""
+        permission = self.query_one("#agent-preset-permission", OrchestratorSelect)
+        if permission.display:
+            permission.value = (
+                preset.permission_mode
+                if preset.permission_mode is not None
+                else _PROVIDER_DEFAULT_PERMISSION
+            )
         self.query_one("#agent-preset-temperature", Input).value = self._text(
             preset.generation.get("temperature")
         )
@@ -267,7 +294,9 @@ class AgentPresetsScreen(Screen[None]):
         self._clear_values()
         self._status("Enter a name and settings, then create the preset.")
 
-    def _load_provider_controls(self, provider: str) -> None:
+    def _load_provider_controls(
+        self, provider: str, *, permission_mode: _PermissionMode | None = None
+    ) -> None:
         repository = self._repository()
         if repository is None:
             return
@@ -278,12 +307,42 @@ class AgentPresetsScreen(Screen[None]):
             return
         self._set_visible("model", capabilities.supports_model)
         self._set_visible("reasoning", capabilities.supports_reasoning_effort)
+        self._set_permission_visible(
+            provider, capabilities.supports_permission_mode, permission_mode
+        )
         self._set_visible("temperature", capabilities.supports_generation)
         self._set_visible("max-output-tokens", capabilities.supports_generation)
 
     def _set_visible(self, name: str, visible: bool) -> None:
         self.query_one(f"#agent-preset-{name}-label", Static).display = visible
-        self.query_one(f"#agent-preset-{name}", Input).display = visible
+        self.query_one(f"#agent-preset-{name}").display = visible
+
+    def _set_permission_visible(
+        self, provider: str, visible: bool, permission_mode: _PermissionMode | None
+    ) -> None:
+        label = self.query_one("#agent-preset-permission-label", Static)
+        selector = self.query_one("#agent-preset-permission", OrchestratorSelect)
+        label.display = visible
+        selector.display = visible
+        if not visible:
+            return
+        repository = self._repository()
+        if repository is None:
+            return
+        values = self.controller.provider_runtime_values(repository, provider)
+        default = values.get("permission_mode", "dontAsk")
+        selector.set_options(
+            [
+                (f"Provider/YAML default ({default})", _PROVIDER_DEFAULT_PERMISSION),
+                *[(mode, mode) for mode in _PERMISSION_MODES],
+            ],
+            allow_blank=False,
+        )
+        selector.value = (
+            permission_mode
+            if permission_mode is not None
+            else _PROVIDER_DEFAULT_PERMISSION
+        )
 
     def _create(self) -> None:
         context = self._preset_context(require_selected=False)
@@ -402,15 +461,35 @@ class AgentPresetsScreen(Screen[None]):
             provider=provider,
             model=self._optional("model"),
             reasoning_effort=self._optional("reasoning"),
+            permission_mode=self._permission_mode(),
             generation={key: value for key, value in generation.items() if value is not None},
         )
 
     def _clear_values(self) -> None:
         for name in ("model", "reasoning", "temperature", "max-output-tokens"):
             self.query_one(f"#agent-preset-{name}", Input).value = ""
+        selector = self.query_one("#agent-preset-permission", OrchestratorSelect)
+        if _PROVIDER_DEFAULT_PERMISSION in selector._legal_values:
+            selector.value = _PROVIDER_DEFAULT_PERMISSION
+
+    def _selected_agent_preset(self) -> AgentPresetConfig | None:
+        """Return the currently edited preset, if it still exists."""
+
+        role = self._role()
+        repository = self._repository()
+        if self._selected_preset is None or role is None or repository is None:
+            return None
+        return self.controller.agent_presets(repository, role).get(self._selected_preset)
 
     def _optional(self, name: str) -> str | None:
         return self.query_one(f"#agent-preset-{name}", Input).value.strip() or None
+
+    def _permission_mode(self) -> _PermissionMode | None:
+        selector = self.query_one("#agent-preset-permission", OrchestratorSelect)
+        if not selector.display:
+            return None
+        value = selector.value
+        return cast(_PermissionMode, value) if value in _PERMISSION_MODES else None
 
     def _repository(self) -> str | None:
         value = self.query_one("#agent-presets-repository", OrchestratorSelect).value
