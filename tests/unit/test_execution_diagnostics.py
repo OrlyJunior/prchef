@@ -4,6 +4,7 @@ from pathlib import Path
 
 from orchestrator.models.agent import AgentRequest, AgentResult, AgentRole
 from orchestrator.models.execution_diagnostic import DiagnosticCategory
+from orchestrator.providers.agent_provider import AgentProviderError
 from orchestrator.providers.diagnostic_provider import DiagnosticAgentProvider
 
 
@@ -58,3 +59,37 @@ def test_diagnostic_provider_records_full_redacted_request_and_response() -> Non
     assert wrapped_provider.request.instructions == (
         "Authorization: Bearer very-secret\nAPI_KEY=also-secret\nfull context"
     )
+
+
+def test_diagnostic_provider_redacts_retryable_provider_error_metadata() -> None:
+    class FailingProvider:
+        def execute(self, request: AgentRequest, *, on_started=None) -> AgentResult:
+            del request, on_started
+            raise AgentProviderError(
+                "API Error: Request rejected (429), Authorization: Bearer provider-secret",
+                category="rate_limit",
+                metadata={"errors": [{"api_key": "provider-key", "code": "rate_limit"}]},
+            )
+
+    events: list[tuple[DiagnosticCategory, AgentRole, dict[str, object]]] = []
+    provider = DiagnosticAgentProvider(
+        FailingProvider(),  # type: ignore[arg-type]
+        role=AgentRole.PLANNER,
+        provider_config={"name": "claude"},
+        record=lambda category, role, payload: events.append((category, role, payload)),
+    )
+
+    try:
+        provider.execute(AgentRequest(title="plan", instructions="work"))
+    except AgentProviderError:
+        pass
+    else:
+        raise AssertionError("the failing provider should propagate its error")
+
+    payload = events[1][2]
+    assert payload["message"] == (
+        "API Error: Request rejected (429), Authorization=[REDACTED] [REDACTED]"
+    )
+    assert payload["provider_metadata"] == {
+        "errors": [{"api_key": "[REDACTED]", "code": "rate_limit"}]
+    }
