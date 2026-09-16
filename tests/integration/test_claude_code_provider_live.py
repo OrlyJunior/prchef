@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from orchestrator.clients.claude_code_client import ClaudeCodeClient
-from orchestrator.clients.command_client import CommandClient
+from orchestrator.clients.factory import ClientFactory
+from orchestrator.config.project_config import ProjectConfig
+from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.providers.claude_code_provider import ClaudeCodeAgentProvider
 from orchestrator.services.spec_service import SpecService
 
 _LIVE_ENABLED = (
@@ -36,18 +37,69 @@ class _EmptyRepositoryContext:
 
 
 def test_authenticated_claude_code_executes_the_planner_role(tmp_path: Path) -> None:
-    provider = ClaudeCodeAgentProvider(
-        "claude-live",
-        ClaudeCodeClient(
-            CommandClient(),
-            "claude",
-            180,
-            permission_mode="dontAsk",
-            max_turns=3,
-            bare_mode=True,
-            provider_name="claude-live",
-        ),
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "claude-live@example.test"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
     )
+    subprocess.run(
+        ["git", "config", "user.name", "Claude live test"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "README.md").write_text("# isolated Claude planner test\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=tmp_path, check=True, capture_output=True, text=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True, text=True
+    )
+    before_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout
+    before_branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    before_remotes = subprocess.run(
+        ["git", "remote"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout
+    before_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "agents": {
+                "planner": {"provider": "claude-live"},
+                "implementer": {"provider": "claude-live"},
+                "reviewer": {"provider": "claude-live"},
+            },
+            "providers": {
+                "claude-live": {
+                    "type": "claude-code",
+                    "executable": "claude",
+                    "timeout_seconds": 180,
+                    "permission_mode": "dontAsk",
+                    "max_turns": 3,
+                    "bare_mode": True,
+                }
+            },
+        }
+    )
+    provider = ClientFactory(None).create(config).agent(AgentRole.PLANNER)
     service = SpecService(provider, _EmptyRepositoryContext())  # type: ignore[arg-type]
     task = DevelopmentTask(
         id="claude-live-planner",
@@ -72,4 +124,27 @@ def test_authenticated_claude_code_executes_the_planner_role(tmp_path: Path) -> 
     assert spec.current_behavior
     assert spec.implementation_proposal
     assert isinstance(spec.safe_to_implement, bool)
-    assert list(tmp_path.iterdir()) == []
+    after_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout
+    after_branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    after_remotes = subprocess.run(
+        ["git", "remote"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout
+    after_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert after_head == before_head
+    assert after_branch == before_branch
+    assert after_remotes == before_remotes
+    assert after_status == before_status

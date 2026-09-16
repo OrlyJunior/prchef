@@ -14,7 +14,7 @@ from jsonschema.exceptions import SchemaError, ValidationError
 
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.clients.exceptions import CommandExecutionError
-from orchestrator.runtime_logging import summarize_text
+from orchestrator.runtime_logging import redact_payload, summarize_text
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +92,10 @@ class ClaudeCodeClient:
 
         envelope, parse_error = self._parse_envelope(result.stdout)
         if envelope is None:
-            message = parse_error or summarize_text(result.stderr or result.stdout, limit=2_000)
-            if result.success:
-                message = message or "Claude Code returned malformed JSON output"
+            details = summarize_text(result.stderr or result.stdout, limit=2_000)
+            message = self._with_details(
+                parse_error or "Claude Code returned malformed JSON output", details
+            )
             return ClaudeCodeResult(
                 success=False,
                 error_message=message or "Claude Code failed without output",
@@ -103,24 +104,42 @@ class ClaudeCodeClient:
 
         metadata = self._metadata(envelope)
         session_id = self._string(envelope.get("session_id"))
-        summary = self._string(envelope.get("result")) or ""
+        summary = self._string(envelope.get("result"))
+        envelope_type = self._string(envelope.get("type"))
         subtype = self._string(envelope.get("subtype"))
+        if envelope_type is None or subtype is None:
+            return ClaudeCodeResult(
+                success=False,
+                error_message=self._with_details(
+                    "Claude Code returned a malformed result envelope "
+                    "without a type or subtype",
+                    self._terminal_details(envelope, result.stderr),
+                ),
+                workspace_changes_may_exist=True,
+                session_id=session_id,
+                metadata=metadata,
+            )
         is_error = (
-            envelope.get("type") not in {None, "result"}
+            envelope_type != "result"
             or envelope.get("is_error") is True
-            or (subtype is not None and subtype != "success")
+            or subtype != "success"
         )
         if not result.success or is_error:
             return ClaudeCodeResult(
                 success=False,
-                summary=summary,
-                error_message=summarize_text(
-                    self._string(envelope.get("error"))
-                    or summary
-                    or result.stderr
-                    or "Claude Code failed",
-                    limit=2_000,
+                summary=summary or "",
+                error_message=self._with_details(
+                    "Claude Code failed",
+                    self._terminal_details(envelope, result.stderr),
                 ),
+                workspace_changes_may_exist=True,
+                session_id=session_id,
+                metadata=metadata,
+            )
+        if summary is None:
+            return ClaudeCodeResult(
+                success=False,
+                error_message="Claude Code returned a malformed successful result without text",
                 workspace_changes_may_exist=True,
                 session_id=session_id,
                 metadata=metadata,
@@ -179,6 +198,19 @@ class ClaudeCodeClient:
             "-p",
             "--output-format",
             "json",
+            # Restricted mode is the enforcement boundary: it ignores user and
+            # project settings, confines file tools to cwd, blocks cloud runs,
+            # and removes command tools unless explicitly re-added below.
+            "--restricted",
+            # Keep the mutable surface intentionally file-only.  In
+            # particular, do not re-add Bash: otherwise a model could bypass
+            # orchestrator-owned Git/GitHub lifecycle policy with a shell.
+            "--tools",
+            "Read,Edit,Glob,Grep",
+            # --tools does not limit MCP tools. Deny them explicitly so the
+            # boundary holds even if an administrator supplies one.
+            "--disallowedTools",
+            "mcp__*",
             "--permission-mode",
             self._permission_mode,
             "--permission-prompts",
@@ -208,6 +240,42 @@ class ClaudeCodeClient:
         return parsed, None
 
     @staticmethod
+    def _with_details(message: str, details: str | None) -> str:
+        if not details:
+            return message
+        return f"{message}: {details}"
+
+    @classmethod
+    def _terminal_details(cls, envelope: Mapping[str, Any], stderr: str) -> str | None:
+        """Render Claude's terminal fields without losing failure classification data."""
+
+        details: list[str] = []
+        for key in (
+            "error",
+            "errors",
+            "terminal_reason",
+            "api_error_status",
+            "stop_reason",
+            "subtype",
+            "result",
+        ):
+            value = envelope.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                rendered = value
+            else:
+                try:
+                    rendered = json.dumps(redact_payload(value), sort_keys=True)
+                except (TypeError, ValueError):
+                    rendered = str(redact_payload(value))
+            if rendered.strip():
+                details.append(f"{key}={rendered}")
+        if stderr.strip():
+            details.append(f"stderr={stderr}")
+        return summarize_text("; ".join(details), limit=2_000) or None
+
+    @staticmethod
     def _string(value: object) -> str | None:
         if not isinstance(value, str):
             return None
@@ -228,12 +296,21 @@ class ClaudeCodeClient:
             "usage",
             "modelUsage",
             "subtype",
+            "errors",
+            "terminal_reason",
+            "api_error_status",
+            "stop_reason",
         ):
             value = envelope.get(key)
             if value is None:
                 continue
             if isinstance(value, (str, int, float, bool)):
                 metadata[key] = value
-            elif key in {"usage", "modelUsage"} and isinstance(value, Mapping):
-                metadata[key] = dict(value)
+            elif key in {"usage", "modelUsage", "errors"} and isinstance(
+                value, (Mapping, list, tuple)
+            ):
+                # Diagnostics are persisted by provider-neutral wrappers. Keep
+                # the documented terminal data but redact it before it crosses
+                # this provider boundary.
+                metadata[key] = redact_payload(value)
         return metadata

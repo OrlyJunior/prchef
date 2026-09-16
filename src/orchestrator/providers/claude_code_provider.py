@@ -33,11 +33,12 @@ class ClaudeCodeAgentProvider:
             request.workspace_path,
             output_schema=(request.structured_output.schema if request.structured_output else None),
         )
-        retryable = _retryable_failure_category(result.error_message)
+        retryable = _retryable_failure_category(result.error_message, result.metadata)
         if not result.success and retryable is not None:
             raise AgentProviderError(
-                "Claude Code provider quota, rate limit, or temporary capacity was exhausted.",
+                result.error_message or "Claude Code exhausted a retryable provider resource.",
                 category=retryable,
+                metadata=dict(result.metadata),
             )
         execution = (
             AgentExecutionReference(
@@ -59,31 +60,50 @@ class ClaudeCodeAgentProvider:
         )
 
 
-def _retryable_failure_category(message: str | None) -> str | None:
+def _retryable_failure_category(
+    message: str | None, metadata: object | None = None
+) -> str | None:
     """Normalize Claude CLI text to the provider-neutral fallback categories."""
 
-    if message is None:
+    if message is None and metadata is None:
         return None
-    details = message.casefold()
+    details = " ".join((str(message or ""), str(metadata or ""))).casefold()
     if any(
         marker in details
         for marker in (
             "authentication",
+            "authentication_failed",
             "unauthorized",
             "forbidden",
             "permission denied",
+            "oauth_org_not_allowed",
+            "account_on_hold",
+            "invalid_request",
+            "model_not_found",
+            "invalid model",
+            "unknown option",
             "content policy",
             "safety filter",
         )
     ):
         return None
-    if "quota" in details or "insufficient_quota" in details:
+    if any(marker in details for marker in ("quota", "insufficient_quota", "billing_error")):
         return "quota"
-    if "rate limit" in details or "ratelimit" in details or "http 429" in details:
+    if any(
+        marker in details
+        for marker in ("rate limit", "rate_limit", "rate-limit", "ratelimit", "429")
+    ):
         return "rate_limit"
     if any(
         marker in details
-        for marker in ("http 503", "capacity", "overloaded", "temporarily unavailable")
+        for marker in (
+            "http 503",
+            "503",
+            "capacity",
+            "overloaded",
+            "temporarily unavailable",
+            "server_error",
+        )
     ):
         return "capacity"
     return None

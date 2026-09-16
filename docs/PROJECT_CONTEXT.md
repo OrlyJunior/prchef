@@ -254,14 +254,18 @@
 - Claude Code is a first-class local-workspace CLI provider. Its safe configuration accepts one
   executable, timeout, optional model, `dontAsk`/`acceptEdits`/`auto` permission mode, optional
   turn/budget limits, and bare mode, never arbitrary flags. The provider constructs `claude -p`
-  with JSON output itself, passes the request instructions on stdin, and uses exactly the supplied
-  workspace as cwd. It never creates Claude worktrees, adds directories, resumes/continues sessions,
-  starts remote/cloud work, bypasses permissions, or owns Git branches/commits/pushes/PRs/reviews.
-  Native `--json-schema` structured output is parsed and validated locally before `AgentResult`;
-  completion session IDs and whitelisted usage/cost metadata are diagnostic-only and never resume.
-  Its unavailable CLI, authentication, timeout, malformed envelope/schema, invalid model, quota,
-  rate-limit, and capacity failures remain provider-local; only normalized quota/rate-limit/capacity
-  errors participate in existing one-hop fallback.
+  with JSON output itself, always adds Claude's `--restricted` mode and fixed `Read,Edit,Glob,Grep`
+  tool set, passes request instructions on stdin, and uses exactly the supplied workspace as cwd.
+  Restricted mode ignores user/project settings, confines file tools to cwd, and prevents shell,
+  MCP, and cloud execution; `bare_mode: true` additionally skips auto-discovery. It never creates
+  Claude worktrees, adds directories, resumes/continues sessions, bypasses permissions, or owns Git
+  branches/commits/pushes/PRs/reviews. Native `--json-schema` structured output is parsed and
+  validated locally before `AgentResult`; a successful envelope requires `type=result`,
+  `subtype=success`, and non-empty result text. Completion session IDs, whitelisted usage/cost, and
+  selected terminal error fields are diagnostic-only and never resume. Its unavailable CLI,
+  authentication, timeout, malformed envelope/schema, invalid model, quota, rate-limit, and capacity
+  failures remain provider-local; only normalized quota/rate-limit/capacity errors participate in
+  existing one-hop fallback. Claude Code v2.1.259+ and externally supplied authentication are required.
 - Jules plan/review requests explicitly disable publishing automation and prompt for read-only
   behavior. Codex uses configured argument lists via the generic command client and forces
   `codex exec --json`; when an `AgentRequest` carries a structured-output expectation, it also

@@ -55,6 +55,11 @@ def test_claude_code_client_uses_only_safe_print_mode_arguments_and_workspace(
         "-p",
         "--output-format",
         "json",
+        "--restricted",
+        "--tools",
+        "Read,Edit,Glob,Grep",
+        "--disallowedTools",
+        "mcp__*",
         "--permission-mode",
         "acceptEdits",
         "--permission-prompts",
@@ -71,8 +76,17 @@ def test_claude_code_client_uses_only_safe_print_mode_arguments_and_workspace(
     assert kwargs["input_text"] == "private prompt"
     assert not any(
         flag in command
-        for flag in ("--worktree", "--add-dir", "--resume", "--continue", "--cloud")
+        for flag in (
+            "--worktree",
+            "--add-dir",
+            "--resume",
+            "--continue",
+            "--cloud",
+            "--allowedTools",
+            "--dangerously-skip-permissions",
+        )
     )
+    assert "Bash" not in command[command.index("--tools") + 1]
 
 
 def test_claude_code_client_forwards_native_schema_and_validates_result(tmp_path: Path) -> None:
@@ -116,10 +130,50 @@ def test_claude_code_client_rejects_malformed_or_invalid_structured_output(tmp_p
     ).execute("Return JSON", tmp_path, schema)
 
     assert not malformed.success
-    assert malformed.error_message == "Claude Code returned malformed JSON output"
+    assert malformed.error_message == "Claude Code returned malformed JSON output: not-json"
     assert malformed.workspace_changes_may_exist
     assert not invalid.success
     assert "invalid structured output" in (invalid.error_message or "")
+
+
+@pytest.mark.parametrize("stdout", ["{}", _envelope(type="system", result="wrong type")])
+def test_claude_code_client_rejects_incomplete_or_non_result_envelopes(
+    tmp_path: Path, stdout: str
+) -> None:
+    result = ClaudeCodeClient(
+        RecordingCommandClient(stdout=stdout), "claude", 30  # type: ignore[arg-type]
+    ).execute("work", tmp_path)
+
+    assert not result.success
+    assert "malformed result envelope" in (result.error_message or "") or "failed" in (
+        result.error_message or ""
+    )
+
+
+def test_claude_code_client_preserves_terminal_failure_details_from_stdout_and_stderr(
+    tmp_path: Path,
+) -> None:
+    result = ClaudeCodeClient(
+        RecordingCommandClient(
+            exit_code=1,
+            stdout=_envelope(
+                subtype="error",
+                result="API Error: Request rejected (429)",
+                terminal_reason="rate_limit",
+                api_error_status=429,
+                errors=[{"code": "rate_limit", "api_key": "do-not-persist"}],
+            ),
+            stderr="request exhausted",
+        ),
+        "claude",
+        30,  # type: ignore[arg-type]
+    ).execute("work", tmp_path)
+
+    assert not result.success
+    assert "Request rejected (429)" in (result.error_message or "")
+    assert result.metadata["terminal_reason"] == "rate_limit"
+    assert result.metadata["api_error_status"] == 429
+    assert result.metadata["errors"] == [{"code": "rate_limit", "api_key": "[REDACTED]"}]
 
 
 def test_claude_code_client_marks_a_timeout_as_a_possible_workspace_change(tmp_path: Path) -> None:
@@ -140,6 +194,8 @@ def test_claude_code_client_marks_a_timeout_as_a_possible_workspace_change(tmp_p
     ("message", "category"),
     [
         ("rate limit reached", "rate_limit"),
+        ("API Error: Request rejected (429)", "rate_limit"),
+        ("error=rate_limit", "rate_limit"),
         ("quota exceeded", "quota"),
         ("service overloaded", "capacity"),
     ],
@@ -160,6 +216,53 @@ def test_claude_provider_preserves_retryable_fallback_categories(
         provider.execute(AgentRequest(instructions="work", title="work", workspace_path=tmp_path))
 
     assert caught.value.category == category
+
+
+def test_claude_provider_keeps_terminal_metadata_on_a_retryable_error(tmp_path: Path) -> None:
+    provider = ClaudeCodeAgentProvider(
+        "claude",
+        ClaudeCodeClient(
+            RecordingCommandClient(
+                exit_code=1,
+                stdout=_envelope(
+                    subtype="error",
+                    result="Request rejected",
+                    api_error_status=429,
+                ),
+            ),
+            "claude",
+            30,  # type: ignore[arg-type]
+        ),
+    )
+
+    with pytest.raises(AgentProviderError) as caught:
+        provider.execute(AgentRequest(instructions="work", title="work", workspace_path=tmp_path))
+
+    assert caught.value.category == "rate_limit"
+    assert caught.value.metadata["api_error_status"] == 429
+
+
+def test_claude_provider_classifies_a_retryable_stderr_when_cli_output_is_not_json(
+    tmp_path: Path,
+) -> None:
+    provider = ClaudeCodeAgentProvider(
+        "claude",
+        ClaudeCodeClient(
+            RecordingCommandClient(
+                exit_code=1,
+                stdout="",
+                stderr="API Error: Request rejected (429)",
+            ),
+            "claude",
+            30,  # type: ignore[arg-type]
+        ),
+    )
+
+    with pytest.raises(AgentProviderError) as caught:
+        provider.execute(AgentRequest(instructions="work", title="work", workspace_path=tmp_path))
+
+    assert caught.value.category == "rate_limit"
+    assert "Request rejected (429)" in str(caught.value)
 
 
 def test_claude_provider_exposes_completion_session_without_startup_resume(tmp_path: Path) -> None:
@@ -199,6 +302,21 @@ def test_claude_settings_reject_arbitrary_command_configuration() -> None:
         ClaudeCodeProviderSettings.model_validate(
             {"type": "claude-code", "command": ["claude", "--dangerously-skip-permissions"]}
         )
+
+
+def test_claude_code_is_restricted_even_when_bare_mode_is_disabled(tmp_path: Path) -> None:
+    commands = RecordingCommandClient(stdout=_envelope(result="done"))
+    client = ClaudeCodeClient(
+        commands, "claude", 30, bare_mode=False  # type: ignore[arg-type]
+    )
+
+    result = client.execute("work", tmp_path)
+
+    assert result.success
+    command, _ = commands.calls[0]
+    assert "--restricted" in command
+    assert "--bare" not in command
+    assert command[command.index("--tools") + 1] == "Read,Edit,Glob,Grep"
 
 
 def test_claude_settings_support_runtime_model_override_and_first_class_label(

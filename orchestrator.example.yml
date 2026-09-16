@@ -94,9 +94,12 @@ defaults:
       # Ele implica workspace-write e nao pode ser combinado com --sandbox.
       # approval_policy: approve-for-me
     # Claude Code needs a recent `claude` CLI with `--output-format json`,
-    # `--json-schema`, and `--permission-prompts`. Authenticate outside this
+    # `--json-schema`, `--restricted`, and `--permission-prompts`. Authenticate outside this
     # YAML. Bare mode requires ANTHROPIC_API_KEY (or supported cloud-provider
     # credentials); it does not read subscription login/keychain credentials.
+    # The provider always uses restricted, file-only tools in the supplied
+    # workspace, so project/user hooks, MCP, Bash, and Git lifecycle actions
+    # cannot be enabled by this configuration.
     # claude:
     #   type: claude-code
     #   executable: claude
