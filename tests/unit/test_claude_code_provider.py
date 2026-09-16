@@ -344,5 +344,11 @@ def test_claude_settings_support_runtime_model_override_and_first_class_label(
     overridden = config.with_agent_runtime_overrides({}, {"planner": {"model": "claude-other"}})
 
     assert config.provider_options() == [("claude", "claude")]
-    assert config.provider_runtime_values("claude") == {"model": "claude-configured"}
-    assert overridden.provider_runtime_values("__tui_runtime_planner") == {"model": "claude-other"}
+    assert config.provider_runtime_values("claude") == {
+        "model": "claude-configured",
+        "permission_mode": "acceptEdits",
+    }
+    assert overridden.provider_runtime_values("__tui_runtime_planner") == {
+        "model": "claude-other",
+        "permission_mode": "acceptEdits",
+    }

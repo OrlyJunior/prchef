@@ -100,6 +100,11 @@ metadados diagnosticos de conclusao: nao ha callback de inicio nem resume automa
 Code v2.1.259 ou posterior (`--restricted` requer v2.1.248 e `--permission-prompts` v2.1.259), com
 autenticacao fornecida externamente, nunca no YAML.
 
+O modo de permissao Claude tambem e uma opcao de runtime por papel: presets e a TUI podem escolher
+`dontAsk`, `acceptEdits` ou `auto` para planner, implementer e reviewer usando uma unica instancia
+nomeada. A substituicao e validada em memoria e nao altera o YAML; quando omitida, o valor do
+provider no YAML continua sendo o default.
+
 O provider `codex-cli` recebe `model` e `reasoning_effort` somente na sua propria configuracao e
 os traduz para argumentos da CLI. Os services continuam conhecendo apenas `AgentProvider`; eles nao
 selecionam modelo, esforco de raciocinio ou fallback de runtime.

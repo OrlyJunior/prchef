@@ -1296,6 +1296,46 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
     asyncio.run(drive())
 
 
+def test_workflow_runner_keeps_claude_permission_modes_role_local(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.providers["claude"] = AgentProviderSettings.model_validate(
+        {"type": "claude-code", "permission_mode": "dontAsk"}
+    )
+    for role in ("planner", "implementer", "reviewer"):
+        getattr(config.agents, role).provider = "claude"
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            screen = application.screen
+            screen.query_one("#repository").value = "example"
+            await settle_tui(pilot)
+            for prefix in ("planner", "implementer", "reviewer"):
+                assert screen.query_one(f"#{prefix}-permission").display is True
+                assert "Provider/YAML default (dontAsk)" in str(
+                    screen.query_one(f"#{prefix}-summary", Static).renderable
+                )
+
+            screen.query_one("#implementer-permission").value = "acceptEdits"
+            screen.query_one("#reviewer-permission").value = "auto"
+            await settle_tui(pilot)
+            assert screen._runtime_options_for_role(AgentRole.PLANNER, "planner") == {
+                "model": None
+            }
+            assert screen._runtime_options_for_role(AgentRole.IMPLEMENTER, "implementer") == {
+                "model": None,
+                "permission_mode": "acceptEdits",
+            }
+            assert screen._runtime_options_for_role(AgentRole.REVIEWER, "reviewer") == {
+                "model": None,
+                "permission_mode": "auto",
+            }
+
+    asyncio.run(drive())
+
+
 def test_workflow_runner_clarifies_configured_fallback_during_primary_override(
     tmp_path: Path,
 ) -> None:
@@ -1490,6 +1530,86 @@ def test_agent_presets_screen_manages_all_role_presets(tmp_path: Path) -> None:
             await settle_tui(pilot)
             assert "reviewer" not in config.agent_presets
             assert "fast" in config.agent_presets["planner"]
+
+    asyncio.run(drive())
+
+
+def test_agent_presets_screen_manages_claude_permission_mode(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.providers["claude"] = AgentProviderSettings.model_validate(
+        {"type": "claude-code", "permission_mode": "dontAsk"}
+    )
+    config.agents.planner.provider = "claude"
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("p")
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#agent-presets-repository", Select).value = "example"
+            await settle_tui(pilot)
+
+            permission = screen.query_one("#agent-preset-permission", OrchestratorSelect)
+            assert permission.display is True
+            assert "Provider/YAML default (dontAsk)" in {
+                option[0] for option in permission._options
+            }
+            permission.value = "acceptEdits"
+            screen.query_one("#agent-preset-name", Input).value = "editing"
+            screen.query_one("#create-agent-preset", Button).press()
+            await settle_tui(pilot)
+            assert config.agent_presets["planner"]["editing"].permission_mode == "acceptEdits"
+
+            screen.query_one("#agent-preset-provider", Select).value = "planner"
+            await settle_tui(pilot)
+            assert permission.display is False
+
+            screen.query_one("#agent-preset-provider", Select).value = "claude"
+            await settle_tui(pilot)
+            assert permission.display is True
+            assert permission.value == "acceptEdits"
+
+            # A delayed provider event from an earlier switch must not reload
+            # permission controls for a provider the selector no longer names.
+            provider_select = screen.query_one("#agent-preset-provider", OrchestratorSelect)
+            screen.on_select_changed(OrchestratorSelect.Changed(provider_select, "planner"))
+            await settle_tui(pilot)
+            assert permission.display is True
+            assert permission.value == "acceptEdits"
+
+            permission.value = permission._options[0][1]
+            screen.query_one("#update-agent-preset", Button).press()
+            await settle_tui(pilot)
+            assert config.agent_presets["planner"]["editing"].permission_mode is None
+
+    asyncio.run(drive())
+
+
+def test_agent_presets_screen_reports_invalid_claude_permission_default(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.providers["claude"] = AgentProviderSettings.model_validate(
+        {"type": "claude-code", "permission_mode": "invalid"}
+    )
+    config.agents.planner.provider = "claude"
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("p")
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#agent-presets-repository", Select).value = "example"
+            await settle_tui(pilot)
+
+            assert screen.query_one(
+                "#agent-preset-permission", OrchestratorSelect
+            ).display is False
+            status = str(screen.query_one("#agent-presets-status", Static).renderable)
+            assert "Cannot load permission default for provider 'claude'" in status
+            assert "permission_mode" in status
 
     asyncio.run(drive())
 

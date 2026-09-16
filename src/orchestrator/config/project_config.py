@@ -253,6 +253,7 @@ class AgentPresetConfig(BaseModel):
     provider: str
     model: str | None = None
     reasoning_effort: str | None = None
+    permission_mode: Literal["dontAsk", "acceptEdits", "auto"] | None = None
     generation: Mapping[str, Any] = Field(default_factory=dict)
 
     @field_validator("provider", "model", "reasoning_effort")
@@ -282,6 +283,8 @@ class AgentPresetConfig(BaseModel):
             options["model"] = self.model
         if self.reasoning_effort is not None:
             options["reasoning_effort"] = self.reasoning_effort
+        if self.permission_mode is not None:
+            options["permission_mode"] = self.permission_mode
         if self.generation:
             options["generation"] = dict(self.generation)
         return options
@@ -566,6 +569,7 @@ class ProviderRuntimeCapabilities:
 
     supports_model: bool = False
     supports_reasoning_effort: bool = False
+    supports_permission_mode: bool = False
     supports_generation: bool = False
 
 
@@ -983,7 +987,9 @@ class ProjectConfig(BaseModel):
                 supports_model=True, supports_reasoning_effort=True
             )
         if settings.type == "claude-code":
-            return ProviderRuntimeCapabilities(supports_model=True)
+            return ProviderRuntimeCapabilities(
+                supports_model=True, supports_permission_mode=True
+            )
         if settings.type == "gemini-vertex":
             return ProviderRuntimeCapabilities(supports_model=True, supports_generation=True)
         if settings.type == "litellm":
@@ -1004,7 +1010,7 @@ class ProjectConfig(BaseModel):
             }
         if settings.type == "claude-code":
             claude = ClaudeCodeProviderSettings.model_validate(settings.model_dump())
-            return {"model": claude.model}
+            return {"model": claude.model, "permission_mode": claude.permission_mode}
         if settings.type == "gemini-vertex":
             vertex = GeminiVertexProviderSettings.model_validate(settings.model_dump())
             return {
@@ -1053,6 +1059,8 @@ class ProjectConfig(BaseModel):
             allowed = {"model"} if capability.supports_model else set()
             if capability.supports_reasoning_effort:
                 allowed.add("reasoning_effort")
+            if capability.supports_permission_mode:
+                allowed.add("permission_mode")
             if capability.supports_generation:
                 allowed.add("generation")
             unsupported = sorted(set(overrides) - allowed)
