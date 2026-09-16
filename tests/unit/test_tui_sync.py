@@ -88,6 +88,31 @@ def test_wait_for_workers_allows_only_a_superseded_cancellation() -> None:
     asyncio.run(drive())
 
 
+def test_wait_for_workers_allows_a_later_scheduled_supersession() -> None:
+    async def drive() -> None:
+        node = object()
+        superseded = _Worker(node)
+        superseded.cancel()
+        live_workers = [superseded]
+        replacement = _Worker(node)
+
+        async def schedule_replacement() -> None:
+            await asyncio.sleep(0)
+            live_workers.append(replacement)
+
+        replacement_task = asyncio.create_task(schedule_replacement())
+        await _wait_for_workers(
+            [superseded],  # type: ignore[arg-type]
+            timeout=0.1,
+            description="task reload",
+            refresh_workers=lambda: live_workers,  # type: ignore[return-value]
+        )
+        await replacement_task
+        assert live_workers == [superseded, replacement]
+
+    asyncio.run(drive())
+
+
 def test_wait_for_workers_cancels_and_reaps_timed_out_workers() -> None:
     async def drive() -> None:
         worker = _Worker(object(), block=True)
