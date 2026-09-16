@@ -48,12 +48,15 @@ class DiagnosticAgentProvider:
             self._record(
                 DiagnosticCategory.ERROR,
                 self._role,
-                {
-                    "operation": "agent_provider.execute",
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                    "provider": self._provider_config,
-                },
+                self._sanitize(
+                    {
+                        "operation": "agent_provider.execute",
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                        "provider_metadata": self._exception_metadata(exc),
+                        "provider": self._provider_config,
+                    }
+                ),
             )
             raise
         if self._cancellation_check is not None:
@@ -103,6 +106,11 @@ class DiagnosticAgentProvider:
     def _sanitize(payload: dict[str, Any]) -> dict[str, Any]:
         value = redact_payload(payload)
         return value if isinstance(value, dict) else {"value": value}
+
+    @staticmethod
+    def _exception_metadata(error: Exception) -> dict[str, Any]:
+        metadata = getattr(error, "metadata", {})
+        return dict(metadata) if isinstance(metadata, Mapping) else {}
 
     @staticmethod
     def _structured_output(result: AgentResult) -> dict[str, Any] | None:

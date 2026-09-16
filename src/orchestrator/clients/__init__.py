@@ -1,3 +1,4 @@
+from orchestrator.clients.claude_code_client import ClaudeCodeClient
 from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.command_client import CommandClient, CommandResult
 from orchestrator.clients.git_client import GitClient
@@ -7,6 +8,7 @@ from orchestrator.clients.jules_client import JulesClient
 from orchestrator.clients.trello_client import TrelloClient
 
 __all__ = [
+    "ClaudeCodeClient",
     "CodexClient",
     "CommandClient",
     "CommandResult",

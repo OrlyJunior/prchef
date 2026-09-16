@@ -93,6 +93,24 @@ defaults:
       # Opcional: usa o modo de revisao automatica do Codex CLI.
       # Ele implica workspace-write e nao pode ser combinado com --sandbox.
       # approval_policy: approve-for-me
+    # Claude Code needs a recent `claude` CLI with `--output-format json`,
+    # `--json-schema`, `--restricted`, and `--permission-prompts`. Authenticate outside this
+    # YAML. Bare mode requires ANTHROPIC_API_KEY (or supported cloud-provider
+    # credentials); it does not read subscription login/keychain credentials.
+    # The provider always uses restricted, file-only tools in the supplied
+    # workspace, so project/user hooks, MCP, Bash, and Git lifecycle actions
+    # cannot be enabled by this configuration.
+    # claude:
+    #   type: claude-code
+    #   executable: claude
+    #   timeout_seconds: 1800
+    #   # model: <your-supported-claude-model>
+    #   # `dontAsk` is suitable for read-only roles. Use `acceptEdits` only for
+    #   # a role permitted to edit the orchestrator-created workspace.
+    #   permission_mode: dontAsk
+    #   bare_mode: true
+    #   # max_turns: 12
+    #   # max_budget_usd: 5.00
     # Requer ADC (por exemplo, `gcloud auth application-default login`), nao uma API key.
     # vertex-gemini:
     #   type: gemini-vertex
