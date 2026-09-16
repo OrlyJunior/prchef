@@ -269,6 +269,21 @@ class GitHubClient:
         except (ValueError, KeyError, TypeError) as exc:
             raise GitHubClientError(f"Invalid GitHub CLI response: {viewed.stdout}") from exc
 
+    def is_pull_request_open(self, repository: str, pull_request_number: int) -> bool:
+        """Return whether a persisted pull request can still receive branch updates."""
+        if pull_request_number <= 0:
+            raise ValueError("Pull request number must be positive")
+        if not repository.strip():
+            raise ValueError("GitHub repository must be non-empty")
+        viewed = self._run(
+            "api",
+            f"repos/{repository}/pulls/{pull_request_number}",
+            "--jq",
+            ".state",
+            env=self._implementer_auth_environment(),
+        )
+        return viewed.stdout.strip().casefold() == "open"
+
     def submit_pull_request_review(
         self,
         *,

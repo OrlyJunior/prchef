@@ -791,6 +791,75 @@ def test_review_correction_limit_finishes_changes_requested(workflow) -> None:
     assert factory.github.create_calls == 1
 
 
+def test_manual_continuation_reuses_open_pr_and_records_feedback(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.changes_requested = True
+
+    paused = service.run("card-manual-continuation")
+    assert paused.status is WorkflowStatus.CHANGES_REQUESTED
+    factory.jules.changes_requested = False
+
+    resumed = service.continue_execution(paused.id, "Also cover the boundary case.")
+
+    assert resumed.status is WorkflowStatus.APPROVED
+    assert factory.github.create_calls == 1
+    assert factory.github.pr_open_calls == [
+        {"repository": "example/api", "pull_request_number": 42}
+    ]
+    assert "OPERATOR FEEDBACK FOR CONTINUING" in factory.codex.requests[-1].instructions
+    assert "Also cover the boundary case." in factory.codex.requests[-1].instructions
+    assert any(
+        diagnostic.payload.get("kind") == "MANUAL_CONTINUATION"
+        and diagnostic.payload["feedback"] == "Also cover the boundary case."
+        for diagnostic in repository.diagnostics
+    )
+
+
+def test_manual_continuation_stops_before_implementer_when_workspace_is_missing(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.changes_requested = True
+    paused = service.run("card-missing-continuation-worktree")
+    assert paused.workspace_path is not None
+    Path(paused.workspace_path).rmdir()
+    initial_requests = len(factory.codex.requests)
+
+    with pytest.raises(Exception, match="workspace"):
+        service.continue_execution(paused.id, "Please continue.")
+
+    assert len(factory.codex.requests) == initial_requests
+
+
+def test_manual_continuation_blocks_a_closed_persisted_pull_request(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.changes_requested = True
+    paused = service.run("card-closed-continuation-pr")
+    factory.jules.changes_requested = False
+    factory.github.pr_open = False
+    pushes_before = factory.git.push_calls
+
+    resumed = service.continue_execution(paused.id, "Please address the review.")
+
+    assert resumed.status is WorkflowStatus.FAILED
+    assert "closed or unavailable" in (resumed.error_message or "")
+    assert factory.git.push_calls == pushes_before
+    assert factory.github.create_calls == 1
+
+
+def test_manual_continuation_creates_pr_when_original_failure_had_none(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.github.error = RuntimeError("PR creation failed")
+    failed = service.run("card-continuation-without-pr")
+    assert failed.status is WorkflowStatus.FAILED
+    assert failed.pull_request_snapshot is None
+    factory.github.error = None
+
+    resumed = service.continue_execution(failed.id, "Retry PR creation after implementation.")
+
+    assert resumed.status is WorkflowStatus.APPROVED
+    assert resumed.pull_request_snapshot is not None
+    assert factory.github.create_calls == 2
+
+
 def test_review_correction_uses_validation_retry_handling(workflow) -> None:
     service, repository, _, factory = workflow
     factory.jules.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
