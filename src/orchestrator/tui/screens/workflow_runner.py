@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from textual import work
 from textual.app import ComposeResult
@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 
 
 _MANUAL_PRESET = object()
+_PROVIDER_DEFAULT_PERMISSION = object()
+_PERMISSION_MODES = ("dontAsk", "acceptEdits", "auto")
+_PermissionMode = Literal["dontAsk", "acceptEdits", "auto"]
 
 
 class StopWorkflowConfirmation(ModalScreen[bool]):
@@ -171,6 +174,15 @@ class WorkflowRunnerScreen(Screen[None]):
                                     yield Input(
                                         placeholder="Provider/YAML default",
                                         id=f"{prefix}-reasoning",
+                                    )
+                                with Vertical(classes="role-field"):
+                                    yield Static(
+                                        "Permission mode", id=f"{prefix}-permission-label"
+                                    )
+                                    yield OrchestratorSelect(
+                                        [],
+                                        prompt="Provider/YAML default",
+                                        id=f"{prefix}-permission",
                                     )
                                 with Vertical(classes="role-field role-advanced-action"):
                                     yield Button("Advanced ▸", id=f"{prefix}-advanced-toggle")
@@ -333,6 +345,17 @@ class WorkflowRunnerScreen(Screen[None]):
                     return
                 self._load_role_runtime_controls(role, prefix, event.value)
                 self._clear_preset_if_provider_changed(role, prefix, event.value)
+                self._update_preset_source(role, prefix)
+                return
+            if event.select.id == f"{prefix}-permission":
+                provider = self._selected(f"#{prefix}-provider")
+                repository = self._selected("#repository")
+                if provider is None or repository is None:
+                    return
+                capabilities = self.controller.provider_runtime_capabilities(repository, provider)
+                values = self._runtime_values_from_controls(prefix)
+                self._clear_preset_if_runtime_changed(role, prefix)
+                self._update_role_summary(role, prefix, provider, values, capabilities)
                 self._update_preset_source(role, prefix)
                 return
 
@@ -543,6 +566,13 @@ class WorkflowRunnerScreen(Screen[None]):
     def _set_preset_runtime_controls(self, prefix: str, preset: AgentPresetConfig) -> None:
         self.query_one(f"#{prefix}-model", Input).value = preset.model or ""
         self.query_one(f"#{prefix}-reasoning", Input).value = preset.reasoning_effort or ""
+        permission = self.query_one(f"#{prefix}-permission", OrchestratorSelect)
+        if permission.display:
+            permission.value = (
+                preset.permission_mode
+                if preset.permission_mode is not None
+                else _PROVIDER_DEFAULT_PERMISSION
+            )
         generation = dict(preset.generation)
         for name in ("temperature", "max-output-tokens"):
             value = generation.get(name.replace("-", "_"))
@@ -560,6 +590,7 @@ class WorkflowRunnerScreen(Screen[None]):
             provider=provider,
             model=options.get("model"),
             reasoning_effort=options.get("reasoning_effort"),
+            permission_mode=options.get("permission_mode"),
             generation=generation,
         )
 
@@ -631,6 +662,7 @@ class WorkflowRunnerScreen(Screen[None]):
             provider=provider,
             model=defaults.get("model"),
             reasoning_effort=defaults.get("reasoning_effort"),
+            permission_mode=None,
             generation={key: value for key, value in generation.items() if value is not None},
         )
         return not self._preset_matches_controls(role, prefix, baseline)
@@ -651,9 +683,13 @@ class WorkflowRunnerScreen(Screen[None]):
             self._runtime_inputs[(role, previous)] = self._runtime_values_from_controls(prefix)
         try:
             capabilities = self.controller.provider_runtime_capabilities(repository, provider)
+            provider_values = self.controller.provider_runtime_values(repository, provider)
             values = None if reset_to_defaults else self._runtime_inputs.get((role, provider))
             if values is None:
-                values = self.controller.provider_runtime_values(repository, provider)
+                values = provider_values
+                permission_value = None
+            else:
+                permission_value = values.get("permission_mode")
         except Exception as exc:
             self.notify(f"Could not load provider runtime settings: {exc}", severity="error")
             return
@@ -665,6 +701,12 @@ class WorkflowRunnerScreen(Screen[None]):
             "reasoning",
             capabilities.supports_reasoning_effort,
             values.get("reasoning_effort"),
+        )
+        self._set_permission_control(
+            prefix,
+            capabilities.supports_permission_mode,
+            provider_values.get("permission_mode"),
+            permission_value,
         )
         generation = values.get("generation", {})
         generation = generation if isinstance(generation, dict) else {}
@@ -692,12 +734,31 @@ class WorkflowRunnerScreen(Screen[None]):
         if visible:
             input_widget.value = "" if value is None else str(value)
 
+    def _set_permission_control(
+        self, prefix: str, visible: bool, default: Any, value: Any
+    ) -> None:
+        label = self.query_one(f"#{prefix}-permission-label", Static)
+        selector = self.query_one(f"#{prefix}-permission", OrchestratorSelect)
+        label.display = visible
+        selector.display = visible
+        if not visible:
+            return
+        selector.set_options(
+            [
+                (f"Provider/YAML default ({default or 'dontAsk'})", _PROVIDER_DEFAULT_PERMISSION),
+                *[(mode, mode) for mode in _PERMISSION_MODES],
+            ],
+            allow_blank=False,
+        )
+        selector.value = value if value in _PERMISSION_MODES else _PROVIDER_DEFAULT_PERMISSION
+
     @staticmethod
     def _copy_runtime_values(values: dict[str, Any]) -> dict[str, Any]:
         generation = values.get("generation", {})
         return {
             "model": values.get("model"),
             "reasoning_effort": values.get("reasoning_effort"),
+            "permission_mode": values.get("permission_mode"),
             "generation": dict(generation) if isinstance(generation, dict) else {},
         }
 
@@ -705,6 +766,7 @@ class WorkflowRunnerScreen(Screen[None]):
         return {
             "model": self.query_one(f"#{prefix}-model", Input).value.strip() or None,
             "reasoning_effort": self.query_one(f"#{prefix}-reasoning", Input).value.strip() or None,
+            "permission_mode": self._permission_mode(prefix),
             "generation": {
                 "temperature": self.query_one(f"#{prefix}-temperature", Input).value.strip()
                 or None,
@@ -727,6 +789,8 @@ class WorkflowRunnerScreen(Screen[None]):
             options["model"] = values["model"]
         if capabilities.supports_reasoning_effort:
             options["reasoning_effort"] = values["reasoning_effort"]
+        if capabilities.supports_permission_mode and values["permission_mode"] is not None:
+            options["permission_mode"] = values["permission_mode"]
         if capabilities.supports_generation:
             options["generation"] = values["generation"]
         return options
@@ -765,6 +829,14 @@ class WorkflowRunnerScreen(Screen[None]):
             parts.append(str(values.get("model") or "Provider default"))
         if capabilities.supports_reasoning_effort:
             parts.append(str(values.get("reasoning_effort") or "Provider default"))
+        if capabilities.supports_permission_mode:
+            default = self._runtime_defaults.get((role, provider), {}).get("permission_mode")
+            permission = values.get("permission_mode")
+            parts.append(
+                str(permission)
+                if permission is not None
+                else f"Provider/YAML default ({default or 'dontAsk'})"
+            )
         self.query_one(f"#{prefix}-summary", Static).update(" · ".join(parts))
 
     def _update_advanced_indicators(
@@ -789,6 +861,13 @@ class WorkflowRunnerScreen(Screen[None]):
                 default_text = configured if configured is not None else "Provider default"
                 source = f"This-run override (default: {default_text})"
             self.query_one(f"#{prefix}-{control_name}-source", Static).update(source)
+
+    def _permission_mode(self, prefix: str) -> _PermissionMode | None:
+        selector = self.query_one(f"#{prefix}-permission", OrchestratorSelect)
+        if not selector.display:
+            return None
+        value = selector.value
+        return cast(_PermissionMode, value) if value in _PERMISSION_MODES else None
 
     def _set_advanced_visibility(self, role: AgentRole, prefix: str, supported: bool) -> None:
         advanced = self.query_one(f"#{prefix}-advanced", Vertical)
