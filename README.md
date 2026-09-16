@@ -17,6 +17,7 @@ local -> commit -> push -> PR -> review. O merge continua inteiramente manual.
 - Python 3.11+
 - Git
 - Codex CLI autenticado
+- Opcionalmente, Claude Code CLI autenticado para o provider `claude-code`
 - GitHub CLI (`gh`) autenticado, usado para GitHub Issues e Pull Requests
 - Uma credencial para o provider API escolhido, por exemplo `OPENAI_API_KEY` para o exemplo
   LiteLLM incluído
@@ -30,6 +31,23 @@ repositorio. LiteLLM é o backend API-modelo de primeira classe para provedores 
 locais compatíveis; ele não recebe implicitamente shell, filesystem ou estado de workflow.
 O adaptador `gemini-vertex` faz uma unica chamada request/response ao Vertex AI usando ADC e nao
 recebe acesso ao filesystem, shell ou ferramentas locais.
+
+O provider opcional `claude-code` usa somente `claude -p --output-format json` no workspace que o
+orquestrador forneceu. Para respostas estruturadas, ele encaminha o schema existente por
+`--json-schema`, consome o envelope JSON (incluindo `result`, `structured_output` e metadados de
+uso) e valida o objeto antes de ele chegar ao planner ou reviewer. Instale uma versao recente da
+CLI v2.1.259 ou posterior, que suporte `--json-schema` e `--permission-prompts`, e autentique fora
+do YAML. O modo
+`bare_mode: true` e o default recomendado para chamadas reproduziveis; nesse modo, Claude Code
+requer `ANTHROPIC_API_KEY` (ou credenciais suportadas de cloud) e nao usa login de assinatura ou
+keychain. `permission_mode: dontAsk` e apropriado para papeis de leitura; apenas configure
+`acceptEdits` para um papel que possa editar o worktree criado pelo orquestrador.
+
+A configuracao Claude aceita apenas `executable`, modelo, limites de turno/orcamento, modo de
+permissao e bare mode. Nao ha campo para argumentos arbitrarios, `--worktree`, `--add-dir`,
+`--resume`, `--continue`, execucao remota ou bypass de permissao. Claude nunca cria branch,
+commit, push, PR, merge ou revisao: esses passos continuam pertencendo ao orquestrador. O session
+ID e guardado somente como metadado diagnostico apos a conclusao; nao existe resume automatico.
 
 Por padrao, o Codex roda com `--sandbox workspace-write`. Para optar explicitamente pela revisao
 automatica de pedidos de aprovacao da CLI, configure `approval_policy: approve-for-me` em

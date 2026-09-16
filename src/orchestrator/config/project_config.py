@@ -44,6 +44,7 @@ JULES_DEPRECATION_MESSAGE = (
 _PROVIDER_SUPPORT_TIERS: dict[str, ProviderSupportTier] = {
     "litellm": ProviderSupportTier.FIRST_CLASS,
     "codex-cli": ProviderSupportTier.FIRST_CLASS,
+    "claude-code": ProviderSupportTier.FIRST_CLASS,
     "gemini-vertex": ProviderSupportTier.OPTIONAL,
     "jules": ProviderSupportTier.DEPRECATED,
 }
@@ -587,6 +588,67 @@ class CodexCliProviderSettings(CodexIntegrationSettings):
     type: Literal["codex-cli"] = "codex-cli"
 
 
+class ClaudeCodeProviderSettings(BaseModel):
+    """Safe, provider-local controls for Claude Code's print-mode CLI.
+
+    The executable is intentionally a single entry rather than a free-form
+    command list.  The provider constructs every supported CLI argument so
+    configuration cannot opt into worktrees, session resume, remote runs, or
+    permission-bypass switches that would undermine orchestrator ownership.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["claude-code"] = "claude-code"
+    executable: str = "claude"
+    timeout_seconds: int = Field(default=1800, gt=0, le=86_400)
+    model: str | None = None
+    permission_mode: Literal["dontAsk", "acceptEdits", "auto"] = "dontAsk"
+    max_turns: int | None = Field(default=None, gt=0, le=100)
+    max_budget_usd: float | None = Field(default=None, gt=0, le=10_000)
+    bare_mode: bool = True
+
+    @field_validator("executable", "model")
+    @classmethod
+    def validate_non_empty_string(
+        cls, value: str | None, info: ValidationInfo
+    ) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"Claude Code provider {info.field_name} must be a non-empty string")
+        return normalized
+
+    @field_validator("executable")
+    @classmethod
+    def validate_executable(cls, value: str) -> str:
+        prohibited = (
+            "--worktree",
+            "--add-dir",
+            "--resume",
+            "--continue",
+            "--cloud",
+            "--permission-mode",
+            "--allowedtools",
+            "--dangerously-skip-permissions",
+            "--bypass-permissions",
+        )
+        lowered = value.casefold()
+        if any(flag in lowered for flag in prohibited):
+            raise ValueError(
+                "Claude Code executable must be one command entry, not a CLI command with options"
+            )
+        if any(character in value for character in ("\n", "\r", "\x00")):
+            raise ValueError("Claude Code executable must be one command entry")
+        is_path = "/" in value or "\\" in value
+        if any(character.isspace() for character in value) and not is_path:
+            raise ValueError(
+                "Claude Code executable must be one command entry, not a CLI command with options"
+            )
+        return value
+
+
 class GeminiGenerationSettings(BaseModel):
     """Small, provider-local set of generation controls for Vertex Gemini."""
 
@@ -664,6 +726,7 @@ def _validate_provider_settings(
 ) -> (
     JulesProviderSettings
     | CodexCliProviderSettings
+    | ClaudeCodeProviderSettings
     | GeminiVertexProviderSettings
     | LiteLLMProviderSettings
 ):
@@ -675,6 +738,8 @@ def _validate_provider_settings(
             return JulesProviderSettings.model_validate(values)
         if provider_type == "codex-cli":
             return CodexCliProviderSettings.model_validate(values)
+        if provider_type == "claude-code":
+            return ClaudeCodeProviderSettings.model_validate(values)
         if provider_type == "gemini-vertex":
             return GeminiVertexProviderSettings.model_validate(values)
         if provider_type == "litellm":
@@ -917,6 +982,8 @@ class ProjectConfig(BaseModel):
             return ProviderRuntimeCapabilities(
                 supports_model=True, supports_reasoning_effort=True
             )
+        if settings.type == "claude-code":
+            return ProviderRuntimeCapabilities(supports_model=True)
         if settings.type == "gemini-vertex":
             return ProviderRuntimeCapabilities(supports_model=True, supports_generation=True)
         if settings.type == "litellm":
@@ -935,6 +1002,9 @@ class ProjectConfig(BaseModel):
                 "model": codex.model,
                 "reasoning_effort": codex.reasoning_effort,
             }
+        if settings.type == "claude-code":
+            claude = ClaudeCodeProviderSettings.model_validate(settings.model_dump())
+            return {"model": claude.model}
         if settings.type == "gemini-vertex":
             vertex = GeminiVertexProviderSettings.model_validate(settings.model_dump())
             return {

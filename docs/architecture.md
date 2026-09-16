@@ -83,6 +83,15 @@ O papel define as instrucoes e a expectativa de output estruturado. O provider r
 de execucao. `AgentProviderRegistry` associa `providers.<nome>.type` a um adaptador explicito; task
 providers de GitHub/Trello continuam sendo um dominio separado.
 
+O provider `claude-code` usa apenas o CLI em print mode (`claude -p --output-format json`) e recebe
+uma superficie segura de configuracao: um executavel, timeout, modelo opcional, modo de permissao,
+limites de turnos/orcamento e bare mode. Nao aceita uma lista livre de argumentos. O cliente usa
+exatamente `AgentRequest.workspace_path` como cwd e nunca habilita worktrees, diretorios extras,
+execucao remota, resume de sessao, bypass de permissao ou comandos de lifecycle Git/GitHub. Para
+`StructuredOutputExpectation`, envia `--json-schema`, le o envelope JSON e valida localmente
+`structured_output` antes de devolver `AgentResult`. Session IDs e uso/custo sao apenas metadados
+diagnosticos de conclusao: nao ha callback de inicio nem resume automatico.
+
 O provider `codex-cli` recebe `model` e `reasoning_effort` somente na sua propria configuracao e
 os traduz para argumentos da CLI. Os services continuam conhecendo apenas `AgentProvider`; eles nao
 selecionam modelo, esforco de raciocinio ou fallback de runtime.

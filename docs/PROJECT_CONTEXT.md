@@ -251,6 +251,17 @@
   exponential retries only for transient polling/result requests. It never creates a replacement
   session after creation. `FAILED`, `CANCELLED`, timeout, or human-intervention states surface
   with the original session ID.
+- Claude Code is a first-class local-workspace CLI provider. Its safe configuration accepts one
+  executable, timeout, optional model, `dontAsk`/`acceptEdits`/`auto` permission mode, optional
+  turn/budget limits, and bare mode, never arbitrary flags. The provider constructs `claude -p`
+  with JSON output itself, passes the request instructions on stdin, and uses exactly the supplied
+  workspace as cwd. It never creates Claude worktrees, adds directories, resumes/continues sessions,
+  starts remote/cloud work, bypasses permissions, or owns Git branches/commits/pushes/PRs/reviews.
+  Native `--json-schema` structured output is parsed and validated locally before `AgentResult`;
+  completion session IDs and whitelisted usage/cost metadata are diagnostic-only and never resume.
+  Its unavailable CLI, authentication, timeout, malformed envelope/schema, invalid model, quota,
+  rate-limit, and capacity failures remain provider-local; only normalized quota/rate-limit/capacity
+  errors participate in existing one-hop fallback.
 - Jules plan/review requests explicitly disable publishing automation and prompt for read-only
   behavior. Codex uses configured argument lists via the generic command client and forces
   `codex exec --json`; when an `AgentRequest` carries a structured-output expectation, it also

@@ -5,12 +5,14 @@ from collections.abc import Callable
 
 from pydantic import ValidationError
 
+from orchestrator.clients.claude_code_client import ClaudeCodeClient
 from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.command_client import CommandClient
 from orchestrator.clients.jules_client import JulesClient
 from orchestrator.config.project_config import (
     JULES_DEPRECATION_MESSAGE,
     AgentProviderSettings,
+    ClaudeCodeProviderSettings,
     CodexCliProviderSettings,
     ConfigurationError,
     GeminiVertexProviderSettings,
@@ -18,6 +20,7 @@ from orchestrator.config.project_config import (
     LiteLLMProviderSettings,
 )
 from orchestrator.providers.agent_provider import AgentProvider
+from orchestrator.providers.claude_code_provider import ClaudeCodeAgentProvider
 from orchestrator.providers.codex_provider import CodexAgentProvider
 from orchestrator.providers.gemini_vertex_provider import GeminiVertexAgentProvider
 from orchestrator.providers.jules_provider import JulesAgentProvider
@@ -35,6 +38,7 @@ class AgentProviderRegistry:
         self._builders: dict[str, ProviderBuilder] = {
             "jules": self._build_jules,
             "codex-cli": self._build_codex,
+            "claude-code": self._build_claude_code,
             "gemini-vertex": self._build_gemini_vertex,
             "litellm": self._build_litellm,
         }
@@ -92,6 +96,26 @@ class AgentProviderRegistry:
                 reasoning_effort=options.reasoning_effort,
                 provider_name=name,
             )
+        )
+
+    @staticmethod
+    def _build_claude_code(
+        name: str, settings: AgentProviderSettings, commands: CommandClient
+    ) -> AgentProvider:
+        options = ClaudeCodeProviderSettings.model_validate(settings.model_dump())
+        return ClaudeCodeAgentProvider(
+            name,
+            ClaudeCodeClient(
+                commands,
+                options.executable,
+                options.timeout_seconds,
+                model=options.model,
+                permission_mode=options.permission_mode,
+                max_turns=options.max_turns,
+                max_budget_usd=options.max_budget_usd,
+                bare_mode=options.bare_mode,
+                provider_name=name,
+            ),
         )
 
     @staticmethod
