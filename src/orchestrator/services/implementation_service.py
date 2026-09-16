@@ -123,16 +123,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
         """Ask the implementer to address a review in the existing workspace."""
-        feedback = json.dumps(
-            {
-                "summary": review.summary,
-                "findings": review.findings,
-                "blocking_findings": review.blocking_findings,
-                "suggestions": review.suggestions,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        feedback = self.render_review_findings(review)
         context = self._prompt_context(repository_path, instructions_repository_path)
         prompt = f"""ORIGINAL TASK:
 {task.as_original_prompt()}
@@ -153,6 +144,55 @@ or revert unrelated existing changes.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
         return self._run_prompt(prompt, repository_path)
+
+    def continue_implementation(
+        self,
+        task: DevelopmentTask,
+        spec: RepositorySpec,
+        feedback: str,
+        repository_path: Path,
+        *,
+        instructions_repository_path: Path | None = None,
+    ) -> ImplementationResult:
+        """Start a fresh implementer invocation in a retained workflow workspace."""
+        if not feedback.strip():
+            raise ValueError("Continuation feedback must not be empty")
+        context = self._prompt_context(repository_path, instructions_repository_path)
+        prompt = f"""ORIGINAL TASK:
+{task.as_original_prompt()}
+
+REPOSITORY SPEC:
+{spec.as_prompt_context()}
+
+OPERATOR FEEDBACK FOR CONTINUING THE CURRENT IMPLEMENTATION:
+{feedback}
+
+{context}Continue the existing implementation in this workspace. Address the operator feedback
+without starting over or reverting unrelated existing changes. The workspace may contain retained
+changes from the prior terminal attempt; inspect its current state using your tools.
+Keep docs/PROJECT_CONTEXT.md accurate if this correction changes durable project knowledge.
+Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+"""
+        return self._run_prompt(prompt, repository_path)
+
+    @staticmethod
+    def render_validation_failures(validation: ValidationResult) -> str:
+        """Render the same bounded validation context used for automatic corrections."""
+        return ImplementationService._render_validation_failures(validation)
+
+    @staticmethod
+    def render_review_findings(review: CodeReview) -> str:
+        """Render the full persisted review context used by review corrections."""
+        return json.dumps(
+            {
+                "summary": review.summary,
+                "findings": review.findings,
+                "blocking_findings": review.blocking_findings,
+                "suggestions": review.suggestions,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     def run_polish_pass(
         self,

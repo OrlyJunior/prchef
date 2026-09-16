@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import unicodedata
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -554,6 +554,96 @@ class WorkflowService:
             self._repository.record_error(execution_id, str(exc))
             return self._finish(execution_id, WorkflowStatus.FAILED, config)
 
+    def continuation_feedback(self, execution_id: str) -> str:
+        """Return the editable feedback shown before a terminal execution is continued."""
+        execution = self._repository.get_execution(execution_id)
+        self._assert_continuation_eligible(execution)
+        if execution.status is WorkflowStatus.CHANGES_REQUESTED:
+            if not execution.review_snapshot:
+                raise WorkflowError("Cannot continue: the terminal review output was not persisted")
+            return ImplementationService.render_review_findings(
+                CodeReview(**execution.review_snapshot)
+            )
+        if execution.validation_snapshot:
+            validation = self._validation_from_snapshot(execution.validation_snapshot)
+            if not validation.success:
+                return ImplementationService.render_validation_failures(validation)
+        implementation_error = (execution.implementation_snapshot or {}).get("error_message")
+        if isinstance(implementation_error, str) and implementation_error.strip():
+            return implementation_error
+        if execution.error_message:
+            return execution.error_message
+        return "The previous workflow attempt failed. Inspect the retained workspace and continue."
+
+    def continue_execution(
+        self,
+        execution_id: str,
+        feedback: str,
+        *,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> WorkflowExecution:
+        """Manually continue an eligible terminal execution in its retained workspace."""
+        if not feedback.strip():
+            raise ValueError("Continuation feedback must not be empty")
+        self._event_listener = event_listener
+        execution = self._repository.get_execution(execution_id)
+        self._assert_continuation_eligible(execution)
+        task = self._task_from_snapshot(execution)
+        if not execution.spec_snapshot:
+            raise WorkflowError("Cannot continue: the original repository spec was not persisted")
+        assert execution.workspace_path is not None and execution.working_branch is not None
+        workspace_path = Path(execution.workspace_path)
+        config = self._config_loader.load(
+            task, execution.repository_ref or execution.repository or None
+        )
+        clients = self._client_factory.create(config)
+        execution_clients = clients.at_path(workspace_path)
+        # Do this before changing status or contacting the implementer: a human
+        # can safely correct a missing/moved worktree and try again.
+        execution_clients.git.verify_worktree_branch(execution.working_branch, execution.commit_sha)
+        self._record_diagnostic(
+            execution_id,
+            DiagnosticCategory.WORKFLOW_EVENT,
+            {"kind": "MANUAL_CONTINUATION", "feedback": feedback},
+            stage=WorkflowStage.IMPLEMENT,
+        )
+        self._repository.resume_execution(execution_id)
+        self._emit(execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.RUNNING)
+        repository_slug = clients.git.github_repository()
+        repository_context_strategy = resolve_repository_context_strategy(
+            config.repository_context.strategy,
+            settings=config.repository_context,
+            repository_key=config.configured_repository_key,
+            configured_root=config.path,
+        )
+        return self._implement_and_review(
+            execution_id,
+            task,
+            RepositorySpec(**execution.spec_snapshot),
+            config,
+            clients,
+            repository_slug,
+            workspace_path,
+            execution.working_branch,
+            repository_context_strategy,
+            continuation_feedback=feedback,
+            force_polish=True,
+        )
+
+    @staticmethod
+    def _assert_continuation_eligible(execution: WorkflowExecution) -> None:
+        eligible_failed = (
+            execution.status is WorkflowStatus.FAILED
+            and execution.workspace_path is not None
+            and execution.working_branch is not None
+        )
+        if execution.status is WorkflowStatus.CHANGES_REQUESTED or eligible_failed:
+            return
+        raise WorkflowError(
+            "Only CHANGES_REQUESTED executions, or FAILED executions with a retained "
+            "workspace and branch, can be continued"
+        )
+
     def _resume_planning(
         self,
         execution: WorkflowExecution,
@@ -723,6 +813,8 @@ class WorkflowService:
         workspace_path: Path,
         working_branch: str,
         repository_context_strategy: RepositoryContextStrategy,
+        continuation_feedback: str | None = None,
+        force_polish: bool = False,
     ) -> WorkflowExecution:
         """Continue a resumed planning execution without creating another execution."""
         execution_clients = clients.at_path(workspace_path)
@@ -737,12 +829,18 @@ class WorkflowService:
         )
         try:
             with self._step(execution_id, WorkflowStage.IMPLEMENT):
-                implementation = implementation_service.implement(
-                    task,
-                    spec,
-                    workspace_path,
-                    instructions_repository_path=config.path,
-                )
+                if continuation_feedback is None:
+                    implementation = implementation_service.implement(
+                        task, spec, workspace_path, instructions_repository_path=config.path
+                    )
+                else:
+                    implementation = implementation_service.continue_implementation(
+                        task,
+                        spec,
+                        continuation_feedback,
+                        workspace_path,
+                        instructions_repository_path=config.path,
+                    )
                 self._repository.record_implementation(execution_id, implementation)
                 if not implementation.success:
                     raise WorkflowError(
@@ -765,29 +863,41 @@ class WorkflowService:
                 )
                 self._repository.record_commit(execution_id, commit_sha)
             with self._step(execution_id, WorkflowStage.PUSH):
+                pull_request_snapshot = self._repository.get_execution(
+                    execution_id
+                ).pull_request_snapshot
+                if pull_request_snapshot:
+                    existing_pr = PullRequest(**pull_request_snapshot)
+                    self._assert_pull_request_open(
+                        execution_clients, repository_slug, existing_pr.number
+                    )
                 execution_clients.git.push(
                     working_branch, config.repository.protected_branches
                 )
-            with self._step(execution_id, WorkflowStage.CREATE_PR):
-                pull_request = execution_clients.github.create_pull_request(
-                    title=task.title,
-                    body=self._pull_request_body(
-                        task,
-                        validation,
-                        self._task_provider.pull_request_reference(task, repository_slug),
-                    ),
-                    base_branch=config.repository.base_branch,
-                    head_branch=working_branch,
-                )
-                self._repository.record_pull_request(execution_id, pull_request)
-                self._assign_implementer(
-                    execution_clients=execution_clients,
-                    pull_request_number=pull_request.number,
-                    workspace_path=workspace_path,
-                )
-            polish_attempted = (
+            if pull_request_snapshot:
+                pull_request = PullRequest(**pull_request_snapshot)
+            else:
+                with self._step(execution_id, WorkflowStage.CREATE_PR):
+                    pull_request = execution_clients.github.create_pull_request(
+                        title=task.title,
+                        body=self._pull_request_body(
+                            task,
+                            validation,
+                            self._task_provider.pull_request_reference(task, repository_slug),
+                        ),
+                        base_branch=config.repository.base_branch,
+                        head_branch=working_branch,
+                    )
+                    self._repository.record_pull_request(execution_id, pull_request)
+                    self._assign_implementer(
+                        execution_clients=execution_clients,
+                        pull_request_number=pull_request.number,
+                        workspace_path=workspace_path,
+                    )
+            polish_attempted = not force_polish and (
                 self._repository.get_execution(execution_id).polish_outcome is not None
             )
+            review_attempt = 0
             while True:
                 with self._step(execution_id, WorkflowStage.REVIEW):
                     review = ReviewService(
@@ -840,6 +950,10 @@ class WorkflowService:
                         pull_request=pull_request,
                         working_branch=working_branch,
                         config=config,
+                        force=force_polish,
+                        before_push=lambda: self._assert_pull_request_open(
+                            execution_clients, repository_slug, pull_request.number
+                        ),
                     )
                     if polish_outcome is PolishOutcome.APPLIED:
                         if polish_validation is None:
@@ -848,6 +962,48 @@ class WorkflowService:
                             )
                         validation = polish_validation
                         continue
+                if (
+                    review.result is ReviewDecision.CHANGES_REQUESTED
+                    and review_attempt < config.review.max_review_retries
+                ):
+                    review_attempt += 1
+                    with self._step(execution_id, WorkflowStage.IMPLEMENT):
+                        implementation = implementation_service.correct_review_findings(
+                            task,
+                            spec,
+                            review,
+                            workspace_path,
+                            instructions_repository_path=config.path,
+                        )
+                        self._repository.record_implementation(execution_id, implementation)
+                        if not implementation.success:
+                            raise WorkflowError(
+                                implementation.error_message or "Review correction provider failed"
+                            )
+                    validation = self._validate_with_corrections(
+                        execution_id=execution_id,
+                        execution_clients=execution_clients,
+                        implementation_service=implementation_service,
+                        task=task,
+                        spec=spec,
+                        workspace_path=workspace_path,
+                        config=config,
+                    )
+                    with self._step(execution_id, WorkflowStage.COMMIT):
+                        commit_sha = execution_clients.git.commit_all(
+                            self._commit_message(task),
+                            working_branch,
+                            config.repository.protected_branches,
+                        )
+                        self._repository.record_commit(execution_id, commit_sha)
+                    with self._step(execution_id, WorkflowStage.PUSH):
+                        self._assert_pull_request_open(
+                            execution_clients, repository_slug, pull_request.number
+                        )
+                        execution_clients.git.push(
+                            working_branch, config.repository.protected_branches
+                        )
+                    continue
                 break
             status = {
                 ReviewDecision.APPROVED: WorkflowStatus.APPROVED,
@@ -1380,10 +1536,12 @@ class WorkflowService:
         pull_request: PullRequest,
         working_branch: str,
         config: ProjectConfig,
+        force: bool = False,
+        before_push: Callable[[], None] | None = None,
     ) -> tuple[PolishOutcome, ValidationResult | None]:
         """Evaluate approved-review suggestions once and persist an auditable outcome."""
         persisted = self._repository.get_execution(execution_id).polish_outcome
-        if persisted is not None:
+        if persisted is not None and not force:
             return persisted, None
 
         with self._step(execution_id, WorkflowStage.POLISH):
@@ -1447,10 +1605,31 @@ class WorkflowService:
             )
             self._repository.record_commit(execution_id, commit_sha)
         with self._step(execution_id, WorkflowStage.PUSH):
+            if before_push is not None:
+                before_push()
             execution_clients.git.push(working_branch, config.repository.protected_branches)
 
         self._repository.record_polish_outcome(execution_id, PolishOutcome.APPLIED)
         return PolishOutcome.APPLIED, validation
+
+    @staticmethod
+    def _assert_pull_request_open(
+        execution_clients: WorkflowClients, repository_slug: str, pull_request_number: int
+    ) -> None:
+        try:
+            is_open = execution_clients.github.is_pull_request_open(
+                repository_slug, pull_request_number
+            )
+        except GitHubClientError as exc:
+            raise WorkflowError(
+                f"Persisted pull request #{pull_request_number} is unavailable; "
+                "human intervention is required before continuing"
+            ) from exc
+        if not is_open:
+            raise WorkflowError(
+                f"Persisted pull request #{pull_request_number} is closed or unavailable; "
+                "human intervention is required before continuing"
+            )
 
     def _record_skipped_polish(
         self,

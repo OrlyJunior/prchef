@@ -114,6 +114,28 @@ class GitClient:
     def current_branch(self) -> str:
         return self._git("branch", "--show-current").stdout.strip()
 
+    def verify_worktree_branch(self, working_branch: str, expected_commit: str | None) -> None:
+        """Confirm a retained workflow worktree is still on its recorded branch.
+
+        An execution that already recorded a commit must still point at that
+        commit.  Earlier failures can deliberately retain uncommitted agent
+        work, so they have no commit value to compare here.
+        """
+        if not self._path.is_dir():
+            raise GitClientError(f"Workflow workspace is unavailable: {self._path}")
+        current = self.current_branch()
+        if current != working_branch:
+            raise GitClientError(
+                "Workflow workspace is on branch "
+                f"{current or '<detached>'}, expected {working_branch}"
+            )
+        if expected_commit:
+            head = self._git("rev-parse", "HEAD").stdout.strip()
+            if head != expected_commit:
+                raise GitClientError(
+                    "Workflow workspace HEAD no longer matches the last recorded commit"
+                )
+
     def changed_files(self) -> list[str]:
         lines = self._git("status", "--porcelain").stdout.splitlines()
         return [line[3:].strip() for line in lines if len(line) > 3]
