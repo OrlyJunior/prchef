@@ -46,7 +46,10 @@ desabilitando auto-descoberta de hooks, plugins, skills e MCP. Mesmo se configur
 `--restricted` continua a proteger a fronteira de workspace. No modo bare, Claude Code requer
 `ANTHROPIC_API_KEY` (ou credenciais suportadas de cloud) e nao usa login de assinatura ou
 keychain. `permission_mode: dontAsk` e apropriado para papeis de leitura; apenas configure
-`acceptEdits` para um papel que possa editar o worktree criado pelo orquestrador.
+`acceptEdits` para um papel que possa editar o worktree criado pelo orquestrador. Um unico
+provider Claude pode servir todos os papeis: use presets ou a configuracao temporaria da TUI para
+atribuir `dontAsk`, `acceptEdits` ou `auto` por papel. O valor no YAML do provider continua sendo
+o default quando o papel nao define uma substituicao.
 
 A configuracao Claude aceita apenas `executable`, modelo, limites de turno/orcamento, modo de
 permissao e bare mode. Nao ha campo para argumentos arbitrarios, `--worktree`, `--add-dir`,

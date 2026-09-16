@@ -204,6 +204,22 @@ def test_example_configuration_uses_first_class_litellm_and_codex(tmp_path: Path
     assert config.providers["codex"].type == "codex-cli"
 
 
+def test_example_agent_presets_block_keeps_every_preset_when_uncommented() -> None:
+    example_path = Path(__file__).resolve().parents[2] / "orchestrator.example.yml"
+    lines = example_path.read_text(encoding="utf-8").splitlines()
+    start = lines.index("  # agent_presets:")
+    block: list[str] = []
+    for line in lines[start:]:
+        if not line.startswith("  #"):
+            break
+        block.append("  " + line[len("  # ") :])
+
+    presets = yaml.safe_load("\n".join(block))["agent_presets"]
+
+    assert set(presets["planner"]) == {"cloud-backup", "claude-read-only"}
+    assert set(presets["implementer"]) == {"focused", "claude-edit"}
+
+
 def test_role_runtime_overrides_are_validated_in_memory_and_keep_defaults(tmp_path: Path) -> None:
     config = ProjectConfig.model_validate(
         {
@@ -311,6 +327,81 @@ def test_role_runtime_overrides_reject_unsupported_and_invalid_values(tmp_path: 
         config.with_agent_runtime_overrides(
             {}, {"implementer": {"reasoning_effort": " "}}
         )
+
+
+def test_claude_permission_mode_is_a_role_local_runtime_override(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "providers": {
+                "claude": {
+                    "type": "claude-code",
+                    "model": "claude-configured",
+                    "permission_mode": "dontAsk",
+                },
+            },
+            "agents": {
+                "planner": {"provider": "claude"},
+                "implementer": {"provider": "claude"},
+                "reviewer": {"provider": "claude"},
+            },
+        }
+    )
+
+    assert config.provider_runtime_capabilities("claude").supports_permission_mode
+    assert config.provider_runtime_values("claude") == {
+        "model": "claude-configured",
+        "permission_mode": "dontAsk",
+    }
+    selected = config.with_agent_runtime_overrides(
+        {},
+        {
+            "planner": {"permission_mode": "dontAsk"},
+            "implementer": {"permission_mode": "acceptEdits"},
+            "reviewer": {"permission_mode": "auto"},
+        },
+    )
+
+    assert config.provider_runtime_values("claude")["permission_mode"] == "dontAsk"
+    assert selected.provider_runtime_values("__tui_runtime_planner")["permission_mode"] == "dontAsk"
+    assert (
+        selected.provider_runtime_values("__tui_runtime_implementer")["permission_mode"]
+        == "acceptEdits"
+    )
+    assert selected.provider_runtime_values("__tui_runtime_reviewer")["permission_mode"] == "auto"
+    with pytest.raises(ConfigurationError, match="literal_error"):
+        config.with_agent_runtime_overrides({}, {"planner": {"permission_mode": "edit"}})
+    with pytest.raises(ConfigurationError, match="does not support runtime option"):
+        ProjectConfig.model_validate({"path": tmp_path}).with_agent_runtime_overrides(
+            {}, {"planner": {"permission_mode": "dontAsk"}}
+        )
+
+
+def test_claude_permission_preset_omits_default_and_applies_override(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "providers": {"claude": {"type": "claude-code", "permission_mode": "dontAsk"}},
+            "agents": {
+                "planner": {"provider": "claude"},
+                "implementer": {"provider": "claude"},
+                "reviewer": {"provider": "claude"},
+            },
+            "agent_presets": {
+                "planner": {"default": {"provider": "claude"}},
+                "implementer": {
+                    "edit": {"provider": "claude", "permission_mode": "acceptEdits"}
+                },
+            },
+        }
+    )
+
+    assert config.agent_presets["planner"]["default"].runtime_options() == {}
+    selected = config.with_agent_preset("implementer", "edit")
+    assert (
+        selected.provider_runtime_values("__tui_runtime_implementer")["permission_mode"]
+        == "acceptEdits"
+    )
 
 
 def test_agent_presets_are_role_scoped_and_apply_as_runtime_templates(tmp_path: Path) -> None:
