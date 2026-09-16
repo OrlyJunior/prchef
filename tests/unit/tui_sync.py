@@ -31,25 +31,42 @@ def _screen_workers(pilot: Pilot[Any]) -> list[Worker[Any]]:
     return [worker for worker in pilot.app.workers if worker.node is screen]
 
 
-def _was_superseded(worker: Worker[Any], workers: Sequence[Worker[Any]]) -> bool:
+def _was_superseded(
+    worker: Worker[Any],
+    workers: Sequence[Worker[Any]],
+    refreshed_workers: Sequence[Worker[Any]] = (),
+) -> bool:
     """Return whether a newer worker in the same exclusive group replaced ``worker``.
 
     Textual does not retain the ``exclusive`` flag on a ``Worker``. Its worker
     manager does, however, expose workers in creation order, and exclusive
     work cancels older workers with the same node and group before adding the
-    replacement. That lets the test helper accept only this specific expected
-    cancellation, rather than treating every ``WorkerCancelled`` as settled.
+    replacement. Workers first observed in a refreshed manager snapshot are
+    necessarily newer than the original snapshot, so append them after that
+    original creation order. That lets the test helper accept only this
+    specific expected cancellation, rather than treating every
+    ``WorkerCancelled`` as settled.
     """
 
+    observed_workers = [*workers]
+    observed_workers.extend(
+        refreshed_worker
+        for refreshed_worker in refreshed_workers
+        if not any(refreshed_worker is observed for observed in observed_workers)
+    )
     try:
-        worker_index = workers.index(worker)
-    except ValueError:
+        worker_index = next(
+            index
+            for index, observed_worker in enumerate(observed_workers)
+            if observed_worker is worker
+        )
+    except StopIteration:
         return False
     return any(
         replacement.node is worker.node
         and replacement.group == worker.group
         and not replacement.is_cancelled
-        for replacement in workers[worker_index + 1 :]
+        for replacement in observed_workers[worker_index + 1 :]
     )
 
 
@@ -70,11 +87,21 @@ async def _cancel_workers(workers: Iterable[Worker[Any]]) -> None:
 
 
 async def _wait_for_workers(
-    workers: Iterable[Worker[Any]], *, timeout: float, description: str
+    workers: Iterable[Worker[Any]],
+    *,
+    timeout: float,
+    description: str,
+    refresh_workers: Callable[[], Iterable[Worker[Any]]] | None = None,
 ) -> None:
-    """Wait for workers, surfacing failures and cleaning up a timeout."""
+    """Wait for workers, surfacing failures and cleaning up a timeout.
+
+    ``refresh_workers`` supplies a live worker snapshot after one zero-time
+    scheduling yield. Textual can cancel an exclusive worker before scheduling
+    its replacement, so that replacement may not have existed in ``workers``.
+    """
 
     workers = tuple(workers)
+    deadline = asyncio.get_running_loop().time() + timeout
     wait_task = asyncio.gather(*(worker.wait() for worker in workers), return_exceptions=True)
     try:
         results = await asyncio.wait_for(wait_task, timeout)
@@ -82,11 +109,20 @@ async def _wait_for_workers(
         await _cancel_workers(workers)
         raise AssertionError(f"Timed out waiting for {description} workers") from exc
 
+    refreshed_workers: Sequence[Worker[Any]] = ()
+    if refresh_workers is not None and asyncio.get_running_loop().time() < deadline:
+        # Give Textual one event-loop turn to register an exclusive worker's
+        # replacement, without adding a wall-clock delay or extending timeout.
+        await asyncio.sleep(0)
+        refreshed_workers = tuple(refresh_workers())
+
     for worker, result in zip(workers, results, strict=True):
         # Exclusive Textual workers are intentionally superseded by a newer
         # request. All other cancellations and failures are surfaced to the
         # test, because their callbacks may not have updated the asserted UI.
-        if isinstance(result, WorkerCancelled) and _was_superseded(worker, workers):
+        if isinstance(result, WorkerCancelled) and _was_superseded(
+            worker, workers, refreshed_workers
+        ):
             continue
         if isinstance(result, BaseException):
             raise result
@@ -109,7 +145,12 @@ async def settle_tui(
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise AssertionError(f"Timed out waiting for {description} to settle")
-            await _wait_for_workers(workers, timeout=remaining, description=description)
+            await _wait_for_workers(
+                workers,
+                timeout=remaining,
+                description=description,
+                refresh_workers=lambda: _screen_workers(pilot),
+            )
             continue
 
         await pilot.pause()
