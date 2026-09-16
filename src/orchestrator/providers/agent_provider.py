@@ -1,4 +1,5 @@
-from typing import Protocol
+from collections.abc import Mapping
+from typing import Any, Protocol
 
 from orchestrator.models.agent import AgentRequest, AgentResult, AgentStartedCallback
 
@@ -18,10 +19,12 @@ class AgentProviderError(RuntimeError):
         *,
         category: str = "unknown",
         retry_after_seconds: float | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.retry_after_seconds = retry_after_seconds
+        self.metadata = dict(metadata or {})
 
     @property
     def is_retryable_quota_failure(self) -> bool:
