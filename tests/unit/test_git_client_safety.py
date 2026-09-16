@@ -83,3 +83,17 @@ def test_no_implementer_app_preserves_ambient_git_identity(tmp_path: Path) -> No
     assert commit["env"] is None
     assert push["env"] is None
 
+
+def test_verify_worktree_branch_rejects_a_changed_recorded_head(tmp_path: Path) -> None:
+    class ChangedHeadCommands(RecordingCommands):
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            result = super().run(command, **kwargs)
+            if command[1:] == ["rev-parse", "HEAD"]:
+                return CommandResult(command, 0, "b" * 40, "", 0.01)
+            return result
+
+    client = GitClient(ChangedHeadCommands(), tmp_path)
+
+    with pytest.raises(GitClientError, match="last recorded commit"):
+        client.verify_worktree_branch("feature/test", "a" * 40)
+

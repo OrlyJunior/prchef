@@ -299,6 +299,7 @@ class _WorkflowService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None, dict[AgentRole, str], dict[AgentRole, Any]]] = []
         self.emit_terminal_event = False
+        self.continuations: list[tuple[str, str]] = []
 
     def run(
         self,
@@ -326,6 +327,21 @@ class _WorkflowService:
                 )
             )
         return WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED)
+
+    def continuation_feedback(self, execution_id: str) -> str:
+        assert execution_id == "execution-1"
+        return "Persisted terminal feedback"
+
+    def continue_execution(
+        self,
+        execution_id: str,
+        feedback: str,
+        *,
+        event_listener: Callable[..., None] | None = None,
+    ) -> WorkflowExecution:
+        del event_listener
+        self.continuations.append((execution_id, feedback))
+        return WorkflowExecution(id=execution_id, status=WorkflowStatus.APPROVED)
 
 
 def _controller(tmp_path: Path) -> tuple[WorkflowController, _WorkflowService, _Repository]:
@@ -2177,6 +2193,30 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
             assert '"spec-session": "https://example/sessions/planner"' in rendered
 
     asyncio.run(drive())
+
+
+def test_execution_detail_offers_editable_terminal_continuation(tmp_path: Path) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.CHANGES_REQUESTED
+    repository.execution.workspace_path = str(tmp_path / "worktree")
+    repository.execution.working_branch = "workflow/12"
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            feedback = screen.query_one("#execution-continuation-feedback", TextArea)
+            assert feedback.display is True
+            assert feedback.text == "Persisted terminal feedback"
+            feedback.text = "Edited continuation feedback"
+            screen.query_one("#execution-continue", Button).press()
+            await wait_for_tui(pilot, lambda: bool(service.continuations))
+
+    asyncio.run(drive())
+
+    assert service.continuations == [("execution-1", "Edited continuation feedback")]
 
 
 def test_execution_detail_copies_all_persisted_detailed_logs(

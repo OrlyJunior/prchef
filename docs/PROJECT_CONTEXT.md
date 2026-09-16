@@ -141,6 +141,14 @@
   service/controller boundary. It ends as `CANCELLED`, never `FAILED`; providers that cannot be
   interrupted immediately finish their current operation, but no later stage is scheduled.
   Cancellation status and diagnostics remain inspectable after restart.
+- Terminal `CHANGES_REQUESTED` executions, and `FAILED` executions that retained both a
+  workspace and working branch, can be manually continued from the TUI execution detail view.
+  The operator edits the persisted terminal feedback, which is recorded as a diagnostic, then a
+  fresh implementer invocation resumes in the retained worktree at `IMPLEMENT`. Continuations use
+  normal validation/review correction limits but have no manual retry ceiling. A persisted PR must
+  still be open before each resumed push; pushing its retained branch updates the PR, while a
+  missing PR is created after push. A closed or unavailable persisted PR blocks continuation and is
+  never recreated automatically.
 - Provider startup references during spec/review are persisted immediately in legacy-named
   `spec_jules_session_*` / `review_jules_session_*` fields. Preserve those fields for later human
   inspection; no automatic session/workflow resume exists.
