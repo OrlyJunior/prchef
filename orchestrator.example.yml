@@ -60,16 +60,15 @@ defaults:
   #     cloud-backup:
   #       provider: cloud-api
   #       model: openai/gpt-4.1-mini
+  #     # One Claude provider can use role-local permission modes without duplicate definitions.
+  #     claude-read-only:
+  #       provider: claude
+  #       permission_mode: dontAsk
   #   implementer:
   #     focused:
   #       provider: codex
   #       model: <your-supported-codex-model>
   #       reasoning_effort: medium
-  #   # One Claude provider can use role-local permission modes without duplicate definitions.
-  #   planner:
-  #     claude-read-only:
-  #       provider: claude
-  #       permission_mode: dontAsk
   #   implementer:
   #     claude-edit:
   #       provider: claude

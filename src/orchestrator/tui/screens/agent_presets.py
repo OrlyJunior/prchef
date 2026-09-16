@@ -56,6 +56,9 @@ class AgentPresetsScreen(Screen[None]):
         self._initial_repository = repository
         self._selected_preset: str | None = None
         self._suppressed_preset_changes: set[object] = set()
+        # Select changes queued during role loading can arrive after an
+        # invalid provider default has been reported.
+        self._provider_controls_failed = False
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="agent-presets"):
@@ -244,7 +247,8 @@ class AgentPresetsScreen(Screen[None]):
         provider = self.query_one("#agent-preset-provider", OrchestratorSelect)
         provider.set_options(provider_options, allow_blank=False)
         provider.value = default_provider
-        self._load_provider_controls(default_provider)
+        if not self._load_provider_controls(default_provider):
+            return
         self._status(
             f"{role.value.title()} presets loaded. Create new or select an existing preset."
         )
@@ -263,9 +267,10 @@ class AgentPresetsScreen(Screen[None]):
         provider = self.query_one("#agent-preset-provider", OrchestratorSelect)
         try:
             provider.value = preset.provider
-            self._load_provider_controls(
+            if not self._load_provider_controls(
                 preset.provider, permission_mode=preset.permission_mode
-            )
+            ):
+                return
         except Exception as exc:
             self._status(
                 f"Preset {name!r} references unavailable provider {preset.provider!r}: {exc}"
@@ -292,26 +297,33 @@ class AgentPresetsScreen(Screen[None]):
         self._selected_preset = None
         self.query_one("#agent-preset-name", Input).value = ""
         self._clear_values()
+        if self._provider_controls_failed:
+            return
         self._status("Enter a name and settings, then create the preset.")
 
     def _load_provider_controls(
         self, provider: str, *, permission_mode: _PermissionMode | None = None
-    ) -> None:
+    ) -> bool:
+        self._provider_controls_failed = False
         repository = self._repository()
         if repository is None:
-            return
+            return False
         try:
             capabilities = self.controller.provider_runtime_capabilities(repository, provider)
         except Exception as exc:
+            self._provider_controls_failed = True
             self._status(f"Cannot load provider settings: {exc}")
-            return
+            return False
         self._set_visible("model", capabilities.supports_model)
         self._set_visible("reasoning", capabilities.supports_reasoning_effort)
-        self._set_permission_visible(
+        if not self._set_permission_visible(
             provider, capabilities.supports_permission_mode, permission_mode
-        )
+        ):
+            self._provider_controls_failed = True
+            return False
         self._set_visible("temperature", capabilities.supports_generation)
         self._set_visible("max-output-tokens", capabilities.supports_generation)
+        return True
 
     def _set_visible(self, name: str, visible: bool) -> None:
         self.query_one(f"#agent-preset-{name}-label", Static).display = visible
@@ -319,17 +331,29 @@ class AgentPresetsScreen(Screen[None]):
 
     def _set_permission_visible(
         self, provider: str, visible: bool, permission_mode: _PermissionMode | None
-    ) -> None:
+    ) -> bool:
         label = self.query_one("#agent-preset-permission-label", Static)
         selector = self.query_one("#agent-preset-permission", OrchestratorSelect)
         label.display = visible
         selector.display = visible
         if not visible:
-            return
+            return True
         repository = self._repository()
         if repository is None:
-            return
-        values = self.controller.provider_runtime_values(repository, provider)
+            return False
+        try:
+            values = self.controller.provider_runtime_values(repository, provider)
+        except Exception as exc:
+            # Provider schemas are deliberately revalidated when their defaults
+            # are exposed.  Keep an invalid deferred setting from escaping this
+            # event handler, and do not leave a stale selection from another
+            # provider visible.  Do not replace its options with an empty
+            # non-blank Select: Textual rejects that invalid widget state while
+            # this screen is mounting.
+            selector.display = False
+            label.display = False
+            self._status(f"Cannot load permission default for provider {provider!r}: {exc}")
+            return False
         default = values.get("permission_mode", "dontAsk")
         selector.set_options(
             [
@@ -343,6 +367,7 @@ class AgentPresetsScreen(Screen[None]):
             if permission_mode is not None
             else _PROVIDER_DEFAULT_PERMISSION
         )
+        return True
 
     def _create(self) -> None:
         context = self._preset_context(require_selected=False)
