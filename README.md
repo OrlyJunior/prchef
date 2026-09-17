@@ -51,7 +51,13 @@ provider Claude pode servir todos os papeis: use presets ou a configuracao tempo
 atribuir `dontAsk`, `acceptEdits` ou `auto` por papel. O valor no YAML do provider continua sendo
 o default quando o papel nao define uma substituicao.
 
-A configuracao Claude aceita apenas `executable`, modelo, limites de turno/orcamento, modo de
+Para controlar o pensamento estendido de Claude, configure opcionalmente `effort` no provider com
+um de `low`, `medium`, `high`, `xhigh` ou `max`. O orquestrador envia `--effort <valor>` apenas
+quando o campo esta presente; se omitido, o default da CLI Claude permanece autoritativo. A TUI e
+os presets usam a chave neutra `reasoning_effort` para essa mesma opcao por papel, sem alterar o
+YAML ou outros papeis que compartilhem o provider.
+
+A configuracao Claude aceita apenas `executable`, modelo, esforco, limites de turno/orcamento, modo de
 permissao e bare mode. Nao ha campo para argumentos arbitrarios, `--worktree`, `--add-dir`,
 `--resume`, `--continue`, execucao remota ou bypass de permissao. Claude nunca cria branch,
 commit, push, PR, merge ou revisao: o provider nao expoe shell, e esses passos continuam pertencendo
@@ -450,6 +456,11 @@ configuracoes legadas. Quando ausentes, a execucao usa o default externo da Code
 verbose mostra `<external-default>`. Prefira fixa-los para controle de reproducibilidade, quota e
 custo. Em comandos customizados, o orquestrador injeta cada opcao apenas se a flag correspondente
 nao existir; uma flag existente com valor diferente e rejeitada antes do subprocesso.
+
+No `claude-code`, `model` e `effort` tambem sao opcionais. `effort` aceita apenas `low`, `medium`,
+`high`, `xhigh` ou `max` e e enviado como `--effort` somente quando configurado. A TUI e os presets
+o apresentam como `reasoning_effort`, uma substituicao em memoria por papel que e validada pela
+mesma schema Claude e nunca persiste sobre o default YAML.
 
 `gemini-vertex` exige `project` e `model`; `location` tem default `global`. A autenticacao e sempre
 via ADC, nunca por API key. Quando uma etapa solicita JSON estruturado, o adapter usa

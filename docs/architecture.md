@@ -84,8 +84,10 @@ de execucao. `AgentProviderRegistry` associa `providers.<nome>.type` a um adapta
 providers de GitHub/Trello continuam sendo um dominio separado.
 
 O provider `claude-code` usa apenas o CLI em print mode (`claude -p --output-format json`) e recebe
-uma superficie segura de configuracao: um executavel, timeout, modelo opcional, modo de permissao,
-limites de turnos/orcamento e bare mode. Nao aceita uma lista livre de argumentos. O cliente usa
+uma superficie segura de configuracao: um executavel, timeout, modelo e `effort` opcionais, modo de
+permissao, limites de turnos/orcamento e bare mode. `effort` aceita apenas `low`, `medium`, `high`,
+`xhigh` ou `max` e o cliente acrescenta `--effort <valor>` somente quando configurado; se omitido,
+o default da CLI permanece em vigor. Nao aceita uma lista livre de argumentos. O cliente usa
 exatamente `AgentRequest.workspace_path` como cwd, sempre adiciona `--restricted` e limita as
 ferramentas internas a `Read,Edit,Write,Glob,Grep`. Assim, configuracoes de usuario/projeto nao sao
 carregadas, as ferramentas de arquivo ficam confinadas ao workspace, e shell, MCP e execucao cloud
@@ -100,10 +102,11 @@ metadados diagnosticos de conclusao: nao ha callback de inicio nem resume automa
 Code v2.1.259 ou posterior (`--restricted` requer v2.1.248 e `--permission-prompts` v2.1.259), com
 autenticacao fornecida externamente, nunca no YAML.
 
-O modo de permissao Claude tambem e uma opcao de runtime por papel: presets e a TUI podem escolher
-`dontAsk`, `acceptEdits` ou `auto` para planner, implementer e reviewer usando uma unica instancia
-nomeada. A substituicao e validada em memoria e nao altera o YAML; quando omitida, o valor do
-provider no YAML continua sendo o default.
+O modo de permissao e o esforco de raciocinio Claude tambem sao opcoes de runtime por papel:
+presets e a TUI podem escolher `dontAsk`, `acceptEdits` ou `auto`, e a chave neutra
+`reasoning_effort` para os cinco valores Claude, usando uma unica instancia nomeada. A camada de
+runtime traduz `reasoning_effort` para o campo nativo `effort`; a substituicao e validada em
+memoria e nao altera o YAML. Quando omitida, o valor do provider no YAML continua sendo o default.
 
 O provider `codex-cli` recebe `model` e `reasoning_effort` somente na sua propria configuracao e
 os traduz para argumentos da CLI. Os services continuam conhecendo apenas `AgentProvider`; eles nao

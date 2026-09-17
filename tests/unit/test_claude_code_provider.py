@@ -41,6 +41,7 @@ def test_claude_code_client_uses_only_safe_print_mode_arguments_and_workspace(
         "claude",
         30,
         model="claude-test",
+        effort="high",
         permission_mode="acceptEdits",
         max_turns=4,
         max_budget_usd=2.5,
@@ -67,6 +68,8 @@ def test_claude_code_client_uses_only_safe_print_mode_arguments_and_workspace(
         "--bare",
         "--model",
         "claude-test",
+        "--effort",
+        "high",
         "--max-turns",
         "4",
         "--max-budget-usd",
@@ -87,6 +90,16 @@ def test_claude_code_client_uses_only_safe_print_mode_arguments_and_workspace(
         )
     )
     assert "Bash" not in command[command.index("--tools") + 1]
+
+
+def test_claude_code_client_omits_effort_when_not_configured(tmp_path: Path) -> None:
+    commands = RecordingCommandClient(stdout=_envelope(result="done"))
+    client = ClaudeCodeClient(commands, "claude", 30)  # type: ignore[arg-type]
+
+    result = client.execute("work", tmp_path)
+
+    assert result.success
+    assert "--effort" not in commands.calls[0][0]
 
 
 def test_claude_code_client_forwards_native_schema_and_validates_result(tmp_path: Path) -> None:
@@ -304,6 +317,21 @@ def test_claude_settings_reject_arbitrary_command_configuration() -> None:
         )
 
 
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_claude_settings_accept_documented_effort_values(effort: str) -> None:
+    settings = ClaudeCodeProviderSettings.model_validate(
+        {"type": "claude-code", "effort": effort}
+    )
+
+    assert settings.effort == effort
+
+
+@pytest.mark.parametrize("effort", ["", "very-high", "minimal", "HIGH", 1])
+def test_claude_settings_reject_unsupported_effort_values(effort: object) -> None:
+    with pytest.raises(ValidationError, match="literal_error"):
+        ClaudeCodeProviderSettings.model_validate({"type": "claude-code", "effort": effort})
+
+
 def test_claude_code_is_restricted_even_when_bare_mode_is_disabled(tmp_path: Path) -> None:
     commands = RecordingCommandClient(stdout=_envelope(result="done"))
     client = ClaudeCodeClient(
@@ -319,7 +347,7 @@ def test_claude_code_is_restricted_even_when_bare_mode_is_disabled(tmp_path: Pat
     assert command[command.index("--tools") + 1] == "Read,Edit,Write,Glob,Grep"
 
 
-def test_claude_settings_support_runtime_model_override_and_first_class_label(
+def test_claude_settings_support_runtime_model_and_effort_override_and_first_class_label(
     tmp_path: Path,
 ) -> None:
     config = ProjectConfig.model_validate(
@@ -334,6 +362,7 @@ def test_claude_settings_support_runtime_model_override_and_first_class_label(
                 "claude": {
                     "type": "claude-code",
                     "model": "claude-configured",
+                    "effort": "medium",
                     "permission_mode": "acceptEdits",
                     "max_turns": 5,
                 }
@@ -341,14 +370,19 @@ def test_claude_settings_support_runtime_model_override_and_first_class_label(
         }
     )
 
-    overridden = config.with_agent_runtime_overrides({}, {"planner": {"model": "claude-other"}})
+    overridden = config.with_agent_runtime_overrides(
+        {}, {"planner": {"model": "claude-other", "reasoning_effort": "xhigh"}}
+    )
 
     assert config.provider_options() == [("claude", "claude")]
+    assert config.provider_runtime_capabilities("claude").supports_reasoning_effort
     assert config.provider_runtime_values("claude") == {
         "model": "claude-configured",
+        "reasoning_effort": "medium",
         "permission_mode": "acceptEdits",
     }
     assert overridden.provider_runtime_values("__tui_runtime_planner") == {
         "model": "claude-other",
+        "reasoning_effort": "xhigh",
         "permission_mode": "acceptEdits",
     }

@@ -514,7 +514,9 @@ class WorkflowRunnerScreen(Screen[None]):
             return
         provider_select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
         provider_select.value = preset.provider
-        self._load_role_runtime_controls(role, prefix, preset.provider)
+        self._load_role_runtime_controls(
+            role, prefix, preset.provider, reset_to_defaults=True
+        )
         self._set_preset_runtime_controls(prefix, preset)
         self._update_preset_source(role, prefix)
 
@@ -564,8 +566,12 @@ class WorkflowRunnerScreen(Screen[None]):
             selector.value = _MANUAL_PRESET
 
     def _set_preset_runtime_controls(self, prefix: str, preset: AgentPresetConfig) -> None:
-        self.query_one(f"#{prefix}-model", Input).value = preset.model or ""
-        self.query_one(f"#{prefix}-reasoning", Input).value = preset.reasoning_effort or ""
+        # Omitted preset fields inherit the selected provider's YAML defaults,
+        # which `_load_role_runtime_controls` has already populated.
+        if preset.model is not None:
+            self.query_one(f"#{prefix}-model", Input).value = preset.model
+        if preset.reasoning_effort is not None:
+            self.query_one(f"#{prefix}-reasoning", Input).value = preset.reasoning_effort
         permission = self.query_one(f"#{prefix}-permission", OrchestratorSelect)
         if permission.display:
             permission.value = (
@@ -576,7 +582,8 @@ class WorkflowRunnerScreen(Screen[None]):
         generation = dict(preset.generation)
         for name in ("temperature", "max-output-tokens"):
             value = generation.get(name.replace("-", "_"))
-            self.query_one(f"#{prefix}-{name}", Input).value = "" if value is None else str(value)
+            if value is not None:
+                self.query_one(f"#{prefix}-{name}", Input).value = str(value)
 
     def _preset_from_controls(self, role: AgentRole, prefix: str) -> AgentPresetConfig:
         provider = self._selected(f"#{prefix}-provider")
@@ -600,10 +607,36 @@ class WorkflowRunnerScreen(Screen[None]):
         if self._selected(f"#{prefix}-provider") != preset.provider:
             return False
         current = self._preset_from_controls(role, prefix).model_dump(exclude_none=True)
-        expected = preset.model_dump(exclude_none=True)
+        expected = self._preset_with_provider_defaults(preset).model_dump(exclude_none=True)
         return bool(
             self._preset_comparison_value(current)
             == self._preset_comparison_value(expected)
+        )
+
+    def _preset_with_provider_defaults(self, preset: AgentPresetConfig) -> AgentPresetConfig:
+        """Materialize omitted preset values as the selected provider's defaults."""
+
+        repository = self._selected("#repository")
+        defaults = (
+            self.controller.provider_runtime_values(repository, preset.provider)
+            if repository is not None
+            else {}
+        )
+        default_generation = defaults.get("generation", {})
+        generation = (
+            dict(default_generation) if isinstance(default_generation, dict) else {}
+        )
+        generation.update(preset.generation)
+        return AgentPresetConfig(
+            provider=preset.provider,
+            model=preset.model if preset.model is not None else defaults.get("model"),
+            reasoning_effort=(
+                preset.reasoning_effort
+                if preset.reasoning_effort is not None
+                else defaults.get("reasoning_effort")
+            ),
+            permission_mode=preset.permission_mode,
+            generation={key: value for key, value in generation.items() if value is not None},
         )
 
     @staticmethod

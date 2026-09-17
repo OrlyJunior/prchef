@@ -1315,11 +1315,13 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
     asyncio.run(drive())
 
 
-def test_workflow_runner_keeps_claude_permission_modes_role_local(tmp_path: Path) -> None:
+def test_workflow_runner_keeps_claude_permission_modes_and_effort_role_local(
+    tmp_path: Path,
+) -> None:
     controller, _, _ = _controller(tmp_path)
     config = controller.project_config("example")
     config.providers["claude"] = AgentProviderSettings.model_validate(
-        {"type": "claude-code", "permission_mode": "dontAsk"}
+        {"type": "claude-code", "effort": "medium", "permission_mode": "dontAsk"}
     )
     for role in ("planner", "implementer", "reviewer"):
         getattr(config.agents, role).provider = "claude"
@@ -1332,23 +1334,30 @@ def test_workflow_runner_keeps_claude_permission_modes_role_local(tmp_path: Path
             screen.query_one("#repository").value = "example"
             await settle_tui(pilot)
             for prefix in ("planner", "implementer", "reviewer"):
+                assert screen.query_one(f"#{prefix}-reasoning").display is True
                 assert screen.query_one(f"#{prefix}-permission").display is True
                 assert "Provider/YAML default (dontAsk)" in str(
                     screen.query_one(f"#{prefix}-summary", Static).renderable
                 )
 
+            screen.query_one("#planner-reasoning", Input).value = "low"
+            screen.query_one("#implementer-reasoning", Input).value = "high"
+            screen.query_one("#reviewer-reasoning", Input).value = "max"
             screen.query_one("#implementer-permission").value = "acceptEdits"
             screen.query_one("#reviewer-permission").value = "auto"
             await settle_tui(pilot)
             assert screen._runtime_options_for_role(AgentRole.PLANNER, "planner") == {
-                "model": None
+                "model": None,
+                "reasoning_effort": "low",
             }
             assert screen._runtime_options_for_role(AgentRole.IMPLEMENTER, "implementer") == {
                 "model": None,
+                "reasoning_effort": "high",
                 "permission_mode": "acceptEdits",
             }
             assert screen._runtime_options_for_role(AgentRole.REVIEWER, "reviewer") == {
                 "model": None,
+                "reasoning_effort": "max",
                 "permission_mode": "auto",
             }
 
@@ -1428,6 +1437,41 @@ def test_workflow_runner_selects_role_local_presets_without_crud_controls(tmp_pa
                 "reasoning_effort": "xhigh",
             }
             assert config.agent_presets["implementer"]["deep"].model == "preset-model"
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_preset_omitting_claude_effort_inherits_provider_default(
+    tmp_path: Path,
+) -> None:
+    controller, service, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.providers["claude"] = AgentProviderSettings.model_validate(
+        {"type": "claude-code", "effort": "medium", "permission_mode": "dontAsk"}
+    )
+    config.agent_presets = {
+        "planner": {
+            "edit": AgentPresetConfig(provider="claude", permission_mode="acceptEdits")
+        }
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#planner-preset", Select).value = "edit"
+            await settle_tui(pilot)
+
+            assert screen.query_one("#planner-reasoning", Input).value == "medium"
+            assert "Selected preset: edit" in str(
+                screen.query_one("#planner-preset-source", Static).renderable
+            )
+            screen.query_one("#available-tasks", Select).value = "12"
+            screen.query_one("#start-workflow", Button).press()
+            await settle_tui(pilot)
+            assert service.calls[-1][3][AgentRole.PLANNER]["reasoning_effort"] == "medium"
 
     asyncio.run(drive())
 
@@ -1553,11 +1597,11 @@ def test_agent_presets_screen_manages_all_role_presets(tmp_path: Path) -> None:
     asyncio.run(drive())
 
 
-def test_agent_presets_screen_manages_claude_permission_mode(tmp_path: Path) -> None:
+def test_agent_presets_screen_manages_claude_permission_mode_and_effort(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     config = controller.project_config("example")
     config.providers["claude"] = AgentProviderSettings.model_validate(
-        {"type": "claude-code", "permission_mode": "dontAsk"}
+        {"type": "claude-code", "effort": "medium", "permission_mode": "dontAsk"}
     )
     config.agents.planner.provider = "claude"
     application = OrchestratorApp(controller)
@@ -1571,15 +1615,19 @@ def test_agent_presets_screen_manages_claude_permission_mode(tmp_path: Path) -> 
             await settle_tui(pilot)
 
             permission = screen.query_one("#agent-preset-permission", OrchestratorSelect)
+            reasoning = screen.query_one("#agent-preset-reasoning", Input)
             assert permission.display is True
+            assert reasoning.display is True
             assert "Provider/YAML default (dontAsk)" in {
                 option[0] for option in permission._options
             }
             permission.value = "acceptEdits"
+            reasoning.value = "high"
             screen.query_one("#agent-preset-name", Input).value = "editing"
             screen.query_one("#create-agent-preset", Button).press()
             await settle_tui(pilot)
             assert config.agent_presets["planner"]["editing"].permission_mode == "acceptEdits"
+            assert config.agent_presets["planner"]["editing"].reasoning_effort == "high"
 
             screen.query_one("#agent-preset-provider", Select).value = "planner"
             await settle_tui(pilot)
@@ -1588,7 +1636,9 @@ def test_agent_presets_screen_manages_claude_permission_mode(tmp_path: Path) -> 
             screen.query_one("#agent-preset-provider", Select).value = "claude"
             await settle_tui(pilot)
             assert permission.display is True
+            assert reasoning.display is True
             assert permission.value == "acceptEdits"
+            assert reasoning.value == "high"
 
             # A delayed provider event from an earlier switch must not reload
             # permission controls for a provider the selector no longer names.
