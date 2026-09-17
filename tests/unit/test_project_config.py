@@ -329,7 +329,7 @@ def test_role_runtime_overrides_reject_unsupported_and_invalid_values(tmp_path: 
         )
 
 
-def test_claude_permission_mode_is_a_role_local_runtime_override(tmp_path: Path) -> None:
+def test_claude_permission_and_effort_are_role_local_runtime_overrides(tmp_path: Path) -> None:
     config = ProjectConfig.model_validate(
         {
             "path": tmp_path,
@@ -337,6 +337,7 @@ def test_claude_permission_mode_is_a_role_local_runtime_override(tmp_path: Path)
                 "claude": {
                     "type": "claude-code",
                     "model": "claude-configured",
+                    "effort": "medium",
                     "permission_mode": "dontAsk",
                 },
             },
@@ -348,40 +349,60 @@ def test_claude_permission_mode_is_a_role_local_runtime_override(tmp_path: Path)
         }
     )
 
-    assert config.provider_runtime_capabilities("claude").supports_permission_mode
+    capabilities = config.provider_runtime_capabilities("claude")
+    assert capabilities.supports_reasoning_effort
+    assert capabilities.supports_permission_mode
     assert config.provider_runtime_values("claude") == {
         "model": "claude-configured",
+        "reasoning_effort": "medium",
         "permission_mode": "dontAsk",
     }
     selected = config.with_agent_runtime_overrides(
         {},
         {
-            "planner": {"permission_mode": "dontAsk"},
-            "implementer": {"permission_mode": "acceptEdits"},
-            "reviewer": {"permission_mode": "auto"},
+            "planner": {"reasoning_effort": "low", "permission_mode": "dontAsk"},
+            "implementer": {"reasoning_effort": "high", "permission_mode": "acceptEdits"},
+            "reviewer": {"reasoning_effort": "max", "permission_mode": "auto"},
         },
     )
 
     assert config.provider_runtime_values("claude")["permission_mode"] == "dontAsk"
+    assert config.provider_runtime_values("claude")["reasoning_effort"] == "medium"
     assert selected.provider_runtime_values("__tui_runtime_planner")["permission_mode"] == "dontAsk"
+    assert selected.provider_runtime_values("__tui_runtime_planner")["reasoning_effort"] == "low"
     assert (
         selected.provider_runtime_values("__tui_runtime_implementer")["permission_mode"]
         == "acceptEdits"
     )
+    assert (
+        selected.provider_runtime_values("__tui_runtime_implementer")["reasoning_effort"]
+        == "high"
+    )
     assert selected.provider_runtime_values("__tui_runtime_reviewer")["permission_mode"] == "auto"
+    assert selected.provider_runtime_values("__tui_runtime_reviewer")["reasoning_effort"] == "max"
     with pytest.raises(ConfigurationError, match="literal_error"):
         config.with_agent_runtime_overrides({}, {"planner": {"permission_mode": "edit"}})
+    with pytest.raises(ConfigurationError, match="literal_error"):
+        config.with_agent_runtime_overrides({}, {"planner": {"reasoning_effort": "deep"}})
     with pytest.raises(ConfigurationError, match="does not support runtime option"):
         ProjectConfig.model_validate({"path": tmp_path}).with_agent_runtime_overrides(
             {}, {"planner": {"permission_mode": "dontAsk"}}
         )
 
 
-def test_claude_permission_preset_omits_default_and_applies_override(tmp_path: Path) -> None:
+def test_claude_permission_and_effort_preset_omits_defaults_and_applies_override(
+    tmp_path: Path,
+) -> None:
     config = ProjectConfig.model_validate(
         {
             "path": tmp_path,
-            "providers": {"claude": {"type": "claude-code", "permission_mode": "dontAsk"}},
+            "providers": {
+                "claude": {
+                    "type": "claude-code",
+                    "effort": "medium",
+                    "permission_mode": "dontAsk",
+                }
+            },
             "agents": {
                 "planner": {"provider": "claude"},
                 "implementer": {"provider": "claude"},
@@ -390,7 +411,11 @@ def test_claude_permission_preset_omits_default_and_applies_override(tmp_path: P
             "agent_presets": {
                 "planner": {"default": {"provider": "claude"}},
                 "implementer": {
-                    "edit": {"provider": "claude", "permission_mode": "acceptEdits"}
+                    "edit": {
+                        "provider": "claude",
+                        "reasoning_effort": "high",
+                        "permission_mode": "acceptEdits",
+                    }
                 },
             },
         }
@@ -402,6 +427,15 @@ def test_claude_permission_preset_omits_default_and_applies_override(tmp_path: P
         selected.provider_runtime_values("__tui_runtime_implementer")["permission_mode"]
         == "acceptEdits"
     )
+    assert (
+        selected.provider_runtime_values("__tui_runtime_implementer")["reasoning_effort"]
+        == "high"
+    )
+    config.agent_presets["implementer"]["invalid"] = AgentPresetConfig(
+        provider="claude", reasoning_effort="deep"
+    )
+    with pytest.raises(ConfigurationError, match="literal_error"):
+        config.with_agent_preset("implementer", "invalid")
 
 
 def test_agent_presets_are_role_scoped_and_apply_as_runtime_templates(tmp_path: Path) -> None:

@@ -607,6 +607,7 @@ class ClaudeCodeProviderSettings(BaseModel):
     executable: str = "claude"
     timeout_seconds: int = Field(default=1800, gt=0, le=86_400)
     model: str | None = None
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     permission_mode: Literal["dontAsk", "acceptEdits", "auto"] = "dontAsk"
     max_turns: int | None = Field(default=None, gt=0, le=100)
     max_budget_usd: float | None = Field(default=None, gt=0, le=10_000)
@@ -988,7 +989,9 @@ class ProjectConfig(BaseModel):
             )
         if settings.type == "claude-code":
             return ProviderRuntimeCapabilities(
-                supports_model=True, supports_permission_mode=True
+                supports_model=True,
+                supports_reasoning_effort=True,
+                supports_permission_mode=True,
             )
         if settings.type == "gemini-vertex":
             return ProviderRuntimeCapabilities(supports_model=True, supports_generation=True)
@@ -1010,7 +1013,11 @@ class ProjectConfig(BaseModel):
             }
         if settings.type == "claude-code":
             claude = ClaudeCodeProviderSettings.model_validate(settings.model_dump())
-            return {"model": claude.model, "permission_mode": claude.permission_mode}
+            return {
+                "model": claude.model,
+                "reasoning_effort": claude.effort,
+                "permission_mode": claude.permission_mode,
+            }
         if settings.type == "gemini-vertex":
             vertex = GeminiVertexProviderSettings.model_validate(settings.model_dump())
             return {
@@ -1092,7 +1099,13 @@ class ProjectConfig(BaseModel):
                     generation.update(value)
                     values["generation"] = generation
                 else:
-                    values[key] = value
+                    # The runtime/preset boundary is provider-neutral. Claude's
+                    # CLI calls this native setting `effort`, while the shared
+                    # launcher control is named `reasoning_effort`.
+                    if base.type == "claude-code" and key == "reasoning_effort":
+                        values["effort"] = value
+                    else:
+                        values[key] = value
             validated = _validate_provider_settings(values, provider_name)
             runtime_name = f"__tui_runtime_{role}"
             suffix = 2
