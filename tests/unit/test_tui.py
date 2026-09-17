@@ -2248,6 +2248,78 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
     asyncio.run(drive())
 
 
+@pytest.mark.parametrize(
+    ("status", "workspace_path", "working_branch", "expected"),
+    [
+        (WorkflowStatus.CHANGES_REQUESTED, "worktree", "workflow/12", True),
+        (WorkflowStatus.FAILED, "worktree", "workflow/12", True),
+        (WorkflowStatus.CHANGES_REQUESTED, None, None, True),
+        (WorkflowStatus.FAILED, None, "workflow/12", False),
+        (WorkflowStatus.FAILED, "worktree", None, False),
+        (WorkflowStatus.APPROVED, "worktree", "workflow/12", False),
+        (WorkflowStatus.CANCELLED, "worktree", "workflow/12", False),
+        (WorkflowStatus.NEEDS_HUMAN, "worktree", "workflow/12", False),
+    ],
+)
+def test_execution_detail_continuation_follows_status_not_completed_stage(
+    tmp_path: Path,
+    status: WorkflowStatus,
+    workspace_path: str | None,
+    working_branch: str | None,
+    expected: bool,
+) -> None:
+    """Every terminal execution reaches ``COMPLETED``, so only ``status`` may decide."""
+
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = status
+    repository.execution.current_stage = WorkflowStage.COMPLETED
+    repository.execution.workspace_path = (
+        str(tmp_path / workspace_path) if workspace_path is not None else None
+    )
+    repository.execution.working_branch = working_branch
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            for widget_id in (
+                "execution-continuation-title",
+                "execution-continuation-feedback",
+                "execution-continuation-actions",
+            ):
+                assert screen.query_one(f"#{widget_id}").display is expected
+
+    asyncio.run(drive())
+
+
+def test_execution_detail_continuation_feedback_is_readable_beside_long_details(
+    tmp_path: Path,
+) -> None:
+    """The feedback editor must keep rows of its own next to the auto-height details."""
+
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.CHANGES_REQUESTED
+    repository.execution.current_stage = WorkflowStage.COMPLETED
+    repository.execution.workspace_path = str(tmp_path / "worktree")
+    repository.execution.working_branch = "workflow/12"
+    repository.execution.validation_snapshot = {
+        f"check_{number}": "passed" for number in range(40)
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 24)) as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            feedback = application.screen.query_one("#execution-continuation-feedback", TextArea)
+            assert feedback.text == "Persisted terminal feedback"
+            assert feedback.size.height > 0
+
+    asyncio.run(drive())
+
+
 def test_execution_detail_offers_editable_terminal_continuation(tmp_path: Path) -> None:
     controller, service, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.CHANGES_REQUESTED
