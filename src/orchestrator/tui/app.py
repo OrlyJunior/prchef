@@ -112,6 +112,9 @@ class OrchestratorApp(App[None]):
     }
     #human-input-prompt { margin-bottom: 1; }
     #human-response { height: 7; }
+    /* TextArea defaults to height 1fr, which resolves to zero rows beside the
+       auto-height detail content and hides the feedback this action edits. */
+    #execution-continuation-feedback { height: 7; }
     #execution-human-title,
     #execution-human-prompt,
     #execution-human-response,
