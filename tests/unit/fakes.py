@@ -148,6 +148,10 @@ class FakeWorkflowRepository:
         self.diagnostics.append(diagnostic)
         return diagnostic
 
+    def list_diagnostics(self, execution_id: str) -> list[Any]:
+        assert execution_id == self._execution().id
+        return list(self.diagnostics)
+
     def request_human_input(
         self, execution_id: str, stage: WorkflowStage, prompt: str
     ) -> HumanInteraction:
@@ -520,6 +524,7 @@ class FakeClientFactory:
         self.git = FakeGitClient()
         self.github = FakeGitHubClient()
         self.commands = FakeCommandClient()
+        self.configs: list[ProjectConfig] = []
 
     def create(
         self,
@@ -527,6 +532,7 @@ class FakeClientFactory:
         *,
         agent_roles: set[AgentRole] | None = None,
     ) -> SimpleNamespace:
+        self.configs.append(config)
         implementer_app = config.integrations.github.implementer_app
         self.github.implementer_identity = (
             implementer_app.bot_name or "implementer[bot]"
@@ -541,7 +547,11 @@ class FakeClientFactory:
             AgentRole.REVIEWER: config.agents.reviewer.provider,
         }
         agents = {
-            role: provider_by_name[role_names[role]]
+            role: (
+                self.jules
+                if role_names[role].startswith("__tui_runtime_")
+                else provider_by_name[role_names[role]]
+            )
             for role in selected
         }
         clients = SimpleNamespace(

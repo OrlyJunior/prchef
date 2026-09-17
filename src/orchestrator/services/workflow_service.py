@@ -89,6 +89,8 @@ _STAGE_LABELS = {
     WorkflowStage.REVIEW: "review",
 }
 
+_RUNTIME_OVERRIDES_DIAGNOSTIC_KIND = "RUNTIME_OVERRIDES_APPLIED"
+
 
 class WorkflowService:
     def __init__(
@@ -159,6 +161,13 @@ class WorkflowService:
         )
         self._repository.update_status(execution.id, WorkflowStatus.RUNNING)
         self._emit(execution.id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.RUNNING)
+        provider_overrides = {
+            role.value: provider for role, provider in (agent_providers or {}).items()
+        }
+        runtime_overrides = {
+            role.value: dict(options)
+            for role, options in (agent_runtime_options or {}).items()
+        }
         workspace_path: Path | None = None
         config: ProjectConfig | None = None
         try:
@@ -171,16 +180,13 @@ class WorkflowService:
 
             with self._step(execution.id, WorkflowStage.LOAD_CONFIG):
                 config = self._config_loader.load(task, repository_override)
-                if agent_providers or agent_runtime_options:
+                if provider_overrides or runtime_overrides:
                     config = config.with_agent_runtime_overrides(
-                        {
-                            role.value: provider
-                            for role, provider in (agent_providers or {}).items()
-                        },
-                        {
-                            role.value: options
-                            for role, options in (agent_runtime_options or {}).items()
-                        },
+                        provider_overrides,
+                        runtime_overrides,
+                    )
+                    self._record_runtime_overrides(
+                        execution.id, provider_overrides, runtime_overrides
                     )
                 self._repository.update_project(
                     execution.id,
@@ -503,6 +509,13 @@ class WorkflowService:
             config = self._config_loader.load(
                 task, execution.repository_ref or execution.repository or None
             )
+            provider_overrides, runtime_overrides = self._runtime_overrides_for_execution(
+                execution_id
+            )
+            if provider_overrides or runtime_overrides:
+                config = config.with_agent_runtime_overrides(
+                    provider_overrides, runtime_overrides
+                )
             clients = self._client_factory.create(config)
             repository_slug = clients.git.github_repository()
             repository_context_strategy = resolve_repository_context_strategy(
@@ -596,6 +609,11 @@ class WorkflowService:
         config = self._config_loader.load(
             task, execution.repository_ref or execution.repository or None
         )
+        provider_overrides, runtime_overrides = self._runtime_overrides_for_execution(
+            execution_id
+        )
+        if provider_overrides or runtime_overrides:
+            config = config.with_agent_runtime_overrides(provider_overrides, runtime_overrides)
         clients = self._client_factory.create(config)
         execution_clients = clients.at_path(workspace_path)
         # Do this before changing status or contacting the implementer: a human
@@ -1037,6 +1055,80 @@ class WorkflowService:
         self._repository.record_error(execution_id, prompt)
         self._repository.request_human_input(execution_id, stage, prompt)
         return self._finish(execution_id, WorkflowStatus.NEEDS_HUMAN, config)
+
+    def _record_runtime_overrides(
+        self,
+        execution_id: str,
+        provider_overrides: Mapping[str, str],
+        runtime_overrides: Mapping[str, Mapping[str, object]],
+    ) -> None:
+        """Durably persist validated one-run selections for restart-safe resume.
+
+        Unlike ordinary diagnostics this record is load-bearing: human resume and
+        manual continuation rebuild the role-local provider/model/effort choices
+        from it. It is written before any agent starts, and a failed or lossy
+        write stops the launch with an explicit error instead of letting a later
+        resume silently fall back to YAML defaults.
+        """
+
+        providers = dict(provider_overrides)
+        options = {role: dict(values) for role, values in runtime_overrides.items()}
+        failure = (
+            "Could not persist the selected agent runtime overrides "
+            "(provider/model/effort); the run was stopped before any agent started "
+            "so a later resume cannot silently use different settings. "
+            "Retry the launch."
+        )
+        diagnostic = ExecutionDiagnostic(
+            execution_id=execution_id,
+            category=DiagnosticCategory.WORKFLOW_EVENT,
+            payload={
+                "kind": _RUNTIME_OVERRIDES_DIAGNOSTIC_KIND,
+                "provider_overrides": providers,
+                "runtime_overrides": options,
+            },
+            stage=WorkflowStage.LOAD_CONFIG,
+        )
+        try:
+            self._repository.record_diagnostic(diagnostic)
+            persisted = self._runtime_overrides_for_execution(execution_id)
+        except Exception as exc:
+            logger.warning("[workflow] Could not persist runtime overrides", exc_info=True)
+            raise WorkflowError(failure) from exc
+        expected = json.loads(json.dumps((providers, options), default=str))
+        if json.loads(json.dumps(persisted, default=str)) != expected:
+            raise WorkflowError(failure)
+
+    def _runtime_overrides_for_execution(
+        self, execution_id: str
+    ) -> tuple[dict[str, str], dict[str, dict[str, object]]]:
+        """Return the launch selections recorded for a resumable execution."""
+
+        list_diagnostics = getattr(self._repository, "list_diagnostics", None)
+        if not callable(list_diagnostics):
+            return {}, {}
+        for diagnostic in reversed(list_diagnostics(execution_id)):
+            payload = diagnostic.payload
+            if payload.get("kind") != _RUNTIME_OVERRIDES_DIAGNOSTIC_KIND:
+                continue
+            raw_providers = payload.get("provider_overrides")
+            raw_options = payload.get("runtime_overrides")
+            if not isinstance(raw_providers, Mapping) or not isinstance(raw_options, Mapping):
+                raise WorkflowError("Persisted runtime overrides are invalid")
+            providers = {
+                role: provider
+                for role, provider in raw_providers.items()
+                if isinstance(role, str) and isinstance(provider, str)
+            }
+            options = {
+                role: dict(value)
+                for role, value in raw_options.items()
+                if isinstance(role, str) and isinstance(value, Mapping)
+            }
+            if len(providers) != len(raw_providers) or len(options) != len(raw_options):
+                raise WorkflowError("Persisted runtime overrides are invalid")
+            return providers, options
+        return {}, {}
 
     @staticmethod
     def _planner_prompt(spec: RepositorySpec) -> str:
