@@ -609,6 +609,11 @@ class WorkflowService:
         config = self._config_loader.load(
             task, execution.repository_ref or execution.repository or None
         )
+        provider_overrides, runtime_overrides = self._runtime_overrides_for_execution(
+            execution_id
+        )
+        if provider_overrides or runtime_overrides:
+            config = config.with_agent_runtime_overrides(provider_overrides, runtime_overrides)
         clients = self._client_factory.create(config)
         execution_clients = clients.at_path(workspace_path)
         # Do this before changing status or contacting the implementer: a human
@@ -1057,21 +1062,42 @@ class WorkflowService:
         provider_overrides: Mapping[str, str],
         runtime_overrides: Mapping[str, Mapping[str, object]],
     ) -> None:
-        """Persist validated one-run selections for restart-safe human resume."""
+        """Durably persist validated one-run selections for restart-safe resume.
 
-        self._record_diagnostic(
-            execution_id,
-            DiagnosticCategory.WORKFLOW_EVENT,
-            {
+        Unlike ordinary diagnostics this record is load-bearing: human resume and
+        manual continuation rebuild the role-local provider/model/effort choices
+        from it. It is written before any agent starts, and a failed or lossy
+        write stops the launch with an explicit error instead of letting a later
+        resume silently fall back to YAML defaults.
+        """
+
+        providers = dict(provider_overrides)
+        options = {role: dict(values) for role, values in runtime_overrides.items()}
+        failure = (
+            "Could not persist the selected agent runtime overrides "
+            "(provider/model/effort); the run was stopped before any agent started "
+            "so a later resume cannot silently use different settings. "
+            "Retry the launch."
+        )
+        diagnostic = ExecutionDiagnostic(
+            execution_id=execution_id,
+            category=DiagnosticCategory.WORKFLOW_EVENT,
+            payload={
                 "kind": _RUNTIME_OVERRIDES_DIAGNOSTIC_KIND,
-                "provider_overrides": dict(provider_overrides),
-                "runtime_overrides": {
-                    role: dict(options) for role, options in runtime_overrides.items()
-                },
+                "provider_overrides": providers,
+                "runtime_overrides": options,
             },
             stage=WorkflowStage.LOAD_CONFIG,
-            notify=False,
         )
+        try:
+            self._repository.record_diagnostic(diagnostic)
+            persisted = self._runtime_overrides_for_execution(execution_id)
+        except Exception as exc:
+            logger.warning("[workflow] Could not persist runtime overrides", exc_info=True)
+            raise WorkflowError(failure) from exc
+        expected = json.loads(json.dumps((providers, options), default=str))
+        if json.loads(json.dumps(persisted, default=str)) != expected:
+            raise WorkflowError(failure)
 
     def _runtime_overrides_for_execution(
         self, execution_id: str

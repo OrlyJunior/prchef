@@ -416,6 +416,68 @@ def test_human_resume_preserves_role_local_claude_effort(workflow) -> None:
     assert loader.config.providers["claude"].effort == "medium"
 
 
+def test_unpersistable_runtime_overrides_stop_launch_before_agents_run(
+    workflow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, repository, _, factory = workflow
+    loader = service._config_loader
+    loader.config.providers["claude"] = AgentProviderSettings.model_validate(
+        {"type": "claude-code", "effort": "medium"}
+    )
+    loader.config.agents.planner.provider = "claude"
+    record_diagnostic = repository.record_diagnostic
+
+    def failing_record(diagnostic):
+        if diagnostic.payload.get("kind") == "RUNTIME_OVERRIDES_APPLIED":
+            raise RuntimeError("database is locked")
+        return record_diagnostic(diagnostic)
+
+    monkeypatch.setattr(repository, "record_diagnostic", failing_record)
+
+    result = service.run(
+        "card-claude-effort-unpersisted",
+        agent_providers={AgentRole.PLANNER: "claude"},
+        agent_runtime_options={
+            AgentRole.PLANNER: {"model": None, "reasoning_effort": "xhigh"}
+        },
+    )
+
+    assert result.status is WorkflowStatus.FAILED
+    assert "Could not persist the selected agent runtime overrides" in (
+        result.error_message or ""
+    )
+    assert factory.configs == []
+    assert result.spec_snapshot is None
+
+
+def test_manual_continuation_preserves_role_local_runtime_overrides(workflow) -> None:
+    service, _, _, factory = workflow
+    loader = service._config_loader
+    loader.config.providers["claude"] = AgentProviderSettings.model_validate(
+        {"type": "claude-code", "effort": "medium"}
+    )
+    loader.config.agents.planner.provider = "claude"
+    factory.jules.changes_requested = True
+
+    paused = service.run(
+        "card-claude-effort-continuation",
+        agent_providers={AgentRole.PLANNER: "claude"},
+        agent_runtime_options={
+            AgentRole.PLANNER: {"model": None, "reasoning_effort": "xhigh"}
+        },
+    )
+    assert paused.status is WorkflowStatus.CHANGES_REQUESTED
+    factory.jules.changes_requested = False
+
+    resumed = service.continue_execution(paused.id, "Also cover the boundary case.")
+
+    assert resumed.status is WorkflowStatus.APPROVED
+    continued_config = factory.configs[-1]
+    continued_provider = continued_config.providers[continued_config.agents.planner.provider]
+    assert continued_provider.effort == "xhigh"
+    assert loader.config.providers["claude"].effort == "medium"
+
+
 def test_reviewer_human_response_reuses_existing_workspace_branch_and_pr(
     workflow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
