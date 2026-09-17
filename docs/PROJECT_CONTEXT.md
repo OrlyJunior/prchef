@@ -51,7 +51,8 @@
 - The TUI launcher may select configured provider instances and role-local runtime settings
   (model, reasoning, Claude permission mode, and exposed provider generation options) for one run. These overrides are
   schema-validated in memory, never alter YAML defaults, and may give roles sharing a configured
-  provider independent runtime settings. Its default launcher view presents compact per-role
+  provider independent runtime settings. Validated launch selections are recorded with the execution's
+  diagnostics so a human-blocked execution reapplies them when it resumes. Its default launcher view presents compact per-role
   provider/model/runtime summaries; role configuration and generation controls are progressive,
   and generation fields identify Provider/YAML defaults versus temporary overrides. GitHub App
   identities remain separately persisted, inspectable configuration.

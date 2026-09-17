@@ -1441,6 +1441,41 @@ def test_workflow_runner_selects_role_local_presets_without_crud_controls(tmp_pa
     asyncio.run(drive())
 
 
+def test_workflow_runner_preset_omitting_claude_effort_inherits_provider_default(
+    tmp_path: Path,
+) -> None:
+    controller, service, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.providers["claude"] = AgentProviderSettings.model_validate(
+        {"type": "claude-code", "effort": "medium", "permission_mode": "dontAsk"}
+    )
+    config.agent_presets = {
+        "planner": {
+            "edit": AgentPresetConfig(provider="claude", permission_mode="acceptEdits")
+        }
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#planner-preset", Select).value = "edit"
+            await settle_tui(pilot)
+
+            assert screen.query_one("#planner-reasoning", Input).value == "medium"
+            assert "Selected preset: edit" in str(
+                screen.query_one("#planner-preset-source", Static).renderable
+            )
+            screen.query_one("#available-tasks", Select).value = "12"
+            screen.query_one("#start-workflow", Button).press()
+            await settle_tui(pilot)
+            assert service.calls[-1][3][AgentRole.PLANNER]["reasoning_effort"] == "medium"
+
+    asyncio.run(drive())
+
+
 def test_workflow_runner_applies_and_resets_reviewer_preset_independently(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     controller.project_config("example").agent_presets = {
