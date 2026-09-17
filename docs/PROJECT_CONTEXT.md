@@ -260,8 +260,10 @@
   session after creation. `FAILED`, `CANCELLED`, timeout, or human-intervention states surface
   with the original session ID.
 - Claude Code is a first-class local-workspace CLI provider. Its safe configuration accepts one
-  executable, timeout, optional model, `dontAsk`/`acceptEdits`/`auto` permission mode, optional
-  turn/budget limits, and bare mode, never arbitrary flags. The provider constructs `claude -p`
+  executable, timeout, optional model and native `effort` (`low`, `medium`, `high`, `xhigh`, or
+  `max`), `dontAsk`/`acceptEdits`/`auto` permission mode, optional turn/budget limits, and bare
+  mode, never arbitrary flags. When configured, effort becomes exactly `--effort <value>`; when
+  omitted, Claude's CLI default applies. The provider constructs `claude -p`
   with JSON output itself, always adds Claude's `--restricted` mode and fixed `Read,Edit,Write,Glob,Grep`
   tool set, passes request instructions on stdin, and uses exactly the supplied workspace as cwd.
   Restricted mode ignores user/project settings, confines file tools to cwd, and prevents shell,
@@ -270,10 +272,12 @@
   branches/commits/pushes/PRs/reviews. Native `--json-schema` structured output is parsed and
   validated locally before `AgentResult`; a successful envelope requires `type=result`,
   `subtype=success`, and non-empty result text. Completion session IDs, whitelisted usage/cost, and
-  selected terminal error fields are diagnostic-only and never resume. Permission mode is exposed
-  as a schema-validated role-local preset/per-run override; one named Claude provider can therefore
-  give planner/reviewer read-only and implementer editing access without duplicate definitions.
-  Provider YAML remains the default whenever that role-local value is omitted. Its unavailable CLI,
+  selected terminal error fields are diagnostic-only and never resume. Permission mode and the
+  provider-neutral `reasoning_effort` (translated to Claude's native `effort`) are exposed as
+  schema-validated role-local preset/per-run overrides; one named Claude provider can therefore
+  give planner/reviewer read-only or distinct thinking depths and implementer editing access without
+  duplicate definitions. Provider YAML remains the default whenever that role-local value is omitted.
+  Its unavailable CLI,
   authentication, timeout, malformed envelope/schema, invalid model, quota, rate-limit, and capacity
   failures remain provider-local; only normalized quota/rate-limit/capacity errors participate in
   existing one-hop fallback. Claude Code v2.1.259+ and externally supplied authentication are required.

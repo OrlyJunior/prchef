@@ -110,6 +110,7 @@ class AgentProviderRegistry:
                 options.executable,
                 options.timeout_seconds,
                 model=options.model,
+                effort=options.effort,
                 permission_mode=options.permission_mode,
                 max_turns=options.max_turns,
                 max_budget_usd=options.max_budget_usd,

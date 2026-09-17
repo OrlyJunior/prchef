@@ -40,6 +40,7 @@ class ClaudeCodeClient:
         timeout_seconds: int,
         *,
         model: str | None = None,
+        effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
         permission_mode: Literal["dontAsk", "acceptEdits", "auto"] = "dontAsk",
         max_turns: int | None = None,
         max_budget_usd: float | None = None,
@@ -50,6 +51,7 @@ class ClaudeCodeClient:
         self._executable = executable
         self._timeout_seconds = timeout_seconds
         self._model = model
+        self._effort = effort
         self._permission_mode = permission_mode
         self._max_turns = max_turns
         self._max_budget_usd = max_budget_usd
@@ -65,9 +67,10 @@ class ClaudeCodeClient:
         command = self._execution_command(output_schema)
         logger.info("[claude-code] Starting execution")
         logger.debug(
-            "[claude-code] Starting provider=%s model=%s permission_mode=%s bare=%s",
+            "[claude-code] Starting provider=%s model=%s effort=%s permission_mode=%s bare=%s",
             self._provider_name,
             self._model or "<external-default>",
+            self._effort or "<external-default>",
             self._permission_mode,
             self._bare_mode,
         )
@@ -220,6 +223,8 @@ class ClaudeCodeClient:
             command.append("--bare")
         if self._model is not None:
             command.extend(("--model", self._model))
+        if self._effort is not None:
+            command.extend(("--effort", self._effort))
         if self._max_turns is not None:
             command.extend(("--max-turns", str(self._max_turns)))
         if self._max_budget_usd is not None:

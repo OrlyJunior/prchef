@@ -63,15 +63,17 @@ def test_resolves_and_reuses_a_named_claude_code_provider(tmp_path: Path) -> Non
             "reviewer": {"provider": "codex"},
         },
         providers={
-            "claude": {"type": "claude-code", "executable": "claude"},
+            "claude": {"type": "claude-code", "executable": "claude", "effort": "xhigh"},
             "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
         },
     )
 
     clients = ClientFactory(None).create(config)
 
-    assert isinstance(clients.agent(AgentRole.PLANNER), ClaudeCodeAgentProvider)
-    assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.IMPLEMENTER)
+    planner = clients.agent(AgentRole.PLANNER)
+    assert isinstance(planner, ClaudeCodeAgentProvider)
+    assert planner is clients.agent(AgentRole.IMPLEMENTER)
+    assert planner._client._effort == "xhigh"
 
 
 def test_jules_instantiation_logs_its_deprecated_status(

@@ -63,6 +63,8 @@ defaults:
   #     # One Claude provider can use role-local permission modes without duplicate definitions.
   #     claude-read-only:
   #       provider: claude
+  #       # Claude accepts low, medium, high, xhigh, or max per role.
+  #       reasoning_effort: medium
   #       permission_mode: dontAsk
   #   implementer:
   #     focused:
@@ -112,6 +114,9 @@ defaults:
     #   executable: claude
     #   timeout_seconds: 1800
     #   # model: <your-supported-claude-model>
+    #   # Optional native Claude thinking depth: low, medium, high, xhigh, or max.
+    #   # When omitted, no --effort flag is sent and Claude's CLI default applies.
+    #   # effort: medium
     #   # Default for roles without a preset/TUI runtime override. `dontAsk` is
     #   # suitable for read-only roles; use `acceptEdits` only for a role
     #   # permitted to edit the orchestrator-created workspace.
