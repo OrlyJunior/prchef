@@ -2540,6 +2540,74 @@ def test_workflow_runner_confirms_and_requests_cancellation(tmp_path: Path) -> N
     asyncio.run(drive())
 
 
+@pytest.mark.parametrize(
+    ("final_status", "expected_text"),
+    [
+        (WorkflowStatus.CHANGES_REQUESTED, "Review changes requested"),
+        (WorkflowStatus.APPROVED, "Workflow approved"),
+        (WorkflowStatus.FAILED, "Workflow failed"),
+        (WorkflowStatus.CANCELLED, "Workflow cancelled"),
+    ],
+)
+def test_workflow_runner_terminal_workflow_finished_resets_active_controls(
+    tmp_path: Path, final_status: WorkflowStatus, expected_text: str
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.RUNNING
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            for event in (
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.EXECUTION_CREATED,
+                    status=WorkflowStatus.RUNNING,
+                ),
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.STATUS_CHANGED,
+                    status=WorkflowStatus.RUNNING,
+                ),
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.STAGE_STARTED,
+                    stage=WorkflowStage.REVIEW,
+                ),
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.STAGE_FINISHED,
+                    stage=WorkflowStage.REVIEW,
+                    step_status=StepStatus.SUCCEEDED,
+                ),
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.STATUS_CHANGED,
+                    status=final_status,
+                ),
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.WORKFLOW_FINISHED,
+                    status=final_status,
+                ),
+            ):
+                screen._render_workflow_event(event)
+            await settle_tui(pilot)
+
+            assert screen.query_one("#workflow-stop-actions", Horizontal).display is False
+            assert screen.query_one("#start-workflow", Button).disabled is False
+            assert expected_text in str(
+                screen.query_one("#workflow-progress", Static).renderable
+            )
+            assert screen.query_one("#copy-detailed-logs-button", Button).disabled is False
+
+    asyncio.run(drive())
+
+
 def test_workflow_runner_does_not_need_to_scroll_in_a_tall_terminal(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     application = OrchestratorApp(controller)
