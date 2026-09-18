@@ -155,6 +155,10 @@
   inspection; no automatic session/workflow resume exists.
 - Workflow observer events are emitted only after persisted status/step transitions. They are for
   live terminal presentation and listeners may never change workflow semantics or make a run fail.
+- The TUI treats a `WORKFLOW_FINISHED` event as terminal for its active-run controls regardless of
+  final status (including `CHANGES_REQUESTED`), reacting to the event itself rather than waiting
+  for the blocking workflow call to return; this avoids the runner screen appearing stuck on a
+  finished run.
 
 ## Normal `run` behavior
 

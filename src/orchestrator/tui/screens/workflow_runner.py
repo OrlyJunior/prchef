@@ -1101,6 +1101,11 @@ class WorkflowRunnerScreen(Screen[None]):
             stop = self.query_one("#stop-workflow", Button)
             stop.disabled = False
             stop.label = "Stop workflow"
+        if (
+            event.kind is WorkflowEventKind.WORKFLOW_FINISHED
+            and event.execution_id == self._active_execution_id
+        ):
+            self._reset_active_workflow_controls()
         self._append_raw_event(event)
         self._append_live_diagnostic(event)
         message = self._timeline_message(event)
@@ -1314,13 +1319,18 @@ class WorkflowRunnerScreen(Screen[None]):
             WorkflowStage.COMPLETED: "Workflow completed",
         }[stage]
 
+    def _reset_active_workflow_controls(self) -> None:
+        """Restore idle-run controls; safe to call more than once per execution."""
+
+        self.query_one("#start-workflow", Button).disabled = False
+        self.query_one("#workflow-stop-actions", Horizontal).display = False
+
     def _workflow_finished(self, execution: WorkflowExecution) -> None:
         self._active_execution_id = execution.id
-        self.query_one("#start-workflow", Button).disabled = False
+        self._reset_active_workflow_controls()
         progress = self.query_one("#workflow-progress", Static)
         progress.update(self._status_message(execution.status))
         progress.set_class(execution.status is WorkflowStatus.CANCELLED, "cancelled")
-        self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.notify(self._status_message(execution.status))
         if execution.status is WorkflowStatus.NEEDS_HUMAN:
             self._show_human_panel(execution)
