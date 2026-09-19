@@ -1476,6 +1476,50 @@ def test_workflow_runner_preset_omitting_claude_effort_inherits_provider_default
     asyncio.run(drive())
 
 
+def test_workflow_runner_names_preset_on_provider_with_uneditable_generation(
+    tmp_path: Path,
+) -> None:
+    """A provider generation key without a control must not hide the preset name.
+
+    Generation options the launcher cannot edit are inherited unchanged by
+    every run, so a preset selected on such a provider still describes the
+    configured controls exactly.
+    """
+
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.providers["ollama"] = AgentProviderSettings.model_validate(
+        {
+            "type": "litellm",
+            "model": "ollama/gemma4:e4b",
+            "temperature": 0.2,
+            "generation": {"num_ctx": 32768},
+        }
+    )
+    config.agent_presets = {
+        "planner": {"coder": AgentPresetConfig(provider="ollama", model="ollama/qwen2.5-coder:14b")}
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#planner-preset", Select).value = "coder"
+            await settle_tui(pilot)
+
+            assert screen.query_one("#planner-model", Input).value == "ollama/qwen2.5-coder:14b"
+            assert "Selected preset: coder" == str(
+                screen.query_one("#planner-preset-source", Static).renderable
+            )
+            assert "preset: coder)" in str(
+                screen.query_one("#planner-summary", Static).renderable
+            )
+
+    asyncio.run(drive())
+
+
 def test_workflow_runner_applies_and_resets_reviewer_preset_independently(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     controller.project_config("example").agent_presets = {
