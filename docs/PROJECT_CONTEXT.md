@@ -347,7 +347,11 @@
   dedicated TUI Agent Presets screen creates, updates, renames, and deletes them in the resolved
   global configuration; the compact launcher exposes an independent selector per role and only
   applies its preset to that one run. Editing a selected role's launcher settings returns that
-  role to Manual, while choosing Manual restores its configured provider/YAML defaults. Presets
+  role to Manual, while choosing Manual restores its configured provider/YAML defaults. Switching
+  a preset's provider in the editor hides, but does not clear, runtime inputs the newly-selected
+  provider does not support (preserving their value if the user switches back); saving only
+  serializes fields whose input is currently displayed, so a persisted preset can never contain a
+  runtime option foreign to its assigned provider. Presets
   never alter or remove provider definitions. A preset with a missing provider remains persisted
   and is shown as an actionable launcher warning unless it is selected as a fallback, in which
   case configuration validation rejects it before execution. The Agent Presets screen also views,

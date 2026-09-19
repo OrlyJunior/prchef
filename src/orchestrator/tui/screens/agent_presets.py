@@ -513,7 +513,10 @@ class AgentPresetsScreen(Screen[None]):
         return self.controller.agent_presets(repository, role).get(self._selected_preset)
 
     def _optional(self, name: str) -> str | None:
-        return self.query_one(f"#agent-preset-{name}", Input).value.strip() or None
+        widget = self.query_one(f"#agent-preset-{name}", Input)
+        if not widget.display:
+            return None
+        return widget.value.strip() or None
 
     def _permission_mode(self) -> _PermissionMode | None:
         selector = self.query_one("#agent-preset-permission", OrchestratorSelect)
