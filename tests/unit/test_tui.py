@@ -1656,6 +1656,95 @@ def test_agent_presets_screen_manages_claude_permission_mode_and_effort(tmp_path
     asyncio.run(drive())
 
 
+def test_agent_presets_screen_omits_hidden_fields_when_switching_provider(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.providers["claude"] = AgentProviderSettings.model_validate(
+        {"type": "claude-code", "effort": "medium", "permission_mode": "dontAsk"}
+    )
+    config.agents.planner.provider = "claude"
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("p")
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#agent-presets-repository", Select).value = "example"
+            await settle_tui(pilot)
+
+            model = screen.query_one("#agent-preset-model", Input)
+            reasoning = screen.query_one("#agent-preset-reasoning", Input)
+            permission = screen.query_one("#agent-preset-permission", OrchestratorSelect)
+            temperature = screen.query_one("#agent-preset-temperature", Input)
+            max_tokens = screen.query_one("#agent-preset-max-output-tokens", Input)
+
+            model.value = "claude-model"
+            reasoning.value = "high"
+            permission.value = "acceptEdits"
+            screen.query_one("#agent-preset-name", Input).value = "mixed"
+            screen.query_one("#create-agent-preset", Button).press()
+            await settle_tui(pilot)
+            saved = config.agent_presets["planner"]["mixed"]
+            assert saved.provider == "claude"
+            assert saved.model == "claude-model"
+            assert saved.reasoning_effort == "high"
+            assert saved.permission_mode == "acceptEdits"
+            assert saved.generation == {}
+
+            # Switch to a generation-capable provider that hides reasoning and
+            # permission but still exposes model; hidden values must not leak
+            # into the saved preset.
+            screen.query_one("#agent-preset-provider", Select).value = "vertex"
+            await settle_tui(pilot)
+            assert reasoning.display is False
+            assert permission.display is False
+            assert model.display is True
+            assert temperature.display is True
+            assert max_tokens.display is True
+
+            temperature.value = "0.5"
+            max_tokens.value = "300"
+            screen.query_one("#update-agent-preset", Button).press()
+            await settle_tui(pilot)
+            saved = config.agent_presets["planner"]["mixed"]
+            assert saved.provider == "vertex"
+            assert saved.model == "claude-model"
+            assert saved.reasoning_effort is None
+            assert saved.permission_mode is None
+            assert saved.generation == {"temperature": "0.5", "max_output_tokens": "300"}
+            config.with_agent_runtime_overrides(
+                {"planner": saved.provider}, {"planner": saved.runtime_options()}
+            )
+
+            # Switch to a provider that supports none of these fields; the
+            # saved preset must contain no runtime options at all.
+            screen.query_one("#agent-preset-provider", Select).value = "planner"
+            await settle_tui(pilot)
+            assert model.display is False
+            assert reasoning.display is False
+            assert permission.display is False
+            assert temperature.display is False
+            assert max_tokens.display is False
+
+            screen.query_one("#update-agent-preset", Button).press()
+            await settle_tui(pilot)
+            saved = config.agent_presets["planner"]["mixed"]
+            assert saved.provider == "planner"
+            assert saved.model is None
+            assert saved.reasoning_effort is None
+            assert saved.permission_mode is None
+            assert saved.generation == {}
+            assert saved.runtime_options() == {}
+            config.with_agent_runtime_overrides(
+                {"planner": saved.provider}, {"planner": saved.runtime_options()}
+            )
+
+    asyncio.run(drive())
+
+
 def test_agent_presets_screen_reports_invalid_claude_permission_default(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     config = controller.project_config("example")
