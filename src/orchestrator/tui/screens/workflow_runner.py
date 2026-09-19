@@ -37,6 +37,11 @@ _MANUAL_PRESET = object()
 _PROVIDER_DEFAULT_PERMISSION = object()
 _PERMISSION_MODES = ("dontAsk", "acceptEdits", "auto")
 _PermissionMode = Literal["dontAsk", "acceptEdits", "auto"]
+# The advanced controls expose exactly these generation options. Any other
+# generation key a provider configures (`num_ctx`, `vertex_project`, ...) is
+# inherited unchanged by every run, so it cannot distinguish one selection
+# from another.
+_CONTROLLED_GENERATION_OPTIONS = ("temperature", "max_output_tokens")
 
 
 class StopWorkflowConfirmation(ModalScreen[bool]):
@@ -614,7 +619,13 @@ class WorkflowRunnerScreen(Screen[None]):
         )
 
     def _preset_with_provider_defaults(self, preset: AgentPresetConfig) -> AgentPresetConfig:
-        """Materialize omitted preset values as the selected provider's defaults."""
+        """Materialize omitted preset values as the selected provider's defaults.
+
+        Only the generation options the launcher can edit are retained: the
+        controls can never reproduce a provider's remaining generation keys,
+        so keeping them here would make every preset on such a provider look
+        like a this-run override.
+        """
 
         repository = self._selected("#repository")
         defaults = (
@@ -636,7 +647,11 @@ class WorkflowRunnerScreen(Screen[None]):
                 else defaults.get("reasoning_effort")
             ),
             permission_mode=preset.permission_mode,
-            generation={key: value for key, value in generation.items() if value is not None},
+            generation={
+                key: value
+                for key, value in generation.items()
+                if value is not None and key in _CONTROLLED_GENERATION_OPTIONS
+            },
         )
 
     @staticmethod
