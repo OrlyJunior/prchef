@@ -27,6 +27,7 @@ from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationCheck, ValidationResult
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import WorkflowStatus
+from orchestrator.providers.concurrency import ProviderConcurrencyCoordinator
 from orchestrator.repositories.workflow_repository import WorkflowRepository
 from orchestrator.runtime_logging import configure_logging, redact_text
 from orchestrator.services.debug_service import (
@@ -36,6 +37,8 @@ from orchestrator.services.debug_service import (
     DebugStage,
     parse_debug_stage,
 )
+from orchestrator.services.execution_dispatcher import ExecutionDispatcher
+from orchestrator.services.qdrant_repository_context import QdrantClientManager
 from orchestrator.services.task_provider import (
     GitHubIssueTaskProvider,
     TaskProvider,
@@ -142,6 +145,32 @@ def _migrated_repository(settings: Settings) -> WorkflowRepository:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     return _repository(settings)
+
+
+def _provider_coordinator(
+    config_loader: ProjectConfigLoader,
+) -> ProviderConcurrencyCoordinator:
+    """Fix every configured provider's concurrency ceiling for this process.
+
+    Ceilings are read once at startup: changing ``max_concurrency`` requires a
+    restart, so a running process never has to reconcile slots held under an
+    older limit. Providers only defined per repository register lazily at their
+    first use with the conservative default.
+    """
+
+    try:
+        defaults = config_loader.load_defaults()
+    except ConfigurationError:
+        return ProviderConcurrencyCoordinator()
+    return ProviderConcurrencyCoordinator(
+        {name: settings.max_concurrency for name, settings in defaults.providers.items()}
+    )
+
+
+def _execution_dispatcher(coordinator: ProviderConcurrencyCoordinator) -> ExecutionDispatcher:
+    """Size the worker pool from the configured ceilings, not from user input."""
+
+    return ExecutionDispatcher(max_workers=coordinator.total_capacity())
 
 
 def _config_loader(config_file: Path | None) -> ProjectConfigLoader:
@@ -366,6 +395,11 @@ def tui(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     workflow_repository = _migrated_repository(settings)
+    coordinator = _provider_coordinator(config_loader)
+    dispatcher = _execution_dispatcher(coordinator)
+    # One long-lived index client per configured store: local Qdrant takes an
+    # exclusive lock, so concurrent executions must share it.
+    index_clients = QdrantClientManager()
     controller = WorkflowController(
         workflow_repository=workflow_repository,
         config_loader=config_loader,
@@ -374,8 +408,15 @@ def tui(
             settings, config_loader, source, repository
         ),
         verbose=verbose,
+        dispatcher=dispatcher,
+        provider_coordinator=coordinator,
+        repository_index_clients=index_clients,
     )
-    application_type(controller).run()
+    try:
+        application_type(controller).run()
+    finally:
+        dispatcher.shutdown(wait=False)
+        index_clients.close()
 
 
 @app.command()
@@ -423,18 +464,27 @@ def run(
         task_id=task_id,
         repository=repository,
     )
+    coordinator = _provider_coordinator(config_loader)
+    dispatcher = _execution_dispatcher(coordinator)
+    index_clients = QdrantClientManager()
     service = WorkflowService(
         workflow_repository=workflow_repository,
         task_provider=provider,
         config_loader=config_loader,
         client_factory=ClientFactory(settings.jules_api_key),
         verbose=verbose,
+        dispatcher=dispatcher,
+        provider_coordinator=coordinator,
+        repository_index_clients=index_clients,
     )
     try:
         execution = service.run(selected_id, repository)
     except OperationalError as exc:
         typer.echo(f"Database access failed after migrations: {exc}", err=True)
         raise typer.Exit(code=2) from exc
+    finally:
+        dispatcher.shutdown(wait=False)
+        index_clients.close()
     _print_execution(execution)
     _print_final_summary(execution)
     if execution.status not in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:
@@ -491,14 +541,24 @@ def respond(
         raise typer.BadParameter(
             f"Unsupported persisted task provider: {execution.task_source}"
         )
+    coordinator = _provider_coordinator(config_loader)
+    dispatcher = _execution_dispatcher(coordinator)
+    index_clients = QdrantClientManager()
     service = WorkflowService(
         workflow_repository=workflow_repository,
         task_provider=provider,
         config_loader=config_loader,
         client_factory=ClientFactory(settings.jules_api_key),
         verbose=verbose,
+        dispatcher=dispatcher,
+        provider_coordinator=coordinator,
+        repository_index_clients=index_clients,
     )
-    result = service.respond_and_resume(execution_id, message)
+    try:
+        result = service.respond_and_resume(execution_id, message)
+    finally:
+        dispatcher.shutdown(wait=False)
+        index_clients.close()
     _print_execution(result)
     _print_final_summary(result)
     if result.status not in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:
@@ -665,10 +725,12 @@ def debug(
         pull_request=explicit_pull_request,
         diff=explicit_diff,
     )
+    index_clients = QdrantClientManager()
     service = DebugService(
         config_loader=_config_loader(settings.config_file),
         client_factory=ClientFactory(settings.jules_api_key),
         task_provider_factory=lambda source, repo: _debug_task_provider(settings, source, repo),
+        repository_index_clients=index_clients,
     )
     try:
         result = service.execute(execution, debug_stage, inputs=explicit_inputs, dry_run=dry_run)
@@ -690,6 +752,8 @@ def debug(
             )
         )
         raise typer.Exit(code=1) from exc
+    finally:
+        index_clients.close()
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
 
 

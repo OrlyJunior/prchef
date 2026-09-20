@@ -6,7 +6,7 @@ from pathlib import Path
 
 from orchestrator.clients.git_client import GitClient
 from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import WorkflowStatus
+from orchestrator.models.workflow_status import ACTIVE_WORKFLOW_STATUSES, WorkflowStatus
 from orchestrator.repositories.workflow_repository import WorkflowRepository
 
 
@@ -57,7 +57,9 @@ class WorkspaceCleanupService:
         WorkflowStatus.CANCELLED,
         WorkflowStatus.NEEDS_HUMAN,
     }
-    _ACTIVE_STATUSES = {WorkflowStatus.PENDING, WorkflowStatus.RUNNING}
+    # WAITING work is queued for provider capacity, not finished: its worktree
+    # is still needed as soon as a slot frees up.
+    _ACTIVE_STATUSES = ACTIVE_WORKFLOW_STATUSES
 
     def __init__(
         self,

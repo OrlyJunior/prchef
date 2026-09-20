@@ -326,8 +326,13 @@ def resolve_repository_context_strategy(
     configured_root: Path | None = None,
     embedding_provider: EmbeddingProvider | None = None,
     client_factory: Callable[[Any], Any] | None = None,
+    client_manager: Any | None = None,
 ) -> RepositoryContextStrategy:
-    """Resolve a stable strategy name through the orchestrator-owned registry."""
+    """Resolve a stable strategy name through the orchestrator-owned registry.
+
+    ``client_manager`` lets the composing process share one long-lived index
+    client across concurrent executions; index-free strategies ignore it.
+    """
 
     normalized = name.strip().casefold()
     try:
@@ -353,6 +358,8 @@ def resolve_repository_context_strategy(
         kwargs["embedding_provider"] = embedding_provider
     if client_factory is not None:
         kwargs["client_factory"] = client_factory
+    if client_manager is not None:
+        kwargs["client_manager"] = client_manager
     return builder(**kwargs)
 
 

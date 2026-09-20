@@ -11,6 +11,7 @@ from orchestrator.config.project_config import RepositoryContextSettings
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.repository_context import EmbeddingIdentity, IndexLifecycleState
 from orchestrator.services.qdrant_repository_context import (
+    QdrantClientManager,
     QdrantRepositoryContextStrategy,
     canonical_path_identifier,
     create_qdrant_client,
@@ -480,3 +481,66 @@ def test_semantic_failure_uses_heuristic_fallback_when_enabled(tmp_path: Path) -
 
     assert "LOCAL REPOSITORY CONTEXT" in result
     assert "source.py" in result
+
+
+def test_injected_manager_reuses_one_client_across_operations(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    index = tmp_path / "index"
+    _repository(root, {"source.py": "alpha source"})
+    opened: list[object] = []
+    closed: list[object] = []
+
+    def factory(qdrant_settings: object) -> object:
+        client = create_qdrant_client(qdrant_settings)  # type: ignore[arg-type]
+
+        class Client:
+            def __getattr__(self, name: str) -> object:
+                return getattr(client, name)
+
+            def close(self) -> None:
+                closed.append(self)
+                client.close()
+
+        tracked = Client()
+        opened.append(tracked)
+        return tracked
+
+    manager = QdrantClientManager(factory)
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(index),
+        "repo",
+        root,
+        embedding_provider=FakeEmbeddingProvider(),
+        client_manager=manager,
+    )
+
+    strategy.render(_request(root))
+    strategy.inspect_index()
+    # The strategy does not own the manager, so it never closes it.
+    strategy.close()
+
+    assert len(opened) == 1
+    assert closed == []
+
+    manager.close()
+    assert len(closed) == 1
+
+
+def test_a_standalone_strategy_does_not_hold_the_local_store_open(tmp_path: Path) -> None:
+    """Embedded Qdrant locks its directory, so an unshared client must not linger."""
+
+    root = tmp_path / "repository"
+    index = tmp_path / "index"
+    _repository(root, {"source.py": "alpha source"})
+
+    first = QdrantRepositoryContextStrategy(
+        _settings(index), "repo", root, embedding_provider=FakeEmbeddingProvider()
+    )
+    assert "source.py" in first.render(_request(root))
+
+    # A second strategy over the same store must still be able to open it.
+    second = QdrantRepositoryContextStrategy(
+        _settings(index), "repo", root, embedding_provider=FakeEmbeddingProvider()
+    )
+    assert "source.py" in second.render(_request(root))
+    assert second.inspect_index().state is IndexLifecycleState.READY
