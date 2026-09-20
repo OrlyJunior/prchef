@@ -1438,3 +1438,196 @@ def test_loader_rejects_qdrant_for_path_only_repository_or_index_inside_repo(
     )
     with pytest.raises(ConfigurationError, match="outside the repository"):
         ProjectConfigLoader(inside_config).load(registered_task)
+
+
+def _concurrency_config(tmp_path: Path, providers: dict[str, object]) -> ProjectConfig:
+    return ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "agents": {
+                "planner": {"provider": "planner-provider"},
+                "implementer": {"provider": "planner-provider"},
+                "reviewer": {"provider": "planner-provider"},
+            },
+            "providers": providers,
+        }
+    )
+
+
+def test_provider_max_concurrency_defaults_to_one(tmp_path: Path) -> None:
+    config = _concurrency_config(
+        tmp_path, {"planner-provider": {"type": "codex-cli", "command": ["codex"]}}
+    )
+
+    assert config.providers["planner-provider"].max_concurrency == 1
+    assert config.provider_max_concurrency("planner-provider") == 1
+
+
+def test_provider_max_concurrency_accepts_an_explicit_positive_limit(tmp_path: Path) -> None:
+    config = _concurrency_config(
+        tmp_path,
+        {"planner-provider": {"type": "codex-cli", "command": ["codex"], "max_concurrency": 3}},
+    )
+
+    assert config.provider_max_concurrency("planner-provider") == 3
+
+
+@pytest.mark.parametrize("invalid", [0, -1, 1.5, "two", None])
+def test_provider_max_concurrency_rejects_non_positive_integers(
+    tmp_path: Path, invalid: object
+) -> None:
+    with pytest.raises(ValidationError):
+        _concurrency_config(
+            tmp_path,
+            {
+                "planner-provider": {
+                    "type": "codex-cli",
+                    "command": ["codex"],
+                    "max_concurrency": invalid,
+                }
+            },
+        )
+
+
+def test_provider_max_concurrency_rejects_an_unconfigured_provider(tmp_path: Path) -> None:
+    config = _concurrency_config(
+        tmp_path, {"planner-provider": {"type": "codex-cli", "command": ["codex"]}}
+    )
+
+    with pytest.raises(ConfigurationError, match="is not configured"):
+        config.provider_max_concurrency("absent")
+
+
+def _repository_concurrency_config(
+    tmp_path: Path, repository_providers: dict[str, object]
+) -> Path:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        yaml.safe_dump(
+            {
+                "defaults": {
+                    "agents": {
+                        "planner": {"provider": "shared"},
+                        "implementer": {"provider": "shared"},
+                        "reviewer": {"provider": "shared"},
+                    },
+                    "providers": {
+                        "shared": {
+                            "type": "codex-cli",
+                            "command": ["codex"],
+                            "max_concurrency": 2,
+                        }
+                    },
+                },
+                "repositories": {
+                    "example": {
+                        "path": str(repository),
+                        "providers": repository_providers,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config_file
+
+
+def _concurrency_task() -> DevelopmentTask:
+    return DevelopmentTask(
+        id="concurrency",
+        source="test",
+        title="Concurrency",
+        description="",
+        url="",
+        repository="example",
+    )
+
+
+@pytest.mark.parametrize("repository_limit", [1, 2, 5])
+def test_repository_level_max_concurrency_is_rejected(
+    tmp_path: Path, repository_limit: int
+) -> None:
+    """Even a value repeating the default is rejected: one authoritative source."""
+
+    config_file = _repository_concurrency_config(
+        tmp_path, {"shared": {"max_concurrency": repository_limit}}
+    )
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        ProjectConfigLoader(config_file).load(_concurrency_task())
+
+    message = str(exc_info.value)
+    assert "repositories.example.providers.shared.max_concurrency" in message
+    assert "defaults.providers.<name>.max_concurrency" in message
+
+
+def test_repository_provider_overrides_other_than_concurrency_still_apply(
+    tmp_path: Path,
+) -> None:
+    config_file = _repository_concurrency_config(
+        tmp_path, {"shared": {"timeout_seconds": 120}}
+    )
+
+    config = ProjectConfigLoader(config_file).load(_concurrency_task())
+
+    assert config.providers["shared"].timeout_seconds == 120
+    # The ceiling still comes from defaults and is untouched by the override.
+    assert config.provider_max_concurrency("shared") == 2
+
+
+def test_runtime_overrides_retain_the_original_provider_concurrency_identity(
+    tmp_path: Path,
+) -> None:
+    config = _concurrency_config(
+        tmp_path,
+        {"planner-provider": {"type": "codex-cli", "command": ["codex"], "max_concurrency": 4}},
+    )
+
+    overridden = config.with_agent_runtime_overrides({}, {"planner": {"model": "gpt-5-codex"}})
+    runtime_name = overridden.agents.planner.provider
+
+    assert runtime_name.startswith("__tui_runtime_")
+    assert overridden.provider_concurrency_name(runtime_name) == "planner-provider"
+    # A temporary model change must not create a second quota pool.
+    assert overridden.provider_max_concurrency(runtime_name) == 4
+
+
+def test_presets_retain_the_original_provider_concurrency_identity(tmp_path: Path) -> None:
+    config = ProjectConfig.model_validate(
+        {
+            "path": tmp_path,
+            "agents": {
+                "planner": {"provider": "primary"},
+                "implementer": {"provider": "primary"},
+                "reviewer": {"provider": "primary"},
+            },
+            "providers": {
+                "primary": {"type": "codex-cli", "command": ["codex"], "max_concurrency": 2},
+                "secondary": {"type": "codex-cli", "command": ["codex"], "max_concurrency": 3},
+            },
+            "agent_presets": {
+                "planner": {
+                    "fast": {"provider": "secondary", "model": "gpt-5-codex"},
+                }
+            },
+        }
+    )
+
+    with_preset = config.with_agent_preset("planner", "fast")
+    runtime_name = with_preset.agents.planner.provider
+
+    # A preset pointing at another configured provider is charged to that
+    # provider's ceiling, not the one it replaced.
+    assert with_preset.provider_concurrency_name(runtime_name) == "secondary"
+    assert with_preset.provider_max_concurrency(runtime_name) == 3
+
+
+def test_provider_concurrency_name_of_a_plain_provider_is_itself(tmp_path: Path) -> None:
+    config = _concurrency_config(
+        tmp_path, {"planner-provider": {"type": "codex-cli", "command": ["codex"]}}
+    )
+
+    assert config.provider_concurrency_name("planner-provider") == "planner-provider"

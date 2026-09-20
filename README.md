@@ -414,9 +414,11 @@ defaults:
       type: litellm
       model: openai/gpt-4.1-mini
       api_key_env: OPENAI_API_KEY
+      max_concurrency: 3
     codex:
       type: codex-cli
       command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
+      max_concurrency: 2
   safety:
     allow_direct_merge: false
     require_tests: true
@@ -494,6 +496,52 @@ configuracao com os nomes disponiveis/suportados.
 
 `allow_direct_merge: true` e rejeitado nesta V1. Credenciais ficam exclusivamente em variaveis
 de ambiente e `.env` nao e versionado.
+
+### Execucoes concorrentes e limites por provider
+
+Varias execucoes podem correr ao mesmo tempo no mesmo processo (`run` ou `tui`), mas a
+concorrencia e sempre limitada. O limite e declarado por instancia nomeada de provider, porque e
+o provider que representa o recurso realmente compartilhado: uma unica cota de API, ou a VRAM de
+uma unica GPU no caso de modelos locais. Um teto global sozinho nao protegeria nenhum dos dois.
+
+```yaml
+defaults:
+  providers:
+    codex:
+      type: codex-cli
+      command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
+      max_concurrency: 2   # duas chamadas Codex simultaneas
+    local-ollama:
+      type: litellm
+      model: ollama/llama3.2
+      api_base: http://localhost:11434
+      max_concurrency: 1   # uma GPU, uma chamada por vez
+```
+
+- `max_concurrency` e um inteiro positivo e vale **1** quando omitido: o default e
+  deliberadamente conservador, ou seja, execucao sequencial por provider.
+- O teto e por provider, nao global. Providers com nomes diferentes sao admitidos de forma
+  independente; `codex` ocupado nao bloqueia `local-ollama`.
+- Declare `max_concurrency` apenas em `defaults.providers.<nome>`. Uma entrada em
+  `repositories.<chave>.providers.<nome>` que defina `max_concurrency` e rejeitada com um erro de
+  configuracao acionavel, mesmo quando repete o default. Um repositorio que precise de capacidade
+  propria esta usando outra conexao e merece um nome de provider proprio. Os demais overrides de
+  provider por repositorio continuam funcionando normalmente.
+- Os tetos sao lidos uma vez na inicializacao e valem para todo o processo. Alterar
+  `max_concurrency` exige reiniciar `orchestrator run`/`tui`.
+- Overrides de runtime da TUI e presets por papel criam variantes em memoria, mas continuam
+  contabilizados no provider configurado de origem: trocar o modelo nao cria uma segunda cota.
+  Um fallback libera o slot do provider primario antes de disputar o slot do seu proprio provider.
+
+Uma chamada de agente que nao consegue um slot imediatamente entra numa fila FIFO. A execucao
+passa a `WAITING` (distinto de `PENDING`, que e trabalho ainda nao iniciado) e volta a `RUNNING`
+quando e admitida. O slot e mantido apenas durante a chamada ao agente, nunca durante Git,
+validacao ou operacoes GitHub. Execucoes em `PENDING`, `WAITING` e `RUNNING` continuam
+cancelaveis pela TUI e terminam como `CANCELLED` sem iniciar outra etapa.
+
+Trabalho enfileirado vive apenas na memoria do processo. As linhas persistidas permanecem no banco
+apos um encerramento, mas **nao** sao retomadas automaticamente no proximo start; a recuperacao
+automatica e trabalho futuro (#46).
 
 ## Validacoes
 

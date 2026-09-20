@@ -21,6 +21,7 @@ from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationResult
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
+    ACTIVE_WORKFLOW_STATUSES,
     PolishOutcome,
     StepStatus,
     WorkflowStage,
@@ -49,6 +50,12 @@ def _load(value: str | None) -> dict[str, Any] | None:
         return None
     parsed = json.loads(value)
     return parsed if isinstance(parsed, dict) else None
+
+
+# Queued, provider-blocked, and genuinely running work are all "active": they
+# have not reached a terminal status, so they remain cancellable. The column is
+# string-backed, so compare persisted values rather than enum members.
+_ACTIVE_STATUS_VALUES = frozenset(status.value for status in ACTIVE_WORKFLOW_STATUSES)
 
 
 class WorkflowRepository:
@@ -120,17 +127,20 @@ class WorkflowRepository:
         self._mutate(execution_id, lambda entity: setattr(entity, "status", status.value))
 
     def request_cancellation(self, execution_id: str) -> bool:
-        """Durably request cooperative cancellation of a running execution.
+        """Durably request cooperative cancellation of an active execution.
 
-        The request deliberately does not discard workspace or artifact fields.
-        A running service observes this marker and performs the terminal transition
-        at a safe stage boundary.
+        Queued (``PENDING``) and provider-blocked (``WAITING``) work is
+        cancellable too: it has not reached a terminal status and its user is
+        entitled to stop it before it consumes any shared capacity. The request
+        deliberately does not discard workspace or artifact fields. A running
+        service observes this marker and performs the terminal transition at a
+        safe stage or provider boundary.
         """
         with self._sessions() as session, session.begin():
             entity = session.get(WorkflowExecutionEntity, execution_id)
             if entity is None:
                 raise KeyError(f"Workflow execution not found: {execution_id}")
-            if entity.status != WorkflowStatus.RUNNING.value:
+            if entity.status not in _ACTIVE_STATUS_VALUES:
                 return False
             if entity.cancellation_requested_at is None:
                 entity.cancellation_requested_at = _utcnow()
@@ -143,7 +153,7 @@ class WorkflowRepository:
             if entity is None:
                 raise KeyError(f"Workflow execution not found: {execution_id}")
             return (
-                entity.status == WorkflowStatus.RUNNING.value
+                entity.status in _ACTIVE_STATUS_VALUES
                 and entity.cancellation_requested_at is not None
             )
 
@@ -280,6 +290,22 @@ class WorkflowRepository:
             entity.status = WorkflowStatus.RUNNING.value
             entity.error_message = None
             entity.finished_at = None
+
+        self._mutate(execution_id, mutate)
+
+    def queue_execution(self, execution_id: str) -> None:
+        """Return a resumed or continued execution to the queued state.
+
+        Resumes and continuations compete for the same bounded capacity as
+        fresh runs, so they wait in ``PENDING`` rather than claiming ``RUNNING``
+        before a worker actually starts them.
+        """
+
+        def mutate(entity: WorkflowExecutionEntity) -> None:
+            entity.status = WorkflowStatus.PENDING.value
+            entity.error_message = None
+            entity.finished_at = None
+            entity.cancellation_requested_at = None
 
         self._mutate(execution_id, mutate)
 

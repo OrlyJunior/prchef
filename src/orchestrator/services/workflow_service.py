@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from orchestrator.models.agent import AgentRole
 from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from orchestrator.models.human_interaction import HumanInteraction
 from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
@@ -44,6 +46,10 @@ from orchestrator.providers.agent_provider import (
     AgentProvider,
     AgentProviderError,
 )
+from orchestrator.providers.concurrency import (
+    ConcurrencyLimitedAgentProvider,
+    ProviderConcurrencyCoordinator,
+)
 from orchestrator.providers.diagnostic_provider import DiagnosticAgentProvider
 from orchestrator.providers.fallback_provider import FallbackAgentProvider
 from orchestrator.repositories.workflow_repository import WorkflowRepository
@@ -54,6 +60,7 @@ from orchestrator.runtime_logging import (
     redact_text,
 )
 from orchestrator.services.exceptions import WorkflowCancelledError, WorkflowError
+from orchestrator.services.execution_dispatcher import ExecutionDispatcher, ExecutionHandle
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.notifications import NotificationService
 from orchestrator.services.repository_context import (
@@ -90,6 +97,20 @@ _STAGE_LABELS = {
 }
 
 _RUNTIME_OVERRIDES_DIAGNOSTIC_KIND = "RUNTIME_OVERRIDES_APPLIED"
+_PROVIDER_WAIT_DIAGNOSTIC_KIND = "PROVIDER_SLOT_WAIT"
+_PROVIDER_ADMITTED_DIAGNOSTIC_KIND = "PROVIDER_SLOT_ADMITTED"
+
+
+@dataclass(slots=True)
+class _ExecutionRuntime:
+    """Mutable state owned by exactly one in-flight execution.
+
+    Concurrent executions share a service instance, so the observer and the
+    stage used for diagnostic attribution can never live on the service itself.
+    """
+
+    listener: WorkflowEventListener | None = None
+    active_stage: WorkflowStage | None = None
 
 
 class WorkflowService:
@@ -102,6 +123,9 @@ class WorkflowService:
         *,
         verbose: bool = False,
         notification_service: NotificationService | None = None,
+        dispatcher: ExecutionDispatcher | None = None,
+        provider_coordinator: ProviderConcurrencyCoordinator | None = None,
+        repository_index_clients: Any | None = None,
     ) -> None:
         self._repository = workflow_repository
         self._task_provider = task_provider
@@ -109,29 +133,119 @@ class WorkflowService:
         self._client_factory = client_factory
         self._verbose = verbose
         self._notification_service = notification_service or NotificationService()
-        self._event_listener: WorkflowEventListener | None = None
-        self._active_stage: WorkflowStage | None = None
+        # A composing process supplies one dispatcher and one coordinator so
+        # every execution competes for the same bounded capacity. Isolated
+        # callers get private, strictly sequential ones.
+        self._dispatcher = dispatcher or ExecutionDispatcher()
+        self._provider_coordinator = provider_coordinator or ProviderConcurrencyCoordinator()
+        self._repository_index_clients = repository_index_clients
+        self._runtimes: dict[str, _ExecutionRuntime] = {}
+        self._runtime_lock = threading.RLock()
 
     def cancel_execution(self, execution_id: str) -> bool:
         """Request cancellation without coupling the caller to a provider.
 
+        Queued, provider-blocked, and running executions are all cancellable.
         Providers remain responsible for any interruption mechanism they can
         safely offer. The workflow itself observes this persisted request at
-        stage boundaries, so a request made by another process is restart-safe.
+        stage and provider-admission boundaries, so a request made by another
+        process is restart-safe.
         """
         accepted = self._repository.request_cancellation(execution_id)
-        if accepted:
-            self._record_diagnostic(
-                execution_id,
-                DiagnosticCategory.WORKFLOW_EVENT,
-                {
-                    "kind": "CANCELLATION_REQUESTED",
-                    "message": "Cancellation requested by user",
-                },
-                stage=self._active_stage,
-                notify=False,
-            )
-        return accepted
+        if not accepted:
+            return False
+        runtime = self._peek_runtime(execution_id)
+        self._record_diagnostic(
+            execution_id,
+            DiagnosticCategory.WORKFLOW_EVENT,
+            {
+                "kind": "CANCELLATION_REQUESTED",
+                "message": "Cancellation requested by user",
+            },
+            stage=runtime.active_stage if runtime is not None else None,
+            notify=False,
+        )
+        # Wake work queued for a provider slot first, then drop work that has
+        # not started at all. Both paths are idempotent: whichever observes the
+        # persisted request first finishes the execution as CANCELLED.
+        self._provider_coordinator.cancel(execution_id)
+        self._dispatcher.cancel(execution_id)
+        return True
+
+    def _begin_runtime(
+        self, execution_id: str, listener: WorkflowEventListener | None
+    ) -> _ExecutionRuntime:
+        runtime = _ExecutionRuntime(listener=listener)
+        with self._runtime_lock:
+            self._runtimes[execution_id] = runtime
+        return runtime
+
+    def _runtime(self, execution_id: str) -> _ExecutionRuntime:
+        with self._runtime_lock:
+            runtime = self._runtimes.get(execution_id)
+            if runtime is None:
+                runtime = _ExecutionRuntime()
+                self._runtimes[execution_id] = runtime
+            return runtime
+
+    def _peek_runtime(self, execution_id: str) -> _ExecutionRuntime | None:
+        with self._runtime_lock:
+            return self._runtimes.get(execution_id)
+
+    def _end_runtime(self, execution_id: str) -> None:
+        with self._runtime_lock:
+            self._runtimes.pop(execution_id, None)
+
+    def _active_stage_of(self, execution_id: str) -> WorkflowStage | None:
+        runtime = self._peek_runtime(execution_id)
+        return runtime.active_stage if runtime is not None else None
+
+    def submit_execution(
+        self,
+        task_id: str,
+        repository_override: str | None = None,
+        *,
+        agent_providers: Mapping[AgentRole, str] | None = None,
+        agent_runtime_options: Mapping[AgentRole, Mapping[str, object]] | None = None,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> ExecutionHandle:
+        """Persist a fresh execution and queue it for bounded admission.
+
+        This is the mandatory submission seam for workflow execution. The row
+        exists (as ``PENDING``) and its ID is available before any work starts,
+        so batch, scheduling, continuous-execution, and label-selection
+        features submit here instead of adding their own concurrency handling.
+        Queued work is in-memory only; recovering it after a restart is
+        deliberately out of scope.
+
+        ``event_listener`` is an observational hook for interactive clients. It
+        is called after the corresponding repository update and failures in the
+        listener are isolated from workflow execution.
+        """
+
+        execution = self._repository.create_execution(
+            task_id, task_source=self._task_provider.source
+        )
+        self._begin_runtime(execution.id, event_listener)
+        self._emit(
+            execution.id,
+            WorkflowEventKind.EXECUTION_CREATED,
+            stage=execution.current_stage,
+            status=execution.status,
+        )
+        provider_overrides = {
+            role.value: provider for role, provider in (agent_providers or {}).items()
+        }
+        runtime_overrides = {
+            role.value: dict(options)
+            for role, options in (agent_runtime_options or {}).items()
+        }
+        return self._submit(
+            execution.id,
+            lambda: self._execute_workflow(
+                execution, task_id, repository_override, provider_overrides, runtime_overrides
+            ),
+        )
 
     def run(
         self,
@@ -142,32 +256,56 @@ class WorkflowService:
         agent_runtime_options: Mapping[AgentRole, Mapping[str, object]] | None = None,
         event_listener: WorkflowEventListener | None = None,
     ) -> WorkflowExecution:
-        """Run a workflow using the same persisted transitions used by the CLI.
+        """Submit a workflow and wait for it, preserving synchronous callers."""
 
-        ``event_listener`` is an observational hook for interactive clients. It
-        is called after the corresponding repository update and failures in the
-        listener are isolated from workflow execution.
-        """
+        return self.submit_execution(
+            task_id,
+            repository_override,
+            agent_providers=agent_providers,
+            agent_runtime_options=agent_runtime_options,
+            event_listener=event_listener,
+        ).result()
 
-        self._event_listener = event_listener
-        execution = self._repository.create_execution(
-            task_id, task_source=self._task_provider.source
-        )
-        self._emit(
-            execution.id,
-            WorkflowEventKind.EXECUTION_CREATED,
-            stage=execution.current_stage,
-            status=execution.status,
-        )
-        self._repository.update_status(execution.id, WorkflowStatus.RUNNING)
-        self._emit(execution.id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.RUNNING)
-        provider_overrides = {
-            role.value: provider for role, provider in (agent_providers or {}).items()
-        }
-        runtime_overrides = {
-            role.value: dict(options)
-            for role, options in (agent_runtime_options or {}).items()
-        }
+    def _submit(
+        self, execution_id: str, work: Callable[[], WorkflowExecution]
+    ) -> ExecutionHandle:
+        """Queue already-persisted work and clean its runtime up afterwards."""
+
+        def run_job() -> WorkflowExecution:
+            try:
+                return work()
+            finally:
+                self._end_runtime(execution_id)
+
+        def drop_job() -> WorkflowExecution:
+            try:
+                return self._finish(execution_id, WorkflowStatus.CANCELLED, None)
+            finally:
+                self._end_runtime(execution_id)
+
+        return self._dispatcher.submit(execution_id, run_job, on_dropped=drop_job)
+
+    def _start_admitted(self, execution_id: str) -> None:
+        """Move admitted work from the queue into a genuinely running state."""
+
+        self._raise_if_cancellation_requested(execution_id)
+        self._repository.update_status(execution_id, WorkflowStatus.RUNNING)
+        self._emit(execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.RUNNING)
+
+    def _execute_workflow(
+        self,
+        execution: WorkflowExecution,
+        task_id: str,
+        repository_override: str | None,
+        provider_overrides: Mapping[str, str],
+        runtime_overrides: Mapping[str, Mapping[str, object]],
+    ) -> WorkflowExecution:
+        """Run a workflow using the same persisted transitions used by the CLI."""
+
+        try:
+            self._start_admitted(execution.id)
+        except WorkflowCancelledError:
+            return self._finish(execution.id, WorkflowStatus.CANCELLED, None)
         workspace_path: Path | None = None
         config: ProjectConfig | None = None
         try:
@@ -201,12 +339,7 @@ class WorkflowService:
                 )
                 clients = self._client_factory.create(config)
                 repository_slug = clients.git.github_repository()
-                repository_context_strategy = resolve_repository_context_strategy(
-                    config.repository_context.strategy,
-                    settings=config.repository_context,
-                    repository_key=config.configured_repository_key,
-                    configured_root=config.path,
-                )
+                repository_context_strategy = self._repository_context_strategy(config)
 
             with self._step(execution.id, WorkflowStage.GENERATE_SPEC):
                 spec = SpecService(
@@ -478,6 +611,31 @@ class WorkflowService:
                 )
             return result
 
+    def submit_response(
+        self,
+        execution_id: str,
+        response: str,
+        *,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> ExecutionHandle:
+        """Persist a human response and queue the same execution for admission.
+
+        A resume competes for capacity exactly like a fresh run, so it returns
+        to ``PENDING`` until a worker starts it rather than claiming a running
+        state it cannot yet use.
+        """
+
+        execution = self._repository.get_execution(execution_id)
+        if execution.status is not WorkflowStatus.NEEDS_HUMAN:
+            raise ValueError(f"Execution {execution_id} is not awaiting human input")
+        interaction = self._repository.respond_to_human_input(execution_id, response)
+        self._begin_runtime(execution_id, event_listener)
+        self._queue_resumed(execution_id)
+        return self._submit(
+            execution_id,
+            lambda: self._execute_response(execution, interaction, response),
+        )
+
     def respond_and_resume(
         self,
         execution_id: str,
@@ -492,17 +650,21 @@ class WorkflowService:
         plus the human answer, which makes the workflow-level behaviour
         provider agnostic and restart-safe.
         """
-        self._event_listener = event_listener
-        execution = self._repository.get_execution(execution_id)
-        if execution.status is not WorkflowStatus.NEEDS_HUMAN:
-            raise ValueError(f"Execution {execution_id} is not awaiting human input")
-        interaction = self._repository.respond_to_human_input(execution_id, response)
-        self._repository.resume_execution(execution_id)
-        self._emit(
-            execution_id,
-            WorkflowEventKind.STATUS_CHANGED,
-            status=WorkflowStatus.RUNNING,
-        )
+        return self.submit_response(
+            execution_id, response, event_listener=event_listener
+        ).result()
+
+    def _execute_response(
+        self,
+        execution: WorkflowExecution,
+        interaction: HumanInteraction,
+        response: str,
+    ) -> WorkflowExecution:
+        execution_id = execution.id
+        try:
+            self._start_admitted(execution_id)
+        except WorkflowCancelledError:
+            return self._finish(execution_id, WorkflowStatus.CANCELLED, None)
         config: ProjectConfig | None = None
         try:
             task = self._task_from_snapshot(execution)
@@ -518,12 +680,7 @@ class WorkflowService:
                 )
             clients = self._client_factory.create(config)
             repository_slug = clients.git.github_repository()
-            repository_context_strategy = resolve_repository_context_strategy(
-                config.repository_context.strategy,
-                settings=config.repository_context,
-                repository_key=config.configured_repository_key,
-                configured_root=config.path,
-            )
+            repository_context_strategy = self._repository_context_strategy(config)
             previous_responses = [
                 (item.prompt, item.response)
                 for item in execution.human_interactions
@@ -588,17 +745,17 @@ class WorkflowService:
             return execution.error_message
         return "The previous workflow attempt failed. Inspect the retained workspace and continue."
 
-    def continue_execution(
+    def submit_continuation(
         self,
         execution_id: str,
         feedback: str,
         *,
         event_listener: WorkflowEventListener | None = None,
-    ) -> WorkflowExecution:
-        """Manually continue an eligible terminal execution in its retained workspace."""
+    ) -> ExecutionHandle:
+        """Validate a manual continuation, then queue it for bounded admission."""
+
         if not feedback.strip():
             raise ValueError("Continuation feedback must not be empty")
-        self._event_listener = event_listener
         execution = self._repository.get_execution(execution_id)
         self._assert_continuation_eligible(execution)
         task = self._task_from_snapshot(execution)
@@ -606,6 +763,7 @@ class WorkflowService:
             raise WorkflowError("Cannot continue: the original repository spec was not persisted")
         assert execution.workspace_path is not None and execution.working_branch is not None
         workspace_path = Path(execution.workspace_path)
+        working_branch = execution.working_branch
         config = self._config_loader.load(
             task, execution.repository_ref or execution.repository or None
         )
@@ -616,36 +774,90 @@ class WorkflowService:
             config = config.with_agent_runtime_overrides(provider_overrides, runtime_overrides)
         clients = self._client_factory.create(config)
         execution_clients = clients.at_path(workspace_path)
-        # Do this before changing status or contacting the implementer: a human
+        # Do this before changing status or queueing the implementer: a human
         # can safely correct a missing/moved worktree and try again.
-        execution_clients.git.verify_worktree_branch(execution.working_branch, execution.commit_sha)
+        execution_clients.git.verify_worktree_branch(working_branch, execution.commit_sha)
+        self._begin_runtime(execution_id, event_listener)
         self._record_diagnostic(
             execution_id,
             DiagnosticCategory.WORKFLOW_EVENT,
             {"kind": "MANUAL_CONTINUATION", "feedback": feedback},
             stage=WorkflowStage.IMPLEMENT,
         )
-        self._repository.resume_execution(execution_id)
-        self._emit(execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.RUNNING)
-        repository_slug = clients.git.github_repository()
-        repository_context_strategy = resolve_repository_context_strategy(
-            config.repository_context.strategy,
-            settings=config.repository_context,
-            repository_key=config.configured_repository_key,
-            configured_root=config.path,
+        self._queue_resumed(execution_id)
+        spec = RepositorySpec(**execution.spec_snapshot)
+        return self._submit(
+            execution_id,
+            lambda: self._execute_continuation(
+                execution_id,
+                task,
+                spec,
+                config,
+                clients,
+                workspace_path,
+                working_branch,
+                feedback,
+            ),
         )
+
+    def continue_execution(
+        self,
+        execution_id: str,
+        feedback: str,
+        *,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> WorkflowExecution:
+        """Manually continue an eligible terminal execution in its retained workspace."""
+        return self.submit_continuation(
+            execution_id, feedback, event_listener=event_listener
+        ).result()
+
+    def _execute_continuation(
+        self,
+        execution_id: str,
+        task: DevelopmentTask,
+        spec: RepositorySpec,
+        config: ProjectConfig,
+        clients: WorkflowClients,
+        workspace_path: Path,
+        working_branch: str,
+        feedback: str,
+    ) -> WorkflowExecution:
+        try:
+            self._start_admitted(execution_id)
+        except WorkflowCancelledError:
+            return self._finish(execution_id, WorkflowStatus.CANCELLED, config)
+        repository_slug = clients.git.github_repository()
+        repository_context_strategy = self._repository_context_strategy(config)
         return self._implement_and_review(
             execution_id,
             task,
-            RepositorySpec(**execution.spec_snapshot),
+            spec,
             config,
             clients,
             repository_slug,
             workspace_path,
-            execution.working_branch,
+            working_branch,
             repository_context_strategy,
             continuation_feedback=feedback,
             force_polish=True,
+        )
+
+    def _queue_resumed(self, execution_id: str) -> None:
+        """Park a resumed or continued execution in the shared submission queue."""
+
+        self._repository.queue_execution(execution_id)
+        self._emit(execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.PENDING)
+
+    def _repository_context_strategy(self, config: ProjectConfig) -> RepositoryContextStrategy:
+        """Resolve the configured strategy, sharing any process index clients."""
+
+        return resolve_repository_context_strategy(
+            config.repository_context.strategy,
+            settings=config.repository_context,
+            repository_key=config.configured_repository_key,
+            configured_root=config.path,
+            client_manager=self._repository_index_clients,
         )
 
     @staticmethod
@@ -1217,8 +1429,9 @@ class WorkflowService:
     def _step(self, execution_id: str, stage: WorkflowStage) -> Iterator[None]:
         self._raise_if_cancellation_requested(execution_id)
         label = _STAGE_LABELS.get(stage, stage.value.casefold().replace("_", " "))
-        previous_stage = self._active_stage
-        self._active_stage = stage
+        runtime = self._runtime(execution_id)
+        previous_stage = runtime.active_stage
+        runtime.active_stage = stage
         logger.info("[workflow] Entering %s", label)
         self._repository.update_stage(execution_id, stage)
         step_id = self._repository.start_step(execution_id, stage)
@@ -1273,7 +1486,7 @@ class WorkflowService:
             )
             logger.info("[workflow] Completed %s", label)
         finally:
-            self._active_stage = previous_stage
+            runtime.active_stage = previous_stage
 
     def _raise_if_cancellation_requested(self, execution_id: str) -> None:
         if self._repository.cancellation_requested(execution_id):
@@ -1304,18 +1517,27 @@ class WorkflowService:
                     primary_provider_name = preset.provider
                     primary_preset_name = preset_name
                     break
-        primary = DiagnosticAgentProvider(
-            provider,
-            role=role,
-            provider_config={
-                "name": primary_provider_name,
-                "preset": primary_preset_name,
-                **provider_settings,
-            },
-            record=lambda category, event_role, payload: self._record_diagnostic(
-                execution_id, category, payload, stage=self._active_stage, role=event_role
+        primary = self._admitted_agent(
+            DiagnosticAgentProvider(
+                provider,
+                role=role,
+                provider_config={
+                    "name": primary_provider_name,
+                    "preset": primary_preset_name,
+                    **provider_settings,
+                },
+                record=lambda category, event_role, payload: self._record_diagnostic(
+                    execution_id,
+                    category,
+                    payload,
+                    stage=self._active_stage_of(execution_id),
+                    role=event_role,
+                ),
+                cancellation_check=lambda: self._raise_if_cancellation_requested(execution_id),
             ),
-            cancellation_check=lambda: self._raise_if_cancellation_requested(execution_id),
+            config=config,
+            provider_name=configured,
+            execution_id=execution_id,
         )
         if fallback_preset_name is None:
             return primary
@@ -1331,24 +1553,31 @@ class WorkflowService:
             fallback_provider = self._client_factory.create(
                 fallback_config, agent_roles={role}
             ).agent(role)
-            return DiagnosticAgentProvider(
-                fallback_provider,
-                role=role,
-                provider_config={
-                    "name": fallback_preset.provider,
-                    "preset": fallback_preset_name,
-                    **fallback_settings,
-                },
-                record=lambda category, event_role, payload: self._record_diagnostic(
-                    execution_id,
-                    category,
-                    payload,
-                    stage=self._active_stage,
-                    role=event_role,
+            # The fallback is charged to its own configured provider name; the
+            # primary's slot is already released by the time this runs.
+            return self._admitted_agent(
+                DiagnosticAgentProvider(
+                    fallback_provider,
+                    role=role,
+                    provider_config={
+                        "name": fallback_preset.provider,
+                        "preset": fallback_preset_name,
+                        **fallback_settings,
+                    },
+                    record=lambda category, event_role, payload: self._record_diagnostic(
+                        execution_id,
+                        category,
+                        payload,
+                        stage=self._active_stage_of(execution_id),
+                        role=event_role,
+                    ),
+                    cancellation_check=lambda: self._raise_if_cancellation_requested(
+                        execution_id
+                    ),
                 ),
-                cancellation_check=lambda: self._raise_if_cancellation_requested(
-                    execution_id
-                ),
+                config=fallback_config,
+                provider_name=fallback_configured,
+                execution_id=execution_id,
             )
 
         def record_fallback(error: AgentProviderError) -> None:
@@ -1372,7 +1601,7 @@ class WorkflowService:
             self._emit(
                 execution_id,
                 WorkflowEventKind.AGENT_FALLBACK,
-                stage=self._active_stage,
+                stage=self._active_stage_of(execution_id),
                 message=(
                     f"{role.value.title()} switched from {primary_provider_name} to "
                     f"{fallback_preset.provider}/{fallback_preset_name}"
@@ -1382,6 +1611,60 @@ class WorkflowService:
 
         return FallbackAgentProvider(
             primary, fallback_factory=create_fallback, on_fallback=record_fallback
+        )
+
+    def _admitted_agent(
+        self,
+        provider: AgentProvider,
+        *,
+        config: ProjectConfig,
+        provider_name: str,
+        execution_id: str,
+    ) -> AgentProvider:
+        """Bound one agent call by its provider's shared concurrency ceiling.
+
+        The slot is acquired immediately before the call and released right
+        after it, so a workflow never reserves a provider while it is doing
+        Git, validation, or GitHub work. Role-local runtime variants are
+        charged to the configured provider they were derived from.
+        """
+
+        concurrency_name = config.provider_concurrency_name(provider_name)
+        return ConcurrencyLimitedAgentProvider(
+            provider,
+            provider_name=concurrency_name,
+            coordinator=self._provider_coordinator,
+            limit=config.provider_max_concurrency(provider_name),
+            execution_id=execution_id,
+            on_wait=lambda name: self._record_provider_wait(execution_id, name),
+            on_admitted=lambda name: self._record_provider_admission(execution_id, name),
+            cancellation_check=lambda: self._raise_if_cancellation_requested(execution_id),
+        )
+
+    def _record_provider_wait(self, execution_id: str, provider_name: str) -> None:
+        """Persist that started work is blocked on shared provider capacity."""
+
+        stage = self._active_stage_of(execution_id)
+        self._repository.update_status(execution_id, WorkflowStatus.WAITING)
+        self._emit(
+            execution_id,
+            WorkflowEventKind.STATUS_CHANGED,
+            stage=stage,
+            status=WorkflowStatus.WAITING,
+            message=f"Waiting for {provider_name} capacity",
+            payload={"kind": _PROVIDER_WAIT_DIAGNOSTIC_KIND, "provider": provider_name},
+        )
+
+    def _record_provider_admission(self, execution_id: str, provider_name: str) -> None:
+        stage = self._active_stage_of(execution_id)
+        self._repository.update_status(execution_id, WorkflowStatus.RUNNING)
+        self._emit(
+            execution_id,
+            WorkflowEventKind.STATUS_CHANGED,
+            stage=stage,
+            status=WorkflowStatus.RUNNING,
+            message=f"Admitted to {provider_name}",
+            payload={"kind": _PROVIDER_ADMITTED_DIAGNOSTIC_KIND, "provider": provider_name},
         )
 
     def _record_validation_check(
@@ -1489,7 +1772,8 @@ class WorkflowService:
         )
 
     def _notify_event(self, event: WorkflowEvent) -> None:
-        listener = self._event_listener
+        runtime = self._peek_runtime(event.execution_id)
+        listener = runtime.listener if runtime is not None else None
         if listener is None:
             return
         try:

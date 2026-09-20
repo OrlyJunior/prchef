@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import subprocess
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -70,6 +72,74 @@ def create_qdrant_client(settings: QdrantSettings) -> Any:
     return qdrant_client(host=settings.host, port=settings.port or 6333)
 
 
+def qdrant_connection_key(settings: QdrantSettings) -> str:
+    """Return a canonical identity for one configured Qdrant connection."""
+
+    if settings.mode == "local":
+        path = settings.path
+        location = "" if path is None else os.path.normcase(str(path.expanduser().resolve()))
+        return f"local:{location.replace(chr(92), '/')}"
+    if settings.url is not None:
+        return f"url:{settings.url}"
+    return f"host:{settings.host}:{settings.port or 6333}"
+
+
+class QdrantClientManager:
+    """Own one long-lived Qdrant client per configured connection.
+
+    Local (embedded) mode takes an exclusive lock on its storage directory, so
+    repeatedly opening and closing a client per operation makes concurrent
+    in-process executions impossible. One lazily created client per connection
+    is reused instead, and local operations are serialized through a per-store
+    lock. Clients are closed once, at process shutdown; an operation failure
+    never closes the shared client out from under other executions.
+    """
+
+    def __init__(self, client_factory: QdrantClientFactory = create_qdrant_client) -> None:
+        self._client_factory = client_factory
+        self._lock = threading.RLock()
+        self._clients: dict[str, Any] = {}
+        self._operation_locks: dict[str, threading.RLock] = {}
+        self._closed = False
+
+    @contextmanager
+    def session(self, settings: QdrantSettings) -> Iterator[Any]:
+        """Yield the shared client for ``settings``, coordinating local access."""
+
+        key = qdrant_connection_key(settings)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("The Qdrant client manager is already closed")
+            client = self._clients.get(key)
+            if client is None:
+                client = self._client_factory(settings)
+                self._clients[key] = client
+            operation_lock = (
+                self._operation_locks.setdefault(key, threading.RLock())
+                if settings.mode == "local"
+                else None
+            )
+        with operation_lock or nullcontext():
+            yield client
+
+    def open_connections(self) -> int:
+        """Return how many distinct connections are currently held open."""
+
+        with self._lock:
+            return len(self._clients)
+
+    def close(self) -> None:
+        """Close every held client exactly once."""
+
+        with self._lock:
+            clients = list(self._clients.values())
+            self._clients.clear()
+            self._operation_locks.clear()
+            self._closed = True
+        for client in clients:
+            _close_client(client)
+
+
 class QdrantRepositoryContextStrategy:
     """Synchronize and retrieve one configured repository through Qdrant."""
 
@@ -81,6 +151,7 @@ class QdrantRepositoryContextStrategy:
         *,
         embedding_provider: EmbeddingProvider | None = None,
         client_factory: QdrantClientFactory = create_qdrant_client,
+        client_manager: QdrantClientManager | None = None,
     ) -> None:
         if not repository_key.strip():
             raise ValueError("Qdrant repository context requires a configured repository key")
@@ -89,7 +160,14 @@ class QdrantRepositoryContextStrategy:
         self._configured_root = configured_root.resolve()
         self._configured_path_id = canonical_path_identifier(self._configured_root)
         self._collection_name = repository_collection_name(repository_key, self._configured_root)
+        # A caller that owns a process-wide manager injects it so every
+        # execution shares one long-lived client. Standalone use has nothing to
+        # share with, so it keeps the per-operation lifecycle: holding the
+        # embedded store's exclusive directory lock open would lock out the
+        # next caller for this same store.
         self._client_factory = client_factory
+        self._owns_clients = client_manager is None
+        self._clients = client_manager or QdrantClientManager(client_factory)
         identity = EmbeddingIdentity(
             provider=settings.embedding.provider,
             model=settings.embedding.model,
@@ -104,6 +182,32 @@ class QdrantRepositoryContextStrategy:
     @property
     def collection_name(self) -> str:
         return self._collection_name
+
+    def close(self) -> None:
+        """Close clients this strategy owns; injected managers are left alone."""
+
+        if self._owns_clients:
+            self._clients.close()
+
+    @contextmanager
+    def _session(self) -> Iterator[Any]:
+        """Yield a client for one index operation.
+
+        An injected manager keeps its client open for the whole process and
+        coordinates concurrent local access. Without one, the client belongs to
+        this single operation and is closed immediately afterwards.
+        """
+
+        if not self._owns_clients:
+            with self._clients.session(self._settings.qdrant) as client:
+                yield client
+            return
+        manager = QdrantClientManager(self._client_factory)
+        try:
+            with manager.session(self._settings.qdrant) as client:
+                yield client
+        finally:
+            manager.close()
 
     def render(self, request: RepositoryContextRequest) -> str:
         source_root = self._validate_request_root(Path(request.repository_path))
@@ -130,8 +234,7 @@ class QdrantRepositoryContextStrategy:
 
         source_root_id = canonical_path_identifier(self._configured_root)
         try:
-            client = self._client_factory(self._settings.qdrant)
-            try:
+            with self._session() as client:
                 if not client.collection_exists(self._collection_name):
                     return RepositoryIndexStatus(
                         strategy="qdrant", state=IndexLifecycleState.NOT_INDEXED
@@ -186,8 +289,6 @@ class QdrantRepositoryContextStrategy:
                     point_count=len(points),
                     error_message=error_message,
                 )
-            finally:
-                _close_client(client)
         except Exception as exc:
             return RepositoryIndexStatus(
                 strategy="qdrant",
@@ -209,12 +310,9 @@ class QdrantRepositoryContextStrategy:
         """Delete only this configured repository's deterministic collection."""
 
         try:
-            client = self._client_factory(self._settings.qdrant)
-            try:
+            with self._session() as client:
                 if client.collection_exists(self._collection_name):
                     client.delete_collection(self._collection_name)
-            finally:
-                _close_client(client)
         except Exception as exc:
             self._record_failure(exc)
             raise RepositoryIndexOperationError(_safe_error_message(exc)) from exc
@@ -269,8 +367,7 @@ class QdrantRepositoryContextStrategy:
         *,
         rebuild: bool = False,
     ) -> None:
-        client = self._client_factory(self._settings.qdrant)
-        try:
+        with self._session() as client:
             models = _qdrant_models()
             self._ensure_compatible_collection(client, models)
             existing = self._scroll_source_points(client, models, source_root_id)
@@ -350,13 +447,10 @@ class QdrantRepositoryContextStrategy:
                     wait=True,
                 )
             self._record_success(client, models, source_root)
-        finally:
-            _close_client(client)
 
     def _query(self, text: str, source_root_id: str) -> list[RetrievedRepositoryChunk]:
         vector = self._embedding.embed_query(text)
-        client = self._client_factory(self._settings.qdrant)
-        try:
+        with self._session() as client:
             models = _qdrant_models()
             response = client.query_points(
                 collection_name=self._collection_name,
@@ -401,8 +495,6 @@ class QdrantRepositoryContextStrategy:
                     item.point_id,
                 ),
             )
-        finally:
-            _close_client(client)
 
     def _ensure_compatible_collection(self, client: Any, models: Any) -> None:
         exists = client.collection_exists(self._collection_name)
@@ -501,8 +593,7 @@ class QdrantRepositoryContextStrategy:
         """Best-effort persistent failure state; never masks the original failure."""
 
         try:
-            client = self._client_factory(self._settings.qdrant)
-            try:
+            with self._session() as client:
                 models = _qdrant_models()
                 if not client.collection_exists(self._collection_name):
                     self._ensure_compatible_collection(client, models)
@@ -537,8 +628,6 @@ class QdrantRepositoryContextStrategy:
                     ],
                     wait=True,
                 )
-            finally:
-                _close_client(client)
         except Exception:
             return
 

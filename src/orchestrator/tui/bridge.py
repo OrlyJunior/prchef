@@ -30,7 +30,9 @@ from orchestrator.models.workflow_event import (
 )
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_step import WorkflowStep
+from orchestrator.providers.concurrency import ProviderConcurrencyCoordinator
 from orchestrator.repositories.workflow_repository import WorkflowRepository
+from orchestrator.services.execution_dispatcher import ExecutionDispatcher, ExecutionHandle
 from orchestrator.services.project_context import (
     IMPLEMENTER_INSTRUCTIONS_FILE,
     REVIEWER_INSTRUCTIONS_FILE,
@@ -76,6 +78,9 @@ class WorkflowController:
         task_provider_factory: TaskProviderFactory,
         verbose: bool = False,
         workflow_service_factory: WorkflowServiceFactory | None = None,
+        dispatcher: ExecutionDispatcher | None = None,
+        provider_coordinator: ProviderConcurrencyCoordinator | None = None,
+        repository_index_clients: Any | None = None,
     ) -> None:
         self._repository = workflow_repository
         self._config_loader = config_loader
@@ -83,6 +88,11 @@ class WorkflowController:
         self._task_provider_factory = task_provider_factory
         self._verbose = verbose
         self._workflow_service_factory = workflow_service_factory
+        # Process-scoped so every execution the UI starts, resumes, or
+        # continues competes for the same bounded capacity.
+        self._dispatcher = dispatcher or ExecutionDispatcher()
+        self._provider_coordinator = provider_coordinator or ProviderConcurrencyCoordinator()
+        self._repository_index_clients = repository_index_clients
         self._selected_repository: str | None = None
         self._active_services: dict[str, WorkflowService] = {}
         self._index_operations: set[str] = set()
@@ -249,6 +259,7 @@ class WorkflowController:
                 settings=config.repository_context,
                 repository_key=config.configured_repository_key,
                 configured_root=config.path,
+                client_manager=self._repository_index_clients,
             )
             inspect = getattr(strategy, "inspect_index", None)
             if not callable(inspect):
@@ -296,6 +307,7 @@ class WorkflowController:
                 settings=config.repository_context,
                 repository_key=config.configured_repository_key,
                 configured_root=config.path,
+                client_manager=self._repository_index_clients,
             )
             action = getattr(strategy, operation, None)
             if not callable(action):
@@ -362,12 +374,14 @@ class WorkflowController:
         provider = self._task_provider_factory(task_provider, repository)
         return provider.list_tasks(limit=limit)
 
-    def start_workflow(
+    def submit_workflow(
         self,
         launch: WorkflowLaunch,
         *,
         event_listener: WorkflowEventListener | None = None,
-    ) -> WorkflowExecution:
+    ) -> ExecutionHandle:
+        """Submit a launch through the shared dispatcher and return its handle."""
+
         task_id = launch.task_id.strip()
         if not task_id:
             raise ValueError("Select a task before starting a workflow")
@@ -398,17 +412,44 @@ class WorkflowController:
                 )
             logger.debug("[config] TUI agent resolution: %s", "; ".join(resolutions))
         provider = self._task_provider_factory(launch.task_provider, launch.repository)
-        service = (
-            self._workflow_service_factory(provider)
-            if self._workflow_service_factory is not None
-            else WorkflowService(
-                workflow_repository=self._repository,
-                task_provider=provider,
-                config_loader=self._config_loader,
-                client_factory=self._client_factory,
-                verbose=self._verbose,
-            )
+        service = self._create_service(provider)
+        return service.submit_execution(
+            task_id,
+            launch.repository,
+            agent_providers=launch.agent_providers,
+            agent_runtime_options=launch.agent_runtime_options,
+            event_listener=self._tracking_listener(service, event_listener),
         )
+
+    def start_workflow(
+        self,
+        launch: WorkflowLaunch,
+        *,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> WorkflowExecution:
+        """Submit a launch and wait for it, preserving the blocking TUI worker."""
+
+        return self.submit_workflow(launch, event_listener=event_listener).result()
+
+    def _create_service(self, provider: TaskProvider) -> WorkflowService:
+        if self._workflow_service_factory is not None:
+            return self._workflow_service_factory(provider)
+        return WorkflowService(
+            workflow_repository=self._repository,
+            task_provider=provider,
+            config_loader=self._config_loader,
+            client_factory=self._client_factory,
+            verbose=self._verbose,
+            dispatcher=self._dispatcher,
+            provider_coordinator=self._provider_coordinator,
+            repository_index_clients=self._repository_index_clients,
+        )
+
+    def _tracking_listener(
+        self, service: WorkflowService, event_listener: WorkflowEventListener | None
+    ) -> WorkflowEventListener:
+        """Track which service owns an execution so cancellation can reach it."""
+
         def observe(event: WorkflowEvent) -> None:
             if event.kind is WorkflowEventKind.EXECUTION_CREATED:
                 self._active_services[event.execution_id] = service
@@ -417,13 +458,7 @@ class WorkflowController:
             if event_listener is not None:
                 event_listener(event)
 
-        return service.run(
-            task_id,
-            launch.repository,
-            agent_providers=launch.agent_providers,
-            agent_runtime_options=launch.agent_runtime_options,
-            event_listener=observe,
-        )
+        return observe
 
     def cancel_workflow(self, execution_id: str) -> bool:
         """Request cancellation through the service boundary when it is live.
@@ -468,6 +503,29 @@ class WorkflowController:
         method = getattr(self._repository, "list_diagnostics", None)
         return method(execution_id) if callable(method) else []
 
+    def submit_response(
+        self,
+        execution_id: str,
+        response: str,
+        *,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> ExecutionHandle:
+        """Queue a human-response resume through the shared dispatcher."""
+
+        service = self._service_for_execution(self._repository.get_execution(execution_id))
+        # Register before submitting so a queued resume is already cancellable
+        # through its own service; a rejected submission is rolled back.
+        self._active_services[execution_id] = service
+        try:
+            return service.submit_response(
+                execution_id,
+                response,
+                event_listener=self._tracking_listener(service, event_listener),
+            )
+        except Exception:
+            self._active_services.pop(execution_id, None)
+            raise
+
     def respond_and_resume(
         self,
         execution_id: str,
@@ -475,45 +533,41 @@ class WorkflowController:
         *,
         event_listener: WorkflowEventListener | None = None,
     ) -> WorkflowExecution:
-        execution = self._repository.get_execution(execution_id)
-        provider = self._task_provider_factory(
-            execution.task_source, execution.repository_ref or execution.repository
-        )
-        service = (
-            self._workflow_service_factory(provider)
-            if self._workflow_service_factory is not None
-            else WorkflowService(
-                workflow_repository=self._repository,
-                task_provider=provider,
-                config_loader=self._config_loader,
-                client_factory=self._client_factory,
-                verbose=self._verbose,
-            )
-        )
-        return service.respond_and_resume(
+        return self.submit_response(
             execution_id, response, event_listener=event_listener
-        )
+        ).result()
 
     def _service_for_execution(self, execution: WorkflowExecution) -> WorkflowService:
         provider = self._task_provider_factory(
             execution.task_source, execution.repository_ref or execution.repository
         )
-        return (
-            self._workflow_service_factory(provider)
-            if self._workflow_service_factory is not None
-            else WorkflowService(
-                workflow_repository=self._repository,
-                task_provider=provider,
-                config_loader=self._config_loader,
-                client_factory=self._client_factory,
-                verbose=self._verbose,
-            )
-        )
+        return self._create_service(provider)
 
     def continuation_feedback(self, execution_id: str) -> str:
         return self._service_for_execution(
             self._repository.get_execution(execution_id)
         ).continuation_feedback(execution_id)
+
+    def submit_continuation(
+        self,
+        execution_id: str,
+        feedback: str,
+        *,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> ExecutionHandle:
+        """Queue a manual continuation through the shared dispatcher."""
+
+        service = self._service_for_execution(self._repository.get_execution(execution_id))
+        self._active_services[execution_id] = service
+        try:
+            return service.submit_continuation(
+                execution_id,
+                feedback,
+                event_listener=self._tracking_listener(service, event_listener),
+            )
+        except Exception:
+            self._active_services.pop(execution_id, None)
+            raise
 
     def continue_execution(
         self,
@@ -522,6 +576,6 @@ class WorkflowController:
         *,
         event_listener: WorkflowEventListener | None = None,
     ) -> WorkflowExecution:
-        return self._service_for_execution(
-            self._repository.get_execution(execution_id)
-        ).continue_execution(execution_id, feedback, event_listener=event_listener)
+        return self.submit_continuation(
+            execution_id, feedback, event_listener=event_listener
+        ).result()

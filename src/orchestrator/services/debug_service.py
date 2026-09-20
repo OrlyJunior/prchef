@@ -95,10 +95,14 @@ class DebugService:
         config_loader: ProjectConfigLoader,
         client_factory: ClientFactory,
         task_provider_factory: TaskProviderFactory,
+        repository_index_clients: Any | None = None,
     ) -> None:
         self._config_loader = config_loader
         self._client_factory = client_factory
         self._task_provider_factory = task_provider_factory
+        # Shared with workflow and TUI index operations so local index clients
+        # are opened once per store for the whole process.
+        self._repository_index_clients = repository_index_clients
 
     def execute(
         self,
@@ -141,6 +145,7 @@ class DebugService:
             settings=config.repository_context,
             repository_key=config.configured_repository_key,
             configured_root=config.path,
+            client_manager=self._repository_index_clients,
         )
         role_by_stage = {
             DebugStage.SPEC_GENERATION: AgentRole.PLANNER,

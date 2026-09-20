@@ -18,7 +18,11 @@ from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import WorkflowStage, WorkflowStatus
+from orchestrator.models.workflow_status import (
+    ACTIVE_WORKFLOW_STATUSES,
+    WorkflowStage,
+    WorkflowStatus,
+)
 from orchestrator.runtime_logging import redact_payload, redact_text
 from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
 from orchestrator.tui.diagnostics import format_diagnostics_for_export
@@ -42,6 +46,8 @@ _PermissionMode = Literal["dontAsk", "acceptEdits", "auto"]
 # inherited unchanged by every run, so it cannot distinguish one selection
 # from another.
 _CONTROLLED_GENERATION_OPTIONS = ("temperature", "max_output_tokens")
+# Non-terminal states. All of them can still be stopped by the operator.
+_CANCELLABLE_STATUSES = ACTIVE_WORKFLOW_STATUSES
 
 
 class StopWorkflowConfirmation(ModalScreen[bool]):
@@ -1108,10 +1114,17 @@ class WorkflowRunnerScreen(Screen[None]):
         elif self._active_execution_id is None:
             self._active_execution_id = event.execution_id
         if (
-            event.kind is WorkflowEventKind.STATUS_CHANGED
-            and event.execution_id == self._active_execution_id
-            and event.status is WorkflowStatus.RUNNING
+            event.execution_id == self._active_execution_id
+            and (
+                event.kind is WorkflowEventKind.EXECUTION_CREATED
+                or (
+                    event.kind is WorkflowEventKind.STATUS_CHANGED
+                    and event.status in _CANCELLABLE_STATUSES
+                )
+            )
         ):
+            # Queued and provider-blocked work is cancellable too, so the stop
+            # control must be available before a stage is genuinely running.
             self.query_one("#workflow-stop-actions", Horizontal).display = True
             stop = self.query_one("#stop-workflow", Button)
             stop.disabled = False
@@ -1232,7 +1245,7 @@ class WorkflowRunnerScreen(Screen[None]):
         if event.kind == WorkflowEventKind.EXECUTION_CREATED:
             return "Preparing workflow…"
         if event.kind == WorkflowEventKind.STATUS_CHANGED:
-            return self._status_message(event.status)
+            return self._status_message(event.status, event.payload)
         if event.kind == WorkflowEventKind.WORKFLOW_FINISHED:
             return self._status_message(event.status)
         if event.kind == WorkflowEventKind.AGENT_FALLBACK:
@@ -1278,12 +1291,18 @@ class WorkflowRunnerScreen(Screen[None]):
         return f" ({' · '.join(details)})"
 
     @staticmethod
-    def _status_message(status: WorkflowStatus | None) -> str:
+    def _status_message(
+        status: WorkflowStatus | None, payload: dict[str, Any] | None = None
+    ) -> str:
         if status is None:
             return "Workflow status updated"
+        provider = (payload or {}).get("provider")
+        if status is WorkflowStatus.WAITING and isinstance(provider, str) and provider:
+            return f"Waiting for {provider} capacity…"
         messages: dict[WorkflowStatus, str] = {
-            WorkflowStatus.PENDING: "Preparing workflow…",
+            WorkflowStatus.PENDING: "Queued for an execution slot…",
             WorkflowStatus.RUNNING: "Workflow running…",
+            WorkflowStatus.WAITING: "Waiting for agent capacity…",
             WorkflowStatus.APPROVED: "✓ Workflow approved",
             WorkflowStatus.CHANGES_REQUESTED: "• Review changes requested",
             WorkflowStatus.NEEDS_HUMAN: "! Waiting for human input",
