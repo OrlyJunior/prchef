@@ -13,7 +13,15 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError as RoundTripYAMLError
 
@@ -568,7 +576,7 @@ class AgentProviderSettings(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     type: str
-    max_concurrency: int = _max_concurrency_field()
+    max_concurrency: StrictInt = _max_concurrency_field()
 
 
 @dataclass(frozen=True, slots=True)
@@ -592,7 +600,7 @@ class JulesProviderSettings(JulesIntegrationSettings):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["jules"] = "jules"
-    max_concurrency: int = _max_concurrency_field()
+    max_concurrency: StrictInt = _max_concurrency_field()
 
     @model_validator(mode="after")
     def warn_deprecated(self) -> JulesProviderSettings:
@@ -604,7 +612,7 @@ class CodexCliProviderSettings(CodexIntegrationSettings):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["codex-cli"] = "codex-cli"
-    max_concurrency: int = _max_concurrency_field()
+    max_concurrency: StrictInt = _max_concurrency_field()
 
 
 class ClaudeCodeProviderSettings(BaseModel):
@@ -619,7 +627,7 @@ class ClaudeCodeProviderSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["claude-code"] = "claude-code"
-    max_concurrency: int = _max_concurrency_field()
+    max_concurrency: StrictInt = _max_concurrency_field()
     executable: str = "claude"
     timeout_seconds: int = Field(default=1800, gt=0, le=86_400)
     model: str | None = None
@@ -685,7 +693,7 @@ class GeminiVertexProviderSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["gemini-vertex"] = "gemini-vertex"
-    max_concurrency: int = _max_concurrency_field()
+    max_concurrency: StrictInt = _max_concurrency_field()
     project: str = Field(min_length=1)
     location: str = Field(default="global", min_length=1)
     model: str = Field(min_length=1)
@@ -703,7 +711,7 @@ class LiteLLMProviderSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["litellm"] = "litellm"
-    max_concurrency: int = _max_concurrency_field()
+    max_concurrency: StrictInt = _max_concurrency_field()
     model: str = Field(min_length=1)
     api_key_env: str | None = None
     api_base: str | None = None

@@ -36,6 +36,7 @@ class _Ticket:
     provider: str
     execution_id: str | None
     queued: bool = True
+    admitted: bool = False
     cancelled: bool = False
 
 
@@ -136,13 +137,13 @@ class ProviderConcurrencyCoordinator:
             if execution_id is not None:
                 self._execution_tickets.setdefault(execution_id, set()).add(ticket)
             immediate = self._admit_locked(ticket)
-        if not immediate:
-            if on_wait is not None:
-                on_wait()
-            self._await_admission(ticket)
-            if on_admitted is not None:
-                on_admitted()
         try:
+            if not immediate:
+                if on_wait is not None:
+                    on_wait()
+                self._await_admission(ticket)
+                if on_admitted is not None:
+                    on_admitted()
             yield
         finally:
             self._release(ticket)
@@ -174,6 +175,7 @@ class ProviderConcurrencyCoordinator:
             return False
         queue.popleft()
         ticket.queued = False
+        ticket.admitted = True
         self._active[ticket.provider] = self._active.get(ticket.provider, 0) + 1
         # A remaining slot may now belong to the next waiter in line.
         self._condition.notify_all()
@@ -192,9 +194,16 @@ class ProviderConcurrencyCoordinator:
 
     def _release(self, ticket: _Ticket) -> None:
         with self._condition:
-            if not ticket.queued:
+            if ticket.queued:
+                # A lifecycle hook can fail before a queued ticket is
+                # admitted. Remove it so it cannot become a permanently
+                # blocking FIFO head.
+                self._abandon_locked(ticket)
+                return
+            if ticket.admitted:
                 remaining = self._active.get(ticket.provider, 0) - 1
                 self._active[ticket.provider] = max(0, remaining)
+                ticket.admitted = False
             self._forget_locked(ticket)
             self._condition.notify_all()
 

@@ -1472,8 +1472,8 @@ def test_provider_max_concurrency_accepts_an_explicit_positive_limit(tmp_path: P
     assert config.provider_max_concurrency("planner-provider") == 3
 
 
-@pytest.mark.parametrize("invalid", [0, -1, 1.5, "two", None])
-def test_provider_max_concurrency_rejects_non_positive_integers(
+@pytest.mark.parametrize("invalid", [0, -1, 1.5, "two", None, True, "2", 1.0])
+def test_provider_max_concurrency_rejects_non_strict_positive_integers(
     tmp_path: Path, invalid: object
 ) -> None:
     with pytest.raises(ValidationError):

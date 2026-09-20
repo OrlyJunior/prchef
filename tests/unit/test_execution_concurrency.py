@@ -219,6 +219,85 @@ def test_permits_are_released_after_success_and_after_failure() -> None:
         assert coordinator.active_count("codex") == 1
 
 
+def test_wait_hook_failure_abandons_its_fifo_ticket(threads) -> None:
+    coordinator = ProviderConcurrencyCoordinator({"codex": 1})
+    holder_admitted = threading.Event()
+    release_holder = threading.Event()
+    holder_finished = threading.Event()
+    waiting = threading.Event()
+    hook_failed = threading.Event()
+
+    def holder() -> None:
+        with coordinator.slot("codex"):
+            holder_admitted.set()
+            _await(release_holder)
+        holder_finished.set()
+
+    def raise_while_waiting() -> None:
+        waiting.set()
+        raise RuntimeError("wait hook exploded")
+
+    def queued() -> None:
+        try:
+            with coordinator.slot("codex", on_wait=raise_while_waiting):
+                raise AssertionError("a failed wait hook must not be admitted")
+        except RuntimeError as exc:
+            assert str(exc) == "wait hook exploded"
+            hook_failed.set()
+
+    _spawn(threads, holder)
+    _await(holder_admitted)
+    _spawn(threads, queued)
+    _await(waiting)
+    _await(hook_failed)
+
+    assert coordinator.queued_count("codex") == 0
+    release_holder.set()
+    _await(holder_finished)
+    with coordinator.slot("codex"):
+        assert coordinator.active_count("codex") == 1
+
+
+def test_admission_hook_failure_releases_its_provider_permit(threads) -> None:
+    coordinator = ProviderConcurrencyCoordinator({"codex": 1})
+    holder_admitted = threading.Event()
+    release_holder = threading.Event()
+    holder_finished = threading.Event()
+    waiting = threading.Event()
+    hook_failed = threading.Event()
+
+    def holder() -> None:
+        with coordinator.slot("codex"):
+            holder_admitted.set()
+            _await(release_holder)
+        holder_finished.set()
+
+    def raise_after_admission() -> None:
+        raise RuntimeError("admission hook exploded")
+
+    def queued() -> None:
+        try:
+            with coordinator.slot(
+                "codex", on_wait=waiting.set, on_admitted=raise_after_admission
+            ):
+                raise AssertionError("a failed admission hook must not enter the slot")
+        except RuntimeError as exc:
+            assert str(exc) == "admission hook exploded"
+            hook_failed.set()
+
+    _spawn(threads, holder)
+    _await(holder_admitted)
+    _spawn(threads, queued)
+    _await(waiting)
+    release_holder.set()
+    _await(holder_finished)
+    _await(hook_failed)
+
+    assert coordinator.active_count("codex") == 0
+    with coordinator.slot("codex"):
+        assert coordinator.active_count("codex") == 1
+
+
 def test_first_registration_fixes_the_ceiling_for_the_process() -> None:
     coordinator = ProviderConcurrencyCoordinator({"codex": 2})
 
