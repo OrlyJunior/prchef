@@ -13,7 +13,15 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError as RoundTripYAMLError
 
@@ -552,10 +560,23 @@ class JulesIntegrationSettings(BaseModel):
     poll_retry_backoff_seconds: float = Field(default=2.0, gt=0)
 
 
+def _max_concurrency_field() -> Any:
+    """Declare the shared, provider-scoped concurrency ceiling.
+
+    The named provider instance *is* the shared resource (one GPU, one API
+    quota), so the ceiling belongs to its definition rather than to a separate
+    pool abstraction. It is deliberately conservative: without an explicit
+    value a provider admits exactly one agent call at a time.
+    """
+
+    return Field(default=1, gt=0)
+
+
 class AgentProviderSettings(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     type: str
+    max_concurrency: StrictInt = _max_concurrency_field()
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,6 +600,7 @@ class JulesProviderSettings(JulesIntegrationSettings):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["jules"] = "jules"
+    max_concurrency: StrictInt = _max_concurrency_field()
 
     @model_validator(mode="after")
     def warn_deprecated(self) -> JulesProviderSettings:
@@ -590,6 +612,7 @@ class CodexCliProviderSettings(CodexIntegrationSettings):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["codex-cli"] = "codex-cli"
+    max_concurrency: StrictInt = _max_concurrency_field()
 
 
 class ClaudeCodeProviderSettings(BaseModel):
@@ -604,6 +627,7 @@ class ClaudeCodeProviderSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["claude-code"] = "claude-code"
+    max_concurrency: StrictInt = _max_concurrency_field()
     executable: str = "claude"
     timeout_seconds: int = Field(default=1800, gt=0, le=86_400)
     model: str | None = None
@@ -669,6 +693,7 @@ class GeminiVertexProviderSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["gemini-vertex"] = "gemini-vertex"
+    max_concurrency: StrictInt = _max_concurrency_field()
     project: str = Field(min_length=1)
     location: str = Field(default="global", min_length=1)
     model: str = Field(min_length=1)
@@ -686,6 +711,7 @@ class LiteLLMProviderSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["litellm"] = "litellm"
+    max_concurrency: StrictInt = _max_concurrency_field()
     model: str = Field(min_length=1)
     api_key_env: str | None = None
     api_base: str | None = None
@@ -791,6 +817,11 @@ class ProjectConfig(BaseModel):
     agents: AgentsSettings = Field(default_factory=AgentsSettings)
     agent_presets: dict[str, dict[str, AgentPresetConfig]] = Field(default_factory=dict)
     providers: dict[str, AgentProviderSettings] = Field(default_factory=dict)
+    # Synthetic role-local provider name -> the configured provider it was
+    # materialized from. Runtime overrides must never create extra capacity for
+    # a shared backend, so concurrency accounting follows this back to the real
+    # configured name. It is in-memory only and never serialized to YAML.
+    runtime_provider_origins: dict[str, str] = Field(default_factory=dict, exclude=True)
     safety: SafetySettings = Field(default_factory=SafetySettings)
     validation: ValidationSettings = Field(default_factory=ValidationSettings)
     review: ReviewSettings = Field(default_factory=ReviewSettings)
@@ -925,6 +956,31 @@ class ProjectConfig(BaseModel):
             (provider_option_label(name, settings.type), name)
             for name, settings in configured
         ]
+
+    def provider_concurrency_name(self, provider_name: str) -> str:
+        """Return the configured provider whose capacity ``provider_name`` consumes.
+
+        Role-local runtime overrides and presets materialize private provider
+        names, but they still talk to the same backend account or GPU as the
+        provider they were derived from, so they must share its ceiling.
+        """
+
+        seen: set[str] = set()
+        current = provider_name
+        while current in self.runtime_provider_origins and current not in seen:
+            seen.add(current)
+            current = self.runtime_provider_origins[current]
+        return current
+
+    def provider_max_concurrency(self, provider_name: str) -> int:
+        """Return the configured ceiling enforced for one provider identity."""
+
+        settings = self.providers.get(self.provider_concurrency_name(provider_name))
+        if settings is None:
+            settings = self.providers.get(provider_name)
+        if settings is None:
+            raise ConfigurationError(f"Agent provider {provider_name!r} is not configured")
+        return settings.max_concurrency
 
     def presets_for_role(self, role: str) -> dict[str, AgentPresetConfig]:
         """Return a copy of the named presets available to one agent role."""
@@ -1115,6 +1171,10 @@ class ProjectConfig(BaseModel):
             selected.providers[runtime_name] = AgentProviderSettings.model_validate(
                 validated.model_dump()
             )
+            # Keep the concurrency identity of the provider this was derived
+            # from: a temporary model/effort change does not create a second
+            # quota pool or a second GPU.
+            selected.runtime_provider_origins[runtime_name] = provider_name
             setting.provider = runtime_name
         return selected
 
@@ -1842,4 +1902,40 @@ class ProjectConfigLoader:
             raise ConfigurationError(
                 f"Project settings at the top level are not applied: {rendered}. "
                 "Place them in 'defaults' or a 'repositories.<name>' entry."
+            )
+        ProjectConfigLoader._reject_repository_provider_concurrency(global_config)
+
+    @staticmethod
+    def _reject_repository_provider_concurrency(global_config: dict[str, Any]) -> None:
+        """Keep ``max_concurrency`` authoritative in exactly one place.
+
+        The ceiling protects a shared physical resource (a GPU's VRAM, one API
+        account's quota) that does not change with the repository being worked
+        on, so a per-repository override could only weaken it. Repositories
+        that genuinely need independent capacity are using independent
+        connections and belong under distinct provider names.
+        """
+
+        repositories = global_config.get("repositories")
+        if not isinstance(repositories, dict):
+            return
+        offending: list[str] = []
+        for key, entry in repositories.items():
+            if not isinstance(entry, dict):
+                continue
+            providers = entry.get("providers")
+            if not isinstance(providers, dict):
+                continue
+            offending.extend(
+                f"repositories.{key}.providers.{name}.max_concurrency"
+                for name, settings in providers.items()
+                if isinstance(settings, dict) and "max_concurrency" in settings
+            )
+        if offending:
+            rendered = ", ".join(sorted(offending))
+            raise ConfigurationError(
+                f"max_concurrency cannot be set per repository: {rendered}. "
+                "Declare it once under 'defaults.providers.<name>.max_concurrency', "
+                "or configure a separate provider name when a repository really "
+                "needs an independent connection."
             )

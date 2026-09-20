@@ -129,9 +129,11 @@ def test_workflow_wrapper_persists_and_streams_sanitized_fallback_event(tmp_path
 
     repository = Repository()
     service = WorkflowService(repository, object(), object(), Factory())  # type: ignore[arg-type]
-    service._active_stage = WorkflowStage.GENERATE_SPEC
     events = []
-    service._event_listener = events.append
+    # Listener and stage attribution belong to one execution's runtime, not to
+    # the shared service, so concurrent executions cannot cross-contaminate.
+    runtime = service._begin_runtime("execution-1", events.append)
+    runtime.active_stage = WorkflowStage.GENERATE_SPEC
     config = ProjectConfig.model_validate(
         {
             "path": tmp_path,

@@ -57,6 +57,7 @@ def test_inspect_retains_active_and_recovery_workspaces_by_default(tmp_path: Pat
         _execution(base / "cancelled", WorkflowStatus.CANCELLED),
         _execution(base / "human", WorkflowStatus.NEEDS_HUMAN),
         _execution(base / "pending", WorkflowStatus.PENDING),
+        _execution(base / "waiting", WorkflowStatus.WAITING),
         _execution(base / "running", WorkflowStatus.RUNNING),
     ]
     service, _, _ = _service(tmp_path, executions)
@@ -74,6 +75,9 @@ def test_inspect_retains_active_and_recovery_workspaces_by_default(tmp_path: Pat
     assert not items["human"].eligible
     assert items["pending"].retention is WorkspaceRetention.ACTIVE_PROTECTED
     assert not items["pending"].eligible
+    # Work queued for provider capacity has a live worktree it will return to.
+    assert items["waiting"].retention is WorkspaceRetention.ACTIVE_PROTECTED
+    assert not items["waiting"].eligible
     assert items["running"].retention is WorkspaceRetention.ACTIVE_PROTECTED
     assert not items["running"].eligible
 
@@ -85,6 +89,7 @@ def test_include_failed_keeps_active_workspaces_protected(tmp_path: Path) -> Non
         _execution(base / "cancelled", WorkflowStatus.CANCELLED),
         _execution(base / "human", WorkflowStatus.NEEDS_HUMAN),
         _execution(base / "pending", WorkflowStatus.PENDING),
+        _execution(base / "waiting", WorkflowStatus.WAITING),
         _execution(base / "running", WorkflowStatus.RUNNING),
     ]
     service, _, _ = _service(tmp_path, executions)
@@ -95,6 +100,7 @@ def test_include_failed_keeps_active_workspaces_protected(tmp_path: Path) -> Non
     assert items["cancelled"].eligible
     assert items["human"].eligible
     assert not items["pending"].eligible
+    assert not items["waiting"].eligible
     assert not items["running"].eligible
 
 

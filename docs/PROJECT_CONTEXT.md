@@ -95,8 +95,12 @@
   embedding provider/model/version/dimension; incompatibility deliberately recreates and fully
   reindexes the collection. Sparse/hybrid retrieval is not implemented, but the named vector and
   payload schema leave room for it without changing workflows. Index state is outside SQLAlchemy
-  and outside repositories. Persistent local mode is small/single-process only and clients are
-  closed after operations; concurrent processes require Qdrant server mode. A failed sync is not
+  and outside repositories. A process-owned client manager keyed by canonical connection settings
+  owns one lazily created, long-lived client per configured store, shared by workflow, debug, and
+  TUI index operations; local-mode operations are serialized through a per-store lock. An operation
+  failure never closes that shared client, and each client is closed exactly once at process
+  shutdown. Persistent local mode remains single-process; concurrent *processes* still require
+  Qdrant server mode. A failed sync is not
   queried, is idempotently repairable, never mutates repository files, and yields a sanitized
   repository-context diagnostic without widening collection/filter scope.
 - Database schema changes require versioned Alembic migrations; never add runtime
@@ -127,9 +131,38 @@
   diagnostics store `effective_instructions` as the one canonical provider prompt; a distinct
   `instructions` field is retained only when it adds prompt-construction context. TUI detailed
   logs and clipboard exports also collapse duplicate legacy prompt fields.
-- An execution is created as `PENDING`, immediately marked `RUNNING`, and records every entered
-  stage as a separately persisted step. Repeated validation/correction attempts create repeated
+- Every execution enters through one process-scoped submission seam. `submit_execution`,
+  `submit_response`, and `submit_continuation` synchronously persist the row, return an
+  `ExecutionHandle` exposing the persisted ID plus non-blocking polling and blocking wait/result,
+  and queue bounded in-process work. `run`, `respond_and_resume`, and `continue_execution` are thin
+  wrappers that submit and immediately wait, so CLI/TUI output and exit behavior are unchanged.
+  Batch, scheduling, continuous-execution, and label-selection features (#44/#45/#46/#147) must
+  submit here rather than adding their own concurrency handling.
+- An execution is created as `PENDING` and becomes `RUNNING` only when a dispatcher worker starts
+  it; resumes and continuations return to `PENDING` and compete for the same capacity. Each entered
+  stage is a separately persisted step. Repeated validation/correction attempts create repeated
   `VALIDATE`/`IMPLEMENT` steps.
+- Concurrency is bounded per *named provider*, because the configured provider instance is the
+  shared resource: one API quota pool, or one GPU's VRAM for a local model. Every provider
+  definition accepts `defaults.providers.<name>.max_concurrency`, a positive integer defaulting to
+  `1`. It is authoritative in exactly one place: a `repositories.<key>.providers.<name>` entry that
+  sets `max_concurrency` is rejected with an actionable configuration error, even when it repeats
+  the default. Other repository provider overrides are unaffected. Ceilings are fixed at startup;
+  changing one requires a restart. There is no global ceiling, resource-pool mapping, backend
+  detection, live resizing, or cross-process coordination.
+- A permit is held only for `AgentProvider.execute`, never across Git, validation, or GitHub work,
+  and is always released. A call that cannot acquire immediately queues FIFO and moves a started
+  execution to `WAITING` — distinct from `PENDING`, which is work that has not begun — emitting the
+  normal persisted status event naming the provider; admission restores `RUNNING`. Different
+  provider names admit independently. TUI runtime overrides and role-local presets are charged to
+  the configured provider they were derived from, so a temporary model change never creates a
+  second quota pool. Fallback releases the primary permit before acquiring the fallback provider's
+  own permit.
+- Concurrent executions share a `WorkflowService` instance, so the event listener and active stage
+  live in per-execution runtime state rather than on the service. Execution-derived worktree paths,
+  branches, and worktree-bound Git/GitHub clients remain distinct per execution.
+- Queueing is in-memory and single-process. Persisted `PENDING`/`WAITING` rows survive a crash but
+  are deliberately **not** resumed automatically at startup; recovery is deferred to #46.
 - Persist: normalized task, resolved repository/base branch and configured repository reference,
   worktree path, branch, latest
   implementation and validation snapshots, commit, PR, review, status/error, and timestamps.
@@ -138,9 +171,13 @@
   requesting stage, exact blocking prompt, request/response timestamps, and the response. `respond`
   and the TUI resume the same execution ID; planner responses rerun planning before any workspace is
   created, while review responses reuse the persisted worktree, branch, PR, and snapshots.
-- A running execution can receive a durable cancellation request through the workflow
-  service/controller boundary. It ends as `CANCELLED`, never `FAILED`; providers that cannot be
+- Any non-terminal execution — `PENDING`, `WAITING`, or `RUNNING` — can receive a durable
+  cancellation request through the workflow service/controller boundary; terminal executions
+  refuse it. It ends as `CANCELLED`, never `FAILED`; providers that cannot be
   interrupted immediately finish their current operation, but no later stage is scheduled.
+  Queued dispatcher work and provider-queued work are woken or dropped, cancellation is checked
+  immediately before and after permit acquisition, any acquired permit is released, and
+  cancellation-versus-admission races resolve idempotently to `CANCELLED`.
   Cancellation status and diagnostics remain inspectable after restart.
 - Terminal `CHANGES_REQUESTED` executions, and `FAILED` executions that retained both a
   workspace and working branch, can be manually continued from the TUI execution detail view.
@@ -159,6 +196,10 @@
   final status (including `CHANGES_REQUESTED`), reacting to the event itself rather than waiting
   for the blocking workflow call to return; this avoids the runner screen appearing stuck on a
   finished run.
+- TUI history, detail, and live progress distinguish queued `PENDING` ("QUEUED"), provider-capacity
+  `WAITING` ("WAITING FOR AGENT", naming the provider in live status where known), `RUNNING`, and a
+  requested-but-unfinished cancellation. The stop control stays available for all three active
+  states. Concurrency is configured in YAML only; no launcher control exposes it.
 
 ## Normal `run` behavior
 
@@ -191,8 +232,8 @@
   available for inspection and recovery. `cleanup-workspaces --repository <key-or-path> --dry-run`
   lists their retention decisions; without `--dry-run` it removes successful (`APPROVED` or
   `CHANGES_REQUESTED`) worktrees and prunes Git metadata. `FAILED`/`CANCELLED`/`NEEDS_HUMAN` worktrees require
-  `--include-failed` (or `--all`); `PENDING`, `RUNNING`, unmanaged, and out-of-root paths are never
-  removed by this command.
+  `--include-failed` (or `--all`); `PENDING`, `WAITING`, `RUNNING`, unmanaged, and out-of-root paths
+  are never removed by this command.
 - Commit/push refuse protected branches and refuse if the current checkout is not the workflow
   branch. Commit stages **all** worktree changes and fails if nothing is staged. Push is only
   `git push --set-upstream origin <working-branch>`.

@@ -11,11 +11,34 @@ from textual.screen import Screen
 from textual.widgets import Button, Input, Static
 
 from orchestrator.models.workflow_execution import WorkflowExecution
+from orchestrator.models.workflow_status import ACTIVE_WORKFLOW_STATUSES, WorkflowStatus
 from orchestrator.tui.bridge import WorkflowController
 from orchestrator.tui.widgets import OrchestratorSelect, is_orchestrator_select_widget
 
 if TYPE_CHECKING:
     from orchestrator.tui.app import OrchestratorApp
+
+
+def execution_status_label(execution: WorkflowExecution) -> str:
+    """Render the state an operator actually needs to distinguish.
+
+    Queued work, work blocked on shared provider capacity, and genuinely
+    running work are all active but mean different things when deciding
+    whether to wait or to stop an execution.
+    """
+
+    if execution.status is WorkflowStatus.NEEDS_HUMAN:
+        return "AWAITING HUMAN"
+    if (
+        execution.status in ACTIVE_WORKFLOW_STATUSES
+        and execution.cancellation_requested_at is not None
+    ):
+        return "CANCELLATION REQUESTED"
+    if execution.status is WorkflowStatus.PENDING:
+        return "QUEUED"
+    if execution.status is WorkflowStatus.WAITING:
+        return "WAITING FOR AGENT"
+    return execution.status.value
 
 
 class ExecutionHistoryScreen(Screen[None]):
@@ -79,18 +102,7 @@ class ExecutionHistoryScreen(Screen[None]):
             (
                 " | ".join(
                     [
-                        (
-                            "AWAITING HUMAN"
-                            if execution.status.value == "NEEDS_HUMAN"
-                            else (
-                                "CANCELLATION REQUESTED"
-                                if (
-                                    execution.status.value == "RUNNING"
-                                    and execution.cancellation_requested_at is not None
-                                )
-                                else execution.status.value
-                            )
-                        ),
+                        execution_status_label(execution),
                         execution.current_stage.value,
                         f"{execution.task_source}:{execution.task_id}",
                         execution.repository or "repository pending",

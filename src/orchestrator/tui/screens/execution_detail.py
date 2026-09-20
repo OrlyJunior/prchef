@@ -16,10 +16,12 @@ from textual.widgets import Button, Static, TextArea
 
 from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
 from orchestrator.models.workflow_execution import WorkflowExecution
+from orchestrator.models.workflow_status import ACTIVE_WORKFLOW_STATUSES, WorkflowStatus
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.runtime_logging import redact_payload
 from orchestrator.tui.bridge import WorkflowController
 from orchestrator.tui.diagnostics import diagnostic_for_display, format_diagnostics_for_export
+from orchestrator.tui.screens.execution_history import execution_status_label
 
 if TYPE_CHECKING:
     from orchestrator.tui.app import OrchestratorApp
@@ -160,11 +162,13 @@ class ExecutionDetailScreen(Screen[None]):
         self.query_one("#copy-detailed-logs-button", Button).disabled = not diagnostics
         status = self.query_one("#execution-status", Static)
         cancellation_pending = (
-            execution.status.value == "RUNNING"
+            execution.status in ACTIVE_WORKFLOW_STATUSES
             and execution.cancellation_requested_at is not None
         )
-        status.update("CANCELLATION REQUESTED" if cancellation_pending else execution.status.value)
-        status.set_class(cancellation_pending or execution.status.value == "CANCELLED", "cancelled")
+        status.update(execution_status_label(execution))
+        status.set_class(
+            cancellation_pending or execution.status is WorkflowStatus.CANCELLED, "cancelled"
+        )
         self._links = {
             "open-task": execution.task_url,
             "open-pr": execution.pr_url or "",

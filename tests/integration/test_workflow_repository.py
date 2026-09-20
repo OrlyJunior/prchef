@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
@@ -240,3 +241,82 @@ def test_migration_backfills_common_identity_for_existing_trello_execution(
     assert persisted.task_id == "legacy-card"
     assert persisted.task_url == "https://trello.example/legacy-card"
     assert persisted.trello_card_id == "legacy-card"
+
+
+def _migrated_repository(tmp_path: Path, name: str) -> WorkflowRepository:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / name).as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+    return WorkflowRepository(build_session_factory(build_engine(database_url)))
+
+
+def test_waiting_status_round_trips_without_a_new_migration(tmp_path: Path) -> None:
+    """The status column is string-backed, so WAITING needs no schema change."""
+
+    repository = _migrated_repository(tmp_path, "waiting.db")
+    execution = repository.create_execution("card-waiting")
+
+    repository.update_status(execution.id, WorkflowStatus.WAITING)
+
+    persisted = repository.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.WAITING
+
+
+@pytest.mark.parametrize(
+    "status", [WorkflowStatus.PENDING, WorkflowStatus.WAITING, WorkflowStatus.RUNNING]
+)
+def test_cancellation_is_accepted_for_every_active_status(
+    tmp_path: Path, status: WorkflowStatus
+) -> None:
+    repository = _migrated_repository(tmp_path, f"cancel-{status.value.lower()}.db")
+    execution = repository.create_execution("card-active")
+    repository.update_status(execution.id, status)
+
+    assert repository.request_cancellation(execution.id) is True
+    assert repository.cancellation_requested(execution.id) is True
+    assert repository.get_execution(execution.id).cancellation_requested_at is not None
+    # Repeating the request is idempotent rather than an error.
+    assert repository.request_cancellation(execution.id) is True
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        WorkflowStatus.APPROVED,
+        WorkflowStatus.CHANGES_REQUESTED,
+        WorkflowStatus.NEEDS_HUMAN,
+        WorkflowStatus.CANCELLED,
+        WorkflowStatus.FAILED,
+    ],
+)
+def test_cancellation_is_rejected_for_terminal_statuses(
+    tmp_path: Path, status: WorkflowStatus
+) -> None:
+    repository = _migrated_repository(tmp_path, f"terminal-{status.value.lower()}.db")
+    execution = repository.create_execution("card-terminal")
+    repository.finish(execution.id, status)
+
+    assert repository.request_cancellation(execution.id) is False
+    assert repository.cancellation_requested(execution.id) is False
+
+
+def test_queue_execution_returns_a_resumed_execution_to_pending(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "requeue.db")
+    execution = repository.create_execution("card-resume")
+    repository.record_error(execution.id, "needs a human answer")
+    repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+
+    repository.queue_execution(execution.id)
+
+    persisted = repository.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.PENDING
+    assert persisted.finished_at is None
+    assert persisted.error_message is None
+    # A queued resume is cancellable again before it consumes any capacity.
+    assert persisted.cancellation_requested_at is None
+    assert repository.request_cancellation(execution.id) is True

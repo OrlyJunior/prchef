@@ -33,7 +33,10 @@ from orchestrator.tui.diagnostics import format_diagnostics_for_export
 from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
 from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
 from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
-from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
+from orchestrator.tui.screens.execution_history import (
+    ExecutionHistoryScreen,
+    execution_status_label,
+)
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 from orchestrator.tui.screens.repository_settings import (
     DeleteRepositoryConfirmation,
@@ -106,7 +109,11 @@ class _Repository:
 
     def request_cancellation(self, execution_id: str) -> bool:
         assert execution_id == self.execution.id
-        if self.execution.status is not WorkflowStatus.RUNNING:
+        if self.execution.status not in {
+            WorkflowStatus.PENDING,
+            WorkflowStatus.WAITING,
+            WorkflowStatus.RUNNING,
+        }:
             return False
         self.cancellation_requests.append(execution_id)
         return True
@@ -295,22 +302,46 @@ class _TaskProvider:
         return ""
 
 
+class _Handle:
+    """Stand in for ExecutionHandle: the controller only polls and waits."""
+
+    def __init__(self, execution: WorkflowExecution) -> None:
+        self._execution = execution
+
+    @property
+    def execution_id(self) -> str:
+        return self._execution.id
+
+    def done(self) -> bool:
+        return True
+
+    def wait(self, timeout: float | None = None) -> bool:
+        del timeout
+        return True
+
+    def result(self, timeout: float | None = None) -> WorkflowExecution:
+        del timeout
+        return self._execution
+
+
 class _WorkflowService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None, dict[AgentRole, str], dict[AgentRole, Any]]] = []
         self.emit_terminal_event = False
         self.continuations: list[tuple[str, str]] = []
         self.continuation_error: Exception | None = None
+        self.responses: list[tuple[str, str]] = []
+        self.cancellations: list[str] = []
 
-    def run(
+    def submit_execution(
         self,
         task_id: str,
-        repository: str | None,
+        repository: str | None = None,
         *,
         agent_providers: dict[AgentRole, str],
         agent_runtime_options: dict[AgentRole, Any],
         event_listener: Callable[..., None] | None,
-    ) -> WorkflowExecution:
+    ) -> _Handle:
         self.calls.append((task_id, repository, agent_providers, agent_runtime_options))
         if self.emit_terminal_event and event_listener is not None:
             event_listener(
@@ -327,11 +358,41 @@ class _WorkflowService:
                     status=WorkflowStatus.APPROVED,
                 )
             )
-        return WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED)
+        return _Handle(WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED))
+
+    def run(
+        self,
+        task_id: str,
+        repository: str | None = None,
+        *,
+        agent_providers: dict[AgentRole, str],
+        agent_runtime_options: dict[AgentRole, Any],
+        event_listener: Callable[..., None] | None,
+    ) -> WorkflowExecution:
+        return self.submit_execution(
+            task_id,
+            repository,
+            agent_providers=agent_providers,
+            agent_runtime_options=agent_runtime_options,
+            event_listener=event_listener,
+        ).result()
 
     def continuation_feedback(self, execution_id: str) -> str:
         assert execution_id == "execution-1"
         return "Persisted terminal feedback"
+
+    def submit_continuation(
+        self,
+        execution_id: str,
+        feedback: str,
+        *,
+        event_listener: Callable[..., None] | None = None,
+    ) -> _Handle:
+        del event_listener
+        self.continuations.append((execution_id, feedback))
+        if self.continuation_error is not None:
+            raise self.continuation_error
+        return _Handle(WorkflowExecution(id=execution_id, status=WorkflowStatus.APPROVED))
 
     def continue_execution(
         self,
@@ -340,11 +401,24 @@ class _WorkflowService:
         *,
         event_listener: Callable[..., None] | None = None,
     ) -> WorkflowExecution:
+        return self.submit_continuation(
+            execution_id, feedback, event_listener=event_listener
+        ).result()
+
+    def submit_response(
+        self,
+        execution_id: str,
+        response: str,
+        *,
+        event_listener: Callable[..., None] | None = None,
+    ) -> _Handle:
         del event_listener
-        self.continuations.append((execution_id, feedback))
-        if self.continuation_error is not None:
-            raise self.continuation_error
-        return WorkflowExecution(id=execution_id, status=WorkflowStatus.APPROVED)
+        self.responses.append((execution_id, response))
+        return _Handle(WorkflowExecution(id=execution_id, status=WorkflowStatus.APPROVED))
+
+    def cancel_execution(self, execution_id: str) -> bool:
+        self.cancellations.append(execution_id)
+        return True
 
 
 def _controller(tmp_path: Path) -> tuple[WorkflowController, _WorkflowService, _Repository]:
@@ -2790,3 +2864,146 @@ def test_secondary_screens_keep_content_in_scrollable_regions_in_small_terminals
             assert settings.scroll_y > 0
 
     asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (WorkflowStatus.PENDING, "QUEUED"),
+        (WorkflowStatus.WAITING, "WAITING FOR AGENT"),
+        (WorkflowStatus.RUNNING, "RUNNING"),
+        (WorkflowStatus.NEEDS_HUMAN, "AWAITING HUMAN"),
+        (WorkflowStatus.APPROVED, "APPROVED"),
+        (WorkflowStatus.CANCELLED, "CANCELLED"),
+    ],
+)
+def test_execution_status_label_distinguishes_queued_from_provider_waiting(
+    status: WorkflowStatus, expected: str
+) -> None:
+    execution = WorkflowExecution(id="execution-1", status=status)
+
+    assert execution_status_label(execution) == expected
+
+
+@pytest.mark.parametrize(
+    "status", [WorkflowStatus.PENDING, WorkflowStatus.WAITING, WorkflowStatus.RUNNING]
+)
+def test_every_active_status_reports_a_pending_cancellation(status: WorkflowStatus) -> None:
+    execution = WorkflowExecution(
+        id="execution-1",
+        status=status,
+        cancellation_requested_at=datetime.now(UTC),
+    )
+
+    assert execution_status_label(execution) == "CANCELLATION REQUESTED"
+
+
+def test_terminal_status_ignores_a_historical_cancellation_marker() -> None:
+    execution = WorkflowExecution(
+        id="execution-1",
+        status=WorkflowStatus.CANCELLED,
+        cancellation_requested_at=datetime.now(UTC),
+    )
+
+    assert execution_status_label(execution) == "CANCELLED"
+
+
+def test_live_status_message_names_the_provider_a_run_is_waiting_for() -> None:
+    waiting_for_provider = WorkflowRunnerScreen._status_message(
+        WorkflowStatus.WAITING, {"provider": "ollama"}
+    )
+
+    assert waiting_for_provider == "Waiting for ollama capacity…"
+    # Without a provider in the payload the message stays generic but distinct.
+    assert (
+        WorkflowRunnerScreen._status_message(WorkflowStatus.WAITING)
+        == "Waiting for agent capacity…"
+    )
+    assert (
+        WorkflowRunnerScreen._status_message(WorkflowStatus.PENDING)
+        == "Queued for an execution slot…"
+    )
+    assert WorkflowRunnerScreen._status_message(WorkflowStatus.RUNNING) == "Workflow running…"
+
+
+@pytest.mark.parametrize(
+    "status", [WorkflowStatus.PENDING, WorkflowStatus.WAITING, WorkflowStatus.RUNNING]
+)
+def test_stop_control_is_offered_for_every_active_status(
+    tmp_path: Path, status: WorkflowStatus
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.STATUS_CHANGED,
+                    status=status,
+                )
+            )
+            await settle_tui(pilot)
+
+            assert screen.query_one("#workflow-stop-actions", Horizontal).display is True
+            assert screen.query_one("#stop-workflow", Button).disabled is False
+
+    asyncio.run(drive())
+
+
+def test_history_filters_and_renders_provider_waiting_executions(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.WAITING
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(ExecutionHistoryScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+
+            # A WAITING execution is still listed and searchable by its status.
+            screen.query_one("#history-filter", Input).value = "waiting"
+            await settle_tui(pilot)
+            picker = screen.query_one("#execution-picker", OrchestratorSelect)
+            assert "1 persisted workflow execution(s)." in str(
+                screen.query_one("#history-summary", Static).renderable
+            )
+            assert any(
+                "WAITING FOR AGENT" in str(label) for label, _ in picker._options
+            )
+
+            screen.query_one("#history-filter", Input).value = "approved"
+            await settle_tui(pilot)
+            assert "0 persisted workflow execution(s)." in str(
+                screen.query_one("#history-summary", Static).renderable
+            )
+
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            detail_status = application.screen.query_one("#execution-status", Static)
+            assert str(detail_status.renderable) == "WAITING FOR AGENT"
+
+    asyncio.run(drive())
+
+
+def test_controller_routes_cancellation_to_the_live_service_then_the_repository(
+    tmp_path: Path,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.WAITING
+
+    # No live service yet: the durable repository request keeps a restarted TUI
+    # able to stop work it no longer owns in memory.
+    assert controller.cancel_workflow("execution-1") is True
+    assert repository.cancellation_requests == ["execution-1"]
+    assert service.cancellations == []
+
+    controller._active_services["execution-1"] = service  # type: ignore[assignment]
+
+    assert controller.cancel_workflow("execution-1") is True
+    assert service.cancellations == ["execution-1"]

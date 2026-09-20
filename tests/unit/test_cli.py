@@ -216,7 +216,9 @@ def _stub_runtime(monkeypatch: Any) -> None:
         main,
         "_config_loader",
         lambda path: SimpleNamespace(
-            load_defaults=lambda: None,
+            # Startup reads the configured provider ceilings once to size the
+            # process-scoped limiter and worker pool.
+            load_defaults=lambda: SimpleNamespace(providers={}),
             default_task_provider=lambda: "github",
         ),
     )
@@ -359,7 +361,11 @@ def test_cli_respond_uses_same_execution_and_service_logic(monkeypatch: Any) -> 
             return WorkflowExecution(id=execution_id, status=WorkflowStatus.APPROVED)
 
     monkeypatch.setattr(main, "_migrated_repository", lambda settings: Repository())
-    monkeypatch.setattr(main, "_config_loader", lambda path: object())
+    monkeypatch.setattr(
+        main,
+        "_config_loader",
+        lambda path: SimpleNamespace(load_defaults=lambda: SimpleNamespace(providers={})),
+    )
     monkeypatch.setattr(main, "WorkflowService", RespondService)
     monkeypatch.setattr(main, "ClientFactory", lambda api_key: object())
 

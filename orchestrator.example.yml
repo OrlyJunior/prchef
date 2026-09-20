@@ -91,9 +91,23 @@ defaults:
     # Desktop alerts are opt-in. Windows is supported in this first version.
     enabled: false
     channel: desktop
+  # Every named provider accepts `max_concurrency`: how many agent calls that
+  # one provider may run at the same time across all concurrent executions in
+  # this process. The named provider *is* the shared resource — one API quota
+  # pool, or one GPU's VRAM for a local model — so the ceiling belongs here
+  # rather than to a single global number.
+  #
+  # It defaults to 1 (strictly sequential) when omitted, which is deliberately
+  # conservative. Ceilings are read once at startup: changing one requires
+  # restarting `orchestrator run`/`tui`. Declare it only under
+  # `defaults.providers.<name>`; a `repositories.<key>.providers.<name>` entry
+  # that sets `max_concurrency` is rejected with a configuration error.
   providers:
     codex:
       type: codex-cli
+      # Two Codex agent calls may be in flight at once; a third queues (FIFO)
+      # and its execution is reported as WAITING until a slot frees up.
+      max_concurrency: 2
       # Fixe estes valores com opcoes suportadas pela sua Codex CLI; nao dependa do default externo.
       # model: <your-supported-codex-model>
       # reasoning_effort: <your-supported-reasoning-effort>
@@ -141,6 +155,9 @@ defaults:
     #   type: litellm
     #   model: ollama/llama3.2
     #   api_base: http://localhost:11434
+    #   # Local models share one GPU's VRAM no matter which execution owns them.
+    #   # Keep this at 1 unless the card demonstrably fits concurrent requests.
+    #   max_concurrency: 1
     #   timeout_seconds: 120
     #   temperature: 0.2
     #   max_output_tokens: 4096
@@ -150,6 +167,9 @@ defaults:
       type: litellm
       model: openai/gpt-4.1-mini
       api_key_env: OPENAI_API_KEY
+      # A hosted account has its own finite quota pool, independent of the
+      # Codex ceiling above: the two admit concurrently.
+      max_concurrency: 3
     # Legacy/deprecated: Jules remains configurable only for existing setups.
     # It uses a remote-session API and does not meet current interactive worktree expectations.
     # jules:

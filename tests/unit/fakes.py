@@ -28,6 +28,12 @@ from orchestrator.models import (
     WorkflowStatus,
 )
 
+# Queued, provider-blocked, and running work are all cancellable, matching the
+# real repository's active-status contract.
+_ACTIVE_STATUSES = frozenset(
+    {WorkflowStatus.PENDING, WorkflowStatus.WAITING, WorkflowStatus.RUNNING}
+)
+
 
 class FakeWorkflowRepository:
     def __init__(self) -> None:
@@ -85,7 +91,7 @@ class FakeWorkflowRepository:
 
     def request_cancellation(self, execution_id: str) -> bool:
         execution = self._execution()
-        if execution.status is not WorkflowStatus.RUNNING:
+        if execution.status not in _ACTIVE_STATUSES:
             return False
         if execution.cancellation_requested_at is None:
             execution.cancellation_requested_at = datetime.now(UTC)
@@ -94,7 +100,7 @@ class FakeWorkflowRepository:
     def cancellation_requested(self, execution_id: str) -> bool:
         execution = self._execution()
         return (
-            execution.status is WorkflowStatus.RUNNING
+            execution.status in _ACTIVE_STATUSES
             and execution.cancellation_requested_at is not None
         )
 
@@ -179,6 +185,13 @@ class FakeWorkflowRepository:
         execution.status = WorkflowStatus.RUNNING
         execution.error_message = None
         execution.finished_at = None
+
+    def queue_execution(self, execution_id: str) -> None:
+        execution = self._execution()
+        execution.status = WorkflowStatus.PENDING
+        execution.error_message = None
+        execution.finished_at = None
+        execution.cancellation_requested_at = None
 
     def finish(self, execution_id: str, status: WorkflowStatus) -> None:
         execution = self._execution()
