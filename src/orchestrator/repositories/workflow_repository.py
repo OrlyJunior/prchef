@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from orchestrator.models.agent import AgentRole
@@ -19,6 +19,7 @@ from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationResult
+from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
     ACTIVE_WORKFLOW_STATUSES,
@@ -31,6 +32,8 @@ from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.repositories.orm_models import (
     ExecutionDiagnosticEntity,
     HumanInteractionEntity,
+    WorkflowBatchEntity,
+    WorkflowBatchItemEntity,
     WorkflowExecutionEntity,
     WorkflowStepEntity,
 )
@@ -88,6 +91,101 @@ class WorkflowRepository:
             session.flush()
             return self._to_domain(entity)
 
+    def create_batch(
+        self,
+        repository: str,
+        task_source: str,
+        tasks: list[DevelopmentTask],
+    ) -> WorkflowBatch:
+        """Persist a batch and its ordered task snapshots in one transaction."""
+
+        entity = WorkflowBatchEntity(
+            id=str(uuid.uuid4()),
+            repository=redact_text(repository),
+            task_source=redact_text(task_source),
+            created_at=_utcnow(),
+            items=[
+                WorkflowBatchItemEntity(
+                    position=position,
+                    task_id=redact_text(task.id),
+                    task_title=redact_text(task.title or "(untitled)"),
+                )
+                for position, task in enumerate(tasks)
+            ],
+        )
+        with self._sessions() as session, session.begin():
+            session.add(entity)
+            session.flush()
+            return self._batch_to_domain(entity)
+
+    def record_batch_item_execution(
+        self, batch_id: str, position: int, execution_id: str
+    ) -> None:
+        with self._sessions() as session, session.begin():
+            entity = session.scalars(
+                select(WorkflowBatchItemEntity).where(
+                    WorkflowBatchItemEntity.batch_id == batch_id,
+                    WorkflowBatchItemEntity.position == position,
+                )
+            ).one_or_none()
+            if entity is None:
+                raise KeyError(f"Workflow batch item not found: {batch_id}[{position}]")
+            entity.execution_id = execution_id
+
+    def get_batch(self, batch_id: str) -> WorkflowBatch:
+        with self._sessions() as session:
+            entity = session.get(WorkflowBatchEntity, batch_id)
+            if entity is None:
+                raise KeyError(f"Workflow batch not found: {batch_id}")
+            return self._batch_to_domain(entity)
+
+    def list_batches(self) -> list[WorkflowBatch]:
+        with self._sessions() as session:
+            entities = session.scalars(
+                select(WorkflowBatchEntity).order_by(WorkflowBatchEntity.created_at)
+            ).unique().all()
+            return [self._batch_to_domain(entity) for entity in entities]
+
+    def delete_batch(self, batch_id: str) -> None:
+        """Delete batch metadata; linked executions deliberately remain intact."""
+
+        with self._sessions() as session, session.begin():
+            entity = session.get(WorkflowBatchEntity, batch_id)
+            if entity is None:
+                raise KeyError(f"Workflow batch not found: {batch_id}")
+            session.delete(entity)
+
+    def executions_for_tasks(
+        self,
+        task_source: str,
+        task_ids: list[str],
+        repository: str,
+    ) -> dict[str, WorkflowExecution]:
+        """Return the newest execution for each repository-scoped task identity."""
+
+        if not task_ids:
+            return {}
+        with self._sessions() as session:
+            entities = session.scalars(
+                select(WorkflowExecutionEntity)
+                .where(
+                    WorkflowExecutionEntity.task_source == task_source,
+                    WorkflowExecutionEntity.task_id.in_(task_ids),
+                    or_(
+                        WorkflowExecutionEntity.repository_ref == repository,
+                        WorkflowExecutionEntity.repository == repository,
+                    ),
+                )
+                .order_by(
+                    WorkflowExecutionEntity.created_at.desc(),
+                    WorkflowExecutionEntity.id.desc(),
+                )
+            ).unique().all()
+            latest: dict[str, WorkflowExecution] = {}
+            for entity in entities:
+                latest.setdefault(entity.task_id, self._to_domain(entity))
+            return latest
+
     def update_task(self, execution_id: str, task: DevelopmentTask) -> None:
         def mutate(entity: WorkflowExecutionEntity) -> None:
             entity.task_source = task.source
@@ -113,6 +211,14 @@ class WorkflowRepository:
             entity.repository_ref = repository_ref
 
         self._mutate(execution_id, mutate)
+
+    def record_submission_repository(self, execution_id: str, repository_ref: str) -> None:
+        """Scope duplicate detection before task/config loading can fail."""
+
+        self._mutate(
+            execution_id,
+            lambda entity: setattr(entity, "repository_ref", redact_text(repository_ref)),
+        )
 
     def record_workspace(self, execution_id: str, workspace_path: str) -> None:
         self._mutate(
@@ -467,4 +573,22 @@ class WorkflowRepository:
             role=AgentRole(entity.role) if entity.role else None,
             payload=payload if isinstance(payload, dict) else {"value": payload},
             occurred_at=entity.occurred_at,
+        )
+
+    @staticmethod
+    def _batch_to_domain(entity: WorkflowBatchEntity) -> WorkflowBatch:
+        return WorkflowBatch(
+            id=entity.id,
+            repository=entity.repository,
+            task_source=entity.task_source,
+            created_at=entity.created_at,
+            items=tuple(
+                WorkflowBatchItem(
+                    position=item.position,
+                    task_id=item.task_id,
+                    task_title=item.task_title,
+                    execution_id=item.execution_id,
+                )
+                for item in entity.items
+            ),
         )

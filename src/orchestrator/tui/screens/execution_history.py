@@ -10,6 +10,7 @@ from textual.events import DescendantFocus
 from textual.screen import Screen
 from textual.widgets import Button, Input, Static
 
+from orchestrator.models.workflow_batch import WorkflowBatch
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import ACTIVE_WORKFLOW_STATUSES, WorkflowStatus
 from orchestrator.tui.bridge import WorkflowController
@@ -49,6 +50,12 @@ class ExecutionHistoryScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="execution-history"):
             yield Static("Execution history", classes="screen-title")
+            yield Static("Stored batches", classes="field-label")
+            yield OrchestratorSelect([], prompt="Select a batch", id="batch-picker")
+            with Horizontal(classes="screen-actions"):
+                yield Button("Inspect batch", id="inspect-batch")
+            yield Static("", id="batch-history-summary")
+            yield Static("Individual executions", classes="field-label")
             yield Input(
                 placeholder="Filter by task, repository, stage, or status",
                 id="history-filter",
@@ -75,27 +82,83 @@ class ExecutionHistoryScreen(Screen[None]):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "history-filter":
-            self.refresh_history(event.value)
+            self._refresh_executions(event.value)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "refresh-history":
             self.refresh_history()
         elif event.button.id == "inspect-execution":
             self._inspect_selected()
+        elif event.button.id == "inspect-batch":
+            self._inspect_batch()
 
     def action_refresh(self) -> None:
         self.refresh_history()
 
     def refresh_history(self, query: str | None = None) -> None:
-        filter_value = self.query_one("#history-filter", Input).value if query is None else query
+        filter_value = (
+            self.query_one("#history-filter", Input).value if query is None else query
+        )
         try:
-            executions = self.controller.executions(filter_value)
+            all_executions = self.controller.executions()
+            executions = (
+                all_executions
+                if not filter_value.strip()
+                else self.controller.executions(filter_value)
+            )
+            batches = self.controller.batches()
+        except Exception as exc:
+            self.query_one("#history-summary", Static).update(
+                f"Could not load execution history: {exc}"
+            )
+            return
+        executions_by_id = {execution.id: execution for execution in all_executions}
+        self.query_one("#batch-picker", OrchestratorSelect).set_options(
+            [
+                (
+                    f"{batch.created_at.isoformat()} | {batch.repository} | "
+                    f"{len(batch.items)} task(s) | "
+                    f"{self._batch_statuses(batch, executions_by_id)}",
+                    batch.id,
+                )
+                for batch in batches
+            ]
+        )
+        self.query_one("#batch-history-summary", Static).update(
+            f"{len(batches)} persisted workflow batch(es)."
+        )
+        self._set_executions(executions)
+
+    def _refresh_executions(self, query: str) -> None:
+        """Filter executions without reloading every persisted batch."""
+
+        try:
+            executions = self.controller.executions(query)
         except Exception as exc:
             self.query_one("#history-summary", Static).update(
                 f"Could not load execution history: {exc}"
             )
             return
         self._set_executions(executions)
+
+    def _batch_statuses(
+        self,
+        batch: WorkflowBatch,
+        executions_by_id: dict[str, WorkflowExecution],
+    ) -> str:
+        statuses: list[str] = []
+        for item in batch.items:
+            execution_id = item.execution_id
+            if not execution_id:
+                statuses.append("NOT STARTED")
+                continue
+            execution = executions_by_id.get(execution_id)
+            statuses.append(
+                execution_status_label(execution)
+                if execution is not None
+                else "UNAVAILABLE"
+            )
+        return ", ".join(statuses) if statuses else "empty"
 
     def _set_executions(self, executions: list[WorkflowExecution]) -> None:
         options = [
@@ -126,3 +189,12 @@ class ExecutionHistoryScreen(Screen[None]):
         from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
 
         self.app.push_screen(ExecutionDetailScreen(execution_id))
+
+    def _inspect_batch(self) -> None:
+        batch_id = self.query_one("#batch-picker", OrchestratorSelect).value
+        if not isinstance(batch_id, str):
+            self.notify("Select a batch to inspect.", severity="warning")
+            return
+        from orchestrator.tui.screens.batch_detail import BatchDetailScreen
+
+        self.app.push_screen(BatchDetailScreen(batch_id))

@@ -23,6 +23,8 @@ from orchestrator.models import (
     RepositorySpec,
     StepStatus,
     ValidationResult,
+    WorkflowBatch,
+    WorkflowBatchItem,
     WorkflowExecution,
     WorkflowStage,
     WorkflowStatus,
@@ -42,6 +44,7 @@ class FakeWorkflowRepository:
         self.stage_changes: list[WorkflowStage] = []
         self.next_step = 1
         self.diagnostics: list[Any] = []
+        self.batches: list[WorkflowBatch] = []
 
     def create_execution(self, task_id: str, task_source: str = "trello") -> WorkflowExecution:
         self.execution = WorkflowExecution(
@@ -51,6 +54,55 @@ class FakeWorkflowRepository:
             trello_card_id=task_id if task_source == "trello" else "",
         )
         return self.execution
+
+    def create_batch(
+        self, repository: str, task_source: str, tasks: list[DevelopmentTask]
+    ) -> WorkflowBatch:
+        batch = WorkflowBatch(
+            id=f"batch-{len(self.batches) + 1}",
+            repository=repository,
+            task_source=task_source,
+            items=tuple(
+                WorkflowBatchItem(position, task.id, task.title)
+                for position, task in enumerate(tasks)
+            ),
+        )
+        self.batches.append(batch)
+        return batch
+
+    def record_batch_item_execution(
+        self, batch_id: str, position: int, execution_id: str
+    ) -> None:
+        batch = self.get_batch(batch_id)
+        items = tuple(
+            WorkflowBatchItem(item.position, item.task_id, item.task_title, execution_id)
+            if item.position == position
+            else item
+            for item in batch.items
+        )
+        replacement = WorkflowBatch(
+            batch.id, batch.repository, batch.task_source, batch.created_at, items
+        )
+        self.batches[self.batches.index(batch)] = replacement
+
+    def get_batch(self, batch_id: str) -> WorkflowBatch:
+        return next(batch for batch in self.batches if batch.id == batch_id)
+
+    def list_batches(self) -> list[WorkflowBatch]:
+        return list(self.batches)
+
+    def executions_for_tasks(
+        self, task_source: str, task_ids: list[str], repository: str
+    ) -> dict[str, WorkflowExecution]:
+        if self.execution is None:
+            return {}
+        if (
+            self.execution.task_source == task_source
+            and self.execution.task_id in task_ids
+            and repository in {self.execution.repository, self.execution.repository_ref}
+        ):
+            return {self.execution.task_id: self.execution}
+        return {}
 
     def _execution(self) -> WorkflowExecution:
         assert self.execution is not None

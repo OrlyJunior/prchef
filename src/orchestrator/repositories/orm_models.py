@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from orchestrator.config.database import Base
@@ -63,6 +63,46 @@ class WorkflowExecutionEntity(Base):
         Index("ix_workflow_executions_trello_card_id", "trello_card_id"),
         Index("ix_workflow_executions_status", "status"),
         Index("ix_workflow_executions_current_stage", "current_stage"),
+    )
+
+
+class WorkflowBatchEntity(Base):
+    __tablename__ = "workflow_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repository: Mapped[str] = mapped_column(Text, nullable=False)
+    task_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    items: Mapped[list["WorkflowBatchItemEntity"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="WorkflowBatchItemEntity.position",
+    )
+
+    __table_args__ = (Index("ix_workflow_batches_created_at", "created_at"),)
+
+
+class WorkflowBatchItemEntity(Base):
+    __tablename__ = "workflow_batch_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflow_batches.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    task_title: Mapped[str] = mapped_column(Text, nullable=False)
+    execution_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("workflow_executions.id", ondelete="SET NULL")
+    )
+
+    batch: Mapped[WorkflowBatchEntity] = relationship(back_populates="items")
+
+    __table_args__ = (
+        UniqueConstraint("batch_id", "position", name="uq_workflow_batch_items_position"),
+        Index("ix_workflow_batch_items_batch_id", "batch_id"),
+        Index("ix_workflow_batch_items_execution_id", "execution_id"),
     )
 
 

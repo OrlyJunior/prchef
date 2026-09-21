@@ -61,9 +61,17 @@
   never changes the selected backend. Provider type is always taken from the configured provider,
   not inferred from its model name.
 - The TUI launcher automatically browses tasks for its selected repository and task provider.
-  Users choose a displayed task; its provider-specific identifier remains internal to the launch
-  data. The interactive selector exposes refresh, loading, and inline-error states, while explicit
-  CLI task identifiers remain supported.
+  Rows show titles, labels, and checkboxes; users may launch one task through the unchanged
+  single-workflow path or select an ordered batch whose shared role presets/runtime overrides are
+  applied to every item. Tasks with any existing execution in the same repository and task source
+  show that status and remain unselectable, with inspection/resume delegated to execution history.
+  Refresh, loading, empty, and inline-error states remain available, while explicit CLI task
+  identifiers remain supported.
+- Batch policy is owned by `WorkflowController` and `WorkflowRepository`, not TUI widgets. A batch
+  is persisted before its first item is submitted, then its tasks are submitted sequentially
+  through `submit_execution`; an item failure does not prevent later submissions. Stopping the
+  active item also stops later batch submissions. Stored batches are browsable from execution
+  history after restart.
 - The TUI's Agent Instructions view edits the selected repository's optional `IMPLEMENTER.md` and
   `REVIEWER.md` independently. Missing files remain absent until their own save action; the TUI
   never stages or commits either file.
@@ -138,6 +146,10 @@
   wrappers that submit and immediately wait, so CLI/TUI output and exit behavior are unchanged.
   Batch, scheduling, continuous-execution, and label-selection features (#44/#45/#46/#147) must
   submit here rather than adding their own concurrency handling.
+- Ordered batch identity is stored separately in `workflow_batches` and
+  `workflow_batch_items` (repository, task source, title snapshots, positions, and nullable
+  execution links). Batch items never overload execution rows; deleting batch metadata cascades
+  only to its items and leaves linked executions intact.
 - An execution is created as `PENDING` and becomes `RUNNING` only when a dispatcher worker starts
   it; resumes and continuations return to `PENDING` and compete for the same capacity. Each entered
   stage is a separately persisted step. Repeated validation/correction attempts create repeated
