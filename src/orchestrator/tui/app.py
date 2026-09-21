@@ -59,8 +59,46 @@ class OrchestratorApp(App[None]):
     WorkflowRunnerScreen.-narrow .role-config-row { layout: vertical; }
     WorkflowRunnerScreen.-narrow .role-field { width: 100%; margin-right: 0; }
     #task-selector { height: auto; }
-    #available-tasks { height: auto; }
-    .task-row { height: auto; margin-top: 0; }
+    /* The task list reads as a table: a distinct select-all band, a column
+       header, then one single-line row per task that clips instead of
+       spilling past the terminal width. */
+    #task-table {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        padding: 0 1;
+        border: round $primary;
+    }
+    #available-tasks { width: 100%; height: auto; }
+    .task-select-all {
+        width: 100%;
+        /* Auto height leaves room for the separator the bottom border draws
+           between this band and the task rows. */
+        height: auto;
+        border: none;
+        border-bottom: hkey $primary;
+        padding: 0;
+        background: $boost;
+        text-style: bold;
+    }
+    .task-select-all:focus { background: $accent 40%; }
+    #task-table-header {
+        width: 100%;
+        height: 1;
+        color: $text-muted;
+        text-style: bold;
+    }
+    .task-row {
+        width: 100%;
+        height: 1;
+        border: none;
+        padding: 0;
+        margin-top: 0;
+        background: transparent;
+    }
+    .task-row:focus { background: $accent 40%; }
+    .task-row:disabled { color: $text-muted; }
+    #task-hint { margin-top: 1; }
     .github-app-roles { width: 100%; }
     .github-app-role { width: 1fr; height: auto; margin-right: 1; }
     .screen-actions { margin-top: 1; height: auto; }

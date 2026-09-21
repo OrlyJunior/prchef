@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
 
 from orchestrator.config.project_config import (
@@ -45,7 +46,11 @@ from orchestrator.tui.screens.repository_settings import (
     DeleteRepositoryConfirmation,
     RepositorySettingsScreen,
 )
-from orchestrator.tui.screens.task_selector import TaskSelector
+from orchestrator.tui.screens.task_selector import (
+    TaskRow,
+    TaskSelector,
+    TaskTableHeader,
+)
 from orchestrator.tui.screens.workflow_runner import StopWorkflowConfirmation, WorkflowRunnerScreen
 from orchestrator.tui.widgets import OrchestratorSelect, RepositorySelect
 from tests.unit.tui_sync import settle_tui, wait_for_tui
@@ -3195,6 +3200,181 @@ def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
                 description="ordered batch submissions",
             )
             assert [call[0] for call in service.calls] == ["12", "3"]
+
+    asyncio.run(drive())
+
+
+_LONG_TASK_TITLE = (
+    "Refactor the workflow batch dispatcher so partially failed batches resume from "
+    "the first unfinished task instead of restarting the whole run"
+)
+_MANY_LABELS = ["bug", "enhancement", "needs-triage", "backend", "priority:high"]
+
+
+def _backlog_tasks() -> list[DevelopmentTask]:
+    """A realistic backlog: many rows, one overlong title, one blocked task."""
+
+    tasks = [
+        DevelopmentTask(
+            "101",
+            "github",
+            _LONG_TASK_TITLE,
+            "",
+            "https://example/101",
+            metadata={"labels": _MANY_LABELS},
+        ),
+        DevelopmentTask(
+            "7",
+            "github",
+            "Busy task",
+            "",
+            "https://example/7",
+            metadata={"labels": ["active"]},
+        ),
+        DevelopmentTask("1042", "github", "", "", "https://example/1042", metadata={}),
+    ]
+    tasks.extend(
+        DevelopmentTask(
+            str(number),
+            "github",
+            f"Task number {number} with an ordinary title",
+            "",
+            f"https://example/{number}",
+            metadata={"labels": ["bug"] if number % 2 else ["enhancement", "ui"]},
+        )
+        for number in range(200, 230)
+    )
+    return tasks
+
+
+def _backlog_controller(
+    tmp_path: Path,
+) -> tuple[WorkflowController, _WorkflowService, _Repository]:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.task_source = "github"
+    repository.execution.task_id = "7"
+    repository.execution.repository_ref = "example"
+    repository.execution.status = WorkflowStatus.RUNNING
+    tasks = _backlog_tasks()
+    provider = _TaskProvider()
+    provider.list_tasks = lambda limit=50: tasks  # type: ignore[method-assign]
+    controller._task_provider_factory = lambda source, selected_repository: provider
+    return controller, service, repository
+
+
+def _row_text(row: TaskRow) -> str:
+    rendered = row.render()
+    assert isinstance(rendered, Text)
+    return rendered.plain
+
+
+def test_task_selector_renders_rows_as_an_aligned_truncated_table(tmp_path: Path) -> None:
+    controller, _, _ = _backlog_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(TaskRow)) == 33,
+                description="backlog task rows",
+            )
+            await settle_tui(pilot)
+            screen = application.screen
+            header = screen.query_one("#task-table-header", TaskTableHeader)
+            header_text = header.render()
+            assert isinstance(header_text, Text)
+            title_column = header_text.plain.index("Title")
+            labels_column = header_text.plain.index("Labels")
+
+            rows = list(screen.query(TaskRow))
+            for row in rows:
+                text = _row_text(row)
+                # Every row is clipped to the row width, so nothing spills off
+                # the side of the terminal.
+                assert len(text) <= row.content_size.width
+                # Columns line up with the heading positions.
+                assert text[:title_column].rstrip().endswith(row._number)
+                assert text[title_column - 1] == " "
+                assert text[labels_column - 1] == " "
+
+            long_row = screen.query_one("#task-checkbox-0", TaskRow)
+            long_text = _row_text(long_row)
+            assert _LONG_TASK_TITLE not in long_text
+            assert "Refactor the workflow batch" in long_text
+            assert "…" in long_text
+            assert "bug, enhancement" in long_text
+            assert ", ".join(_MANY_LABELS) not in long_text
+
+            untitled_row = screen.query_one("#task-checkbox-2", TaskRow)
+            assert "(untitled)" in _row_text(untitled_row)
+
+            # A long backlog stays within the terminal width.
+            content = screen.query_one("#workflow-runner", VerticalScroll)
+            assert content.max_scroll_x == 0
+
+    asyncio.run(drive())
+
+
+def test_task_selector_rows_show_checked_unchecked_and_blocked_glyphs(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _backlog_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(TaskRow)) == 33,
+                description="backlog task rows",
+            )
+            await settle_tui(pilot)
+            screen = application.screen
+            selectable = screen.query_one("#task-checkbox-0", TaskRow)
+            blocked = screen.query_one("#task-checkbox-1", TaskRow)
+
+            assert _row_text(selectable).startswith("[ ]")
+            assert _row_text(blocked).startswith("[-]")
+
+            selectable.value = True
+            await settle_tui(pilot)
+            assert _row_text(selectable).startswith("[x]")
+
+            selectable.value = False
+            await settle_tui(pilot)
+            assert _row_text(selectable).startswith("[ ]")
+
+    asyncio.run(drive())
+
+
+def test_task_selector_separates_select_all_from_the_task_rows(tmp_path: Path) -> None:
+    controller, _, _ = _backlog_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(TaskRow)) == 33,
+                description="backlog task rows",
+            )
+            await settle_tui(pilot)
+            screen = application.screen
+            select_all = screen.query_one("#select-all-tasks", Checkbox)
+
+            # The select-all band sits outside the row list and is styled apart
+            # from it.
+            assert not isinstance(select_all, TaskRow)
+            assert select_all.has_class("task-select-all")
+            assert select_all not in list(
+                screen.query_one("#available-tasks", Vertical).children
+            )
+            assert select_all.styles.text_style.bold is True
+            assert select_all.styles.border_bottom[0] != ""
 
     asyncio.run(drive())
 
