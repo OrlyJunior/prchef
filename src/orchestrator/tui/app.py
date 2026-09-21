@@ -25,13 +25,13 @@ class OrchestratorApp(App[None]):
     TITLE = "Orchestrator"
     SUB_TITLE = "Interactive workflow control"
     CSS = """
-    #home, #workflow-runner, #execution-history, #execution-detail,
+    #home, #workflow-runner, #execution-history, #execution-detail, #batch-detail,
     #github-app-settings, #agent-instructions, #repository-settings {
         width: 100%;
         height: 1fr;
         padding: 1 2;
     }
-    #workflow-runner, #execution-history, #execution-detail,
+    #workflow-runner, #execution-history, #execution-detail, #batch-detail,
     #github-app-settings, #agent-instructions, #repository-settings {
         overflow-y: auto;
     }
@@ -59,6 +59,8 @@ class OrchestratorApp(App[None]):
     WorkflowRunnerScreen.-narrow .role-config-row { layout: vertical; }
     WorkflowRunnerScreen.-narrow .role-field { width: 100%; margin-right: 0; }
     #task-selector { height: auto; }
+    #available-tasks { height: auto; }
+    .task-row { height: auto; margin-top: 0; }
     .github-app-roles { width: 100%; }
     .github-app-role { width: 1fr; height: auto; margin-right: 1; }
     .screen-actions { margin-top: 1; height: auto; }

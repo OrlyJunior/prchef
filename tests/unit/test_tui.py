@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any
 import pytest
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import Button, Input, Select, Static, TextArea
+from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
 
 from orchestrator.config.project_config import (
     AgentPresetConfig,
@@ -24,14 +25,16 @@ from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
 from orchestrator.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
+from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.tui.app import OrchestratorApp
-from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
+from orchestrator.tui.bridge import WorkflowBatchLaunch, WorkflowController, WorkflowLaunch
 from orchestrator.tui.diagnostics import format_diagnostics_for_export
 from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
 from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
+from orchestrator.tui.screens.batch_detail import BatchDetailScreen
 from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
 from orchestrator.tui.screens.execution_history import (
     ExecutionHistoryScreen,
@@ -91,6 +94,7 @@ class _Repository:
         self.executions = [self.execution]
         self.diagnostics: list[ExecutionDiagnostic] = []
         self.cancellation_requests: list[str] = []
+        self.batch_rows: list[WorkflowBatch] = []
 
     def list_executions(self) -> list[WorkflowExecution]:
         return self.executions
@@ -117,6 +121,56 @@ class _Repository:
             return False
         self.cancellation_requests.append(execution_id)
         return True
+
+    def record_submission_repository(self, execution_id: str, repository: str) -> None:
+        del execution_id
+        self.execution.repository_ref = repository
+
+    def executions_for_tasks(
+        self, task_source: str, task_ids: list[str], repository: str
+    ) -> dict[str, WorkflowExecution]:
+        return {
+            execution.task_id: execution
+            for execution in self.executions
+            if execution.task_source == task_source
+            and execution.task_id in task_ids
+            and repository in {execution.repository, execution.repository_ref}
+        }
+
+    def create_batch(
+        self, repository: str, task_source: str, tasks: list[DevelopmentTask]
+    ) -> WorkflowBatch:
+        batch = WorkflowBatch(
+            id=f"batch-{len(self.batch_rows) + 1}",
+            repository=repository,
+            task_source=task_source,
+            items=tuple(
+                WorkflowBatchItem(position, task.id, task.title)
+                for position, task in enumerate(tasks)
+            ),
+        )
+        self.batch_rows.append(batch)
+        return batch
+
+    def record_batch_item_execution(
+        self, batch_id: str, position: int, execution_id: str
+    ) -> None:
+        batch = self.get_batch(batch_id)
+        items = tuple(
+            WorkflowBatchItem(item.position, item.task_id, item.task_title, execution_id)
+            if item.position == position
+            else item
+            for item in batch.items
+        )
+        self.batch_rows[self.batch_rows.index(batch)] = WorkflowBatch(
+            batch.id, batch.repository, batch.task_source, batch.created_at, items
+        )
+
+    def get_batch(self, batch_id: str) -> WorkflowBatch:
+        return next(batch for batch in self.batch_rows if batch.id == batch_id)
+
+    def list_batches(self) -> list[WorkflowBatch]:
+        return list(self.batch_rows)
 
 
 class _ConfigLoader:
@@ -324,6 +378,15 @@ class _Handle:
         return self._execution
 
 
+class _FailingHandle(_Handle):
+    def __init__(self, execution_id: str) -> None:
+        super().__init__(WorkflowExecution(id=execution_id))
+
+    def result(self, timeout: float | None = None) -> WorkflowExecution:
+        del timeout
+        raise RuntimeError("simulated task failure")
+
+
 class _WorkflowService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None, dict[AgentRole, str], dict[AgentRole, Any]]] = []
@@ -332,6 +395,8 @@ class _WorkflowService:
         self.continuation_error: Exception | None = None
         self.responses: list[tuple[str, str]] = []
         self.cancellations: list[str] = []
+        self.before_submit: Callable[[], None] | None = None
+        self.fail_tasks: set[str] = set()
 
     def submit_execution(
         self,
@@ -342,23 +407,36 @@ class _WorkflowService:
         agent_runtime_options: dict[AgentRole, Any],
         event_listener: Callable[..., None] | None,
     ) -> _Handle:
+        if self.before_submit is not None:
+            self.before_submit()
         self.calls.append((task_id, repository, agent_providers, agent_runtime_options))
+        execution_id = f"execution-{len(self.calls)}"
         if self.emit_terminal_event and event_listener is not None:
             event_listener(
                 WorkflowEvent(
-                    execution_id="execution-1",
+                    execution_id=execution_id,
                     kind=WorkflowEventKind.EXECUTION_CREATED,
                     status=WorkflowStatus.PENDING,
                 )
             )
             event_listener(
                 WorkflowEvent(
-                    execution_id="execution-1",
+                    execution_id=execution_id,
                     kind=WorkflowEventKind.WORKFLOW_FINISHED,
                     status=WorkflowStatus.APPROVED,
                 )
             )
-        return _Handle(WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED))
+        if task_id in self.fail_tasks:
+            return _FailingHandle(execution_id)
+        return _Handle(
+            WorkflowExecution(
+                id=execution_id,
+                task_id=task_id,
+                task_source="github",
+                repository_ref=repository or "",
+                status=WorkflowStatus.APPROVED,
+            )
+        )
 
     def run(
         self,
@@ -472,6 +550,186 @@ def test_controller_browses_selections_and_delegates_workflow_start(tmp_path: Pa
             {},
         )
     ]
+
+
+def test_controller_persists_and_runs_batch_in_order_with_shared_role_options(
+    tmp_path: Path,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    tasks = [
+        DevelopmentTask("12", "github", "First", "", "https://example/12"),
+        DevelopmentTask("7", "github", "Second", "", "https://example/7"),
+        DevelopmentTask("3", "github", "Third", "", "https://example/3"),
+    ]
+    provider = _TaskProvider()
+    provider.list_tasks = lambda limit=50: tasks  # type: ignore[method-assign]
+    controller._task_provider_factory = lambda source, repository: provider
+    service.fail_tasks.add("7")
+    service.before_submit = lambda: repository.batch_rows[0]
+    runtime = {AgentRole.IMPLEMENTER: {"model": "codex-batch"}}
+
+    batch = controller.start_batch(
+        WorkflowBatchLaunch(
+            repository="example",
+            task_provider="github",
+            task_ids=("12", "7", "3"),
+            agent_providers={
+                AgentRole.PLANNER: "planner",
+                AgentRole.IMPLEMENTER: "implementer",
+                AgentRole.REVIEWER: "reviewer",
+            },
+            agent_runtime_options=runtime,
+        )
+    )
+
+    assert batch is not None
+    assert [call[0] for call in service.calls] == ["12", "7", "3"]
+    assert all(call[3] == runtime for call in service.calls)
+    assert [item.task_id for item in batch.items] == ["12", "7", "3"]
+    assert all(item.execution_id is not None for item in batch.items)
+
+
+def test_controller_batch_empty_selection_is_a_no_op(tmp_path: Path) -> None:
+    controller, service, repository = _controller(tmp_path)
+
+    result = controller.start_batch(
+        WorkflowBatchLaunch(
+            repository="example",
+            task_provider="github",
+            task_ids=(),
+            agent_providers={},
+        )
+    )
+
+    assert result is None
+    assert service.calls == []
+    assert repository.batch_rows == []
+
+
+def test_controller_validates_shared_batch_launch_before_persisting(tmp_path: Path) -> None:
+    controller, service, repository = _controller(tmp_path)
+
+    with pytest.raises(RuntimeError, match="not configured"):
+        controller.start_batch(
+            WorkflowBatchLaunch(
+                repository="example",
+                task_provider="github",
+                task_ids=("12",),
+                agent_providers={AgentRole.PLANNER: "unknown-provider"},
+            )
+        )
+
+    assert service.calls == []
+    assert repository.batch_rows == []
+
+
+def test_controller_batch_cancellation_is_accepted_between_items(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    cancellation = threading.Event()
+    controller._batch_cancellations["batch-1"] = cancellation
+    controller._execution_batches[repository.execution.id] = "batch-1"
+
+    assert controller.cancel_workflow(repository.execution.id) is True
+    assert cancellation.is_set()
+    assert repository.cancellation_requests == []
+
+
+def test_controller_stopping_batch_cancels_current_and_skips_later_tasks(
+    tmp_path: Path,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    tasks = [
+        DevelopmentTask("12", "github", "First", "", "https://example/12"),
+        DevelopmentTask("7", "github", "Second", "", "https://example/7"),
+    ]
+    provider = _TaskProvider()
+    provider.list_tasks = lambda limit=50: tasks  # type: ignore[method-assign]
+    controller._task_provider_factory = lambda source, selected_repository: provider
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    class BlockingHandle:
+        execution_id = "execution-batch-current"
+
+        def result(self, timeout: float | None = None) -> WorkflowExecution:
+            entered.set()
+            assert release.wait(timeout=5), "batch cancellation did not release current task"
+            return WorkflowExecution(
+                id=self.execution_id, status=WorkflowStatus.CANCELLED
+            )
+
+    class BlockingService(_WorkflowService):
+        def submit_execution(self, task_id: str, repository: str | None = None, **kwargs: Any):
+            calls.append(task_id)
+            listener = kwargs.get("event_listener")
+            assert listener is not None
+            listener(
+                WorkflowEvent(
+                    execution_id=BlockingHandle.execution_id,
+                    kind=WorkflowEventKind.EXECUTION_CREATED,
+                    status=WorkflowStatus.PENDING,
+                )
+            )
+            return BlockingHandle()
+
+        def cancel_execution(self, execution_id: str) -> bool:
+            assert execution_id == BlockingHandle.execution_id
+            release.set()
+            return True
+
+    blocking_service = BlockingService()
+    controller._workflow_service_factory = lambda selected_provider: blocking_service
+    errors: list[BaseException] = []
+
+    def run_batch() -> None:
+        try:
+            controller.start_batch(
+                WorkflowBatchLaunch(
+                    repository="example",
+                    task_provider="github",
+                    task_ids=("12", "7"),
+                    agent_providers={
+                        AgentRole.PLANNER: "planner",
+                        AgentRole.IMPLEMENTER: "implementer",
+                        AgentRole.REVIEWER: "reviewer",
+                    },
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run_batch)
+    worker.start()
+    assert entered.wait(timeout=5), "batch did not start its first task"
+
+    assert controller.cancel_workflow(BlockingHandle.execution_id) is True
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert calls == ["12"]
+    assert repository.get_batch("batch-1").items[1].execution_id is None
+
+
+def test_controller_rejects_batch_task_with_an_existing_execution(tmp_path: Path) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.task_source = "github"
+    repository.execution.task_id = "12"
+    repository.execution.repository_ref = "example"
+
+    with pytest.raises(ValueError, match="already have executions"):
+        controller.start_batch(
+            WorkflowBatchLaunch(
+                repository="example",
+                task_provider="github",
+                task_ids=("12",),
+                agent_providers={},
+            )
+        )
+
+    assert service.calls == []
+    assert repository.batch_rows == []
 
 
 def test_controller_saves_renames_and_deletes_repository_configuration(
@@ -1503,7 +1761,7 @@ def test_workflow_runner_selects_role_local_presets_without_crud_controls(tmp_pa
             assert "Manual configuration; temporary this-run overrides" in str(
                 screen.query_one("#implementer-preset-source", Static).renderable
             )
-            screen.query_one("#available-tasks", Select).value = "12"
+            screen.query_one("#task-checkbox-0", Checkbox).value = True
             screen.query_one("#start-workflow", Button).press()
             await settle_tui(pilot)
             assert service.calls[-1][3][AgentRole.IMPLEMENTER] == {
@@ -1542,7 +1800,7 @@ def test_workflow_runner_preset_omitting_claude_effort_inherits_provider_default
             assert "Selected preset: edit" in str(
                 screen.query_one("#planner-preset-source", Static).renderable
             )
-            screen.query_one("#available-tasks", Select).value = "12"
+            screen.query_one("#task-checkbox-0", Checkbox).value = True
             screen.query_one("#start-workflow", Button).press()
             await settle_tui(pilot)
             assert service.calls[-1][3][AgentRole.PLANNER]["reasoning_effort"] == "medium"
@@ -2026,7 +2284,7 @@ def test_workflow_runner_expands_advanced_controls_and_preserves_overrides(
             assert screen.query_one("#planner-advanced").display is False
             assert screen.query_one("#planner-temperature", Input).value == "0.8"
 
-            screen.query_one("#available-tasks", Select).value = "12"
+            screen.query_one("#task-checkbox-0", Checkbox).value = True
             await settle_tui(pilot)
             screen.query_one("#start-workflow", Button).focus()
             await pilot.press("enter")
@@ -2087,8 +2345,8 @@ def test_workflow_runner_auto_loads_tasks_on_mount(tmp_path: Path) -> None:
             await settle_tui(pilot)
             screen = application.screen
             assert task_loads == [("example", "github")]
-            assert screen.query_one("#available-tasks", Select).value == Select.BLANK
-            assert "1 open github tasks available." in str(
+            assert screen.query_one("#task-selector", TaskSelector).selected_task_ids == ()
+            assert "Selected 0 of 1 available github tasks." in str(
                 screen.query_one("#task-hint").renderable
             )
             assert len(screen.query("#task-id")) == 0
@@ -2674,15 +2932,269 @@ def test_workflow_runner_submits_selected_task_id_in_workflow_launch(
             assert content.max_scroll_y > 0
 
             await settle_tui(pilot)
-            screen.query_one("#available-tasks", Select).value = "12"
+            screen.query_one("#task-checkbox-0", Checkbox).value = True
             await settle_tui(pilot)
             assert screen.query_one("#task-selector", TaskSelector).selected_task_id == "12"
             screen.query_one("#start-workflow", Button).focus()
             await settle_tui(pilot)
+            assert screen.query_one("#start-workflow", Button).has_focus
             assert content.scroll_y > 0
             await pilot.press("enter")
             await settle_tui(pilot)
             assert service.calls[0][0:2] == ("12", "example")
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_start_with_nothing_selected_submits_nothing(
+    tmp_path: Path,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            application.screen.query_one("#start-workflow", Button).press()
+            await settle_tui(pilot)
+
+    asyncio.run(drive())
+
+    assert service.calls == []
+    assert repository.batch_rows == []
+
+
+def test_workflow_runner_refresh_preserves_selection_for_same_task_source(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(".task-row")) == 1,
+                description="initial task list",
+            )
+            screen = application.screen
+            screen.query_one("#task-checkbox-0", Checkbox).value = True
+            await settle_tui(pilot)
+            screen.query_one("#refresh-tasks", Button).press()
+            await wait_for_tui(
+                pilot,
+                lambda: (
+                    len(screen.query(".task-row")) == 1
+                    and screen.query_one(
+                        "#task-selector", TaskSelector
+                    ).selected_task_ids
+                    == ("12",)
+                ),
+                description="refreshed task selection",
+            )
+            assert screen.query_one("#task-checkbox-0", Checkbox).value is True
+            assert str(screen.query_one("#start-workflow", Button).label) == (
+                "Start workflow (1)"
+            )
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_resume_does_not_reload_tasks_during_single_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(".task-row")) == 1,
+                description="initial task list",
+            )
+            screen = application.screen
+            loads: list[tuple[str, str]] = []
+            monkeypatch.setattr(
+                screen,
+                "_request_task_load",
+                lambda repository, provider: loads.append((repository, provider)),
+            )
+            screen.query_one("#start-workflow", Button).disabled = True
+
+            screen.on_screen_resume()
+            await settle_tui(pilot)
+
+            assert loads == []
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_keeps_tasks_when_execution_status_lookup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+
+    def fail_status_lookup(*args: Any, **kwargs: Any) -> dict[str, WorkflowExecution]:
+        raise RuntimeError("status database unavailable")
+
+    monkeypatch.setattr(controller, "task_execution_status", fail_status_lookup)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(".task-row")) == 1,
+                description="task list without execution statuses",
+            )
+            checkbox = application.screen.query_one("#task-checkbox-0", Checkbox)
+            assert checkbox.disabled is False
+            assert "12:" in str(checkbox.label)
+
+    asyncio.run(drive())
+
+
+def test_execution_history_reopens_persisted_batch_and_linked_execution(
+    tmp_path: Path,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.task_id = "12"
+    repository.execution.task_source = "github"
+    repository.execution.repository_ref = "example"
+    batch = repository.create_batch(
+        "example",
+        "github",
+        [DevelopmentTask("12", "github", "Persisted task", "", "https://example/12")],
+    )
+    repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionHistoryScreen())
+            await settle_tui(pilot)
+            history = application.screen
+            assert "1 persisted workflow batch(es)." in str(
+                history.query_one("#batch-history-summary", Static).renderable
+            )
+            history.query_one("#batch-picker", OrchestratorSelect).value = batch.id
+            history.query_one("#inspect-batch", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, BatchDetailScreen)
+
+            application.screen.query_one(
+                "#batch-item-picker", OrchestratorSelect
+            ).value = repository.execution.id
+            application.screen.query_one("#inspect-batch-item", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, ExecutionDetailScreen)
+
+    asyncio.run(drive())
+
+
+def test_execution_history_filter_does_not_reload_batches_or_execution_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    batch = repository.create_batch(
+        "example",
+        "github",
+        [DevelopmentTask("12", "github", "Persisted task", "", "https://example/12")],
+    )
+    repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
+    batch_loads = 0
+    original_list_batches = repository.list_batches
+
+    def list_batches() -> list[WorkflowBatch]:
+        nonlocal batch_loads
+        batch_loads += 1
+        return original_list_batches()
+
+    def fail_step_load(execution_id: str) -> list[Any]:
+        pytest.fail(f"history loaded steps for {execution_id}")
+
+    monkeypatch.setattr(repository, "list_batches", list_batches)
+    monkeypatch.setattr(repository, "list_steps", fail_step_load)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionHistoryScreen())
+            await settle_tui(pilot)
+            assert batch_loads == 1
+            application.screen.query_one("#history-filter", Input).value = "execution"
+            await settle_tui(pilot)
+            assert batch_loads == 1
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
+    tmp_path: Path,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.task_source = "github"
+    repository.execution.task_id = "7"
+    repository.execution.repository_ref = "example"
+    repository.execution.status = WorkflowStatus.RUNNING
+    tasks = [
+        DevelopmentTask(
+            "12", "github", "First", "", "https://example/12", metadata={"labels": ["bug"]}
+        ),
+        DevelopmentTask(
+            "7", "github", "Busy", "", "https://example/7", metadata={"labels": ["active"]}
+        ),
+        DevelopmentTask(
+            "3", "github", "Third", "", "https://example/3", metadata={"labels": []}
+        ),
+    ]
+    provider = _TaskProvider()
+    provider.list_tasks = lambda limit=50: tasks  # type: ignore[method-assign]
+    controller._task_provider_factory = lambda source, selected_repository: provider
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 20)) as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(".task-row")) == 3,
+                description="task checkboxes",
+            )
+            screen = application.screen
+            selector = screen.query_one("#task-selector", TaskSelector)
+            first = screen.query_one("#task-checkbox-0", Checkbox)
+            blocked = screen.query_one("#task-checkbox-1", Checkbox)
+            third = screen.query_one("#task-checkbox-2", Checkbox)
+            header = screen.query_one("#select-all-tasks", Checkbox)
+
+            assert "bug" in str(first.label)
+            assert blocked.disabled is True
+            assert "RUNNING" in str(blocked.label)
+            header.value = True
+            await settle_tui(pilot)
+            assert selector.selected_task_ids == ("12", "3")
+            assert first.value is True and third.value is True
+
+            first.value = False
+            await settle_tui(pilot)
+            assert selector.selected_task_ids == ("3",)
+            assert header.value is False
+
+            header.value = True
+            await settle_tui(pilot)
+            screen.query_one("#start-workflow", Button).press()
+            await wait_for_tui(
+                pilot,
+                lambda: len(service.calls) == 2,
+                description="ordered batch submissions",
+            )
+            assert [call[0] for call in service.calls] == ["12", "3"]
 
     asyncio.run(drive())
 
