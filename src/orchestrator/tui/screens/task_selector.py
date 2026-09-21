@@ -3,15 +3,201 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 
 from rich.text import Text
-from textual.app import ComposeResult
+from textual.app import ComposeResult, RenderResult
 from textual.containers import Vertical
+from textual.geometry import Size
 from textual.message import Message
 from textual.widgets import Button, Checkbox, Static
 
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.workflow_execution import WorkflowExecution
+
+# Checked/unchecked/blocked glyphs. ASCII keeps every column aligned on
+# terminals that render the Unicode ballot boxes as double-width cells.
+_CHECKED = "[x]"
+_UNCHECKED = "[ ]"
+_BLOCKED = "[-]"
+_CHECKBOX_WIDTH = 3
+_GAP = 1
+_MAX_NUMBER_WIDTH = 12
+_MAX_LABELS_WIDTH = 28
+_MAX_STATUS_WIDTH = 16
+_MIN_TITLE_WIDTH = 8
+_MIN_LABELS_WIDTH = 8
+
+
+@dataclass(frozen=True)
+class _ColumnMetrics:
+    """Widest content each optional column holds for the current task list."""
+
+    number: int = 0
+    labels: int = 0
+    status: int = 0
+
+
+@dataclass(frozen=True)
+class _ColumnWidths:
+    """Resolved cell widths for one row of the task table."""
+
+    number: int
+    title: int
+    labels: int
+    status: int
+
+
+def _resolve_columns(width: int, metrics: _ColumnMetrics) -> _ColumnWidths:
+    """Split the row width into aligned columns, favouring the title."""
+
+    available = width - _CHECKBOX_WIDTH - _GAP
+    if available < _MIN_TITLE_WIDTH:
+        return _ColumnWidths(number=0, title=max(available, 0), labels=0, status=0)
+
+    number = min(metrics.number, _MAX_NUMBER_WIDTH)
+    if number:
+        available -= number + _GAP
+
+    status = min(metrics.status, _MAX_STATUS_WIDTH)
+    if status and available - status - _GAP >= _MIN_TITLE_WIDTH:
+        available -= status + _GAP
+    else:
+        status = 0
+
+    # Labels never take more than a third of what is left, and the column is
+    # dropped entirely when the remainder is too narrow to be worth reading.
+    wanted = min(metrics.labels, _MAX_LABELS_WIDTH)
+    labels = min(wanted, max(available // 3, 0))
+    if (
+        labels >= min(wanted, _MIN_LABELS_WIDTH)
+        and available - labels - _GAP >= _MIN_TITLE_WIDTH
+    ):
+        available -= labels + _GAP
+    else:
+        labels = 0
+
+    return _ColumnWidths(number=number, title=max(available, 0), labels=labels, status=status)
+
+
+def _cell(text: Text, width: int) -> Text:
+    """Truncate with an ellipsis and pad so the next column stays aligned."""
+
+    cell = text.copy()
+    cell.truncate(width, overflow="ellipsis", pad=True)
+    return cell
+
+
+def _labels_of(task: DevelopmentTask) -> str:
+    labels = task.metadata.get("labels", [])
+    if not isinstance(labels, list):
+        labels = []
+    return ", ".join(str(label) for label in labels if str(label).strip())
+
+
+class _GlyphCheckbox(Checkbox):
+    """Checkbox that swaps the static ``X`` for a checked/unchecked glyph pair."""
+
+    BUTTON_LEFT = ""
+    BUTTON_INNER = _UNCHECKED
+    BUTTON_RIGHT = ""
+
+    @property
+    def _button(self) -> Text:
+        if self.disabled:
+            glyph = _BLOCKED
+        else:
+            glyph = _CHECKED if self.value else _UNCHECKED
+        return Text(glyph, style=self.get_component_rich_style("toggle--button"))
+
+
+class TaskRow(_GlyphCheckbox):
+    """One task rendered as an aligned checkbox/number/title/labels row."""
+
+    def __init__(
+        self,
+        label: Text,
+        *,
+        number: str,
+        title: str,
+        labels: str,
+        status: str,
+        metrics: _ColumnMetrics,
+        value: bool = False,
+        id: str | None = None,
+        disabled: bool = False,
+        classes: str | None = None,
+    ) -> None:
+        super().__init__(
+            label,
+            value=value,
+            id=id,
+            disabled=disabled,
+            classes=classes,
+            # Columns clip; the tooltip keeps the full text reachable.
+            tooltip=label.plain,
+        )
+        self._number = number
+        self._title = title
+        self._labels = labels
+        self._status = status
+        self._metrics = metrics
+
+    def render(self) -> RenderResult:
+        width = self.content_size.width or self.size.width
+        if width <= 0:
+            return super().render()
+        columns = _resolve_columns(width, self._metrics)
+        row = Text(no_wrap=True, overflow="ellipsis", end="")
+        row.append_text(self._button)
+        row.append(" ")
+        if columns.number:
+            row.append_text(_cell(Text(self._number, style="bold"), columns.number))
+            row.append(" ")
+        row.append_text(_cell(Text(self._title), columns.title))
+        if columns.labels:
+            row.append(" ")
+            row.append_text(_cell(Text(self._labels, style="italic"), columns.labels))
+        if columns.status:
+            row.append(" ")
+            row.append_text(_cell(Text(self._status), columns.status))
+        return row
+
+    def get_content_width(self, container: Size, viewport: Size) -> int:
+        return container.width
+
+    def on_resize(self) -> None:
+        self.refresh()
+
+
+class TaskTableHeader(Static):
+    """Column headings kept in step with the task rows underneath."""
+
+    def __init__(self, *, metrics: _ColumnMetrics, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self._metrics = metrics
+
+    def render(self) -> RenderResult:
+        width = self.content_size.width or self.size.width
+        if width <= 0:
+            return Text("")
+        columns = _resolve_columns(width, self._metrics)
+        row = Text(no_wrap=True, overflow="ellipsis", end="")
+        row.append(" " * (_CHECKBOX_WIDTH + _GAP))
+        if columns.number:
+            row.append_text(_cell(Text("Task"), columns.number))
+            row.append(" ")
+        row.append_text(_cell(Text("Title"), columns.title))
+        if columns.labels:
+            row.append(" ")
+            row.append_text(_cell(Text("Labels"), columns.labels))
+        if columns.status:
+            row.append(" ")
+            row.append_text(_cell(Text("Status"), columns.status))
+        return row
+
+    def on_resize(self) -> None:
+        self.refresh()
 
 
 class TaskSelector(Vertical):
@@ -54,9 +240,15 @@ class TaskSelector(Vertical):
     def compose(self) -> ComposeResult:
         yield Static("Tasks", classes="field-label")
         yield Button("Refresh tasks", id="refresh-tasks")
-        yield Checkbox("Select all available tasks", id="select-all-tasks", disabled=True)
-        # Keep the legacy id while replacing the single-value Select.
-        yield Vertical(id="available-tasks")
+        with Vertical(id="task-table"):
+            yield _GlyphCheckbox(
+                "Select all available tasks",
+                id="select-all-tasks",
+                disabled=True,
+                classes="task-select-all",
+            )
+            # Keep the legacy id while replacing the single-value Select.
+            yield Vertical(id="available-tasks")
         yield Static("Choose a provider and load tasks to browse it.", id="task-hint")
         yield Static("", id="task-error")
 
@@ -82,21 +274,29 @@ class TaskSelector(Vertical):
 
         task_list = self.query_one("#available-tasks", Vertical)
         task_list.remove_children()
-        rows: list[Checkbox] = []
+        metrics = self._column_metrics()
+        rows: list[Static] = []
+        if self._tasks:
+            rows.append(TaskTableHeader(metrics=metrics, id="task-table-header"))
         for position, task in enumerate(self._tasks):
             checkbox_id = f"task-checkbox-{position}"
             self._checkbox_tasks[checkbox_id] = task.id
             execution = self._executions.get(task.id)
-            labels = task.metadata.get("labels", [])
-            if not isinstance(labels, list):
-                labels = []
-            label_text = ", ".join(str(label) for label in labels if str(label).strip())
+            label_text = _labels_of(task)
+            title = task.title or "(untitled)"
             suffix = f" [{label_text}]" if label_text else ""
+            status = ""
             if execution is not None:
-                suffix += f" — {execution.status.value} (open in Execution history)"
+                status = execution.status.value
+                suffix += f" — {status} (open in Execution history)"
             rows.append(
-                Checkbox(
-                    Text(f"{task.id}: {task.title or '(untitled)'}{suffix}"),
+                TaskRow(
+                    Text(f"{task.id}: {title}{suffix}"),
+                    number=task.id,
+                    title=title,
+                    labels=label_text,
+                    status=status,
+                    metrics=metrics,
                     value=task.id in self._selected,
                     id=checkbox_id,
                     disabled=execution is not None,
@@ -116,6 +316,31 @@ class TaskSelector(Vertical):
                 f"No open {provider} tasks were returned."
             )
         self.post_message(self.SelectionChanged(self.selected_task_ids))
+
+    def _column_metrics(self) -> _ColumnMetrics:
+        """Measure the natural width of every column for the loaded tasks."""
+
+        number = max(
+            (len(task.id) for task in self._tasks),
+            default=0,
+        )
+        labels = max(
+            (len(_labels_of(task)) for task in self._tasks),
+            default=0,
+        )
+        status = max(
+            (
+                len(execution.status.value)
+                for task in self._tasks
+                if (execution := self._executions.get(task.id)) is not None
+            ),
+            default=0,
+        )
+        return _ColumnMetrics(
+            number=max(number, len("Task")),
+            labels=max(labels, len("Labels")) if labels else 0,
+            status=max(status, len("Status")) if status else 0,
+        )
 
     def clear_tasks(self) -> None:
         self._pending_selection = None
