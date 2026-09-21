@@ -34,6 +34,7 @@ class TaskSelector(Vertical):
         self._executions: dict[str, WorkflowExecution] = {}
         self._checkbox_tasks: dict[str, str] = {}
         self._selected: set[str] = set()
+        self._pending_selection: set[str] | None = None
         self._provider = ""
         self._updating = False
 
@@ -66,7 +67,12 @@ class TaskSelector(Vertical):
         provider: str,
         executions: Mapping[str, WorkflowExecution] | None = None,
     ) -> None:
-        previous = set(self._selected)
+        previous = (
+            set(self._pending_selection)
+            if self._pending_selection is not None
+            else set(self._selected)
+        )
+        self._pending_selection = None
         self._tasks = list(tasks)
         self._executions = dict(executions or {})
         self._provider = provider
@@ -109,8 +115,10 @@ class TaskSelector(Vertical):
             self.query_one("#task-hint", Static).update(
                 f"No open {provider} tasks were returned."
             )
+        self.post_message(self.SelectionChanged(self.selected_task_ids))
 
     def clear_tasks(self) -> None:
+        self._pending_selection = None
         self._tasks = []
         self._executions.clear()
         self._selected.clear()
@@ -126,10 +134,18 @@ class TaskSelector(Vertical):
         )
         self.post_message(self.SelectionChanged(()))
 
-    def set_tasks_loading(self, *, provider: str) -> None:
+    def set_tasks_loading(
+        self, *, provider: str, preserve_selection: bool = False
+    ) -> None:
         """Render an inline busy state while the runner fetches tasks."""
 
+        retained = (
+            set(self._pending_selection or self._selected)
+            if preserve_selection
+            else set()
+        )
         self.clear_tasks()
+        self._pending_selection = retained
         self.query_one("#refresh-tasks", Button).disabled = True
         self.query_one("#task-hint", Static).update(f"Loading available {provider} tasks...")
 

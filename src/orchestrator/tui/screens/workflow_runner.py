@@ -95,6 +95,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._runtime_defaults: dict[tuple[AgentRole, str], dict[str, Any]] = {}
         self._advanced_open: dict[AgentRole, bool] = {}
         self._task_load_token = 0
+        self._task_context: tuple[str, str] | None = None
         self._suppressed_task_provider_change: tuple[str, str] | None = None
         self._active_execution_id: str | None = None
         self._batch_tasks: tuple[DevelopmentTask, ...] = ()
@@ -306,7 +307,12 @@ class WorkflowRunnerScreen(Screen[None]):
         )
         repository = self._selected("#repository")
         provider = self._selected("#task-provider")
-        if repository is not None and provider is not None and not self._batch_running:
+        if (
+            repository is not None
+            and provider is not None
+            and not self._batch_running
+            and not self.query_one("#start-workflow", Button).disabled
+        ):
             self._request_task_load(repository, provider)
 
     def on_task_selector_selection_changed(
@@ -420,6 +426,8 @@ class WorkflowRunnerScreen(Screen[None]):
         except Exception as exc:
             self.notify(f"Could not resolve repository configuration: {exc}", severity="error")
             return
+        if self._task_context is not None and self._task_context[0] != repository:
+            self._task_context = None
         if not providers:
             self.query_one("#task-selector", TaskSelector).clear_tasks()
             return
@@ -1048,7 +1056,10 @@ class WorkflowRunnerScreen(Screen[None]):
     def _request_task_load(self, repository: str, provider: str) -> None:
         self._task_load_token += 1
         token = self._task_load_token
-        self.query_one("#task-selector", TaskSelector).set_tasks_loading(provider=provider)
+        self.query_one("#task-selector", TaskSelector).set_tasks_loading(
+            provider=provider,
+            preserve_selection=self._task_context == (repository, provider),
+        )
         self._load_tasks(repository, provider, token)
 
     @work(thread=True, exclusive=True)
@@ -1070,14 +1081,20 @@ class WorkflowRunnerScreen(Screen[None]):
                     else {}
                 )
             except Exception as exc:
-                self.query_one("#task-selector", TaskSelector).set_error(str(exc))
-                return
+                executions = {}
+                self.notify(
+                    f"Tasks loaded, but execution statuses are unavailable: {exc}",
+                    severity="warning",
+                )
             self.query_one("#task-selector", TaskSelector).set_tasks(
                 tasks, provider=provider, executions=executions
             )
+            if repository is not None:
+                self._task_context = (repository, provider)
 
     def _task_loading_failed(self, message: str, token: int) -> None:
         if token == self._task_load_token:
+            self._task_context = None
             self.query_one("#task-selector", TaskSelector).set_error(message)
 
     def _start_selected_workflow(self) -> None:
@@ -1511,7 +1528,11 @@ class WorkflowRunnerScreen(Screen[None]):
         stop.disabled = True
         stop.label = "Cancellation requested"
         progress = self.query_one("#workflow-progress", Static)
-        progress.update("Cancellation requested; stopping after the current operation...")
+        progress.update(
+            "Batch cancellation requested; no later tasks will start."
+            if self._batch_running
+            else "Cancellation requested; stopping after the current operation..."
+        )
         progress.add_class("cancelled")
         try:
             accepted = self.controller.cancel_workflow(self._active_execution_id)
@@ -1553,6 +1574,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.query_one("#workflow-progress", Static).update(f"Could not start workflow: {message}")
         self.notify(f"Could not start workflow: {message}", severity="error")
+        self._refresh_task_statuses()
 
     def _selected(self, selector: str) -> str | None:
         value = self.query_one(selector, OrchestratorSelect).value

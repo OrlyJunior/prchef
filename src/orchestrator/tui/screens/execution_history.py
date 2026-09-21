@@ -82,7 +82,7 @@ class ExecutionHistoryScreen(Screen[None]):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "history-filter":
-            self.refresh_history(event.value)
+            self._refresh_executions(event.value)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "refresh-history":
@@ -96,20 +96,29 @@ class ExecutionHistoryScreen(Screen[None]):
         self.refresh_history()
 
     def refresh_history(self, query: str | None = None) -> None:
-        filter_value = self.query_one("#history-filter", Input).value if query is None else query
+        filter_value = (
+            self.query_one("#history-filter", Input).value if query is None else query
+        )
         try:
-            executions = self.controller.executions(filter_value)
+            all_executions = self.controller.executions()
+            executions = (
+                all_executions
+                if not filter_value.strip()
+                else self.controller.executions(filter_value)
+            )
             batches = self.controller.batches()
         except Exception as exc:
             self.query_one("#history-summary", Static).update(
                 f"Could not load execution history: {exc}"
             )
             return
+        executions_by_id = {execution.id: execution for execution in all_executions}
         self.query_one("#batch-picker", OrchestratorSelect).set_options(
             [
                 (
                     f"{batch.created_at.isoformat()} | {batch.repository} | "
-                    f"{len(batch.items)} task(s) | {self._batch_statuses(batch)}",
+                    f"{len(batch.items)} task(s) | "
+                    f"{self._batch_statuses(batch, executions_by_id)}",
                     batch.id,
                 )
                 for batch in batches
@@ -120,18 +129,35 @@ class ExecutionHistoryScreen(Screen[None]):
         )
         self._set_executions(executions)
 
-    def _batch_statuses(self, batch: WorkflowBatch) -> str:
+    def _refresh_executions(self, query: str) -> None:
+        """Filter executions without reloading every persisted batch."""
+
+        try:
+            executions = self.controller.executions(query)
+        except Exception as exc:
+            self.query_one("#history-summary", Static).update(
+                f"Could not load execution history: {exc}"
+            )
+            return
+        self._set_executions(executions)
+
+    def _batch_statuses(
+        self,
+        batch: WorkflowBatch,
+        executions_by_id: dict[str, WorkflowExecution],
+    ) -> str:
         statuses: list[str] = []
         for item in batch.items:
             execution_id = item.execution_id
             if not execution_id:
                 statuses.append("NOT STARTED")
                 continue
-            try:
-                execution, _ = self.controller.execution_detail(execution_id)
-                statuses.append(execution_status_label(execution))
-            except Exception:
-                statuses.append("UNAVAILABLE")
+            execution = executions_by_id.get(execution_id)
+            statuses.append(
+                execution_status_label(execution)
+                if execution is not None
+                else "UNAVAILABLE"
+            )
         return ", ".join(statuses) if statuses else "empty"
 
     def _set_executions(self, executions: list[WorkflowExecution]) -> None:

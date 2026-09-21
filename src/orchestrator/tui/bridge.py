@@ -471,6 +471,18 @@ class WorkflowController:
         if launch.task_provider not in self.task_providers(launch.repository):
             raise ValueError(f"Unsupported task provider: {launch.task_provider}")
 
+        # Validate the shared role/provider/runtime selections before the
+        # durable batch row is created. Individual submissions validate again
+        # through their normal path, but a shared configuration error should
+        # fail once rather than leave a batch with every item unstarted.
+        self.project_config(launch.repository).with_agent_runtime_overrides(
+            {role.value: provider for role, provider in launch.agent_providers.items()},
+            {
+                role.value: options
+                for role, options in launch.agent_runtime_options.items()
+            },
+        )
+
         tasks_by_id = {
             task.id: task
             for task in self.list_tasks(
@@ -591,15 +603,20 @@ class WorkflowController:
         Falling back to the repository keeps a request durable when the TUI was
         restarted while an execution is still marked running.
         """
+        batch_cancellation_requested = False
         batch_id = self._execution_batches.get(execution_id)
         if batch_id is not None:
             cancellation = self._batch_cancellations.get(batch_id)
             if cancellation is not None:
                 cancellation.set()
+                batch_cancellation_requested = True
         service = self._active_services.get(execution_id)
         if service is not None:
-            return service.cancel_execution(execution_id)
-        return self._repository.request_cancellation(execution_id)
+            return service.cancel_execution(execution_id) or batch_cancellation_requested
+        return (
+            self._repository.request_cancellation(execution_id)
+            or batch_cancellation_requested
+        )
 
     def executions(self, query: str = "") -> list[WorkflowExecution]:
         normalized = query.strip().casefold()

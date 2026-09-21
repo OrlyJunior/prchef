@@ -606,6 +606,34 @@ def test_controller_batch_empty_selection_is_a_no_op(tmp_path: Path) -> None:
     assert repository.batch_rows == []
 
 
+def test_controller_validates_shared_batch_launch_before_persisting(tmp_path: Path) -> None:
+    controller, service, repository = _controller(tmp_path)
+
+    with pytest.raises(RuntimeError, match="not configured"):
+        controller.start_batch(
+            WorkflowBatchLaunch(
+                repository="example",
+                task_provider="github",
+                task_ids=("12",),
+                agent_providers={AgentRole.PLANNER: "unknown-provider"},
+            )
+        )
+
+    assert service.calls == []
+    assert repository.batch_rows == []
+
+
+def test_controller_batch_cancellation_is_accepted_between_items(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    cancellation = threading.Event()
+    controller._batch_cancellations["batch-1"] = cancellation
+    controller._execution_batches[repository.execution.id] = "batch-1"
+
+    assert controller.cancel_workflow(repository.execution.id) is True
+    assert cancellation.is_set()
+    assert repository.cancellation_requests == []
+
+
 def test_controller_stopping_batch_cancels_current_and_skips_later_tasks(
     tmp_path: Path,
 ) -> None:
@@ -2910,6 +2938,7 @@ def test_workflow_runner_submits_selected_task_id_in_workflow_launch(
             screen.query_one("#start-workflow", Button).focus()
             await settle_tui(pilot)
             assert screen.query_one("#start-workflow", Button).has_focus
+            assert content.scroll_y > 0
             await pilot.press("enter")
             await settle_tui(pilot)
             assert service.calls[0][0:2] == ("12", "example")
@@ -2934,6 +2963,100 @@ def test_workflow_runner_start_with_nothing_selected_submits_nothing(
 
     assert service.calls == []
     assert repository.batch_rows == []
+
+
+def test_workflow_runner_refresh_preserves_selection_for_same_task_source(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(".task-row")) == 1,
+                description="initial task list",
+            )
+            screen = application.screen
+            screen.query_one("#task-checkbox-0", Checkbox).value = True
+            await settle_tui(pilot)
+            screen.query_one("#refresh-tasks", Button).press()
+            await wait_for_tui(
+                pilot,
+                lambda: (
+                    len(screen.query(".task-row")) == 1
+                    and screen.query_one(
+                        "#task-selector", TaskSelector
+                    ).selected_task_ids
+                    == ("12",)
+                ),
+                description="refreshed task selection",
+            )
+            assert screen.query_one("#task-checkbox-0", Checkbox).value is True
+            assert str(screen.query_one("#start-workflow", Button).label) == (
+                "Start workflow (1)"
+            )
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_resume_does_not_reload_tasks_during_single_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(".task-row")) == 1,
+                description="initial task list",
+            )
+            screen = application.screen
+            loads: list[tuple[str, str]] = []
+            monkeypatch.setattr(
+                screen,
+                "_request_task_load",
+                lambda repository, provider: loads.append((repository, provider)),
+            )
+            screen.query_one("#start-workflow", Button).disabled = True
+
+            screen.on_screen_resume()
+            await settle_tui(pilot)
+
+            assert loads == []
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_keeps_tasks_when_execution_status_lookup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+
+    def fail_status_lookup(*args: Any, **kwargs: Any) -> dict[str, WorkflowExecution]:
+        raise RuntimeError("status database unavailable")
+
+    monkeypatch.setattr(controller, "task_execution_status", fail_status_lookup)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(".task-row")) == 1,
+                description="task list without execution statuses",
+            )
+            checkbox = application.screen.query_one("#task-checkbox-0", Checkbox)
+            assert checkbox.disabled is False
+            assert "12:" in str(checkbox.label)
+
+    asyncio.run(drive())
 
 
 def test_execution_history_reopens_persisted_batch_and_linked_execution(
@@ -2970,6 +3093,43 @@ def test_execution_history_reopens_persisted_batch_and_linked_execution(
             application.screen.query_one("#inspect-batch-item", Button).press()
             await settle_tui(pilot)
             assert isinstance(application.screen, ExecutionDetailScreen)
+
+    asyncio.run(drive())
+
+
+def test_execution_history_filter_does_not_reload_batches_or_execution_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    batch = repository.create_batch(
+        "example",
+        "github",
+        [DevelopmentTask("12", "github", "Persisted task", "", "https://example/12")],
+    )
+    repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
+    batch_loads = 0
+    original_list_batches = repository.list_batches
+
+    def list_batches() -> list[WorkflowBatch]:
+        nonlocal batch_loads
+        batch_loads += 1
+        return original_list_batches()
+
+    def fail_step_load(execution_id: str) -> list[Any]:
+        pytest.fail(f"history loaded steps for {execution_id}")
+
+    monkeypatch.setattr(repository, "list_batches", list_batches)
+    monkeypatch.setattr(repository, "list_steps", fail_step_load)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionHistoryScreen())
+            await settle_tui(pilot)
+            assert batch_loads == 1
+            application.screen.query_one("#history-filter", Input).value = "execution"
+            await settle_tui(pilot)
+            assert batch_loads == 1
 
     asyncio.run(drive())
 
