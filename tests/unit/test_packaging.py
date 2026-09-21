@@ -26,7 +26,7 @@ def test_packaging_keeps_migrations_inside_the_orchestrator_package() -> None:
     assert (package_root / "migrations" / "__init__.py").is_file()
     assert (package_root / "migrations" / "env.py").is_file()
     assert (
-        package_root / "migrations" / "versions" / "0008_add_workflow_cancellation.py"
+        package_root / "migrations" / "versions" / "0009_add_workflow_batches.py"
     ).is_file()
 
 

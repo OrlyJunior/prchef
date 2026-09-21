@@ -16,6 +16,7 @@ from orchestrator.config.project_config import AgentPresetConfig
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from orchestrator.models.workflow_batch import WorkflowBatch
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
@@ -24,7 +25,7 @@ from orchestrator.models.workflow_status import (
     WorkflowStatus,
 )
 from orchestrator.runtime_logging import redact_payload, redact_text
-from orchestrator.tui.bridge import WorkflowController, WorkflowLaunch
+from orchestrator.tui.bridge import WorkflowBatchLaunch, WorkflowController, WorkflowLaunch
 from orchestrator.tui.diagnostics import format_diagnostics_for_export
 from orchestrator.tui.screens.task_selector import TaskSelector
 from orchestrator.tui.widgets import (
@@ -96,6 +97,9 @@ class WorkflowRunnerScreen(Screen[None]):
         self._task_load_token = 0
         self._suppressed_task_provider_change: tuple[str, str] | None = None
         self._active_execution_id: str | None = None
+        self._batch_tasks: tuple[DevelopmentTask, ...] = ()
+        self._batch_task_index = -1
+        self._batch_running = False
 
     def compose(self) -> ComposeResult:
         # One scroll context keeps a keyboard-focused control visible on small terminals.
@@ -299,6 +303,18 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#repository", RepositorySelect).set_repositories(
             repositories,
             selected_repository=self.controller.selected_repository,
+        )
+        repository = self._selected("#repository")
+        provider = self._selected("#task-provider")
+        if repository is not None and provider is not None and not self._batch_running:
+            self._request_task_load(repository, provider)
+
+    def on_task_selector_selection_changed(
+        self, event: TaskSelector.SelectionChanged
+    ) -> None:
+        count = len(event.task_ids)
+        self.query_one("#start-workflow", Button).label = (
+            f"Start workflow ({count})" if count else "Start workflow"
         )
 
     def _set_layout_mode(self, width: int) -> None:
@@ -1046,7 +1062,19 @@ class WorkflowRunnerScreen(Screen[None]):
 
     def _set_available_tasks(self, tasks: list[DevelopmentTask], provider: str, token: int) -> None:
         if token == self._task_load_token:
-            self.query_one("#task-selector", TaskSelector).set_tasks(tasks, provider=provider)
+            repository = self._selected("#repository")
+            try:
+                executions = (
+                    self.controller.task_execution_status(repository, provider, tasks)
+                    if repository is not None
+                    else {}
+                )
+            except Exception as exc:
+                self.query_one("#task-selector", TaskSelector).set_error(str(exc))
+                return
+            self.query_one("#task-selector", TaskSelector).set_tasks(
+                tasks, provider=provider, executions=executions
+            )
 
     def _task_loading_failed(self, message: str, token: int) -> None:
         if token == self._task_load_token:
@@ -1055,30 +1083,29 @@ class WorkflowRunnerScreen(Screen[None]):
     def _start_selected_workflow(self) -> None:
         repository = self._selected("#repository")
         task_provider = self._selected("#task-provider")
-        task_id = self.query_one("#task-selector", TaskSelector).selected_task_id
+        task_selector = self.query_one("#task-selector", TaskSelector)
+        task_ids = task_selector.selected_task_ids
         provider_selections = {
             role: self._selected(f"#{prefix}-provider") for role, prefix in self._role_fields()
         }
-        if repository is None or task_provider is None or task_id is None:
+        if repository is None or task_provider is None:
             self.notify(
-                "Select a repository, provider, and task before starting.", severity="warning"
+                "Select a repository and provider before starting.", severity="warning"
             )
+            return
+        if not task_ids:
+            self.notify("Select at least one task to start.", severity="warning")
             return
         if any(value is None for value in provider_selections.values()):
             self.notify("Select an agent provider for every workflow role.", severity="warning")
             return
-        launch = WorkflowLaunch(
-            repository=repository,
-            task_provider=task_provider,
-            task_id=task_id,
-            agent_providers={
-                role: value for role, value in provider_selections.items() if value is not None
-            },
-            agent_runtime_options={
-                role: self._runtime_options_for_role(role, prefix)
-                for role, prefix in self._role_fields()
-            },
-        )
+        agent_providers = {
+            role: value for role, value in provider_selections.items() if value is not None
+        }
+        runtime_options = {
+            role: self._runtime_options_for_role(role, prefix)
+            for role, prefix in self._role_fields()
+        }
         self.query_one("#start-workflow", Button).disabled = True
         self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.query_one("#workflow-progress", Static).update("Starting workflow…")
@@ -1092,7 +1119,33 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#workflow-events", Static).update("")
         self.query_one("#workflow-raw-events", Static).update("")
         self._hide_human_panel()
-        self._run_workflow(launch)
+        if len(task_ids) == 1:
+            self._batch_running = False
+            self._batch_tasks = ()
+            launch = WorkflowLaunch(
+                repository=repository,
+                task_provider=task_provider,
+                task_id=task_ids[0],
+                agent_providers=agent_providers,
+                agent_runtime_options=runtime_options,
+            )
+            self._run_workflow(launch)
+            return
+        self._batch_running = True
+        self._batch_tasks = task_selector.selected_tasks
+        self._batch_task_index = -1
+        self.query_one("#workflow-progress", Static).update(
+            f"Starting batch of {len(task_ids)} tasks…"
+        )
+        self._run_batch(
+            WorkflowBatchLaunch(
+                repository=repository,
+                task_provider=task_provider,
+                task_ids=task_ids,
+                agent_providers=agent_providers,
+                agent_runtime_options=runtime_options,
+            )
+        )
 
     @work(thread=True, exclusive=True)
     def _run_workflow(self, launch: WorkflowLaunch) -> None:
@@ -1105,12 +1158,33 @@ class WorkflowRunnerScreen(Screen[None]):
             return
         self.app.call_from_thread(self._workflow_finished, execution)
 
+    @work(thread=True, exclusive=True)
+    def _run_batch(self, launch: WorkflowBatchLaunch) -> None:
+        try:
+            batch = self.controller.start_batch(
+                launch, event_listener=self._on_workflow_event
+            )
+        except Exception as exc:
+            self.app.call_from_thread(self._workflow_failed, str(exc))
+            return
+        self.app.call_from_thread(self._batch_finished, batch)
+
     def _on_workflow_event(self, event: WorkflowEvent) -> None:
         self.app.call_from_thread(self._render_workflow_event, event)
 
     def _render_workflow_event(self, event: WorkflowEvent) -> None:
         if event.kind is WorkflowEventKind.EXECUTION_CREATED:
             self._active_execution_id = event.execution_id
+            if self._batch_running:
+                batch_position = (event.payload or {}).get("batch_position")
+                self._batch_task_index = (
+                    batch_position
+                    if isinstance(batch_position, int)
+                    else self._batch_task_index + 1
+                )
+                self._event_lines.clear()
+                self._active_timeline_stages.clear()
+                self._stage_attempts.clear()
         elif self._active_execution_id is None:
             self._active_execution_id = event.execution_id
         if (
@@ -1132,6 +1206,7 @@ class WorkflowRunnerScreen(Screen[None]):
         if (
             event.kind is WorkflowEventKind.WORKFLOW_FINISHED
             and event.execution_id == self._active_execution_id
+            and not self._batch_running
         ):
             self._reset_active_workflow_controls()
         self._append_raw_event(event)
@@ -1139,6 +1214,12 @@ class WorkflowRunnerScreen(Screen[None]):
         message = self._timeline_message(event)
         if message is None:
             return
+        if self._batch_running and 0 <= self._batch_task_index < len(self._batch_tasks):
+            task = self._batch_tasks[self._batch_task_index]
+            message = (
+                f"Task {self._batch_task_index + 1} of {len(self._batch_tasks)}: "
+                f"{task.title or task.id} — {message}"
+            )
         self.query_one("#workflow-progress", Static).update(message)
 
         if event.kind == WorkflowEventKind.STAGE_STARTED and event.stage is not None:
@@ -1370,6 +1451,27 @@ class WorkflowRunnerScreen(Screen[None]):
             self._show_human_panel(execution)
         else:
             self._hide_human_panel()
+        self._refresh_task_statuses()
+
+    def _batch_finished(self, batch: WorkflowBatch | None) -> None:
+        task_count = len(self._batch_tasks)
+        linked_count = sum(item.execution_id is not None for item in batch.items) if batch else 0
+        self._batch_running = False
+        self._batch_tasks = ()
+        self._batch_task_index = -1
+        self._reset_active_workflow_controls()
+        self.query_one("#workflow-progress", Static).update(
+            f"Batch finished: {linked_count} of {task_count} task(s) submitted."
+        )
+        self.query_one("#workflow-stop-actions", Horizontal).display = False
+        self.notify("Batch finished. Open Execution history to inspect each task.")
+        self._refresh_task_statuses()
+
+    def _refresh_task_statuses(self) -> None:
+        repository = self._selected("#repository")
+        provider = self._selected("#task-provider")
+        if repository is not None and provider is not None:
+            self._request_task_load(repository, provider)
 
     def _show_human_panel(self, execution: WorkflowExecution) -> None:
         interaction = next(
@@ -1445,6 +1547,8 @@ class WorkflowRunnerScreen(Screen[None]):
         self.app.call_from_thread(self._workflow_finished, execution)
 
     def _workflow_failed(self, message: str) -> None:
+        self._batch_running = False
+        self._batch_tasks = ()
         self.query_one("#start-workflow", Button).disabled = False
         self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.query_one("#workflow-progress", Static).update(f"Could not start workflow: {message}")

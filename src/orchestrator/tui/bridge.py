@@ -23,6 +23,7 @@ from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
 from orchestrator.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
+from orchestrator.models.workflow_batch import WorkflowBatch
 from orchestrator.models.workflow_event import (
     WorkflowEvent,
     WorkflowEventKind,
@@ -61,12 +62,23 @@ class WorkflowLaunch:
     agent_runtime_options: Mapping[AgentRole, Mapping[str, Any]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class WorkflowBatchLaunch:
+    """One set of role selections applied to an ordered group of tasks."""
+
+    repository: str
+    task_provider: str
+    task_ids: tuple[str, ...]
+    agent_providers: Mapping[AgentRole, str]
+    agent_runtime_options: Mapping[AgentRole, Mapping[str, Any]] = field(default_factory=dict)
+
+
 class WorkflowController:
     """Expose existing orchestration services in forms useful to terminal views.
 
-    The controller has no workflow transitions or persistence logic. It only
-    collects selections, creates the already-existing ``WorkflowService``, and
-    reads persisted executions for inspection.
+    The controller owns launch orchestration (including ordered batches), but
+    no workflow-stage transitions. It delegates durable records to the
+    repository and every execution to the existing ``WorkflowService`` seam.
     """
 
     def __init__(
@@ -95,6 +107,8 @@ class WorkflowController:
         self._repository_index_clients = repository_index_clients
         self._selected_repository: str | None = None
         self._active_services: dict[str, WorkflowService] = {}
+        self._batch_cancellations: dict[str, threading.Event] = {}
+        self._execution_batches: dict[str, str] = {}
         self._index_operations: set[str] = set()
         self._index_operation_lock = threading.RLock()
 
@@ -413,13 +427,17 @@ class WorkflowController:
             logger.debug("[config] TUI agent resolution: %s", "; ".join(resolutions))
         provider = self._task_provider_factory(launch.task_provider, launch.repository)
         service = self._create_service(provider)
-        return service.submit_execution(
+        handle = service.submit_execution(
             task_id,
             launch.repository,
             agent_providers=launch.agent_providers,
             agent_runtime_options=launch.agent_runtime_options,
             event_listener=self._tracking_listener(service, event_listener),
         )
+        record_repository = getattr(self._repository, "record_submission_repository", None)
+        if callable(record_repository):
+            record_repository(handle.execution_id, launch.repository)
+        return handle
 
     def start_workflow(
         self,
@@ -430,6 +448,113 @@ class WorkflowController:
         """Submit a launch and wait for it, preserving the blocking TUI worker."""
 
         return self.submit_workflow(launch, event_listener=event_listener).result()
+
+    def start_batch(
+        self,
+        launch: WorkflowBatchLaunch,
+        *,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> WorkflowBatch | None:
+        """Persist and sequentially run an ordered batch through ``submit_workflow``.
+
+        Submission/result failures are isolated to their item. Cancelling the
+        current execution marks the batch so no later items are submitted.
+        """
+
+        task_ids = tuple(
+            dict.fromkeys(
+                task_id.strip() for task_id in launch.task_ids if task_id.strip()
+            )
+        )
+        if not task_ids:
+            return None
+        if launch.task_provider not in self.task_providers(launch.repository):
+            raise ValueError(f"Unsupported task provider: {launch.task_provider}")
+
+        tasks_by_id = {
+            task.id: task
+            for task in self.list_tasks(
+                repository=launch.repository,
+                task_provider=launch.task_provider,
+            )
+        }
+        missing = [task_id for task_id in task_ids if task_id not in tasks_by_id]
+        if missing:
+            raise ValueError(f"Selected tasks are no longer open: {', '.join(missing)}")
+        existing = self._repository.executions_for_tasks(
+            launch.task_provider, list(task_ids), launch.repository
+        )
+        if existing:
+            raise ValueError(
+                "Tasks already have executions: " + ", ".join(existing)
+            )
+
+        ordered_tasks = [tasks_by_id[task_id] for task_id in task_ids]
+        batch = self._repository.create_batch(
+            launch.repository, launch.task_provider, ordered_tasks
+        )
+        cancellation = threading.Event()
+        self._batch_cancellations[batch.id] = cancellation
+        try:
+            for position, task in enumerate(ordered_tasks):
+                if cancellation.is_set():
+                    break
+                # Close the list/start race as far as the repository boundary
+                # permits. A task that gained an execution is skipped.
+                if self._repository.executions_for_tasks(
+                    launch.task_provider, [task.id], launch.repository
+                ):
+                    continue
+                item_launch = WorkflowLaunch(
+                    repository=launch.repository,
+                    task_provider=launch.task_provider,
+                    task_id=task.id,
+                    agent_providers=launch.agent_providers,
+                    agent_runtime_options=launch.agent_runtime_options,
+                )
+
+                def observe_item(event: WorkflowEvent, *, item_position: int = position) -> None:
+                    if event.kind is WorkflowEventKind.EXECUTION_CREATED:
+                        self._repository.record_batch_item_execution(
+                            batch.id, item_position, event.execution_id
+                        )
+                        self._execution_batches[event.execution_id] = batch.id
+                    if event_listener is not None:
+                        payload = dict(event.payload or {})
+                        payload.update(
+                            {
+                                "batch_id": batch.id,
+                                "batch_position": item_position,
+                                "batch_size": len(ordered_tasks),
+                            }
+                        )
+                        event_listener(replace(event, payload=payload))
+
+                try:
+                    handle = self.submit_workflow(
+                        item_launch, event_listener=observe_item
+                    )
+                    # Test doubles and legacy-compatible services may not emit
+                    # EXECUTION_CREATED, while the handle still exposes the
+                    # synchronously persisted execution identity.
+                    self._repository.record_batch_item_execution(
+                        batch.id, position, handle.execution_id
+                    )
+                    self._execution_batches[handle.execution_id] = batch.id
+                    handle.result()
+                except Exception:
+                    logger.exception(
+                        "Batch %s task %s failed; continuing with the next task",
+                        batch.id,
+                        task.id,
+                    )
+                    continue
+            return self._repository.get_batch(batch.id)
+        finally:
+            self._batch_cancellations.pop(batch.id, None)
+            for execution_id, owning_batch in list(self._execution_batches.items()):
+                if owning_batch == batch.id:
+                    self._execution_batches.pop(execution_id, None)
 
     def _create_service(self, provider: TaskProvider) -> WorkflowService:
         if self._workflow_service_factory is not None:
@@ -466,6 +591,11 @@ class WorkflowController:
         Falling back to the repository keeps a request durable when the TUI was
         restarted while an execution is still marked running.
         """
+        batch_id = self._execution_batches.get(execution_id)
+        if batch_id is not None:
+            cancellation = self._batch_cancellations.get(batch_id)
+            if cancellation is not None:
+                cancellation.set()
         service = self._active_services.get(execution_id)
         if service is not None:
             return service.cancel_execution(execution_id)
@@ -492,6 +622,22 @@ class WorkflowController:
                 ]
             ).casefold()
         ]
+
+    def task_execution_status(
+        self,
+        repository: str,
+        task_provider: str,
+        tasks: list[DevelopmentTask],
+    ) -> dict[str, WorkflowExecution]:
+        return self._repository.executions_for_tasks(
+            task_provider, [task.id for task in tasks], repository
+        )
+
+    def batches(self) -> list[WorkflowBatch]:
+        return list(reversed(self._repository.list_batches()))
+
+    def batch_detail(self, batch_id: str) -> WorkflowBatch:
+        return self._repository.get_batch(batch_id)
 
     def execution_detail(self, execution_id: str) -> tuple[WorkflowExecution, list[WorkflowStep]]:
         return (

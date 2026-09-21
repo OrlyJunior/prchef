@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from orchestrator.config.database import build_engine, build_session_factory
 from orchestrator.models import (
@@ -320,3 +320,78 @@ def test_queue_execution_returns_a_resumed_execution_to_pending(tmp_path: Path) 
     # A queued resume is cancellable again before it consumes any capacity.
     assert persisted.cancellation_requested_at is None
     assert repository.request_cancellation(execution.id) is True
+
+
+def test_workflow_batches_round_trip_order_links_and_restart(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'batches.db').as_posix()}"
+    project_root = Path(__file__).resolve().parents[2]
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    tasks = [
+        DevelopmentTask("12", "github", "First task", "", "https://example/12"),
+        DevelopmentTask("7", "github", "Second task", "", "https://example/7"),
+    ]
+
+    batch = repository.create_batch("example", "github", tasks)
+    execution = repository.create_execution("12", "github")
+    repository.record_submission_repository(execution.id, "example")
+    repository.record_batch_item_execution(batch.id, 0, execution.id)
+
+    restarted = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    persisted = restarted.get_batch(batch.id)
+
+    assert [item.task_id for item in persisted.items] == ["12", "7"]
+    assert [item.task_title for item in persisted.items] == ["First task", "Second task"]
+    assert persisted.items[0].execution_id == execution.id
+    assert persisted.items[1].execution_id is None
+    assert [stored.id for stored in restarted.list_batches()] == [batch.id]
+
+    restarted.delete_batch(batch.id)
+    assert restarted.list_batches() == []
+    assert restarted.get_execution(execution.id).id == execution.id
+    engine = build_engine(database_url)
+    with engine.connect() as connection:
+        count = connection.execute(text("SELECT COUNT(*) FROM workflow_batch_items")).scalar_one()
+    engine.dispose()
+    assert count == 0
+
+
+def test_executions_for_tasks_returns_latest_in_the_selected_repository(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "task-lookups.db")
+    older = repository.create_execution("12", "github")
+    repository.record_submission_repository(older.id, "example")
+    newer = repository.create_execution("12", "github")
+    repository.record_submission_repository(newer.id, "example")
+    other_repository = repository.create_execution("12", "github")
+    repository.record_submission_repository(other_repository.id, "other")
+
+    matches = repository.executions_for_tasks("github", ["12"], "example")
+
+    assert matches["12"].id == newer.id
+
+
+def test_workflow_batch_migration_downgrades_to_0008(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'batch-downgrade.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0008")
+
+    engine = build_engine(database_url)
+    tables = inspect(engine).get_table_names()
+    engine.dispose()
+
+    assert "workflow_batches" not in tables
+    assert "workflow_batch_items" not in tables
+    assert "workflow_executions" in tables
