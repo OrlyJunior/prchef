@@ -52,7 +52,12 @@ from orchestrator.tui.screens.task_selector import (
     TaskTableHeader,
 )
 from orchestrator.tui.screens.workflow_runner import StopWorkflowConfirmation, WorkflowRunnerScreen
-from orchestrator.tui.widgets import OrchestratorSelect, RepositorySelect
+from orchestrator.tui.widgets import (
+    BatchItemRow,
+    BatchProgressView,
+    OrchestratorSelect,
+    RepositorySelect,
+)
 from tests.unit.tui_sync import settle_tui, wait_for_tui
 
 
@@ -105,11 +110,13 @@ class _Repository:
         return self.executions
 
     def get_execution(self, execution_id: str) -> WorkflowExecution:
-        assert execution_id == self.execution.id
-        return self.execution
+        for execution in self.executions:
+            if execution.id == execution_id:
+                return execution
+        raise KeyError(execution_id)
 
     def list_steps(self, execution_id: str) -> list[Any]:
-        assert execution_id == self.execution.id
+        assert any(execution.id == execution_id for execution in self.executions)
         return []
 
     def list_diagnostics(self, execution_id: str) -> list[ExecutionDiagnostic]:
@@ -592,6 +599,47 @@ def test_controller_persists_and_runs_batch_in_order_with_shared_role_options(
     assert all(call[3] == runtime for call in service.calls)
     assert [item.task_id for item in batch.items] == ["12", "7", "3"]
     assert all(item.execution_id is not None for item in batch.items)
+
+
+def test_controller_exposes_batch_identity_before_first_item_submits(
+    tmp_path: Path,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    tasks = [
+        DevelopmentTask("12", "github", "First", "", "https://example/12"),
+        DevelopmentTask("7", "github", "Second", "", "https://example/7"),
+    ]
+    provider = _TaskProvider()
+    provider.list_tasks = lambda limit=50: tasks  # type: ignore[method-assign]
+    controller._task_provider_factory = lambda source, repository: provider
+    observed: list[WorkflowBatch] = []
+
+    def observe(batch: WorkflowBatch) -> None:
+        # The batch row is already durable and every item is still unlinked:
+        # nothing has been submitted through the service yet.
+        assert repository.get_batch(batch.id).id == batch.id
+        assert [item.execution_id for item in batch.items] == [None, None]
+        assert service.calls == []
+        observed.append(batch)
+
+    batch = controller.start_batch(
+        WorkflowBatchLaunch(
+            repository="example",
+            task_provider="github",
+            task_ids=("12", "7"),
+            agent_providers={
+                AgentRole.PLANNER: "planner",
+                AgentRole.IMPLEMENTER: "implementer",
+                AgentRole.REVIEWER: "reviewer",
+            },
+        ),
+        on_batch_created=observe,
+    )
+
+    assert len(observed) == 1
+    assert batch is not None
+    assert observed[0].id == batch.id
+    assert [call[0] for call in service.calls] == ["12", "7"]
 
 
 def test_controller_batch_empty_selection_is_a_no_op(tmp_path: Path) -> None:
@@ -3092,10 +3140,10 @@ def test_execution_history_reopens_persisted_batch_and_linked_execution(
             await settle_tui(pilot)
             assert isinstance(application.screen, BatchDetailScreen)
 
-            application.screen.query_one(
-                "#batch-item-picker", OrchestratorSelect
-            ).value = repository.execution.id
-            application.screen.query_one("#inspect-batch-item", Button).press()
+            detail = application.screen
+            detail.query_one("#batch-row-0-header", Button).press()
+            await settle_tui(pilot)
+            detail.query_one("#batch-row-0-open-execution", Button).press()
             await settle_tui(pilot)
             assert isinstance(application.screen, ExecutionDetailScreen)
 
@@ -3200,6 +3248,341 @@ def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
                 description="ordered batch submissions",
             )
             assert [call[0] for call in service.calls] == ["12", "3"]
+
+    asyncio.run(drive())
+
+
+def _batch_launch(*task_ids: str) -> WorkflowBatchLaunch:
+    return WorkflowBatchLaunch(
+        repository="example",
+        task_provider="github",
+        task_ids=task_ids,
+        agent_providers={
+            AgentRole.PLANNER: "planner",
+            AgentRole.IMPLEMENTER: "implementer",
+            AgentRole.REVIEWER: "reviewer",
+        },
+    )
+
+
+def test_workflow_runner_batch_progress_renders_every_task_in_order(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    batch = WorkflowBatch(
+        id="batch-1",
+        repository="example",
+        task_source="github",
+        items=(
+            WorkflowBatchItem(0, "12", "First task"),
+            WorkflowBatchItem(1, "7", "Second task"),
+            WorkflowBatchItem(2, "3", "Third task"),
+        ),
+    )
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            screen._batch_running = True
+            screen._batch_created(batch, _batch_launch("12", "7", "3"))
+            await settle_tui(pilot)
+
+            view = screen.query_one("#batch-progress", BatchProgressView)
+            assert view.display is True
+            headers = [
+                str(screen.query_one(f"#batch-row-{position}-header", Button).label)
+                for position in range(3)
+            ]
+            assert all("QUEUED" in header for header in headers)
+            assert "12: First task" in headers[0]
+            assert "7: Second task" in headers[1]
+            assert "3: Third task" in headers[2]
+            summary = str(screen.query_one("#batch-progress-summary", Static).renderable)
+            assert "Queued: 3" in summary
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_provider_hold(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    batch = WorkflowBatch(
+        id="batch-1",
+        repository="example",
+        task_source="github",
+        items=(
+            WorkflowBatchItem(0, "12", "First task"),
+            WorkflowBatchItem(1, "7", "Second task"),
+            WorkflowBatchItem(2, "3", "Third task"),
+        ),
+    )
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            screen._batch_running = True
+            screen._batch_created(batch, _batch_launch("12", "7", "3"))
+            await settle_tui(pilot)
+
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.EXECUTION_CREATED,
+                    payload={"batch_position": 0, "batch_size": 3},
+                )
+            )
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.STATUS_CHANGED,
+                    status=WorkflowStatus.WAITING,
+                    payload={"batch_position": 0, "batch_size": 3, "provider": "jules"},
+                )
+            )
+            await settle_tui(pilot)
+
+            assert "WAITING FOR AGENT (jules)" in str(
+                screen.query_one("#batch-row-0-header", Button).label
+            )
+            assert "held by jules" in str(
+                screen.query_one("#batch-row-1-header", Button).label
+            )
+            assert "held by jules" in str(
+                screen.query_one("#batch-row-2-header", Button).label
+            )
+            summary = str(screen.query_one("#batch-progress-summary", Static).renderable)
+            assert "Waiting for provider: 1" in summary
+            assert "Queued: 2" in summary
+
+            # Admission clears the provider hold on the still-queued rows, and
+            # only the affected row (position 0) changed category.
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.STATUS_CHANGED,
+                    status=WorkflowStatus.RUNNING,
+                    payload={"batch_position": 0, "batch_size": 3},
+                )
+            )
+            await settle_tui(pilot)
+            assert "RUNNING" in str(screen.query_one("#batch-row-0-header", Button).label)
+            assert "held by" not in str(
+                screen.query_one("#batch-row-1-header", Button).label
+            )
+            assert "held by" not in str(
+                screen.query_one("#batch-row-2-header", Button).label
+            )
+            summary = str(screen.query_one("#batch-progress-summary", Static).renderable)
+            assert "Running: 1" in summary
+            assert "Queued: 2" in summary
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_batch_row_expands_and_reveals_detailed_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    copied: list[str] = []
+    monkeypatch.setattr(application, "copy_to_clipboard", copied.append)
+    batch = WorkflowBatch(
+        id="batch-1",
+        repository="example",
+        task_source="github",
+        items=(WorkflowBatchItem(0, "12", "First task"),),
+    )
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            screen._batch_running = True
+            screen._batch_created(batch, _batch_launch("12"))
+            await settle_tui(pilot)
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.EXECUTION_CREATED,
+                    payload={"batch_position": 0, "batch_size": 1},
+                )
+            )
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.DIAGNOSTIC,
+                    category=DiagnosticCategory.REQUEST.value,
+                    payload={
+                        "batch_position": 0,
+                        "effective_instructions": "implement the feature",
+                        "authorization": "Bearer secret-token",
+                    },
+                )
+            )
+            await settle_tui(pilot)
+
+            row = screen.query_one("#batch-row-0", BatchItemRow)
+            assert screen.query_one("#batch-row-0-body", Vertical).display is False
+            row.query_one("#batch-row-0-header", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#batch-row-0-body", Vertical).display is True
+
+            toggle = screen.query_one("#batch-row-0-toggle-logs", Button)
+            assert not toggle.disabled
+            toggle.press()
+            await settle_tui(pilot)
+            detailed = screen.query_one("#batch-row-0-detailed", Static)
+            assert detailed.display is True
+            rendered = str(detailed.renderable)
+            assert "implement the feature" in rendered
+            assert "secret-token" not in rendered
+
+            screen.query_one("#batch-row-0-copy-logs", Button).press()
+            await settle_tui(pilot)
+
+    asyncio.run(drive())
+
+    assert len(copied) == 1
+    assert "implement the feature" in copied[0]
+    assert "secret-token" not in copied[0]
+
+
+def test_workflow_runner_batch_finished_keeps_final_rows_and_summary_visible(
+    tmp_path: Path,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    approved = WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED)
+    failed = WorkflowExecution(id="execution-2", status=WorkflowStatus.FAILED)
+    repository.executions = [repository.execution, approved, failed]
+    application = OrchestratorApp(controller)
+    batch = WorkflowBatch(
+        id="batch-1",
+        repository="example",
+        task_source="github",
+        items=(
+            WorkflowBatchItem(0, "12", "First task", "execution-1"),
+            WorkflowBatchItem(1, "7", "Second task", "execution-2"),
+        ),
+    )
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            screen._batch_running = True
+            screen._batch_created(batch, _batch_launch("12", "7"))
+            await settle_tui(pilot)
+
+            screen._batch_finished(batch)
+            await settle_tui(pilot)
+
+            assert screen.query_one("#batch-progress", BatchProgressView).display is True
+            assert "APPROVED" in str(
+                screen.query_one("#batch-row-0-header", Button).label
+            )
+            assert "FAILED" in str(screen.query_one("#batch-row-1-header", Button).label)
+            summary = str(screen.query_one("#batch-progress-summary", Static).renderable)
+            assert "Approved: 1" in summary
+            assert "Failed: 1" in summary
+            assert "Batch finished" in str(
+                screen.query_one("#workflow-progress", Static).renderable
+            )
+
+    asyncio.run(drive())
+
+
+def test_batch_detail_screen_renders_mixed_batch_and_supports_refresh(
+    tmp_path: Path,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    running = WorkflowExecution(id="execution-2", status=WorkflowStatus.RUNNING)
+    repository.executions = [repository.execution, running]
+    batch = repository.create_batch(
+        "example",
+        "github",
+        [
+            DevelopmentTask("12", "github", "First task", "", "https://example/12"),
+            DevelopmentTask("7", "github", "Second task", "", "https://example/7"),
+        ],
+    )
+    repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(BatchDetailScreen(batch.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert "APPROVED" in str(
+                screen.query_one("#batch-row-0-header", Button).label
+            )
+            assert "QUEUED" in str(screen.query_one("#batch-row-1-header", Button).label)
+            summary = str(screen.query_one("#batch-progress-summary", Static).renderable)
+            assert "Approved: 1" in summary
+            assert "Queued: 1" in summary
+
+            # A later submission links the second item; refreshing should pick
+            # it up without losing the first item's already-shown detail.
+            repository.record_batch_item_execution(batch.id, 1, running.id)
+            screen.query_one("#refresh-batch", Button).press()
+            await settle_tui(pilot)
+            assert "RUNNING" in str(screen.query_one("#batch-row-1-header", Button).label)
+
+    asyncio.run(drive())
+
+
+def test_batch_detail_screen_reports_batch_read_failure_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+
+    def fail_get_batch(batch_id: str) -> WorkflowBatch:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(repository, "get_batch", fail_get_batch)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(BatchDetailScreen("missing-batch"))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert "Could not load batch" in str(
+                screen.query_one("#batch-summary", Static).renderable
+            )
+
+    asyncio.run(drive())
+
+
+def test_batch_detail_screen_reports_empty_batch() -> None:
+    class _EmptyRepository:
+        def get_batch(self, batch_id: str) -> WorkflowBatch:
+            return WorkflowBatch(id=batch_id, repository="example", task_source="github")
+
+    controller = WorkflowController(
+        workflow_repository=_EmptyRepository(),  # type: ignore[arg-type]
+        config_loader=object(),  # type: ignore[arg-type]
+        client_factory=object(),  # type: ignore[arg-type]
+        task_provider_factory=lambda source, repository: _TaskProvider(),
+    )
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(BatchDetailScreen("batch-1"))
+            await settle_tui(pilot)
+            screen = application.screen
+            note = str(screen.query_one("#batch-progress-note", Static).renderable)
+            assert "no tasks" in note
 
     asyncio.run(drive())
 

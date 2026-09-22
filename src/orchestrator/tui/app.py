@@ -128,6 +128,25 @@ class OrchestratorApp(App[None]):
     #workflow-progress { margin-top: 2; text-style: bold; }
     #workflow-progress.cancelled, #execution-status.cancelled { color: $warning; }
     #workflow-events { margin-top: 1; color: $text-muted; }
+    #batch-progress { margin-top: 1; height: auto; }
+    .batch-progress-summary { text-style: bold; }
+    .batch-progress-note { margin-top: 1; color: $text-muted; }
+    #batch-progress-rows { height: auto; margin-top: 1; }
+    .batch-item-row {
+        height: auto;
+        margin-top: 1;
+        padding: 0 1;
+        border: round $primary;
+    }
+    .batch-item-header {
+        width: 100%;
+        content-align: left middle;
+        text-align: left;
+    }
+    .batch-item-body { height: auto; margin-top: 1; }
+    .batch-item-body Static { color: $text-muted; }
+    .batch-item-log-actions { height: auto; margin-top: 1; }
+    .batch-item-log-actions Button { width: auto; margin-right: 1; }
     .workflow-log-actions { height: auto; margin-top: 1; }
     .workflow-log-actions Button { width: auto; }
     #workflow-raw-events-title {
