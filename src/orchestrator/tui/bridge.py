@@ -454,11 +454,16 @@ class WorkflowController:
         launch: WorkflowBatchLaunch,
         *,
         event_listener: WorkflowEventListener | None = None,
+        on_batch_created: Callable[[WorkflowBatch], None] | None = None,
     ) -> WorkflowBatch | None:
         """Persist and sequentially run an ordered batch through ``submit_workflow``.
 
         Submission/result failures are isolated to their item. Cancelling the
         current execution marks the batch so no later items are submitted.
+        ``on_batch_created`` fires synchronously right after the durable batch
+        row is committed, before the first item is submitted, so a caller
+        blocked on this method (typically from a background worker) can still
+        expose the batch identity and render every queued item immediately.
         """
 
         task_ids = tuple(
@@ -505,6 +510,8 @@ class WorkflowController:
         batch = self._repository.create_batch(
             launch.repository, launch.task_provider, ordered_tasks
         )
+        if on_batch_created is not None:
+            on_batch_created(batch)
         cancellation = threading.Event()
         self._batch_cancellations[batch.id] = cancellation
         try:

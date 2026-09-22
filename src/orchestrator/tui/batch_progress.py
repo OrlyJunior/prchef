@@ -1,0 +1,405 @@
+"""Read-side batch progress projection, shared by live and persisted views.
+
+This is deliberately a presentation projection, not a second workflow state
+machine: it only reshapes durable batch items, workflow observer events, and
+persisted execution/step rows into one ordered, per-position view. Workflow
+stage transitions and provider-capacity policy remain owned by
+``WorkflowService`` and ``ProviderConcurrencyCoordinator``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, cast
+
+from orchestrator.models.agent import AgentRole
+from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
+from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
+from orchestrator.models.workflow_execution import WorkflowExecution
+from orchestrator.models.workflow_status import (
+    ACTIVE_WORKFLOW_STATUSES,
+    WorkflowStage,
+    WorkflowStatus,
+)
+from orchestrator.runtime_logging import redact_payload
+from orchestrator.tui.workflow_presentation import (
+    STAGE_ROLES,
+    step_timeline_lines,
+    timeline_message,
+)
+
+if TYPE_CHECKING:
+    from orchestrator.tui.bridge import WorkflowController
+
+# Ordered so a summary line and per-category counts are always presented the
+# same way, regardless of how many items land in each bucket.
+SUMMARY_CATEGORIES: tuple[str, ...] = (
+    "QUEUED",
+    "WAITING",
+    "RUNNING",
+    "NEEDS_HUMAN",
+    "APPROVED",
+    "CHANGES_REQUESTED",
+    "FAILED",
+    "CANCELLED",
+)
+
+SUMMARY_LABELS: dict[str, str] = {
+    "QUEUED": "Queued",
+    "WAITING": "Waiting for provider",
+    "RUNNING": "Running",
+    "NEEDS_HUMAN": "Needs human",
+    "APPROVED": "Approved",
+    "CHANGES_REQUESTED": "Changes requested",
+    "FAILED": "Failed",
+    "CANCELLED": "Cancelled",
+}
+
+# Mirrors the single-task live view's concise timeline: EXECUTION_CREATED and
+# STATUS_CHANGED only update the current status label, not the timeline log.
+_TIMELINE_EVENT_KINDS: frozenset[WorkflowEventKind] = frozenset(
+    {
+        WorkflowEventKind.STAGE_STARTED,
+        WorkflowEventKind.STAGE_FINISHED,
+        WorkflowEventKind.STAGE_FAILED,
+        WorkflowEventKind.WORKFLOW_FINISHED,
+        WorkflowEventKind.AGENT_FALLBACK,
+    }
+)
+
+_CATEGORY_FOR_STATUS: dict[WorkflowStatus, str] = {
+    WorkflowStatus.PENDING: "QUEUED",
+    WorkflowStatus.WAITING: "WAITING",
+    WorkflowStatus.RUNNING: "RUNNING",
+    WorkflowStatus.NEEDS_HUMAN: "NEEDS_HUMAN",
+    WorkflowStatus.APPROVED: "APPROVED",
+    WorkflowStatus.CHANGES_REQUESTED: "CHANGES_REQUESTED",
+    WorkflowStatus.CANCELLED: "CANCELLED",
+    WorkflowStatus.FAILED: "FAILED",
+}
+
+
+@dataclass(frozen=True)
+class BatchRowView:
+    """One batch item's presentation-ready state, live or persisted."""
+
+    position: int
+    task_id: str
+    task_title: str
+    execution_id: str | None
+    category: str
+    status_label: str
+    stage_label: str
+    timeline: tuple[str, ...] = ()
+    held_by_provider: str | None = None
+
+
+def category_for_execution(execution: WorkflowExecution) -> str:
+    return _CATEGORY_FOR_STATUS.get(execution.status, "FAILED")
+
+
+def summarize(rows: list[BatchRowView]) -> dict[str, int]:
+    counts = dict.fromkeys(SUMMARY_CATEGORIES, 0)
+    for row in rows:
+        counts[row.category] = counts.get(row.category, 0) + 1
+    return counts
+
+
+def summary_line(rows: list[BatchRowView]) -> str:
+    counts = summarize(rows)
+    return " · ".join(
+        f"{SUMMARY_LABELS[category]}: {counts[category]}" for category in SUMMARY_CATEGORIES
+    )
+
+
+@dataclass
+class _LiveItem:
+    position: int
+    task_id: str
+    task_title: str
+    execution_id: str | None = None
+    status: WorkflowStatus | None = None
+    stage: WorkflowStage | None = None
+    provider_wait: str | None = None
+    cancellation_requested: bool = False
+    finished: bool = False
+    timeline: list[str] = field(default_factory=list)
+    active_stage_line: dict[WorkflowStage, int] = field(default_factory=dict)
+    stage_attempts: dict[WorkflowStage, int] = field(default_factory=dict)
+    diagnostics: list[ExecutionDiagnostic] = field(default_factory=list)
+
+
+def _live_status(item: _LiveItem) -> tuple[str, str]:
+    if item.status is None:
+        return "QUEUED", "QUEUED"
+    if item.status is WorkflowStatus.NEEDS_HUMAN:
+        return "NEEDS_HUMAN", "AWAITING HUMAN"
+    if item.cancellation_requested and item.status in ACTIVE_WORKFLOW_STATUSES:
+        return _CATEGORY_FOR_STATUS[item.status], "CANCELLATION REQUESTED"
+    if item.status is WorkflowStatus.PENDING:
+        return "QUEUED", "QUEUED"
+    if item.status is WorkflowStatus.WAITING:
+        label = (
+            f"WAITING FOR AGENT ({item.provider_wait})"
+            if item.provider_wait
+            else "WAITING FOR AGENT"
+        )
+        return "WAITING", label
+    return _CATEGORY_FOR_STATUS[item.status], item.status.value
+
+
+class LiveBatchProgress:
+    """Event-driven per-position projection for a batch that is still running."""
+
+    def __init__(
+        self,
+        batch: WorkflowBatch,
+        *,
+        role_providers: Mapping[AgentRole, str] | None = None,
+        role_models: Mapping[AgentRole, str | None] | None = None,
+    ) -> None:
+        self.batch_id = batch.id
+        self._items = [
+            _LiveItem(item.position, item.task_id, item.task_title, item.execution_id)
+            for item in batch.items
+        ]
+        self._by_execution: dict[str, int] = {
+            item.execution_id: item.position for item in self._items if item.execution_id
+        }
+        self._role_providers = dict(role_providers or {})
+        self._role_models = dict(role_models or {})
+        self._held_provider: str | None = None
+
+    @property
+    def held_provider(self) -> str | None:
+        return self._held_provider
+
+    def position_for_execution(self, execution_id: str) -> int | None:
+        return self._by_execution.get(execution_id)
+
+    def execution_id_for(self, position: int) -> str | None:
+        if not (0 <= position < len(self._items)):
+            return None
+        return self._items[position].execution_id
+
+    def mark_cancellation_requested(self, execution_id: str) -> None:
+        position = self._by_execution.get(execution_id)
+        if position is not None:
+            self._items[position].cancellation_requested = True
+
+    def apply(self, event: WorkflowEvent) -> int | None:
+        """Update state for one event; return the affected position, if any."""
+
+        payload = event.payload or {}
+        position = payload.get("batch_position")
+        if not isinstance(position, int):
+            position = self._by_execution.get(event.execution_id)
+        if position is None or not (0 <= position < len(self._items)):
+            return None
+        item = self._items[position]
+
+        if event.kind is WorkflowEventKind.EXECUTION_CREATED:
+            item.execution_id = event.execution_id
+            self._by_execution[event.execution_id] = position
+            item.status = WorkflowStatus.PENDING
+            item.stage = None
+            item.provider_wait = None
+            item.cancellation_requested = False
+            item.finished = False
+            item.timeline.clear()
+            item.active_stage_line.clear()
+            item.stage_attempts.clear()
+            item.diagnostics.clear()
+            self._held_provider = None
+        elif event.execution_id != item.execution_id:
+            # A stale event for a position whose item has since been replaced.
+            return None
+
+        if event.kind in (WorkflowEventKind.STATUS_CHANGED, WorkflowEventKind.WORKFLOW_FINISHED):
+            item.status = event.status
+            if event.status is WorkflowStatus.WAITING:
+                provider = payload.get("provider")
+                item.provider_wait = provider if isinstance(provider, str) else None
+                if item.provider_wait:
+                    self._held_provider = item.provider_wait
+            else:
+                item.provider_wait = None
+                self._held_provider = None
+            if event.status is not None and event.status not in ACTIVE_WORKFLOW_STATUSES:
+                item.cancellation_requested = False
+        if event.kind is WorkflowEventKind.WORKFLOW_FINISHED:
+            item.finished = True
+
+        message = timeline_message(event, item.stage_attempts, agent_context=self._agent_context)
+        if event.stage is not None and event.kind == WorkflowEventKind.STAGE_STARTED:
+            item.stage_attempts[event.stage] = item.stage_attempts.get(event.stage, 0) + 1
+        if event.stage is not None:
+            item.stage = event.stage
+        if message is not None and event.kind in _TIMELINE_EVENT_KINDS:
+            self._append_timeline(item, event, message)
+
+        if event.kind is WorkflowEventKind.DIAGNOSTIC or event.kind in {
+            WorkflowEventKind.STATUS_CHANGED,
+            WorkflowEventKind.STAGE_STARTED,
+            WorkflowEventKind.STAGE_FINISHED,
+            WorkflowEventKind.STAGE_FAILED,
+            WorkflowEventKind.AGENT_FALLBACK,
+            WorkflowEventKind.WORKFLOW_FINISHED,
+        }:
+            item.diagnostics.append(self._diagnostic_from_event(event))
+
+        return position
+
+    def _append_timeline(self, item: _LiveItem, event: WorkflowEvent, message: str) -> None:
+        if event.kind is WorkflowEventKind.STAGE_STARTED and event.stage is not None:
+            item.active_stage_line[event.stage] = len(item.timeline)
+            item.timeline.append(message)
+        elif (
+            event.kind in {WorkflowEventKind.STAGE_FINISHED, WorkflowEventKind.STAGE_FAILED}
+            and event.stage is not None
+        ):
+            active_line = item.active_stage_line.pop(event.stage, None)
+            if active_line is None:
+                item.timeline.append(message)
+            else:
+                item.timeline[active_line] = message
+        else:
+            item.timeline.append(message)
+
+    def _agent_context(self, stage: WorkflowStage) -> str:
+        role = STAGE_ROLES.get(stage)
+        if role is None:
+            return ""
+        provider = self._role_providers.get(role)
+        if provider is None:
+            return ""
+        details = [provider]
+        model = self._role_models.get(role)
+        if model:
+            details.append(model)
+        return f" ({' · '.join(details)})"
+
+    @staticmethod
+    def _diagnostic_from_event(event: WorkflowEvent) -> ExecutionDiagnostic:
+        if event.kind is WorkflowEventKind.DIAGNOSTIC:
+            try:
+                category = DiagnosticCategory(event.category or "")
+            except ValueError:
+                category = DiagnosticCategory.WORKFLOW_EVENT
+            payload = event.payload or {}
+        else:
+            category = DiagnosticCategory.WORKFLOW_EVENT
+            payload = {
+                "kind": event.kind.value,
+                "status": event.status.value if event.status else None,
+                "step_status": event.step_status.value if event.step_status else None,
+                "message": event.message,
+            }
+        return ExecutionDiagnostic(
+            execution_id=event.execution_id,
+            category=category,
+            payload=cast(dict[str, Any], redact_payload(payload)),
+            stage=event.stage,
+            occurred_at=event.occurred_at,
+        )
+
+    def diagnostics_for(self, position: int) -> list[ExecutionDiagnostic]:
+        if not (0 <= position < len(self._items)):
+            return []
+        return list(self._items[position].diagnostics)
+
+    def rows(self) -> list[BatchRowView]:
+        rows: list[BatchRowView] = []
+        for item in self._items:
+            if item.execution_id is None:
+                held = self._held_provider
+                rows.append(
+                    BatchRowView(
+                        position=item.position,
+                        task_id=item.task_id,
+                        task_title=item.task_title,
+                        execution_id=None,
+                        category="QUEUED",
+                        status_label=f"QUEUED — held by {held}" if held else "QUEUED",
+                        stage_label="",
+                        held_by_provider=held,
+                    )
+                )
+                continue
+            category, label = _live_status(item)
+            rows.append(
+                BatchRowView(
+                    position=item.position,
+                    task_id=item.task_id,
+                    task_title=item.task_title,
+                    execution_id=item.execution_id,
+                    category=category,
+                    status_label=label,
+                    stage_label=(
+                        item.stage.value.replace("_", " ").title() if item.stage else ""
+                    ),
+                    timeline=tuple(item.timeline),
+                )
+            )
+        return rows
+
+    def summary(self) -> dict[str, int]:
+        return summarize(self.rows())
+
+
+def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> BatchRowView:
+    """Build one row from durable storage: for history, restart, and refresh.
+
+    An unlinked item is QUEUED. Provider capacity is transient and
+    process-local, so a persisted PENDING/WAITING row never claims an active
+    hold here: that would misrepresent work that will not resume on its own
+    after a restart.
+    """
+
+    if item.execution_id is None:
+        return BatchRowView(
+            position=item.position,
+            task_id=item.task_id,
+            task_title=item.task_title,
+            execution_id=None,
+            category="QUEUED",
+            status_label="QUEUED",
+            stage_label="",
+        )
+    # Imported lazily to avoid a hard import cycle at module load time; the
+    # existing execution-history status wording is the single source of truth
+    # both a persisted batch row and its linked execution detail screen use.
+    from orchestrator.tui.screens.execution_history import execution_status_label
+
+    try:
+        execution, steps = controller.execution_detail(item.execution_id)
+    except Exception as exc:
+        return BatchRowView(
+            position=item.position,
+            task_id=item.task_id,
+            task_title=item.task_title,
+            execution_id=item.execution_id,
+            category="FAILED",
+            status_label=f"EXECUTION UNAVAILABLE: {exc}",
+            stage_label="",
+        )
+    return BatchRowView(
+        position=item.position,
+        task_id=item.task_id,
+        task_title=item.task_title,
+        execution_id=item.execution_id,
+        category=category_for_execution(execution),
+        status_label=execution_status_label(execution),
+        stage_label=execution.current_stage.value.replace("_", " ").title(),
+        timeline=tuple(step_timeline_lines(steps)),
+    )
+
+
+def build_persisted_rows(
+    batch: WorkflowBatch, controller: WorkflowController
+) -> list[BatchRowView]:
+    """Render every batch item from durable storage, in its stable order."""
+
+    return [persisted_row(item, controller) for item in batch.items]

@@ -71,7 +71,29 @@
   is persisted before its first item is submitted, then its tasks are submitted sequentially
   through `submit_execution`; an item failure does not prevent later submissions. Stopping the
   active item also stops later batch submissions. Stored batches are browsable from execution
-  history after restart.
+  history after restart. `WorkflowController.start_batch` accepts an optional `on_batch_created`
+  callback invoked synchronously right after the durable batch row commits (before the first item
+  submits), so a caller blocked on this method from a background worker can still expose the batch
+  identity and its stable task order immediately.
+- Batch progress is a read-side TUI projection (`orchestrator.tui.batch_progress`), not a second
+  workflow state machine: it reshapes durable batch items, workflow observer events, and persisted
+  execution/step rows into one ordered, per-position view shared by the active `WorkflowRunnerScreen`
+  batch launch and the persisted `BatchDetailScreen`. Both render the same `BatchProgressView`/
+  `BatchItemRow` widgets, and both reuse the single-task stage/status wording factored into
+  `orchestrator.tui.workflow_presentation` so the two views cannot drift. A summary line always
+  counts every semantic status (queued, waiting for provider, running, needs human, approved,
+  changes requested, failed, cancelled) and is never cleared when the batch finishes; an unlinked
+  batch item (no execution yet) renders as queued rather than disappearing. Each row is independently
+  expandable in the owning screen's existing main scroll region (no nested scroll viewport), showing
+  a concise timeline plus its own show/copy detailed-log and open-execution controls.
+- A batch item's "held by provider" annotation is defined strictly by the existing WAITING/
+  provider-capacity event and diagnostic semantics: while the sequential scheduler's current item is
+  WAITING on a named provider, later unsubmitted (unlinked) rows are annotated as queued and held by
+  that provider; the annotation clears once that item is admitted (RUNNING) or reaches a terminal
+  status. This only applies to the live in-process projection. Provider concurrency state is
+  process-local and does not persist, so a persisted or restarted batch never claims a queued or
+  provider-waiting item is actively held in a live queue; those rows read as plain QUEUED/WAITING
+  from durable storage, and the TUI does not imply PENDING/WAITING work resumes automatically.
 - The TUI's Agent Instructions view edits the selected repository's optional `IMPLEMENTER.md` and
   `REVIEWER.md` independently. Missing files remain absent until their own save action; the TUI
   never stages or commits either file.

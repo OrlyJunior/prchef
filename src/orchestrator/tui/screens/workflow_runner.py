@@ -25,13 +25,23 @@ from orchestrator.models.workflow_status import (
     WorkflowStatus,
 )
 from orchestrator.runtime_logging import redact_payload, redact_text
+from orchestrator.tui.batch_progress import LiveBatchProgress, build_persisted_rows, summarize
 from orchestrator.tui.bridge import WorkflowBatchLaunch, WorkflowController, WorkflowLaunch
 from orchestrator.tui.diagnostics import format_diagnostics_for_export
 from orchestrator.tui.screens.task_selector import TaskSelector
 from orchestrator.tui.widgets import (
+    BatchItemRow,
+    BatchProgressView,
     OrchestratorSelect,
     RepositorySelect,
     is_orchestrator_select_widget,
+)
+from orchestrator.tui.workflow_presentation import (
+    STAGE_ROLES,
+    stage_activity,
+    stage_complete,
+    status_message,
+    timeline_message,
 )
 
 if TYPE_CHECKING:
@@ -99,8 +109,8 @@ class WorkflowRunnerScreen(Screen[None]):
         self._suppressed_task_provider_change: tuple[str, str] | None = None
         self._active_execution_id: str | None = None
         self._batch_tasks: tuple[DevelopmentTask, ...] = ()
-        self._batch_task_index = -1
         self._batch_running = False
+        self._batch_progress: LiveBatchProgress | None = None
 
     def compose(self) -> ComposeResult:
         # One scroll context keeps a keyboard-focused control visible on small terminals.
@@ -232,6 +242,7 @@ class WorkflowRunnerScreen(Screen[None]):
                                             id=f"{prefix}-max-output-tokens-source",
                                         )
             yield Static("No workflow running.", id="workflow-progress")
+            yield BatchProgressView(id="batch-progress")
             with Horizontal(classes="screen-actions", id="workflow-stop-actions"):
                 yield Button("Stop workflow", variant="error", id="stop-workflow")
             with Vertical(id="human-input-panel"):
@@ -247,7 +258,7 @@ class WorkflowRunnerScreen(Screen[None]):
                     )
                     yield Button("Return later", id="return-later")
             yield Static("", id="workflow-events")
-            with Horizontal(classes="workflow-log-actions"):
+            with Horizontal(classes="workflow-log-actions", id="workflow-log-actions"):
                 yield Button("Show detailed logs", id="toggle-workflow-logs")
                 yield Button(
                     "Copy detailed logs", id="copy-detailed-logs-button", disabled=True
@@ -266,6 +277,7 @@ class WorkflowRunnerScreen(Screen[None]):
     def on_mount(self) -> None:
         self._set_layout_mode(self.size.width)
         self.query_one("#workflow-stop-actions", Horizontal).display = False
+        self.query_one("#batch-progress", BatchProgressView).display = False
         try:
             repositories = self.controller.repositories()
         except Exception as exc:
@@ -1136,9 +1148,12 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#workflow-events", Static).update("")
         self.query_one("#workflow-raw-events", Static).update("")
         self._hide_human_panel()
+        self._batch_progress = None
+        self.query_one("#batch-progress", BatchProgressView).display = False
         if len(task_ids) == 1:
             self._batch_running = False
             self._batch_tasks = ()
+            self._set_single_task_controls_visible(True)
             launch = WorkflowLaunch(
                 repository=repository,
                 task_provider=task_provider,
@@ -1150,19 +1165,33 @@ class WorkflowRunnerScreen(Screen[None]):
             return
         self._batch_running = True
         self._batch_tasks = task_selector.selected_tasks
-        self._batch_task_index = -1
+        self._set_single_task_controls_visible(False)
         self.query_one("#workflow-progress", Static).update(
             f"Starting batch of {len(task_ids)} tasks…"
         )
-        self._run_batch(
-            WorkflowBatchLaunch(
-                repository=repository,
-                task_provider=task_provider,
-                task_ids=task_ids,
-                agent_providers=agent_providers,
-                agent_runtime_options=runtime_options,
-            )
+        batch_launch = WorkflowBatchLaunch(
+            repository=repository,
+            task_provider=task_provider,
+            task_ids=task_ids,
+            agent_providers=agent_providers,
+            agent_runtime_options=runtime_options,
         )
+        self._run_batch(batch_launch)
+
+    def _set_single_task_controls_visible(self, visible: bool) -> None:
+        """Hide the single-task timeline/log controls while a batch is active.
+
+        A batch renders its own per-task timeline and logs through
+        ``BatchProgressView``; showing both would duplicate the same
+        information under two different widgets.
+        """
+
+        self.query_one("#workflow-events", Static).display = visible
+        self.query_one("#workflow-log-actions", Horizontal).display = visible
+        self.query_one("#workflow-raw-events-title", Static).display = (
+            visible and self._show_raw_events
+        )
+        self.query_one("#workflow-raw-events", Static).display = visible and self._show_raw_events
 
     @work(thread=True, exclusive=True)
     def _run_workflow(self, launch: WorkflowLaunch) -> None:
@@ -1179,51 +1208,53 @@ class WorkflowRunnerScreen(Screen[None]):
     def _run_batch(self, launch: WorkflowBatchLaunch) -> None:
         try:
             batch = self.controller.start_batch(
-                launch, event_listener=self._on_workflow_event
+                launch,
+                event_listener=self._on_workflow_event,
+                on_batch_created=lambda created_batch: self.app.call_from_thread(
+                    self._batch_created, created_batch, launch
+                ),
             )
         except Exception as exc:
             self.app.call_from_thread(self._workflow_failed, str(exc))
             return
         self.app.call_from_thread(self._batch_finished, batch)
 
+    def _batch_created(self, batch: WorkflowBatch, launch: WorkflowBatchLaunch) -> None:
+        """Render every queued item as soon as the durable batch row exists.
+
+        This runs before the first item is submitted, so the batch identity
+        and its stable task order are visible immediately rather than only
+        after the first execution starts.
+        """
+
+        role_models = {
+            role: options.get("model") for role, options in launch.agent_runtime_options.items()
+        }
+        self._batch_progress = LiveBatchProgress(
+            batch, role_providers=launch.agent_providers, role_models=role_models
+        )
+        view = self.query_one("#batch-progress", BatchProgressView)
+        view.set_rows(self._batch_progress.rows())
+        view.display = True
+        self.query_one("#workflow-progress", Static).update(
+            f"Batch running: {len(batch.items)} task(s)."
+        )
+
     def _on_workflow_event(self, event: WorkflowEvent) -> None:
         self.app.call_from_thread(self._render_workflow_event, event)
 
     def _render_workflow_event(self, event: WorkflowEvent) -> None:
+        if self._batch_running and self._batch_progress is not None:
+            self._render_batch_event(event)
+            return
         if event.kind is WorkflowEventKind.EXECUTION_CREATED:
             self._active_execution_id = event.execution_id
-            if self._batch_running:
-                batch_position = (event.payload or {}).get("batch_position")
-                self._batch_task_index = (
-                    batch_position
-                    if isinstance(batch_position, int)
-                    else self._batch_task_index + 1
-                )
-                self._event_lines.clear()
-                self._active_timeline_stages.clear()
-                self._stage_attempts.clear()
         elif self._active_execution_id is None:
             self._active_execution_id = event.execution_id
-        if (
-            event.execution_id == self._active_execution_id
-            and (
-                event.kind is WorkflowEventKind.EXECUTION_CREATED
-                or (
-                    event.kind is WorkflowEventKind.STATUS_CHANGED
-                    and event.status in _CANCELLABLE_STATUSES
-                )
-            )
-        ):
-            # Queued and provider-blocked work is cancellable too, so the stop
-            # control must be available before a stage is genuinely running.
-            self.query_one("#workflow-stop-actions", Horizontal).display = True
-            stop = self.query_one("#stop-workflow", Button)
-            stop.disabled = False
-            stop.label = "Stop workflow"
+        self._ensure_stop_controls_visible(event)
         if (
             event.kind is WorkflowEventKind.WORKFLOW_FINISHED
             and event.execution_id == self._active_execution_id
-            and not self._batch_running
         ):
             self._reset_active_workflow_controls()
         self._append_raw_event(event)
@@ -1231,12 +1262,6 @@ class WorkflowRunnerScreen(Screen[None]):
         message = self._timeline_message(event)
         if message is None:
             return
-        if self._batch_running and 0 <= self._batch_task_index < len(self._batch_tasks):
-            task = self._batch_tasks[self._batch_task_index]
-            message = (
-                f"Task {self._batch_task_index + 1} of {len(self._batch_tasks)}: "
-                f"{task.title or task.id} — {message}"
-            )
         self.query_one("#workflow-progress", Static).update(message)
 
         if event.kind == WorkflowEventKind.STAGE_STARTED and event.stage is not None:
@@ -1258,6 +1283,89 @@ class WorkflowRunnerScreen(Screen[None]):
             self._event_lines.append(message)
 
         self.query_one("#workflow-events", Static).update("\n".join(self._event_lines[-10:]))
+
+    def _ensure_stop_controls_visible(self, event: WorkflowEvent) -> None:
+        """Show the stop control as soon as cancellable work exists.
+
+        Queued and provider-blocked work is cancellable too, so this must run
+        before a stage is genuinely running.
+        """
+
+        if event.execution_id == self._active_execution_id and (
+            event.kind is WorkflowEventKind.EXECUTION_CREATED
+            or (
+                event.kind is WorkflowEventKind.STATUS_CHANGED
+                and event.status in _CANCELLABLE_STATUSES
+            )
+        ):
+            self.query_one("#workflow-stop-actions", Horizontal).display = True
+            stop = self.query_one("#stop-workflow", Button)
+            stop.disabled = False
+            stop.label = "Stop workflow"
+
+    def _render_batch_event(self, event: WorkflowEvent) -> None:
+        progress = self._batch_progress
+        assert progress is not None
+        if event.kind is WorkflowEventKind.EXECUTION_CREATED:
+            self._active_execution_id = event.execution_id
+        self._ensure_stop_controls_visible(event)
+        held_before = progress.held_provider
+        position = progress.apply(event)
+        if position is None:
+            return
+        view = self.query_one("#batch-progress", BatchProgressView)
+        rows = progress.rows()
+        if progress.held_provider != held_before:
+            # A provider hold started or cleared: every still-queued row's
+            # "held by" annotation depends on this shared batch state, not
+            # just the row that triggered the change.
+            for row in rows:
+                view.update_row(row)
+        else:
+            view.update_row(rows[position])
+        view.update_summary(summarize(rows))
+
+    def on_batch_item_row_show_logs_requested(
+        self, message: BatchItemRow.ShowLogsRequested
+    ) -> None:
+        progress = self._batch_progress
+        if progress is None:
+            return
+        view = self.query_one("#batch-progress", BatchProgressView)
+        row = view.row(message.position)
+        if row is None:
+            return
+        content = format_diagnostics_for_export(progress.diagnostics_for(message.position))
+        row.set_detailed_logs(content)
+
+    def on_batch_item_row_copy_logs_requested(
+        self, message: BatchItemRow.CopyLogsRequested
+    ) -> None:
+        progress = self._batch_progress
+        if progress is None:
+            return
+        content = format_diagnostics_for_export(progress.diagnostics_for(message.position))
+        if not content:
+            self.notify("No detailed logs are available to copy yet.", severity="warning")
+            return
+        try:
+            self.app.copy_to_clipboard(content)
+        except Exception as exc:
+            self.notify(f"Could not copy detailed logs: {exc}", severity="error")
+            return
+        self.notify("Detailed logs copied to clipboard.")
+
+    def on_batch_item_row_open_execution_requested(
+        self, message: BatchItemRow.OpenExecutionRequested
+    ) -> None:
+        progress = self._batch_progress
+        execution_id = progress.execution_id_for(message.position) if progress else None
+        if execution_id is None:
+            self.notify("That batch task has no execution to inspect yet.", severity="warning")
+            return
+        from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
+
+        self.app.push_screen(ExecutionDetailScreen(execution_id))
 
     def _append_raw_event(self, event: WorkflowEvent) -> None:
         """Retain observer diagnostics without putting them in the primary timeline."""
@@ -1340,42 +1448,14 @@ class WorkflowRunnerScreen(Screen[None]):
     def _timeline_message(self, event: WorkflowEvent) -> str | None:
         """Translate persisted observer events into concise, user-facing progress."""
 
-        if event.kind == WorkflowEventKind.EXECUTION_CREATED:
-            return "Preparing workflow…"
-        if event.kind == WorkflowEventKind.STATUS_CHANGED:
-            return self._status_message(event.status, event.payload)
-        if event.kind == WorkflowEventKind.WORKFLOW_FINISHED:
-            return self._status_message(event.status)
-        if event.kind == WorkflowEventKind.AGENT_FALLBACK:
-            return f"↳ {event.message or 'Agent fallback activated'}"
-        if event.stage is None:
-            return None
-
-        stage = event.stage
-        attempt = self._stage_attempts.get(stage, 0) + (
-            1 if event.kind == WorkflowEventKind.STAGE_STARTED else 0
+        return timeline_message(
+            event, self._stage_attempts, agent_context=self._agent_stage_context
         )
-        if event.kind == WorkflowEventKind.STAGE_STARTED:
-            return f"● {self._stage_activity(stage, attempt)}{self._agent_stage_context(stage)}…"
-        if event.kind == WorkflowEventKind.STAGE_FINISHED:
-            if event.step_status is not None and event.step_status.value == "CANCELLED":
-                return f"! {self._stage_activity(stage, attempt)} cancelled"
-            return f"✓ {self._stage_complete(stage)}"
-        if event.kind == WorkflowEventKind.STAGE_FAILED:
-            detail = f": {event.message}" if event.message else ""
-            return f"✗ {self._stage_activity(stage, attempt)} failed{detail}"
-        return None
 
     def _agent_stage_context(self, stage: WorkflowStage) -> str:
         """Add selected agent runtime context only where an agent is active."""
 
-        roles = {
-            WorkflowStage.GENERATE_SPEC: AgentRole.PLANNER,
-            WorkflowStage.IMPLEMENT: AgentRole.IMPLEMENTER,
-            WorkflowStage.POLISH: AgentRole.IMPLEMENTER,
-            WorkflowStage.REVIEW: AgentRole.REVIEWER,
-        }
-        role = roles.get(stage)
+        role = STAGE_ROLES.get(stage)
         if role is None:
             return ""
         provider = self._role_providers.get(role)
@@ -1392,64 +1472,15 @@ class WorkflowRunnerScreen(Screen[None]):
     def _status_message(
         status: WorkflowStatus | None, payload: dict[str, Any] | None = None
     ) -> str:
-        if status is None:
-            return "Workflow status updated"
-        provider = (payload or {}).get("provider")
-        if status is WorkflowStatus.WAITING and isinstance(provider, str) and provider:
-            return f"Waiting for {provider} capacity…"
-        messages: dict[WorkflowStatus, str] = {
-            WorkflowStatus.PENDING: "Queued for an execution slot…",
-            WorkflowStatus.RUNNING: "Workflow running…",
-            WorkflowStatus.WAITING: "Waiting for agent capacity…",
-            WorkflowStatus.APPROVED: "✓ Workflow approved",
-            WorkflowStatus.CHANGES_REQUESTED: "• Review changes requested",
-            WorkflowStatus.NEEDS_HUMAN: "! Waiting for human input",
-            WorkflowStatus.CANCELLED: "! Workflow cancelled",
-            WorkflowStatus.FAILED: "✗ Workflow failed",
-        }
-        return messages.get(status, "Workflow status updated")
+        return status_message(status, payload)
 
     @staticmethod
     def _stage_activity(stage: WorkflowStage, attempt: int) -> str:
-        retry_labels = {
-            WorkflowStage.IMPLEMENT: "Implementing corrections",
-            WorkflowStage.VALIDATE: "Re-validating changes",
-            WorkflowStage.REVIEW: "Reviewing corrections",
-        }
-        activities = {
-            WorkflowStage.LOAD_TASK: "Loading task",
-            WorkflowStage.LOAD_CONFIG: "Configuring repository",
-            WorkflowStage.GENERATE_SPEC: "Generating specification",
-            WorkflowStage.PREPARE_BRANCH: "Preparing branch",
-            WorkflowStage.IMPLEMENT: "Implementing changes",
-            WorkflowStage.POLISH: "Applying polish suggestions",
-            WorkflowStage.VALIDATE: "Validating changes",
-            WorkflowStage.COMMIT: "Committing changes",
-            WorkflowStage.PUSH: "Pushing branch",
-            WorkflowStage.CREATE_PR: "Creating pull request",
-            WorkflowStage.REVIEW: "Reviewing pull request",
-            WorkflowStage.COMPLETED: "Completing workflow",
-        }
-        if attempt > 1:
-            return retry_labels.get(stage, activities[stage])
-        return activities[stage]
+        return stage_activity(stage, attempt)
 
     @staticmethod
     def _stage_complete(stage: WorkflowStage) -> str:
-        return {
-            WorkflowStage.LOAD_TASK: "Task loaded",
-            WorkflowStage.LOAD_CONFIG: "Repository configured",
-            WorkflowStage.GENERATE_SPEC: "Specification generated",
-            WorkflowStage.PREPARE_BRANCH: "Branch prepared",
-            WorkflowStage.IMPLEMENT: "Changes implemented",
-            WorkflowStage.POLISH: "Polish pass completed",
-            WorkflowStage.VALIDATE: "Validation passed",
-            WorkflowStage.COMMIT: "Changes committed",
-            WorkflowStage.PUSH: "Branch pushed",
-            WorkflowStage.CREATE_PR: "Pull request created",
-            WorkflowStage.REVIEW: "Review completed",
-            WorkflowStage.COMPLETED: "Workflow completed",
-        }[stage]
+        return stage_complete(stage)
 
     def _reset_active_workflow_controls(self) -> None:
         """Restore idle-run controls; safe to call more than once per execution."""
@@ -1475,13 +1506,25 @@ class WorkflowRunnerScreen(Screen[None]):
         linked_count = sum(item.execution_id is not None for item in batch.items) if batch else 0
         self._batch_running = False
         self._batch_tasks = ()
-        self._batch_task_index = -1
         self._reset_active_workflow_controls()
         self.query_one("#workflow-progress", Static).update(
             f"Batch finished: {linked_count} of {task_count} task(s) submitted."
         )
         self.query_one("#workflow-stop-actions", Horizontal).display = False
-        self.notify("Batch finished. Open Execution history to inspect each task.")
+        # Reconcile with durable storage once the batch stops running.
+        # Existing rows are updated in place rather than rebuilt so an
+        # operator's expanded rows and visible detailed logs are not disturbed.
+        if batch is not None:
+            try:
+                rows = build_persisted_rows(batch, self.controller)
+            except Exception:
+                rows = None
+            if rows is not None:
+                view = self.query_one("#batch-progress", BatchProgressView)
+                for row in rows:
+                    view.update_row(row)
+                view.update_summary(summarize(rows))
+        self.notify("Batch finished.")
         self._refresh_task_statuses()
 
     def _refresh_task_statuses(self) -> None:
@@ -1545,6 +1588,14 @@ class WorkflowRunnerScreen(Screen[None]):
         if not accepted:
             self.query_one("#workflow-stop-actions", Horizontal).display = False
             self.notify("This workflow has already finished.", severity="warning")
+            return
+        if self._batch_running and self._batch_progress is not None:
+            self._batch_progress.mark_cancellation_requested(self._active_execution_id)
+            position = self._batch_progress.position_for_execution(self._active_execution_id)
+            if position is not None:
+                view = self.query_one("#batch-progress", BatchProgressView)
+                view.update_row(self._batch_progress.rows()[position])
+                view.update_summary(self._batch_progress.summary())
 
     def _resume_active_workflow(self) -> None:
         if self._active_execution_id is None:
@@ -1568,10 +1619,16 @@ class WorkflowRunnerScreen(Screen[None]):
         self.app.call_from_thread(self._workflow_finished, execution)
 
     def _workflow_failed(self, message: str) -> None:
+        was_batch = self._batch_running
         self._batch_running = False
         self._batch_tasks = ()
         self.query_one("#start-workflow", Button).disabled = False
         self.query_one("#workflow-stop-actions", Horizontal).display = False
+        if was_batch and self._batch_progress is None:
+            # Nothing was persisted (validation failed before the batch row
+            # was created): restore the single-task controls this screen
+            # otherwise leaves hidden while a batch is active.
+            self._set_single_task_controls_visible(True)
         self.query_one("#workflow-progress", Static).update(f"Could not start workflow: {message}")
         self.notify(f"Could not start workflow: {message}", severity="error")
         self._refresh_task_statuses()
