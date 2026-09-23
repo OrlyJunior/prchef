@@ -34,6 +34,7 @@ from orchestrator.config.project_config import (
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from orchestrator.models.human_interaction import HumanInteraction
 from orchestrator.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
 from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
@@ -3592,6 +3593,7 @@ def test_workflow_runner_batch_progress_renders_every_task_in_order(
 
             view = screen.query_one("#batch-progress", BatchProgressView)
             assert view.display is True
+            assert screen.query_one("#workflow-outcome", Vertical).display is False
             assert str(screen.query_one("#stop-workflow", Button).label) == "Stop batch"
             headers = [
                 str(screen.query_one(f"#batch-row-{position}-header", Button).label)
@@ -4148,7 +4150,7 @@ def test_task_checkbox_mouse_click_updates_selection_and_screen_on_first_click(
             await wait_for_tui(
                 pilot,
                 lambda: screen.can_view_partial(row),
-                description="focused task row in short viewport",
+                description="focused task row after terminal resize",
             )
             assert row.has_focus
             assert screen.can_view_partial(row)
@@ -4688,12 +4690,187 @@ def test_workflow_runner_terminal_workflow_finished_resets_active_controls(
                 screen._render_workflow_event(event)
             await settle_tui(pilot)
 
+            assert len(screen._event_lines) == 1
+            assert "Workflow " not in screen._event_lines[0]
+            repository.execution.status = final_status
+            screen._workflow_finished(repository.execution)
+            await settle_tui(pilot)
+
             assert screen.query_one("#workflow-stop-actions", Horizontal).display is False
             assert screen.query_one("#start-workflow", Button).disabled is False
+            assert screen.query_one("#workflow-outcome", Vertical).display is True
             assert expected_text in str(
                 screen.query_one("#workflow-progress", Static).renderable
             )
             assert screen.query_one("#copy-detailed-logs-button", Button).disabled is False
+            assert screen.query_one("#outcome-continue", Button).display is (
+                final_status is WorkflowStatus.CHANGES_REQUESTED
+            )
+            assert screen.query_one("#outcome-answer-later", Button).display is False
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_human_outcome_can_be_returned_to_and_answered(
+    tmp_path: Path,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    interaction = HumanInteraction(
+        id=1,
+        workflow_execution_id=repository.execution.id,
+        requesting_stage=WorkflowStage.REVIEW,
+        prompt="Please clarify the requested change.",
+        requested_at=datetime.now(UTC),
+    )
+    repository.execution.status = WorkflowStatus.NEEDS_HUMAN
+    repository.execution.current_stage = WorkflowStage.REVIEW
+    repository.execution.human_interactions = [interaction]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.STAGE_STARTED,
+                    stage=WorkflowStage.REVIEW,
+                )
+            )
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.STAGE_FINISHED,
+                    stage=WorkflowStage.REVIEW,
+                    step_status=StepStatus.SUCCEEDED,
+                )
+            )
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id=repository.execution.id,
+                    kind=WorkflowEventKind.WORKFLOW_FINISHED,
+                    stage=WorkflowStage.REVIEW,
+                    status=WorkflowStatus.NEEDS_HUMAN,
+                )
+            )
+            screen._workflow_finished(repository.execution)
+            await settle_tui(pilot)
+
+            outcome = screen.query_one("#workflow-outcome", Vertical)
+            assert outcome.display is True
+            assert "stopped" in str(
+                screen.query_one("#workflow-outcome-title", Static).renderable
+            ).lower()
+            assert "waiting for your response" in str(
+                screen.query_one("#workflow-outcome-title", Static).renderable
+            ).lower()
+            assert screen.query_one("#human-input-panel", Vertical).display is True
+            assert screen.query_one("#outcome-answer-later", Button).display is False
+            assert "waiting for human input" in str(
+                screen.query_one("#workflow-events", Static).renderable
+            )
+            assert "Workflow" not in str(screen.query_one("#workflow-events", Static).renderable)
+
+            screen.query_one("#return-later", Button).press()
+            await settle_tui(pilot)
+            assert outcome.display is True
+            assert screen.query_one("#human-input-panel", Vertical).display is False
+            assert screen.query_one("#outcome-answer-later", Button).display is True
+            assert screen.query_one("#workflow-outcome-actions", Horizontal).display is True
+
+            screen.query_one("#outcome-answer-later", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, ExecutionDetailScreen)
+            assert application.screen.query_one("#execution-human-title", Static).display is True
+            await pilot.press("escape")
+            await settle_tui(pilot)
+            assert isinstance(application.screen, WorkflowRunnerScreen)
+            assert screen.query_one("#human-input-panel", Vertical).display is True
+
+            screen.query_one("#human-response", TextArea).text = "Add a concrete example."
+            await settle_tui(pilot)
+            assert screen.query_one("#resume-workflow", Button).disabled is False
+            screen.query_one("#resume-workflow", Button).press()
+            await settle_tui(pilot)
+            assert service.responses == [
+                (repository.execution.id, "Add a concrete example.")
+            ]
+            assert "Workflow completed" in str(
+                screen.query_one("#workflow-outcome-title", Static).renderable
+            )
+            assert screen.query_one("#human-input-panel", Vertical).display is False
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_continue_action_opens_detail_and_reconciles_state(
+    tmp_path: Path,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.CHANGES_REQUESTED
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(48, 16)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            screen._workflow_finished(repository.execution)
+            await settle_tui(pilot)
+
+            continue_button = screen.query_one("#outcome-continue", Button)
+            assert continue_button.display is True
+            assert "stopped" in str(
+                screen.query_one("#workflow-outcome-title", Static).renderable
+            ).lower()
+            runner_scroll = screen.query_one("#workflow-runner", VerticalScroll)
+            continue_button.focus()
+            await wait_for_tui(
+                pilot,
+                lambda: runner_scroll.scroll_y > 0
+                and screen.can_view_partial(continue_button),
+                description="focused Continue button in the runner viewport",
+            )
+            assert runner_scroll.scroll_y > 0
+            assert continue_button.region.y < screen.size.height
+
+            continue_button.press()
+            await settle_tui(pilot)
+            detail = application.screen
+            assert isinstance(detail, ExecutionDetailScreen)
+            assert detail.query_one("#execution-continuation-title", Static).display is True
+            assert str(
+                detail.query_one("#execution-continuation-feedback", TextArea).text
+            ) == "Persisted terminal feedback"
+
+            repository.execution.status = WorkflowStatus.APPROVED
+            await pilot.press("escape")
+            await settle_tui(pilot)
+            assert isinstance(application.screen, WorkflowRunnerScreen)
+            assert "completed" in str(
+                screen.query_one("#workflow-outcome-title", Static).renderable
+            ).lower()
+            assert screen.query_one("#outcome-continue", Button).display is False
+
+            repository.execution.status = WorkflowStatus.FAILED
+            repository.execution.workspace_path = str(tmp_path / "worktree")
+            repository.execution.working_branch = "workflow/12"
+            screen._workflow_finished(repository.execution)
+            await settle_tui(pilot)
+            assert screen.query_one("#outcome-continue", Button).display is True
+
+            repository.execution.workspace_path = None
+            repository.execution.working_branch = None
+            screen._workflow_finished(repository.execution)
+            await settle_tui(pilot)
+            assert screen.query_one("#outcome-continue", Button).display is False
+            assert "no continuation" in str(
+                screen.query_one("#workflow-outcome-message", Static).renderable
+            ).lower()
 
     asyncio.run(drive())
 
