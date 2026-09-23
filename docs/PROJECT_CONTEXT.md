@@ -70,7 +70,8 @@
   Refresh, loading, empty, and inline-error states remain available, while explicit CLI task
   identifiers remain supported.
 - Label filtering is an optional task-provider capability (`LabelCatalogProvider.list_labels`),
-  implemented only by GitHub issues (`gh label list`); Trello deliberately lacks it.
+  implemented only by GitHub issues (the full catalog via `gh api --paginate`, not the capped
+  `gh label list`); Trello deliberately lacks it.
   `WorkflowController.list_task_labels` returns `None` for unsupported providers, distinct from an
   empty catalog, and failures surface as an explicit inline label error rather than hiding the
   filter. The launcher loads labels with tasks under the same request token, and filters only the

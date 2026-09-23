@@ -198,12 +198,15 @@ def test_github_issue_client_lists_open_issues_for_task_browser(tmp_path: Path) 
     ]
 
 
-def test_github_issue_client_lists_repository_label_catalog(tmp_path: Path) -> None:
+def test_github_issue_client_lists_complete_paginated_label_catalog(tmp_path: Path) -> None:
+    # More labels than any single page or fixed `gh label list` limit; the
+    # paginated jq output is one JSON-encoded name per line across pages.
+    names = [f"label-{index}" for index in range(250)] + ['Quoted "RAG"', "Tester Agent"]
     commands = StubCommands(
         CommandResult(
             command=[],
             exit_code=0,
-            stdout=json.dumps([{"name": "bug"}, {"name": "Batch Execution"}]),
+            stdout="".join(f"{json.dumps(name)}\n" for name in names) + "\n",
             stderr="",
             duration_seconds=0.1,
         )
@@ -212,20 +215,28 @@ def test_github_issue_client_lists_repository_label_catalog(tmp_path: Path) -> N
     client = GitHubIssueClient(commands, cwd=tmp_path)  # type: ignore[arg-type]
     labels = client.list_labels("owner/api")
 
-    assert labels == [{"name": "bug"}, {"name": "Batch Execution"}]
+    assert labels == [{"name": name} for name in names]
     assert commands.calls == [
         [
             "gh",
-            "label",
-            "list",
-            "--repo",
-            "owner/api",
-            "--limit",
-            "200",
-            "--json",
-            "name",
+            "api",
+            "--paginate",
+            "repos/owner/api/labels?per_page=100",
+            "--jq",
+            ".[].name | tojson",
         ]
     ]
+
+
+@pytest.mark.parametrize("stdout", ["not json\n", '{"name": "bug"}\n', "null\n"])
+def test_github_issue_client_rejects_malformed_label_catalog(
+    stdout: str, tmp_path: Path
+) -> None:
+    commands = StubCommands(CommandResult([], 0, stdout, "", 0.1))
+    client = GitHubIssueClient(commands, cwd=tmp_path)  # type: ignore[arg-type]
+
+    with pytest.raises(GitHubClientError, match="label list"):
+        client.list_labels("owner/api")
 
 
 def test_github_issue_client_reports_label_catalog_failure(tmp_path: Path) -> None:
