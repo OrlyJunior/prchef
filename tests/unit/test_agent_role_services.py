@@ -461,6 +461,252 @@ def test_validation_failures_render_timeouts_alongside_completed_failures() -> N
     assert "ruff" not in rendered
 
 
+def test_validation_correction_prompt_keeps_each_pytest_failure_and_full_summary(
+    tmp_path: Path,
+) -> None:
+    # Pytest's Windows frame separator ends in an underscore and must stay inside one failure.
+    frame_separator = "_ " * 39 + "_\n"
+    large_detail = (
+        "oversized start api_key=hunter2\n"
+        + "x" * 2_500
+        + "\n"
+        + frame_separator
+        + "f" * 8_000
+        + "\noversized end"
+    )
+    small_detail = "small start\n" + "y" * 3_800 + "\nsmall end"
+    large_header = "_______________________________ test_crash ________________________________\n"
+    small_header = "_______________________________ test_sibling ______________________________\n"
+    later_header = "________________________________ test_later ________________________________\n"
+    long_summary_reason = "z" * 5_000 + " summary tail"
+    summary = (
+        "=========================== short test summary info ===========================\n"
+        "FAILED tests/test_widget.py::test_crash - RuntimeError: crash\n"
+        "FAILED tests/test_widget.py::test_sibling - AssertionError: sibling\n"
+        f"FAILED tests/test_other.py::test_later - AssertionError: {long_summary_reason}\n"
+        "============================== 3 failed in 0.01s ==============================\n"
+    )
+    assert len(summary) > 4_000
+    output = (
+        "============================= test session starts =============================\n"
+        "=================================== FAILURES ===================================\n"
+        f"{large_header}"
+        f"{large_detail}\n"
+        f"{small_header}"
+        f"{small_detail}\n"
+        f"{later_header}"
+        "later detail\n"
+        f"{summary}"
+    )
+    provider = RecordingProvider(AgentResult(output="corrected"))
+    validation = ValidationResult(
+        success=False,
+        checks=[
+            ValidationCheck(
+                name="custom validation",
+                command=["make", "check"],
+                success=False,
+                exit_code=1,
+                stderr=output,
+            )
+        ],
+    )
+
+    ImplementationService(provider, ChangedFilesGit()).correct_validation_failures(  # type: ignore[arg-type]
+        _task(), _spec(), validation, tmp_path
+    )
+    prompt = provider.requests[0].instructions
+
+    assert "Command: make check\nExit code: 1" in prompt
+    assert "test session starts" in prompt
+    assert "oversized start" in prompt
+    assert "oversized end" not in prompt
+    assert "api_key=[REDACTED]" in prompt
+    assert "hunter2" not in prompt
+    assert (large_header + large_detail.replace("hunter2", "[REDACTED]"))[:4_000] in prompt
+    large_block = prompt.split(large_header, 1)[1].split(small_header, 1)[0]
+    assert len(large_header + large_block.removesuffix("\n\n")) == 4_000
+    assert frame_separator in large_block
+    assert small_detail in prompt
+    assert "later detail" in prompt
+    assert summary in prompt
+    assert prompt.index("test_crash __________________") < prompt.index(
+        "test_sibling ______________"
+    )
+    assert prompt.index("test_sibling ______________") < prompt.index(
+        "test_later _________________"
+    )
+    assert prompt.index("later detail") < prompt.index(summary)
+
+
+def test_validation_correction_uses_whole_output_cap_for_other_formats(tmp_path: Path) -> None:
+    output = "z" * 5_000 + "late detail"
+    validation = ValidationResult(
+        success=False,
+        checks=[
+            ValidationCheck(
+                name="custom validation",
+                command=["make", "check"],
+                success=False,
+                exit_code=1,
+                stdout=output,
+            )
+        ],
+    )
+
+    provider = RecordingProvider(AgentResult(output="corrected"))
+    ImplementationService(provider, ChangedFilesGit()).correct_validation_failures(  # type: ignore[arg-type]
+        _task(), _spec(), validation, tmp_path
+    )
+    prompt = provider.requests[0].instructions
+
+    assert "Command: make check\nExit code: 1\nOutput:\n" + "z" * 4_000 in prompt
+    assert "z" * 4_001 not in prompt
+    assert "late detail" not in prompt
+
+
+def test_pytest_stdout_summary_survives_separate_stderr_output(tmp_path: Path) -> None:
+    summary = (
+        "================ short test summary info ================\n"
+        "FAILED tests/test_widget.py::test_crash - crash\n"
+        "FAILED tests/test_widget.py::test_sibling - sibling\n"
+        "================ 2 failed in 0.01s ================\n"
+    )
+    stdout = (
+        "================ FAILURES ================\n"
+        "plugin note before test header\n"
+        "________________ test_crash ________________\n"
+        + "x" * 8_000
+        + "\n________________ test_sibling ________________\n"
+        + "sibling details\n"
+        + summary
+    )
+    validation = ValidationResult(
+        success=False,
+        checks=[
+            ValidationCheck(
+                name="custom validation",
+                command=["make", "check"],
+                success=False,
+                exit_code=1,
+                stdout=stdout,
+                stderr="plugin warning api_key=hunter2",
+            )
+        ],
+    )
+    provider = RecordingProvider(AgentResult(output="corrected"))
+
+    ImplementationService(provider, ChangedFilesGit()).correct_validation_failures(  # type: ignore[arg-type]
+        _task(), _spec(), validation, tmp_path
+    )
+    prompt = provider.requests[0].instructions
+
+    assert "Stderr:\nplugin warning api_key=[REDACTED]" in prompt
+    assert "hunter2" not in prompt
+    assert "plugin note before test header" in prompt
+    assert "sibling details" in prompt
+    assert summary in prompt
+    assert prompt.index("sibling details") < prompt.index(summary)
+
+
+def test_pytest_summary_does_not_uncap_nested_output_or_later_commands() -> None:
+    nested_summary = (
+        "================ short test summary info ================\n"
+        "FAILED nested/test_child.py::test_child - nested failure\n"
+        "================ 1 failed in 0.01s ================\n"
+    )
+    outer_summary = (
+        "================ short test summary info ================\n"
+        "FAILED tests/test_widget.py::test_crash - crash\n"
+        "FAILED tests/test_widget.py::test_sibling - sibling\n"
+        "================ 2 failed in 0.02s ================\n"
+    )
+    later_summary = (
+        "================ short test summary info ================\n"
+        "FAILED tests/test_later.py::test_later - later failure\n"
+        "================ 1 failed in 0.03s ================\n"
+    )
+    sibling_header = "________________ test_sibling ________________\n"
+    output = (
+        "================ FAILURES ================\n"
+        "________________ test_crash ________________\n"
+        "crash details\n"
+        "================ plugin banner ================\n"
+        f"{nested_summary}"
+        + "n" * 10_000
+        + "\n"
+        + sibling_header
+        + "sibling details\n"
+        + outer_summary
+        + "later command output\n"
+        + "================ FAILURES ================\n"
+        + "________________ test_later ________________\n"
+        + "later failure details\n"
+        + later_summary
+        + "p" * 10_000
+        + "late tail"
+    )
+    rendered = ImplementationService.render_validation_failures(
+        ValidationResult(
+            success=False,
+            checks=[
+                ValidationCheck(
+                    name="custom validation",
+                    command=["make", "check"],
+                    success=False,
+                    exit_code=1,
+                    stderr=output,
+                )
+            ],
+        )
+    )
+
+    assert nested_summary in rendered
+    assert "n" * 4_001 not in rendered
+    assert sibling_header + "sibling details" in rendered
+    assert outer_summary in rendered
+    assert later_summary in rendered
+    assert "later failure details" in rendered
+    assert rendered.index("sibling details") < rendered.index(outer_summary)
+    assert "later command output" in rendered
+    assert "p" * 4_000 in rendered
+    assert "p" * 4_001 not in rendered
+    assert "late tail" not in rendered
+
+
+def test_pytest_summary_without_result_line_stops_after_summary_entries() -> None:
+    summary = (
+        "================ short test summary info ================\n"
+        "FAILED tests/test_widget.py::test_crash - crash\n"
+    )
+    output = (
+        "================ FAILURES ================\n"
+        "________________ test_crash ________________\n"
+        "crash details\n"
+        + summary
+        + "later command output\n"
+        + "x" * 10_000
+    )
+    rendered = ImplementationService.render_validation_failures(
+        ValidationResult(
+            success=False,
+            checks=[
+                ValidationCheck(
+                    name="pytest",
+                    command=["pytest"],
+                    success=False,
+                    exit_code=1,
+                    stderr=output,
+                )
+            ],
+        )
+    )
+
+    assert summary in rendered
+    assert "later command output" in rendered
+    assert "x" * 4_001 not in rendered
+
+
 def test_timed_out_validation_output_keeps_the_tail_and_reports_missing_output() -> None:
     long_output = "early line\n" + "x" * 5_000 + "\nlast line before hang"
     validation = ValidationResult(

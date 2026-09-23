@@ -321,14 +321,22 @@
   failure. Empty validation is allowed only when tests are not required.
 - `max_validation_retries` defaults to `2` and must be non-negative. A failed validation records
   its result, then—while budget remains—asks the same implementer to correct the **same worktree**.
-  The correction prompt includes failed commands, exit codes, and redacted/truncated output.
+  The correction prompt includes failed commands, exit codes, and redacted output. Recognized
+  pytest `FAILURES` sections cap each test's failure block independently at 4,000 characters,
+  then append the complete redacted `short test summary info` section so every failed test name
+  remains visible. Multiple recognized summaries in one command are retained; text after the
+  last summary has a separate 4,000-character prefix cap. Other completed failure output uses
+  the existing 4,000-character prefix cap. When pytest's report is on stdout and stderr also
+  has output, the prompt includes the parsed stdout report and a capped, redacted stderr excerpt.
+  Text between the `FAILURES` heading and first test header has its own prefix cap; intervening
+  pytest output remains subject to the preceding failure block's cap.
 - A validation command that exceeds `validation.timeout_seconds` is a failed check, not a workflow
   error: `CommandClient` raises `CommandTimeoutError` (a `CommandExecutionError` subtype) carrying
   the configured duration and the partial stdout/stderr, decoded as UTF-8 with replacement.
   The check has no exit code and sets `timed_out`/`timeout_seconds`, later commands still run,
   and it uses the same retry budget. Its correction prompt names the command and timeout and
-  includes the redacted tails of both captured streams, sharing one output budget no larger than
-  a completed failure's. Detection relies only on the subprocess timeout and never parses tool
+  includes the redacted tails of both captured streams, sharing one 4,000-character output budget.
+  Detection relies only on the subprocess timeout and never parses tool
   output. Other command execution errors still fail the workflow.
 - On any timeout, `CommandClient` kills the command's whole process tree, reaps the command, then
   waits a bounded time for output, so children (e.g. behind `npm run test`/Gradle) cannot keep

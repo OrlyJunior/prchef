@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from orchestrator.clients.git_client import GitClient
@@ -20,6 +21,85 @@ from orchestrator.services.structured_output import parse_json_object
 
 _CORRECTION_OUTPUT_LIMIT = 4_000
 _TRUNCATED_OUTPUT_MARKER = "[... earlier output truncated ...]\n"
+_PYTEST_FAILURES_HEADER = re.compile(r"^={2,} FAILURES ={2,}\r?$", re.MULTILINE)
+# A traceback frame separator contains only underscores and spaces, even when it ends in "_".
+_PYTEST_FAILURE_HEADER = re.compile(
+    r"^_+ (?=[^\r\n]*[^_ \r\n])[^\r\n]+ _+\r?$", re.MULTILINE
+)
+_PYTEST_SUMMARY_HEADER = re.compile(
+    r"^={2,} short test summary info ={2,}\r?$", re.MULTILINE
+)
+_PYTEST_SUMMARY_ENTRY = re.compile(
+    r"^(?:FAILED|ERROR|SKIPPED|XFAIL|XPASS|PASSED)\s+\S+"
+)
+_PYTEST_SESSION_RESULT = re.compile(
+    r"^={2,} (?:\d+ [^=\r\n]+|no tests ran[^=\r\n]*) ={2,}\r?$"
+)
+
+
+def _pytest_summary_end(output: str, header_end: int) -> int | None:
+    """Find the end of a real pytest summary without swallowing later command output."""
+    position = header_end
+    if output[position : position + 1] == "\n":
+        position += 1
+    has_failure = False
+    while position < len(output):
+        line_end = output.find("\n", position)
+        line_end = len(output) if line_end < 0 else line_end + 1
+        line = output[position:line_end].rstrip("\r\n")
+        if _PYTEST_SUMMARY_ENTRY.match(line):
+            has_failure |= line.startswith("FAILED ") or line.startswith("ERROR ")
+            position = line_end
+            continue
+        if has_failure and _PYTEST_SESSION_RESULT.fullmatch(line):
+            return line_end
+        return position if has_failure else None
+    return position if has_failure else None
+
+
+def _render_pytest_failure_output(output: str) -> str | None:
+    """Cap recognized pytest details per test and retain their complete summaries."""
+    failures = _PYTEST_FAILURES_HEADER.search(output)
+    if failures is None:
+        return None
+    summaries = [
+        (match, end)
+        for match in _PYTEST_SUMMARY_HEADER.finditer(output, failures.end())
+        if (end := _pytest_summary_end(output, match.end())) is not None
+    ]
+    if not summaries:
+        return None
+    # The last summary delimits the detailed blocks; earlier summaries may come
+    # from nested pytest output or multiple pytest invocations in one command.
+    summary, summary_end = summaries[-1]
+
+    details_end = summary.start()
+    headers = list(_PYTEST_FAILURE_HEADER.finditer(output, failures.end(), details_end))
+    if not headers:
+        return None
+
+    blocks = []
+    for index, header in enumerate(headers):
+        block_end = headers[index + 1].start() if index + 1 < len(headers) else details_end
+        blocks.append(output[header.start() : block_end][:_CORRECTION_OUTPUT_LIMIT])
+    parts = []
+    if failures.start():
+        parts.append(output[: failures.start()][:_CORRECTION_OUTPUT_LIMIT])
+    parts.append(failures.group())
+    # Plugins can print text before the first test header; keep a bounded copy.
+    leading_detail = output[failures.end() : headers[0].start()]
+    if leading_detail.strip():
+        parts.append(leading_detail[:_CORRECTION_OUTPUT_LIMIT])
+    parts.extend(blocks)
+    parts.extend(output[match.start() : end] for match, end in summaries)
+    if summary_end < len(output):
+        parts.append(output[summary_end : summary_end + _CORRECTION_OUTPUT_LIMIT])
+    return "\n\n".join(parts)
+
+
+def _render_completed_failure_output(output: str) -> str:
+    pytest_output = _render_pytest_failure_output(output)
+    return pytest_output if pytest_output is not None else output[:_CORRECTION_OUTPUT_LIMIT]
 
 
 def _bounded_tail(output: str, limit: int) -> str:
@@ -32,8 +112,8 @@ def _bounded_tail(output: str, limit: int) -> str:
 def _bounded_tails(stdout: str, stderr: str) -> tuple[str, str]:
     """Share one output budget between both streams of a killed process.
 
-    A timed-out check then contributes no more output than a completed failure. A stream shorter
-    than half the budget leaves its unused share to the other stream.
+    A timed-out check contributes at most one output budget. A stream shorter than half the
+    budget leaves its unused share to the other stream.
     """
     stderr_budget = min(
         len(stderr),
@@ -198,7 +278,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
 
     @staticmethod
     def render_validation_failures(validation: ValidationResult) -> str:
-        """Render the same bounded validation context used for automatic corrections."""
+        """Render the redacted validation context used for automatic corrections."""
         return ImplementationService._render_validation_failures(validation)
 
     @staticmethod
@@ -324,14 +404,23 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
             if check.timed_out:
                 rendered.append(ImplementationService._render_timed_out_check(check))
                 continue
-            output = check.stderr or check.stdout or "no output"
+            stderr = redact_text(check.stderr)
+            stdout = redact_text(check.stdout)
+            rendered_output = _render_completed_failure_output(stderr or stdout or "no output")
+            if check.stderr and check.stdout:
+                pytest_stdout = _render_pytest_failure_output(stdout)
+                if pytest_stdout is not None:
+                    rendered_output = (
+                        f"Stderr:\n{stderr[:_CORRECTION_OUTPUT_LIMIT]}"
+                        f"\n\nStdout:\n{pytest_stdout}"
+                    )
             rendered.append(
                 "\n".join(
                     (
                         f"Command: {format_command(check.command)}",
                         f"Exit code: {check.exit_code}",
                         "Output:",
-                        redact_text(output)[:_CORRECTION_OUTPUT_LIMIT],
+                        rendered_output,
                     )
                 )
             )
