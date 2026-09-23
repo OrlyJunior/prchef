@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +133,29 @@ def test_planner_ignores_symlink_to_file_outside_repository(
     )._build_prompt(_task(), repository, "owner/repo", "develop")
     assert "External secret guidance" not in prompt
     assert "OUTPUT CONTRACT:" in prompt
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX FIFO support required")
+@pytest.mark.parametrize(
+    ("filename", "loader"),
+    [
+        ("PLANNER.md", load_planner_instructions),
+        ("IMPLEMENTER.md", load_implementer_instructions),
+        ("REVIEWER.md", load_reviewer_instructions),
+    ],
+)
+def test_role_instruction_loaders_ignore_fifo(
+    tmp_path: Path, filename: str, loader: Any
+) -> None:
+    os.mkfifo(tmp_path / filename)
+
+    assert loader(tmp_path) is None
+    if filename == "PLANNER.md":
+        prompt = SpecService(
+            RecordingProvider(AgentResult(output="unused")), MarkerRepositoryContextStrategy()
+        )._build_prompt(_task(), tmp_path, "owner/repo", "develop")
+        assert "REPOSITORY PLANNER INSTRUCTIONS" not in prompt
+        assert "OUTPUT CONTRACT:" in prompt
 
 
 def test_implementer_instructions_use_the_control_checkout_then_worktree_fallback(
@@ -280,12 +304,22 @@ def test_planner_instructions_handle_empty_oversized_and_unreadable_files(
     assert "OUTPUT CONTRACT:" in empty
 
     planner_file.write_text("x" * (MAX_AGENT_INSTRUCTIONS_CHARS + 10), encoding="utf-8")
+    assert len(load_planner_instructions(tmp_path) or "") == MAX_AGENT_INSTRUCTIONS_CHARS + 1
     oversized = service._build_prompt(_task(), tmp_path, "owner/repo", "develop")
     assert "x" * (MAX_AGENT_INSTRUCTIONS_CHARS + 1) not in oversized
     assert (
         "[PLANNER.md truncated; inspect the repository file for the full instructions.]"
         in oversized
     )
+
+    planner_file.write_text(
+        " " * (MAX_AGENT_INSTRUCTIONS_CHARS + 10) + "Keep scope small.", encoding="utf-8"
+    )
+    assert load_planner_instructions(tmp_path) == "Keep scope small."
+    planner_file.write_text(
+        "Keep scope small." + " " * (MAX_AGENT_INSTRUCTIONS_CHARS + 10), encoding="utf-8"
+    )
+    assert load_planner_instructions(tmp_path) == "Keep scope small."
 
     original_open = project_context._open_instruction_file
 

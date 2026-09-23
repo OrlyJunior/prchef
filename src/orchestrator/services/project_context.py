@@ -1,6 +1,7 @@
 """Load compact, durable repository context for agent prompts."""
 
 import os
+import stat
 import sys
 from collections.abc import Callable
 from io import TextIOBase
@@ -97,22 +98,50 @@ def _load_instruction_file(repository_path: Path, filename: str) -> str | None:
     path = repository_path / filename
     try:
         with _open_instruction_file(path) as instruction_file:
-            content = instruction_file.read().strip()
+            content = _read_instruction_content(instruction_file)
     except (OSError, UnicodeError):
         return None
     return content or None
 
 
+def _read_instruction_content(instruction_file: TextIOBase) -> str:
+    """Preserve stripped text and its truncation signal with bounded memory."""
+    prefix = ""
+    content_length = 0
+    stripped_length = 0
+    started = False
+    while chunk := instruction_file.read(4096):
+        if not started:
+            chunk = chunk.lstrip()
+            if not chunk:
+                continue
+            started = True
+        content_length += len(chunk)
+        remaining = MAX_AGENT_INSTRUCTIONS_CHARS + 1 - len(prefix)
+        if remaining > 0:
+            prefix += chunk[:remaining]
+        non_whitespace_length = len(chunk.rstrip())
+        if non_whitespace_length:
+            stripped_length = content_length - len(chunk) + non_whitespace_length
+            if stripped_length > MAX_AGENT_INSTRUCTIONS_CHARS:
+                break
+    return prefix[: min(stripped_length, MAX_AGENT_INSTRUCTIONS_CHARS + 1)]
+
+
 def _open_instruction_file(path: Path) -> TextIOBase:
-    """Open the role file itself, refusing symlinks even if the path changes."""
+    """Open a regular role file, refusing symlinks even if the path changes."""
     if sys.platform == "win32":
         return _open_windows_instruction_file(path)
 
     nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("Opening role files without following symlinks is unsupported")
-    descriptor = os.open(path, os.O_RDONLY | nofollow)
+    nonblock = getattr(os, "O_NONBLOCK", None)
+    if nofollow is None or nonblock is None:
+        raise OSError("Safely opening role files is unsupported")
+    # A FIFO can block in open() before fstat() gets a chance to reject it.
+    descriptor = os.open(path, os.O_RDONLY | nofollow | nonblock)
     try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("Role file is not a regular file")
         return os.fdopen(descriptor, "r", encoding="utf-8")
     except BaseException:
         os.close(descriptor)
