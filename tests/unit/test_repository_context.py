@@ -53,6 +53,23 @@ def test_collects_structure_and_task_matched_code_without_ignored_directories(
     assert ".git" in IGNORED_DIRECTORY_NAMES
 
 
+def test_heuristic_context_excludes_root_role_instructions(tmp_path: Path) -> None:
+    (tmp_path / "PLANNER.md").write_text(
+        "Unique planner context guidance.", encoding="utf-8"
+    )
+    (tmp_path / "IMPLEMENTER.md").write_text("Private implementer context", encoding="utf-8")
+    (tmp_path / "REVIEWER.md").write_text("Private reviewer context", encoding="utf-8")
+    (tmp_path / "planner.py").write_text("def planner_context(): pass", encoding="utf-8")
+
+    context = collect_repository_context(tmp_path, _task())
+
+    assert "planner.py" in context
+    assert "PLANNER.md" not in context
+    assert "Unique planner context guidance." not in context
+    assert "IMPLEMENTER.md" not in context
+    assert "REVIEWER.md" not in context
+
+
 def test_context_is_strictly_bounded(tmp_path: Path) -> None:
     for index in range(12):
         (tmp_path / f"planner_{index}.py").write_text(

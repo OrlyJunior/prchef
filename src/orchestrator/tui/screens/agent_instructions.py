@@ -1,4 +1,4 @@
-"""Repository-local implementer and reviewer instruction editor."""
+"""Repository-local role instruction editor."""
 
 from __future__ import annotations
 
@@ -41,11 +41,14 @@ class AgentInstructionsScreen(Screen[None]):
             with Vertical(classes="workflow-form"):
                 yield RepositorySelect(id="agent-instructions-repository")
                 for role, label in (
+                    ("planner", "Planner instructions (PLANNER.md)"),
                     ("implementer", "Implementer instructions (IMPLEMENTER.md)"),
                     ("reviewer", "Reviewer instructions (REVIEWER.md)"),
                 ):
                     yield Static(label, classes="field-label")
-                    yield TextArea("", id=f"{role}-instructions")
+                    yield TextArea(
+                        "", id=f"{role}-instructions", classes="agent-instructions-editor"
+                    )
                     with Horizontal(classes="screen-actions"):
                         yield Button(
                             f"Save {role.title()} instructions",
@@ -96,6 +99,7 @@ class AgentInstructionsScreen(Screen[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         role_by_button = {
+            "save-planner-instructions": ("planner", AgentRole.PLANNER),
             "save-implementer-instructions": ("implementer", AgentRole.IMPLEMENTER),
             "save-reviewer-instructions": ("reviewer", AgentRole.REVIEWER),
         }
@@ -121,11 +125,12 @@ class AgentInstructionsScreen(Screen[None]):
 
     def _load_repository(self, repository: str) -> None:
         try:
-            implementer, reviewer = self.controller.agent_instructions(repository)
+            planner, implementer, reviewer = self.controller.agent_instructions(repository)
         except Exception as exc:
             self._status(f"Cannot load agent instructions: {exc}")
             return
         for role, content, filename in (
+            ("planner", planner, "PLANNER.md"),
             ("implementer", implementer, "IMPLEMENTER.md"),
             ("reviewer", reviewer, "REVIEWER.md"),
         ):

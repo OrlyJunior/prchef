@@ -9,12 +9,14 @@
   repository browser/RAG service. Human-blocked executions are resumable using their persisted
   workflow state; this is not a provider-session resume system.
 - `docs/PROJECT_CONTEXT.md` is shared supporting context for planning, implementation, and review prompts
-  (capped at 12,000 characters). `IMPLEMENTER.md` and `REVIEWER.md` are optional, capped,
-  role-specific local
-  guidance loaded from the configured repository root at execution time: implementers receive
-  only `IMPLEMENTER.md`, reviewers receive only `REVIEWER.md`. All are supplementary; the current
+  (capped at 12,000 characters). `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` are optional,
+  capped, role-specific local guidance loaded from the configured repository root at execution
+  time: planners receive only `PLANNER.md`, implementers receive only `IMPLEMENTER.md`, and
+  reviewers receive only `REVIEWER.md`. All are supplementary; the current
   task, repository state, and core orchestrator invariants win. The role files are Git-ignored by
   default, can be versioned deliberately, and are editable from the TUI without staging or commit.
+  Symlinked and non-regular role files are ignored when loading; the TUI refuses to save
+  through a symlink. Role-file loading uses bounded memory before prompt rendering.
 
 ## Ownership and layering
 
@@ -103,9 +105,9 @@
 - The live batch view rebuilds its provider-availability controls only when the set of unavailable
   providers changes (counts update in place, so focus and clicks survive events) and notifies when
   a provider first starts holding tasks, since those controls usually sit below the launch form.
-- The TUI's Agent Instructions view edits the selected repository's optional `IMPLEMENTER.md` and
-  `REVIEWER.md` independently. Missing files remain absent until their own save action; the TUI
-  never stages or commits either file.
+- The TUI's Agent Instructions view edits the selected repository's optional `PLANNER.md`,
+  `IMPLEMENTER.md`, and `REVIEWER.md` independently. Missing files remain absent until their own
+  save action; the TUI never stages or commits these files.
 - Provider-specific commands, polling, credentials, or API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Planner/implementer/reviewer services stay provider
   neutral.

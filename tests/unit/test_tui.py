@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -1053,6 +1054,75 @@ def test_textual_app_navigates_to_workflow_runner(tmp_path: Path) -> None:
             assert isinstance(application.screen, WorkflowRunnerScreen)
 
     asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
+    "role, filename",
+    [
+        (AgentRole.PLANNER, "PLANNER.md"),
+        (AgentRole.IMPLEMENTER, "IMPLEMENTER.md"),
+        (AgentRole.REVIEWER, "REVIEWER.md"),
+    ],
+)
+def test_agent_instructions_refuse_symlinked_files(
+    tmp_path: Path, role: AgentRole, filename: str
+) -> None:
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir()
+    outside = tmp_path / "external.md"
+    outside.write_text("Keep this content", encoding="utf-8")
+    instruction_path = repository_path / filename
+    try:
+        instruction_path.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Symlinks unavailable: {exc}")
+
+    controller, _, _ = _controller(repository_path)
+    assert controller.agent_instructions("example") == (None, None, None)
+    with pytest.raises(ValueError, match="symlink"):
+        controller.save_agent_instructions("example", role, "New guidance")
+    assert outside.read_text(encoding="utf-8") == "Keep this content"
+    assert instruction_path.is_symlink()
+
+
+def test_agent_instructions_save_cannot_follow_a_link_added_during_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir()
+    outside = tmp_path / "external.md"
+    outside.write_text("Keep this content", encoding="utf-8")
+    instruction_path = repository_path / "PLANNER.md"
+    original_replace = os.replace
+
+    def replace_after_link(source: Path, destination: Path) -> None:
+        assert destination == instruction_path
+        try:
+            instruction_path.symlink_to(outside)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"Symlinks unavailable: {exc}")
+        original_replace(source, destination)
+
+    monkeypatch.setattr("orchestrator.tui.bridge.os.replace", replace_after_link)
+    controller, _, _ = _controller(repository_path)
+    controller.save_agent_instructions("example", AgentRole.PLANNER, "New guidance")
+
+    assert outside.read_text(encoding="utf-8") == "Keep this content"
+    assert instruction_path.read_text(encoding="utf-8") == "New guidance"
+    assert not instruction_path.is_symlink()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes required")
+def test_agent_instructions_save_preserves_existing_file_mode(tmp_path: Path) -> None:
+    instruction_path = tmp_path / "PLANNER.md"
+    instruction_path.write_text("Old guidance", encoding="utf-8")
+    instruction_path.chmod(0o640)
+    controller, _, _ = _controller(tmp_path)
+
+    controller.save_agent_instructions("example", AgentRole.PLANNER, "New guidance")
+
+    assert instruction_path.read_text(encoding="utf-8") == "New guidance"
+    assert instruction_path.stat().st_mode & 0o777 == 0o640
 
 
 def test_agent_instructions_navigation_uses_a_compact_distinct_control(tmp_path: Path) -> None:
@@ -2790,16 +2860,30 @@ def test_tui_creates_updates_and_switches_agent_instruction_files(tmp_path: Path
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
-        async with application.run_test() as pilot:
+        async with application.run_test(size=(80, 24)) as pilot:
             await pilot.press("i")
             assert isinstance(application.screen, AgentInstructionsScreen)
             screen = application.screen
             repository = screen.query_one("#agent-instructions-repository", OrchestratorSelect)
             repository.value = "example"
             await settle_tui(pilot)
+            for role in ("planner", "implementer", "reviewer"):
+                editor = screen.query_one(f"#{role}-instructions", TextArea)
+                assert editor.outer_size.height == 7
+            assert "No PLANNER.md yet" in str(
+                screen.query_one("#planner-instructions-status", Static).renderable
+            )
+            assert not (tmp_path / "PLANNER.md").exists()
             assert "No IMPLEMENTER.md yet" in str(
                 screen.query_one("#implementer-instructions-status", Static).renderable
             )
+            assert not (tmp_path / "IMPLEMENTER.md").exists()
+            assert not (tmp_path / "REVIEWER.md").exists()
+
+            screen.query_one("#planner-instructions", TextArea).text = "Plan scoped changes."
+            screen.query_one("#save-planner-instructions", Button).press()
+            await settle_tui(pilot)
+            assert (tmp_path / "PLANNER.md").read_text(encoding="utf-8") == "Plan scoped changes."
             assert not (tmp_path / "IMPLEMENTER.md").exists()
             assert not (tmp_path / "REVIEWER.md").exists()
 
@@ -2819,9 +2903,21 @@ def test_tui_creates_updates_and_switches_agent_instruction_files(tmp_path: Path
 
             repository.value = "other"
             await settle_tui(pilot)
+            assert screen.query_one("#planner-instructions", TextArea).text == ""
+            assert "No PLANNER.md yet" in str(
+                screen.query_one("#planner-instructions-status", Static).renderable
+            )
             assert screen.query_one("#implementer-instructions", TextArea).text == ""
             assert "No REVIEWER.md yet" in str(
                 screen.query_one("#reviewer-instructions-status", Static).renderable
+            )
+            assert not (other_path / "PLANNER.md").exists()
+
+            repository.value = "example"
+            await settle_tui(pilot)
+            assert (
+                screen.query_one("#planner-instructions", TextArea).text
+                == "Plan scoped changes."
             )
 
     asyncio.run(drive())

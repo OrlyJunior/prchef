@@ -23,6 +23,7 @@ MAX_TREE_CHARS = 3_500
 MAX_CANDIDATE_FILES = 8
 MAX_FILE_BYTES = 48_000
 MAX_SNIPPET_CHARS = 800
+_ROLE_INSTRUCTION_FILES = frozenset({"planner.md", "implementer.md", "reviewer.md"})
 
 IGNORED_DIRECTORY_NAMES = frozenset(
     {
@@ -147,6 +148,8 @@ class RepositoryContextCollector:
                 continue
             for entry in entries:
                 if entry.name in IGNORED_DIRECTORY_NAMES:
+                    continue
+                if depth == 0 and entry.name.casefold() in _ROLE_INSTRUCTION_FILES:
                     continue
                 try:
                     if entry.is_symlink():
