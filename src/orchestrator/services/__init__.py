@@ -9,6 +9,7 @@ from orchestrator.services.review_service import ReviewService
 from orchestrator.services.spec_service import SpecService
 from orchestrator.services.task_provider import (
     GitHubIssueTaskProvider,
+    LabelCatalogProvider,
     TaskProvider,
     TrelloTaskProvider,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "TaskProvider",
     "TrelloTaskProvider",
     "GitHubIssueTaskProvider",
+    "LabelCatalogProvider",
     "ValidationService",
     "WorkflowService",
 ]

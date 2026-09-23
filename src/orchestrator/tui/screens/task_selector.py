@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from rich.text import Text
 from textual.app import ComposeResult, RenderResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.geometry import Size
 from textual.message import Message
-from textual.widgets import Button, Checkbox, Static
+from textual.widgets import Button, Checkbox, SelectionList, Static
 
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.workflow_execution import WorkflowExecution
@@ -88,11 +88,15 @@ def _cell(text: Text, width: int) -> Text:
     return cell
 
 
-def _labels_of(task: DevelopmentTask) -> str:
+def _label_names_of(task: DevelopmentTask) -> list[str]:
     labels = task.metadata.get("labels", [])
     if not isinstance(labels, list):
-        labels = []
-    return ", ".join(str(label) for label in labels if str(label).strip())
+        return []
+    return [str(label) for label in labels]
+
+
+def _labels_of(task: DevelopmentTask) -> str:
+    return ", ".join(label for label in _label_names_of(task) if label.strip())
 
 
 class _GlyphCheckbox(Checkbox):
@@ -223,10 +227,31 @@ class TaskSelector(Vertical):
         self._pending_selection: set[str] | None = None
         self._provider = ""
         self._updating = False
+        self._rows: list[tuple[DevelopmentTask, TaskRow]] = []
+        self._table_header: TaskTableHeader | None = None
+        # ``None`` means the provider has no label catalog, so no filter is offered.
+        self._label_catalog: tuple[str, ...] | None = None
+        self._label_filter: tuple[str, ...] = ()
+        self._pending_label_filter: tuple[str, ...] | None = None
+        self._label_list: SelectionList[str] | None = None
 
     @property
     def selected_task_ids(self) -> tuple[str, ...]:
+        """Every selected task in list order, including rows hidden by the filter."""
+
         return tuple(task.id for task in self._tasks if task.id in self._selected)
+
+    @property
+    def visible_task_ids(self) -> tuple[str, ...]:
+        return tuple(task.id for task in self._visible_tasks())
+
+    @property
+    def label_filter(self) -> tuple[str, ...]:
+        return self._label_filter
+
+    @property
+    def label_catalog(self) -> tuple[str, ...] | None:
+        return self._label_catalog
 
     @property
     def selected_task_id(self) -> str | None:
@@ -240,6 +265,16 @@ class TaskSelector(Vertical):
     def compose(self) -> ComposeResult:
         yield Static("Tasks", classes="field-label")
         yield Button("Refresh tasks", id="refresh-tasks")
+        # Shown only for providers with a label catalog.
+        with Vertical(id="task-label-filter"):
+            with Horizontal(id="task-label-filter-bar"):
+                yield Static(
+                    "Label filter: off. Select labels to narrow the task list.",
+                    id="task-label-filter-summary",
+                )
+                yield Button("Clear filter", id="clear-task-label-filter", disabled=True)
+            yield Vertical(id="task-label-options")
+            yield Static("", id="task-label-status")
         with Vertical(id="task-table"):
             yield _GlyphCheckbox(
                 "Select all available tasks",
@@ -258,26 +293,45 @@ class TaskSelector(Vertical):
         *,
         provider: str,
         executions: Mapping[str, WorkflowExecution] | None = None,
+        labels: Sequence[str] | None = None,
+        label_error: str = "",
     ) -> None:
+        """Show loaded tasks and, for a label-capable provider, its label filter.
+
+        ``labels`` is ``None`` when the provider has no label catalog; an empty
+        sequence is a supported catalog with no labels. ``label_error`` reports
+        a failed catalog lookup for a provider that does support labels.
+        """
+
         previous = (
             set(self._pending_selection)
             if self._pending_selection is not None
             else set(self._selected)
         )
+        previous_filter = (
+            self._pending_label_filter
+            if self._pending_label_filter is not None
+            else self._label_filter
+        )
         self._pending_selection = None
+        self._pending_label_filter = None
         self._tasks = list(tasks)
         self._executions = dict(executions or {})
         self._provider = provider
         selectable = {task.id for task in self._tasks if task.id not in self._executions}
         self._selected = previous & selectable
         self._checkbox_tasks.clear()
+        self._set_label_catalog(labels, label_error=label_error, retained=previous_filter)
 
         task_list = self.query_one("#available-tasks", Vertical)
         task_list.remove_children()
+        self._rows = []
+        self._table_header = None
         metrics = self._column_metrics()
         rows: list[Static] = []
         if self._tasks:
-            rows.append(TaskTableHeader(metrics=metrics, id="task-table-header"))
+            self._table_header = TaskTableHeader(metrics=metrics, id="task-table-header")
+            rows.append(self._table_header)
         for position, task in enumerate(self._tasks):
             checkbox_id = f"task-checkbox-{position}"
             self._checkbox_tasks[checkbox_id] = task.id
@@ -289,28 +343,26 @@ class TaskSelector(Vertical):
             if execution is not None:
                 status = execution.status.value
                 suffix += f" — {status} (open in Execution history)"
-            rows.append(
-                TaskRow(
-                    Text(f"{task.id}: {title}{suffix}"),
-                    number=task.id,
-                    title=title,
-                    labels=label_text,
-                    status=status,
-                    metrics=metrics,
-                    value=task.id in self._selected,
-                    id=checkbox_id,
-                    disabled=execution is not None,
-                    classes="task-row",
-                )
+            row = TaskRow(
+                Text(f"{task.id}: {title}{suffix}"),
+                number=task.id,
+                title=title,
+                labels=label_text,
+                status=status,
+                metrics=metrics,
+                value=task.id in self._selected,
+                id=checkbox_id,
+                disabled=execution is not None,
+                classes="task-row",
             )
+            self._rows.append((task, row))
+            rows.append(row)
         if rows:
             task_list.mount(*rows)
 
-        header = self.query_one("#select-all-tasks", Checkbox)
-        header.disabled = not selectable
         self.query_one("#refresh-tasks", Button).disabled = False
         self.query_one("#task-error", Static).update("")
-        self._sync_header_and_hint()
+        self._apply_label_filter()
         if not self._tasks:
             self.query_one("#task-hint", Static).update(
                 f"No open {provider} tasks were returned."
@@ -342,13 +394,121 @@ class TaskSelector(Vertical):
             status=max(status, len("Status")) if status else 0,
         )
 
+    def _set_label_catalog(
+        self,
+        labels: Sequence[str] | None,
+        *,
+        label_error: str,
+        retained: tuple[str, ...],
+    ) -> None:
+        """Rebuild the label control, keeping retained labels that still exist."""
+
+        options = self.query_one("#task-label-options", Vertical)
+        options.remove_children()
+        self._label_list = None
+        status = self.query_one("#task-label-status", Static)
+        status.remove_class("-error")
+        supported = labels is not None or bool(label_error)
+        self._label_catalog = tuple(dict.fromkeys(labels or ())) if supported else None
+        catalog = self._label_catalog or ()
+        self._label_filter = tuple(label for label in catalog if label in retained)
+        self.query_one("#task-label-filter", Vertical).display = supported
+        if label_error:
+            status.update(
+                Text(
+                    f"Could not load labels: {label_error}. Showing every loaded task; "
+                    "refresh to retry the label filter."
+                )
+            )
+            status.add_class("-error")
+        elif supported and not catalog:
+            status.update("This repository has no labels to filter by.")
+        else:
+            status.update("")
+        if catalog:
+            self._label_list = SelectionList[str](
+                *[(Text(label), label, label in self._label_filter) for label in catalog],
+                id="task-label-list",
+            )
+            options.mount(self._label_list)
+
+    def _reset_label_filter(self) -> None:
+        self._label_catalog = None
+        self._label_filter = ()
+        self._label_list = None
+        self.query_one("#task-label-options", Vertical).remove_children()
+        self.query_one("#task-label-status", Static).update("")
+        self.query_one("#task-label-filter", Vertical).display = False
+        self._sync_filter_controls()
+
+    def clear_label_filter(self) -> None:
+        """Show the full loaded list again, in its original order."""
+
+        self._label_filter = ()
+        if self._label_list is not None:
+            self._label_list.deselect_all()
+        self._apply_label_filter()
+
+    def on_selection_list_selected_changed(
+        self, event: SelectionList.SelectedChanged[str]
+    ) -> None:
+        event.stop()
+        # A list replaced by a newer load can still deliver a queued message.
+        if event.selection_list is not self._label_list:
+            return
+        chosen = set(event.selection_list.selected)
+        self._label_filter = tuple(
+            label for label in self._label_catalog or () if label in chosen
+        )
+        self._apply_label_filter()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "clear-task-label-filter":
+            event.stop()
+            self.clear_label_filter()
+
+    def _matches_label_filter(self, task: DevelopmentTask) -> bool:
+        # Exact, case-sensitive names; every selected label must be present.
+        names = set(_label_names_of(task))
+        return all(label in names for label in self._label_filter)
+
+    def _visible_tasks(self) -> list[DevelopmentTask]:
+        return [task for task in self._tasks if self._matches_label_filter(task)]
+
+    def _apply_label_filter(self) -> None:
+        any_visible = False
+        for task, row in self._rows:
+            row.display = self._matches_label_filter(task)
+            any_visible = any_visible or row.display
+        if self._table_header is not None:
+            self._table_header.display = any_visible
+        self._sync_filter_controls()
+        self._sync_header_and_hint()
+
+    def _sync_filter_controls(self) -> None:
+        summary = self.query_one("#task-label-filter-summary", Static)
+        if self._label_filter:
+            summary.update(
+                Text(f"Label filter: {' + '.join(self._label_filter)} (tasks must have all)")
+            )
+        else:
+            summary.update("Label filter: off. Select labels to narrow the task list.")
+        self.query_one("#clear-task-label-filter", Button).disabled = not self._label_filter
+        self.query_one("#select-all-tasks", Checkbox).label = (
+            "Select all shown tasks" if self._label_filter else "Select all available tasks"
+        )
+
     def clear_tasks(self) -> None:
         self._pending_selection = None
+        self._pending_label_filter = None
         self._tasks = []
         self._executions.clear()
         self._selected.clear()
         self._checkbox_tasks.clear()
+        self._rows = []
+        self._table_header = None
         self.query_one("#available-tasks", Vertical).remove_children()
+        self._reset_label_filter()
         header = self.query_one("#select-all-tasks", Checkbox)
         self._set_checkbox_value_silently(header, False)
         header.disabled = True
@@ -369,8 +529,20 @@ class TaskSelector(Vertical):
             if preserve_selection
             else set()
         )
+        # A refresh reconciles the filter against the reloaded catalog; a new
+        # repository or provider starts unfiltered.
+        retained_filter = (
+            (
+                self._pending_label_filter
+                if self._pending_label_filter is not None
+                else self._label_filter
+            )
+            if preserve_selection
+            else ()
+        )
         self.clear_tasks()
         self._pending_selection = retained
+        self._pending_label_filter = retained_filter
         self.query_one("#refresh-tasks", Button).disabled = True
         self.query_one("#task-hint", Static).update(f"Loading available {provider} tasks...")
 
@@ -385,8 +557,14 @@ class TaskSelector(Vertical):
         if self._updating:
             return
         if event.checkbox.id == "select-all-tasks":
-            selectable = {task.id for task in self._tasks if task.id not in self._executions}
-            self._selected = selectable if event.value else set()
+            # Only shown, available rows change; hidden selections are kept.
+            shown = {
+                task.id for task in self._visible_tasks() if task.id not in self._executions
+            }
+            if event.value:
+                self._selected |= shown
+            else:
+                self._selected -= shown
             self._updating = True
             try:
                 for checkbox_id, task_id in self._checkbox_tasks.items():
@@ -409,21 +587,45 @@ class TaskSelector(Vertical):
         self.post_message(self.SelectionChanged(self.selected_task_ids))
 
     def _sync_header_and_hint(self) -> None:
+        visible = self._visible_tasks()
+        shown = {task.id for task in visible if task.id not in self._executions}
         selectable_count = sum(task.id not in self._executions for task in self._tasks)
+        header = self.query_one("#select-all-tasks", Checkbox)
+        header.disabled = not shown
         self._updating = True
         try:
             self._set_checkbox_value_silently(
-                self.query_one("#select-all-tasks", Checkbox),
-                bool(selectable_count and len(self._selected) == selectable_count),
+                header, bool(shown) and shown <= self._selected
             )
         finally:
             self._updating = False
-        blocked_count = len(self._tasks) - selectable_count
+        blocked_count = len(visible) - len(shown)
         blocked = f" {blocked_count} already have executions." if blocked_count else ""
-        self.query_one("#task-hint", Static).update(
+        selected = (
             f"Selected {len(self._selected)} of {selectable_count} available "
             f"{self._provider} tasks."
-            f"{blocked}"
+        )
+        if not self._label_filter:
+            self.query_one("#task-hint", Static).update(f"{selected}{blocked}")
+            return
+        labels = " + ".join(self._label_filter)
+        if visible:
+            showing = (
+                f"Showing {len(visible)} of {len(self._tasks)} loaded tasks labelled {labels}."
+            )
+        else:
+            showing = (
+                f"No loaded {self._provider} tasks have every selected label ({labels}). "
+                "Clear the filter to show all tasks."
+            )
+        hidden_count = len(self._selected - shown)
+        hidden = (
+            f" {hidden_count} selected task(s) hidden by the filter will also start."
+            if hidden_count
+            else ""
+        )
+        self.query_one("#task-hint", Static).update(
+            Text(f"{showing} {selected}{hidden}{blocked}")
         )
 
     @staticmethod

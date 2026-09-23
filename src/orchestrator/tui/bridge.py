@@ -52,7 +52,7 @@ from orchestrator.services.project_context import (
     load_reviewer_instructions,
 )
 from orchestrator.services.repository_context import resolve_repository_context_strategy
-from orchestrator.services.task_provider import TaskProvider
+from orchestrator.services.task_provider import LabelCatalogProvider, TaskProvider
 from orchestrator.services.workflow_service import WorkflowService
 
 TaskProviderFactory = Callable[[str, str], TaskProvider]
@@ -460,6 +460,21 @@ class WorkflowController:
     ) -> list[DevelopmentTask]:
         provider = self._task_provider_factory(task_provider, repository)
         return provider.list_tasks(limit=limit)
+
+    def list_task_labels(
+        self, *, repository: str, task_provider: str
+    ) -> tuple[str, ...] | None:
+        """Return the provider's label names, or ``None`` without label support.
+
+        ``None`` is deliberately distinct from an empty tuple: an empty catalog
+        is a supported filter with nothing to choose, while ``None`` means the
+        launcher offers no label filter. Lookup failures propagate.
+        """
+
+        provider = self._task_provider_factory(task_provider, repository)
+        if not isinstance(provider, LabelCatalogProvider):
+            return None
+        return tuple(provider.list_labels())
 
     def submit_workflow(
         self,

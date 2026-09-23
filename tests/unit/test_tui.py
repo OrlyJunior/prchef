@@ -13,7 +13,15 @@ import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Input,
+    Select,
+    SelectionList,
+    Static,
+    TextArea,
+)
 
 from orchestrator.config.project_config import (
     AgentPresetConfig,
@@ -4043,6 +4051,341 @@ def test_task_selector_separates_select_all_from_the_task_rows(tmp_path: Path) -
             )
             assert select_all.styles.text_style.bold is True
             assert select_all.styles.border_bottom[0] != ""
+
+    asyncio.run(drive())
+
+
+class _LabelledTaskProvider(_TaskProvider):
+    """A task provider with a label catalog, as GitHub issues have."""
+
+    def __init__(
+        self,
+        tasks: list[DevelopmentTask],
+        labels: list[str],
+        label_error: Exception | None = None,
+    ) -> None:
+        self.tasks = tasks
+        self.labels = labels
+        self.label_error = label_error
+
+    def list_tasks(self, *, limit: int = 50) -> list[DevelopmentTask]:
+        return list(self.tasks)
+
+    def list_labels(self) -> list[str]:
+        if self.label_error is not None:
+            raise self.label_error
+        return list(self.labels)
+
+
+def _labelled_tasks() -> list[DevelopmentTask]:
+    def task(task_id: str, title: str, labels: list[str]) -> DevelopmentTask:
+        return DevelopmentTask(
+            task_id, "github", title, "", f"https://example/{task_id}",
+            metadata={"labels": labels},
+        )
+
+    return [
+        task("1", "Fix crash", ["bug"]),
+        task("2", "Retrieval bug", ["bug", "RAG"]),
+        task("3", "Capitalised label", ["Bug"]),
+        task("4", "Tester work", ["Tester Agent"]),
+        task("7", "Busy", ["bug", "RAG"]),
+    ]
+
+
+def _labelled_controller(
+    tmp_path: Path,
+    *,
+    labels: list[str] | None = None,
+    label_error: Exception | None = None,
+) -> tuple[WorkflowController, _WorkflowService, _LabelledTaskProvider]:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.task_source = "github"
+    repository.execution.task_id = "7"
+    repository.execution.repository_ref = "example"
+    repository.execution.status = WorkflowStatus.RUNNING
+    provider = _LabelledTaskProvider(
+        _labelled_tasks(),
+        ["bug", "Bug", "RAG", "Tester Agent"] if labels is None else labels,
+        label_error,
+    )
+    # Trello has no label catalog, like the real provider.
+    controller._task_provider_factory = lambda source, selected_repository: (
+        provider if source == "github" else _TaskProvider()
+    )
+    return controller, service, provider
+
+
+async def _wait_for_labelled_tasks(pilot: Any, application: OrchestratorApp) -> TaskSelector:
+    await wait_for_tui(
+        pilot,
+        lambda: len(application.screen.query(TaskRow)) == 5
+        and application.screen.query_one("#task-selector", TaskSelector).label_catalog
+        is not None,
+        description="labelled task rows",
+    )
+    return application.screen.query_one("#task-selector", TaskSelector)
+
+
+def test_controller_distinguishes_unsupported_and_empty_label_catalogs(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    assert controller.list_task_labels(repository="example", task_provider="github") is None
+
+    labelled, _, provider = _labelled_controller(tmp_path, labels=[])
+    assert labelled.list_task_labels(repository="example", task_provider="github") == ()
+    provider.labels = ["bug", "RAG"]
+    assert labelled.list_task_labels(repository="example", task_provider="github") == (
+        "bug",
+        "RAG",
+    )
+    assert labelled.list_task_labels(repository="example", task_provider="trello") is None
+
+
+def test_task_label_filter_matches_exact_names_with_and_and_clears(tmp_path: Path) -> None:
+    controller, _, _ = _labelled_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            selector = await _wait_for_labelled_tasks(pilot, application)
+            screen = application.screen
+            label_list = screen.query_one("#task-label-list", SelectionList)
+            assert screen.query_one("#task-label-filter", Vertical).display is True
+            assert selector.label_catalog == ("bug", "Bug", "RAG", "Tester Agent")
+
+            # Keyboard toggling selects "bug", which must not match "Bug".
+            label_list.focus()
+            label_list.highlighted = 0
+            await pilot.press("space")
+            await wait_for_tui(
+                pilot,
+                lambda: selector.label_filter == ("bug",),
+                description="single label filter",
+            )
+            assert selector.visible_task_ids == ("1", "2", "7")
+            assert screen.query_one("#task-checkbox-2", TaskRow).display is False
+            assert screen.query_one("#task-checkbox-0", TaskRow).display is True
+
+            # Several labels must all be present on a shown task.
+            label_list.select("RAG")
+            await wait_for_tui(
+                pilot,
+                lambda: selector.label_filter == ("bug", "RAG"),
+                description="two-label filter",
+            )
+            assert selector.visible_task_ids == ("2", "7")
+            assert "Showing 2 of 5 loaded tasks labelled bug + RAG." in str(
+                screen.query_one("#task-hint", Static).renderable
+            )
+
+            label_list.select("Tester Agent")
+            await wait_for_tui(
+                pilot,
+                lambda: selector.label_filter == ("bug", "RAG", "Tester Agent"),
+                description="no-match filter",
+            )
+            assert selector.visible_task_ids == ()
+            hint = str(screen.query_one("#task-hint", Static).renderable)
+            assert "No loaded github tasks have every selected label" in hint
+            assert "No open github tasks were returned." not in hint
+            assert screen.query_one("#task-table-header", TaskTableHeader).display is False
+            assert screen.query_one("#select-all-tasks", Checkbox).disabled is True
+
+            clear = screen.query_one("#clear-task-label-filter", Button)
+            assert clear.disabled is False
+            clear.press()
+            await wait_for_tui(
+                pilot,
+                lambda: selector.label_filter == () and label_list.selected == [],
+                description="cleared label filter",
+            )
+            assert selector.visible_task_ids == ("1", "2", "3", "4", "7")
+            assert all(row.display for row in screen.query(TaskRow))
+            assert screen.query_one("#clear-task-label-filter", Button).disabled is True
+            assert "Selected 0 of 4 available github tasks." in str(
+                screen.query_one("#task-hint", Static).renderable
+            )
+
+    asyncio.run(drive())
+
+
+def test_select_all_applies_only_to_shown_available_tasks(tmp_path: Path) -> None:
+    controller, service, _ = _labelled_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            selector = await _wait_for_labelled_tasks(pilot, application)
+            screen = application.screen
+            header = screen.query_one("#select-all-tasks", Checkbox)
+            screen.query_one("#task-checkbox-2", TaskRow).value = True
+            await wait_for_tui(
+                pilot,
+                lambda: selector.selected_task_ids == ("3",),
+                description="selection before filtering",
+            )
+
+            screen.query_one("#task-label-list", SelectionList).select("bug")
+            await wait_for_tui(
+                pilot,
+                lambda: selector.label_filter == ("bug",),
+                description="bug label filter",
+            )
+            assert header.value is False
+            assert str(header.label) == "Select all shown tasks"
+
+            header.value = True
+            await wait_for_tui(
+                pilot,
+                lambda: selector.selected_task_ids == ("1", "2", "3"),
+                description="select all shown tasks",
+            )
+            # Task 7 has an execution; task 3 stays selected while hidden.
+            assert screen.query_one("#task-checkbox-4", TaskRow).value is False
+            assert header.value is True
+            assert "1 selected task(s) hidden by the filter will also start." in str(
+                screen.query_one("#task-hint", Static).renderable
+            )
+            assert str(screen.query_one("#start-workflow", Button).label) == (
+                "Start workflow (3)"
+            )
+
+            header.value = False
+            await wait_for_tui(
+                pilot,
+                lambda: selector.selected_task_ids == ("3",),
+                description="unselect all shown tasks",
+            )
+            assert screen.query_one("#task-checkbox-2", TaskRow).value is True
+
+            screen.query_one("#clear-task-label-filter", Button).press()
+            await wait_for_tui(
+                pilot,
+                lambda: selector.label_filter == (),
+                description="cleared label filter",
+            )
+            assert selector.selected_task_ids == ("3",)
+            assert header.value is False
+            assert str(header.label) == "Select all available tasks"
+
+            screen.query_one("#start-workflow", Button).press()
+            await wait_for_tui(
+                pilot,
+                lambda: len(service.calls) == 1,
+                description="selected hidden-then-shown task launch",
+            )
+            assert service.calls[0][0] == "3"
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize("state", ["unsupported", "empty", "failed"])
+def test_task_label_filter_distinguishes_unsupported_empty_and_failed(
+    tmp_path: Path, state: str
+) -> None:
+    if state == "unsupported":
+        controller, _, _ = _controller(tmp_path)
+    elif state == "empty":
+        controller, _, _ = _labelled_controller(tmp_path, labels=[])
+    else:
+        controller, _, _ = _labelled_controller(
+            tmp_path, label_error=RuntimeError("label scope missing")
+        )
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(TaskRow)) > 0,
+                description="loaded task rows",
+            )
+            screen = application.screen
+            selector = screen.query_one("#task-selector", TaskSelector)
+            filter_panel = screen.query_one("#task-label-filter", Vertical)
+            status = str(screen.query_one("#task-label-status", Static).renderable)
+            assert len(screen.query("#task-label-list")) == 0
+            assert selector.label_filter == ()
+            if state == "unsupported":
+                assert selector.label_catalog is None
+                assert filter_panel.display is False
+            elif state == "empty":
+                assert selector.label_catalog == ()
+                assert filter_panel.display is True
+                assert "no labels to filter by" in status
+            else:
+                assert selector.label_catalog == ()
+                assert filter_panel.display is True
+                assert "Could not load labels: label scope missing" in status
+                assert screen.query_one("#task-label-status", Static).has_class("-error")
+                # Tasks remain usable when only the catalog failed.
+                assert len(screen.query(TaskRow)) == 5
+                assert str(screen.query_one("#task-error", Static).renderable) == ""
+
+    asyncio.run(drive())
+
+
+def test_task_label_filter_reconciles_on_refresh_and_resets_on_source_change(
+    tmp_path: Path,
+) -> None:
+    controller, _, provider = _labelled_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            selector = await _wait_for_labelled_tasks(pilot, application)
+            screen = application.screen
+            label_list = screen.query_one("#task-label-list", SelectionList)
+            label_list.select("bug")
+            label_list.select("RAG")
+            await wait_for_tui(
+                pilot,
+                lambda: selector.label_filter == ("bug", "RAG"),
+                description="two-label filter",
+            )
+
+            # A refresh keeps selected labels that still exist in the catalog.
+            provider.labels = ["bug", "Tester Agent"]
+            screen.query_one("#refresh-tasks", Button).press()
+            await wait_for_tui(
+                pilot,
+                lambda: selector.label_catalog == ("bug", "Tester Agent"),
+                description="refreshed label catalog",
+            )
+            assert selector.label_filter == ("bug",)
+            assert selector.visible_task_ids == ("1", "2", "7")
+            assert screen.query_one("#task-label-list", SelectionList).selected == ["bug"]
+
+            # A stale response cannot restore an old catalog or filter.
+            stale_token = screen._task_load_token - 1
+            screen._set_available_tasks(
+                provider.tasks[:1], "github", stale_token, ("RAG",), ""
+            )
+            await settle_tui(pilot)
+            assert selector.label_catalog == ("bug", "Tester Agent")
+            assert selector.label_filter == ("bug",)
+
+            # A provider without labels offers no filter, and switching back
+            # starts unfiltered.
+            screen.query_one("#task-provider", Select).value = "trello"
+            await wait_for_tui(
+                pilot,
+                lambda: selector.label_catalog is None
+                and len(screen.query(TaskRow)) == 1,
+                description="trello task list",
+            )
+            assert selector.label_filter == ()
+            assert screen.query_one("#task-label-filter", Vertical).display is False
+
+            screen.query_one("#task-provider", Select).value = "github"
+            await _wait_for_labelled_tasks(pilot, application)
+            assert selector.label_filter == ()
+            assert screen.query_one("#task-label-list", SelectionList).selected == []
+            assert selector.visible_task_ids == ("1", "2", "3", "4", "7")
 
     asyncio.run(drive())
 
