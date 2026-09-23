@@ -1959,12 +1959,7 @@ class WorkflowService:
                                 "operation": "validation",
                                 "message": validation.error_message,
                                 "failing_commands": [
-                                    {
-                                        "command": check.command,
-                                        "exit_code": check.exit_code,
-                                        "stdout": check.stdout,
-                                        "stderr": check.stderr,
-                                    }
+                                    self._failing_command_diagnostic(check)
                                     for check in validation.checks
                                     if not check.success
                                 ],
@@ -1998,6 +1993,19 @@ class WorkflowService:
                 continue
             return validation
 
+    @staticmethod
+    def _failing_command_diagnostic(check: ValidationCheck) -> dict[str, Any]:
+        diagnostic: dict[str, Any] = {
+            "command": check.command,
+            "exit_code": check.exit_code,
+            "stdout": check.stdout,
+            "stderr": check.stderr,
+        }
+        if check.timed_out:
+            diagnostic["timed_out"] = True
+            diagnostic["timeout_seconds"] = check.timeout_seconds
+        return diagnostic
+
     def _validate_polish_changes(
         self,
         *,
@@ -2026,8 +2034,7 @@ class WorkflowService:
                             "operation": "optional_polish_validation",
                             "message": validation.error_message,
                             "failing_commands": [
-                                {"command": check.command, "exit_code": check.exit_code,
-                                 "stdout": check.stdout, "stderr": check.stderr}
+                                self._failing_command_diagnostic(check)
                                 for check in validation.checks if not check.success
                             ],
                         },

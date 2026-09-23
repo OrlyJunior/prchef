@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,7 +16,7 @@ import pytest
 from orchestrator.clients import codex_client, command_client
 from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.command_client import CommandClient, CommandResult
-from orchestrator.clients.exceptions import CommandExecutionError
+from orchestrator.clients.exceptions import CommandExecutionError, CommandTimeoutError
 from orchestrator.config.project_config import CodexCliProviderSettings
 
 
@@ -32,8 +36,8 @@ def test_non_windows_command_is_passed_to_subprocess_unchanged(
         lambda *args, **kwargs: pytest.fail("non-Windows should not resolve shims"),
     )
     monkeypatch.setattr(
-        command_client.subprocess,
-        "run",
+        command_client,
+        "_run_process",
         lambda command, **kwargs: (launched.append(command), _completed(command))[1],
     )
 
@@ -64,7 +68,7 @@ def test_windows_native_shim_is_resolved_without_shell_parsing(
         return _completed(command)
 
     monkeypatch.setattr(command_client.shutil, "which", fake_which)
-    monkeypatch.setattr(command_client.subprocess, "run", fake_run)
+    monkeypatch.setattr(command_client, "_run_process", fake_run)
 
     configured = ["codex", "exec", "argument with spaces", "&literal"]
     result = CommandClient().run(
@@ -78,15 +82,9 @@ def test_windows_native_shim_is_resolved_without_shell_parsing(
             [f"C:\\tools\\codex{suffix}", "exec", "argument with spaces", "&literal"],
             {
                 "cwd": tmp_path,
-                "input": None,
-                "capture_output": True,
-                "text": True,
-                "encoding": "utf-8",
-                "errors": "replace",
-                "timeout": 900,
-                "check": False,
+                "input_text": None,
+                "timeout_seconds": 900,
                 "env": {"Path": "C:\\tools", "PATHEXT": ".CMD;.BAT"},
-                "shell": False,
             },
         )
     ]
@@ -132,8 +130,8 @@ def test_launch_diagnostics_log_resolved_command_without_stdin(
             lambda candidate, path=None: "C:\\npm\\codex.cmd",
         )
         monkeypatch.setattr(
-            command_client.subprocess,
-            "run",
+            command_client,
+            "_run_process",
             lambda command, **kwargs: _completed(command),
         )
 
@@ -175,7 +173,7 @@ def test_file_not_found_includes_safe_os_error_diagnostics(
         def missing(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
             raise error
 
-        monkeypatch.setattr(command_client.subprocess, "run", missing)
+        monkeypatch.setattr(command_client, "_run_process", missing)
 
         with caplog.at_level(logging.INFO, logger=target_logger.name):
             with pytest.raises(CommandExecutionError, match="Executable not found: missing-tool"):
@@ -202,12 +200,645 @@ def test_missing_executable_keeps_existing_error_semantics(
         launched.append(command)
         raise FileNotFoundError
 
-    monkeypatch.setattr(command_client.subprocess, "run", missing)
+    monkeypatch.setattr(command_client, "_run_process", missing)
 
     with pytest.raises(CommandExecutionError, match="Executable not found: missing-tool"):
         CommandClient().run(["missing-tool", "argument with spaces"], cwd=tmp_path)
 
     assert launched == [["missing-tool", "argument with spaces"]]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected_stdout", "expected_stderr"),
+    [
+        (b"collected 3 items\n", b"still running", "collected 3 items\n", "still running"),
+        (b"bad \xff byte", None, "bad � byte", ""),
+        ("text output", "text error", "text output", "text error"),
+        (None, None, "", ""),
+    ],
+)
+def test_timeout_carries_partial_output_and_configured_duration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stdout: bytes | str | None,
+    stderr: bytes | str | None,
+    expected_stdout: str,
+    expected_stderr: str,
+) -> None:
+    def hang(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            command, kwargs["timeout_seconds"], output=stdout, stderr=stderr
+        )
+
+    monkeypatch.setattr(command_client, "_is_windows", lambda: False)
+    monkeypatch.setattr(command_client, "_run_process", hang)
+
+    with pytest.raises(CommandTimeoutError) as raised:
+        CommandClient().run(["tool", "check"], cwd=tmp_path, timeout_seconds=30)
+
+    error = raised.value
+    assert isinstance(error, CommandExecutionError)
+    assert str(error) == "Command timed out after 30s: tool check"
+    assert error.timeout_seconds == 30
+    assert error.stdout == expected_stdout
+    assert error.stderr == expected_stderr
+    assert error.duration_seconds >= 0
+    assert isinstance(error.__cause__, subprocess.TimeoutExpired)
+
+
+def test_timeout_remains_catchable_as_command_execution_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def hang(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, kwargs["timeout_seconds"])
+
+    monkeypatch.setattr(command_client, "_is_windows", lambda: False)
+    monkeypatch.setattr(command_client, "_run_process", hang)
+
+    with pytest.raises(CommandExecutionError, match="Command timed out after 900s: tool"):
+        CommandClient().run(["tool"], cwd=tmp_path)
+
+
+class _ScriptedStream:
+    def __init__(self, events: list[str], name: str) -> None:
+        self._events = events
+        self._name = name
+
+    def close(self) -> None:
+        self._events.append(f"close:{self._name}")
+
+
+class _ScriptedProcess:
+    """Popen stand-in whose communicate calls follow a script of results or exceptions."""
+
+    pid = 4321
+
+    def __init__(self, events: list[str], *outcomes: object) -> None:
+        self.events = events
+        self._outcomes = list(outcomes)
+        self.returncode: int | None = None
+        self.stdin = None
+        self.stdout = _ScriptedStream(events, "stdout")
+        self.stderr = _ScriptedStream(events, "stderr")
+
+    def communicate(
+        self, input: str | None = None, timeout: float | None = None
+    ) -> tuple[Any, Any]:
+        self.events.append(f"communicate:{timeout}")
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        self.returncode = -9
+        return outcome  # type: ignore[return-value]
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.events.append(f"wait:{timeout}")
+        self.returncode = -9
+        return self.returncode
+
+
+def _install_scripted_process(
+    monkeypatch: pytest.MonkeyPatch,
+    process: _ScriptedProcess,
+    events: list[str],
+    *,
+    tree_stopped: bool = True,
+) -> None:
+    def terminate(terminated: _ScriptedProcess, job: object) -> bool:
+        events.append(f"terminate:{terminated.pid}")
+        return tree_stopped
+
+    monkeypatch.setattr(command_client, "_is_windows", lambda: False)
+    monkeypatch.setattr(
+        command_client, "_start_process", lambda command, **kwargs: (process, None)
+    )
+    monkeypatch.setattr(command_client, "_terminate_process_tree", terminate)
+    # The scripted pid is not a real process group.
+    monkeypatch.setattr(command_client, "_process_group_emptied", lambda pgid: True)
+
+
+def test_timeout_terminates_the_process_tree_before_collecting_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    process = _ScriptedProcess(
+        events,
+        subprocess.TimeoutExpired(["tool"], 30),
+        ("collected 3 items\n", "hung in test_worker"),
+    )
+    _install_scripted_process(monkeypatch, process, events)
+
+    with pytest.raises(CommandTimeoutError) as raised:
+        CommandClient().run(["tool", "check"], cwd=tmp_path, timeout_seconds=30)
+
+    drain = command_client._POST_KILL_DRAIN_SECONDS
+    assert events == ["communicate:30", "terminate:4321", f"communicate:{drain}"]
+    assert raised.value.stdout == "collected 3 items\n"
+    assert raised.value.stderr == "hung in test_worker"
+    assert process.returncode is not None
+
+
+def test_timeout_is_not_correctable_when_an_escaped_descendant_keeps_output_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    drain = command_client._POST_KILL_DRAIN_SECONDS
+    process = _ScriptedProcess(
+        events,
+        subprocess.TimeoutExpired(["tool"], 30),
+        subprocess.TimeoutExpired(["tool"], drain, output=b"partial \xff", stderr=None),
+    )
+    _install_scripted_process(monkeypatch, process, events)
+
+    with pytest.raises(CommandExecutionError) as raised:
+        CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
+
+    assert not isinstance(raised.value, CommandTimeoutError)
+    assert str(raised.value) == (
+        "Command timed out after 30s and its process tree could not be confirmed "
+        "terminated: tool"
+    )
+    assert events == [
+        "communicate:30",
+        "terminate:4321",
+        f"communicate:{drain}",
+        "close:stdout",
+        "close:stderr",
+        f"wait:{drain}",
+    ]
+
+
+def test_timeout_is_not_correctable_when_the_process_tree_kill_is_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    process = _ScriptedProcess(
+        events,
+        subprocess.TimeoutExpired(["tool"], 30),
+        ("partial", ""),
+    )
+    _install_scripted_process(monkeypatch, process, events, tree_stopped=False)
+
+    with pytest.raises(CommandExecutionError) as raised:
+        CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
+
+    assert not isinstance(raised.value, CommandTimeoutError)
+    assert "could not be confirmed terminated" in str(raised.value)
+
+
+def test_interrupted_command_terminates_the_process_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    process = _ScriptedProcess(events, KeyboardInterrupt())
+    _install_scripted_process(monkeypatch, process, events)
+
+    with pytest.raises(KeyboardInterrupt):
+        CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
+
+    drain = command_client._POST_KILL_DRAIN_SECONDS
+    # The unread output pipes are closed before waiting, so nothing can block writing to them.
+    assert events == [
+        "communicate:30",
+        "terminate:4321",
+        "close:stdout",
+        "close:stderr",
+        f"wait:{drain}",
+    ]
+    assert process.returncode is not None
+
+
+_NOISY_SCRIPT = """\
+import sys
+
+print("ready", flush=True)
+chunk = "x" * 65536
+while True:
+    sys.stdout.write(chunk)
+    sys.stdout.flush()
+"""
+
+
+def _unread_pipe_bytes(fd: int) -> int:
+    import fcntl
+    import termios
+
+    pending = bytearray(4)
+    fcntl.ioctl(fd, termios.FIONREAD, pending)
+    return int.from_bytes(pending, sys.byteorder)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux supervisor only")
+def test_interrupted_cleanup_lets_a_supervisor_blocked_on_full_output_exit(
+    tmp_path: Path,
+) -> None:
+    import fcntl
+
+    noisy = tmp_path / "noisy.py"
+    noisy.write_text(_NOISY_SCRIPT, encoding="utf-8")
+
+    process, containment = command_client._start_process(
+        [sys.executable, str(noisy)], cwd=tmp_path, input_text=None, env=None
+    )
+    try:
+        assert isinstance(containment, command_client._TreeSupervisor)
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        stdout_fd = process.stdout.fileno()
+        capacity = fcntl.fcntl(stdout_fd, fcntl.F_GETPIPE_SZ)
+        # Wait until the unread pipe is full, so the supervisor is blocked relaying into it. The
+        # bound only keeps a regression from hanging the suite.
+        deadline = time.monotonic() + 60
+        while _unread_pipe_bytes(stdout_fd) < capacity:
+            assert time.monotonic() < deadline, "the output pipe never filled"
+            time.sleep(0.01)
+
+        command_client._terminate_process_tree(process, containment)
+        command_client._reap_interrupted_process(process)
+
+        # The supervisor exited within the bounded wait rather than staying blocked on the pipe.
+        assert process.returncode is not None
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if containment is not None:
+            containment.close()
+
+
+_LAUNCHER_SCRIPT = """\
+import subprocess
+import sys
+import time
+
+subprocess.Popen(
+    [sys.executable, sys.argv[1]], stdout=sys.stdout, stderr=sys.stderr
+)
+time.sleep(600)
+"""
+
+_EXITING_LAUNCHER_SCRIPT = """\
+import subprocess
+import sys
+
+subprocess.Popen(
+    [sys.executable, sys.argv[1]], stdout=sys.stdout, stderr=sys.stderr
+)
+"""
+
+_DESCENDANT_SCRIPT = """\
+import time
+
+print("ready", flush=True)
+time.sleep(600)
+"""
+
+
+@pytest.mark.parametrize(
+    "launcher_script",
+    [_LAUNCHER_SCRIPT, _EXITING_LAUNCHER_SCRIPT],
+    ids=["running-launcher", "exited-launcher"],
+)
+def test_terminating_the_process_tree_stops_descendants_holding_output(
+    tmp_path: Path, launcher_script: str
+) -> None:
+    launcher = tmp_path / "launcher.py"
+    descendant = tmp_path / "descendant.py"
+    launcher.write_text(launcher_script, encoding="utf-8")
+    descendant.write_text(_DESCENDANT_SCRIPT, encoding="utf-8")
+
+    process, job = command_client._start_process(
+        [sys.executable, str(launcher), str(descendant)],
+        cwd=tmp_path,
+        input_text=None,
+        env=None,
+    )
+    try:
+        assert process.stdout is not None
+        # Wait until the descendant is running and holds the inherited output pipe.
+        assert process.stdout.readline().strip() == "ready"
+        if launcher_script is _EXITING_LAUNCHER_SCRIPT and not isinstance(
+            job, command_client._TreeSupervisor
+        ):
+            # Like a .cmd shim that returned while its child still runs: only the descendant is
+            # left, so the kill cannot reach it through the launcher. A Linux supervisor outlives
+            # the launcher; its orphan case is covered by the session-escape test below.
+            process.wait(timeout=60)
+
+        assert command_client._terminate_process_tree(process, job)
+
+        # Output reaches EOF only after every process holding the pipe has exited; the bound only
+        # keeps a regression from hanging the suite.
+        process.communicate(timeout=60)
+        assert command_client._stop_confirmed(process, job)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if job is not None:
+            job.close()
+
+    assert process.returncode is not None
+
+
+# Each launcher starts a descendant in a new session, beyond the reach of a process-group kill,
+# and prints "ready <pid>" once it runs.
+_REDIRECTED_SESSION_ESCAPE_SCRIPT = """\
+import subprocess
+import sys
+import time
+
+descendant = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+print("ready", descendant.pid, flush=True)
+time.sleep(600)
+"""
+
+_ORPHANED_SESSION_ESCAPE_SCRIPT = """\
+import subprocess
+import sys
+
+descendant = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    stdin=subprocess.DEVNULL,
+    start_new_session=True,
+)
+print("ready", descendant.pid, flush=True)
+"""
+
+_DETACHING_LAUNCHER_SCRIPT = """\
+import subprocess
+import sys
+
+descendant = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+print("ready", descendant.pid, flush=True)
+"""
+
+
+def _parent_pid(pid: int) -> int | None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_bytes()
+    except OSError:
+        return None
+    return int(stat[stat.rfind(b")") + 2 :].split()[1])
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux supervisor only")
+@pytest.mark.parametrize(
+    "launcher_script",
+    [_REDIRECTED_SESSION_ESCAPE_SCRIPT, _ORPHANED_SESSION_ESCAPE_SCRIPT],
+    ids=["hung-launcher-redirected-descendant", "exited-launcher-orphaned-descendant"],
+)
+def test_timeout_confirms_only_after_stopping_descendants_that_left_the_session(
+    tmp_path: Path, launcher_script: str
+) -> None:
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(launcher_script, encoding="utf-8")
+
+    process, containment = command_client._start_process(
+        [sys.executable, str(launcher)], cwd=tmp_path, input_text=None, env=None
+    )
+    descendant: int | None = None
+    try:
+        assert isinstance(containment, command_client._TreeSupervisor)
+        assert process.stdout is not None
+        ready, pid = process.stdout.readline().split()
+        assert ready == "ready"
+        descendant = int(pid)
+        if launcher_script is _ORPHANED_SESSION_ESCAPE_SCRIPT:
+            # Wait for the launcher to exit: its orphan is then reparented to the supervisor
+            # rather than to init. The bound only keeps a regression from hanging the suite.
+            deadline = time.monotonic() + 60
+            while _parent_pid(descendant) != process.pid:
+                assert time.monotonic() < deadline, "orphan was not kept by the supervisor"
+                time.sleep(0.01)
+
+        assert command_client._terminate_process_tree(process, containment)
+        _, _, drained = command_client._drain_terminated_process(process)
+
+        assert drained
+        assert command_client._stop_confirmed(process, containment)
+        # The supervisor confirms only once it reaped every descendant, so the pid is gone.
+        assert not _process_exists(descendant)
+    finally:
+        if descendant is not None and _process_exists(descendant):
+            os.kill(descendant, signal.SIGKILL)
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if containment is not None:
+            containment.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+@pytest.mark.parametrize(
+    "launcher_script",
+    [_LAUNCHER_SCRIPT, _EXITING_LAUNCHER_SCRIPT],
+    ids=["running-launcher", "exited-launcher"],
+)
+def test_process_group_timeout_is_confirmed_without_a_supervisor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, launcher_script: str
+) -> None:
+    # The path used on macOS, and on Linux whenever the supervisor is unavailable.
+    monkeypatch.setattr(command_client, "_can_supervise", lambda command: False)
+    launcher = tmp_path / "launcher.py"
+    descendant = tmp_path / "descendant.py"
+    launcher.write_text(launcher_script, encoding="utf-8")
+    descendant.write_text(_DESCENDANT_SCRIPT, encoding="utf-8")
+
+    process, containment = command_client._start_process(
+        [sys.executable, str(launcher), str(descendant)],
+        cwd=tmp_path,
+        input_text=None,
+        env=None,
+    )
+    try:
+        assert containment is None
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        if launcher_script is _EXITING_LAUNCHER_SCRIPT:
+            # Only the descendant is left in the group, holding the output pipe.
+            process.wait(timeout=60)
+
+        assert command_client._terminate_process_tree(process, containment)
+        _, _, drained = command_client._drain_terminated_process(process)
+
+        assert drained
+        assert command_client._stop_confirmed(process, containment)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+class _GroupLeader:
+    pid = 4321
+
+    def kill(self) -> None:
+        pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+def test_process_group_kill_is_confirmed_once_no_member_remains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals: list[tuple[int, int]] = []
+    members_left = [1]
+
+    def killpg(pgid: int, signum: int) -> None:
+        signals.append((pgid, signum))
+        if signum == 0:
+            if not members_left:
+                raise ProcessLookupError
+            members_left.pop()
+
+    monkeypatch.setattr(command_client.os, "killpg", killpg)
+    monkeypatch.setattr(command_client.time, "sleep", lambda seconds: None)
+    process: Any = _GroupLeader()
+
+    assert command_client._terminate_process_tree(process, None)
+    assert command_client._stop_confirmed(process, None)
+    assert signals == [(4321, signal.SIGKILL), (4321, 0), (4321, 0)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+@pytest.mark.parametrize("probe_error", [None, PermissionError], ids=["member", "foreign-member"])
+def test_process_group_with_a_surviving_member_is_not_confirmed(
+    monkeypatch: pytest.MonkeyPatch, probe_error: type[OSError] | None
+) -> None:
+    def killpg(pgid: int, signum: int) -> None:
+        if signum == 0 and probe_error is not None:
+            raise probe_error
+
+    monkeypatch.setattr(command_client.os, "killpg", killpg)
+    # No waiting: the first probe that still finds a member decides.
+    monkeypatch.setattr(command_client, "_POST_KILL_DRAIN_SECONDS", 0.0)
+    monkeypatch.setattr(
+        command_client.time, "sleep", lambda seconds: pytest.fail("waited past the bound")
+    )
+
+    process: Any = _GroupLeader()
+
+    assert not command_client._stop_confirmed(process, None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+def test_process_group_that_cannot_be_killed_is_not_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def killpg(pgid: int, signum: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(command_client.os, "killpg", killpg)
+    process: Any = _GroupLeader()
+
+    assert not command_client._terminate_process_tree(process, None)
+
+
+@pytest.mark.parametrize(
+    ("report", "returncode", "confirmed"),
+    [
+        (b"stopped\n", -9, True),
+        (b"", -9, False),
+        (b"stopped\n", None, False),
+    ],
+    ids=["reported", "not-reported", "still-running"],
+)
+def test_supervised_timeout_is_confirmed_only_by_the_supervisor_report(
+    report: bytes, returncode: int | None, confirmed: bool
+) -> None:
+    read_end, write_end = os.pipe()
+    os.write(write_end, report)
+    os.close(write_end)
+    supervisor = command_client._TreeSupervisor(read_end)
+    process: Any = SimpleNamespace(returncode=returncode)
+    try:
+        assert command_client._stop_confirmed(process, supervisor) is confirmed
+    finally:
+        supervisor.close()
+
+
+def test_completed_command_keeps_its_exit_code_and_both_streams(tmp_path: Path) -> None:
+    script = (
+        "import sys; data = sys.stdin.read(); print(data.upper()); "
+        "print('warning', file=sys.stderr); sys.exit(3)"
+    )
+
+    result = CommandClient().run(
+        [sys.executable, "-c", script], cwd=tmp_path, input_text="checked", timeout_seconds=60
+    )
+
+    assert result.exit_code == 3
+    assert result.stdout == "CHECKED\n"
+    assert result.stderr == "warning\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals only")
+def test_command_killed_by_a_signal_keeps_its_signal_status(tmp_path: Path) -> None:
+    script = "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"
+
+    result = CommandClient().run([sys.executable, "-c", script], cwd=tmp_path, timeout_seconds=60)
+
+    assert result.exit_code == -signal.SIGKILL
+
+
+def test_missing_executable_is_reported_as_before(tmp_path: Path) -> None:
+    with pytest.raises(CommandExecutionError, match="Executable not found: orchestrator-no-such"):
+        CommandClient().run(["orchestrator-no-such-tool"], cwd=tmp_path, timeout_seconds=60)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions only")
+def test_background_process_that_released_output_does_not_delay_completion(
+    tmp_path: Path,
+) -> None:
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(_DETACHING_LAUNCHER_SCRIPT, encoding="utf-8")
+
+    result = CommandClient().run([sys.executable, str(launcher)], cwd=tmp_path, timeout_seconds=60)
+
+    ready, pid = result.stdout.split()
+    background = int(pid)
+    try:
+        assert result.exit_code == 0
+        assert ready == "ready"
+        # Like a build daemon, it is left running exactly as when the command ran directly.
+        assert _process_exists(background)
+    finally:
+        os.kill(background, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Job objects are Windows-specific")
+def test_windows_commands_are_contained_in_a_job_object(tmp_path: Path) -> None:
+    process, job = command_client._start_process(
+        [sys.executable, "-c", "print('ran')"], cwd=tmp_path, input_text=None, env=None
+    )
+    try:
+        stdout, _ = process.communicate(timeout=60)
+    finally:
+        if job is not None:
+            job.close()
+
+    assert job is not None
+    assert stdout.strip() == "ran"
 
 
 class RecordingCommandClient:

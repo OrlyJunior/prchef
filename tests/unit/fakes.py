@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from orchestrator.clients.command_client import CommandResult
+from orchestrator.clients.exceptions import CommandTimeoutError
 from orchestrator.config.project_config import ProjectConfig
 from orchestrator.models import (
     AgentExecutionReference,
@@ -559,6 +560,8 @@ class FakeCommandClient:
         self.fail = False
         self.failures_remaining = 0
         self.failure_sequence: list[bool] = []
+        self.time_out = False
+        self.timeout_sequence: list[bool] = []
         self.working_directories: list[Path] = []
         self.commands: list[list[str]] = []
 
@@ -567,6 +570,16 @@ class FakeCommandClient:
         if isinstance(cwd, Path):
             self.working_directories.append(cwd)
         self.commands.append(command)
+        timed_out = self.timeout_sequence.pop(0) if self.timeout_sequence else self.time_out
+        if timed_out:
+            timeout_seconds = kwargs.get("timeout_seconds", 900)
+            raise CommandTimeoutError(
+                f"Command timed out after {timeout_seconds}s: {' '.join(command)}",
+                timeout_seconds=timeout_seconds,
+                stdout="collected 12 items",
+                stderr="waiting on lock",
+                duration_seconds=float(timeout_seconds),
+            )
         if self.failure_sequence:
             failed = self.failure_sequence.pop(0)
         else:

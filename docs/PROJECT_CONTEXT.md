@@ -300,6 +300,38 @@
 - `max_validation_retries` defaults to `2` and must be non-negative. A failed validation records
   its result, then—while budget remains—asks the same implementer to correct the **same worktree**.
   The correction prompt includes failed commands, exit codes, and redacted/truncated output.
+- A validation command that exceeds `validation.timeout_seconds` is a failed check, not a workflow
+  error: `CommandClient` raises `CommandTimeoutError` (a `CommandExecutionError` subtype) carrying
+  the configured duration and the partial stdout/stderr, decoded as UTF-8 with replacement.
+  The check has no exit code and sets `timed_out`/`timeout_seconds`, later commands still run,
+  and it uses the same retry budget. Its correction prompt names the command and timeout and
+  includes the redacted tails of both captured streams, sharing one output budget no larger than
+  a completed failure's. Detection relies only on the subprocess timeout and never parses tool
+  output. Other command execution errors still fail the workflow.
+- On any timeout, `CommandClient` kills the command's whole process tree, reaps the command, then
+  waits a bounded time for output, so children (e.g. behind `npm run test`/Gradle) cannot keep
+  running in the worktree. Windows commands start suspended inside a job object
+  (`clients/windows_job.py`) that is terminated on timeout, reaching descendants even after the
+  launcher (e.g. a `.cmd` shim) exited; `taskkill /F /T` is only a fallback when a job is
+  unavailable. Linux commands run under `clients/process_supervisor.py`, a stdlib-only script
+  started as `python -I -S` that registers as a child subreaper: descendants that leave the
+  process group (`setsid`, double fork) are still reparented to it. It relays output through its
+  own pipes and exits with the command's own status once the command exited and its output
+  closed. On timeout it kills every descendant found through `/proc` and reports `stopped` only
+  once it has no children left. Neither mechanism kills on normal completion, so completed
+  commands, including background processes that released their output, behave as before.
+  Whenever the orchestrator stops reading a stopped command (interruption such as Ctrl+C, or a
+  post-timeout drain that expired), it first closes the command's pipes on POSIX, so a supervisor
+  relaying into a full pipe gets `EPIPE` and exits instead of outliving the bounded wait.
+- A timeout becomes `CommandTimeoutError` only once the tree is confirmed stopped: job empty or
+  supervisor reported `stopped`, output closed, and the command reaped. On other POSIX platforms
+  (e.g. macOS), or on Linux when the supervisor is unavailable, the command leads its own process
+  group; the group is `SIGKILL`ed and confirmed once a bounded `killpg(pgid, 0)` poll finds no
+  member left, so macOS timeouts also reach the correction loop. Known limit there: a descendant
+  that left the group (`setsid`) and released its output cannot be detected. Whenever
+  confirmation fails (a member or pipe-holder survives, or the group cannot be signalled), the
+  timeout raises a plain `CommandExecutionError` and the workflow fails without correction, so an
+  implementer never edits a worktree that a known-live validation process may still be using.
 - Planning, execution ID, branch, and worktree are never recreated during corrections. A passing
   retry continues to commit/push/PR/review. Exhaustion or correction failure ends as `FAILED` and
   preserves the worktree.
