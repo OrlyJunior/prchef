@@ -259,6 +259,15 @@ def test_timeout_remains_catchable_as_command_execution_error(
         CommandClient().run(["tool"], cwd=tmp_path)
 
 
+class _ScriptedStream:
+    def __init__(self, events: list[str], name: str) -> None:
+        self._events = events
+        self._name = name
+
+    def close(self) -> None:
+        self._events.append(f"close:{self._name}")
+
+
 class _ScriptedProcess:
     """Popen stand-in whose communicate calls follow a script of results or exceptions."""
 
@@ -268,6 +277,9 @@ class _ScriptedProcess:
         self.events = events
         self._outcomes = list(outcomes)
         self.returncode: int | None = None
+        self.stdin = None
+        self.stdout = _ScriptedStream(events, "stdout")
+        self.stderr = _ScriptedStream(events, "stderr")
 
     def communicate(
         self, input: str | None = None, timeout: float | None = None
@@ -350,6 +362,8 @@ def test_timeout_is_not_correctable_when_an_escaped_descendant_keeps_output_open
         "communicate:30",
         "terminate:4321",
         f"communicate:{drain}",
+        "close:stdout",
+        "close:stderr",
         f"wait:{drain}",
     ]
 
@@ -383,8 +397,73 @@ def test_interrupted_command_terminates_the_process_tree(
         CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
 
     drain = command_client._POST_KILL_DRAIN_SECONDS
-    assert events == ["communicate:30", "terminate:4321", f"wait:{drain}"]
+    # The unread output pipes are closed before waiting, so nothing can block writing to them.
+    assert events == [
+        "communicate:30",
+        "terminate:4321",
+        "close:stdout",
+        "close:stderr",
+        f"wait:{drain}",
+    ]
     assert process.returncode is not None
+
+
+_NOISY_SCRIPT = """\
+import sys
+
+print("ready", flush=True)
+chunk = "x" * 65536
+while True:
+    sys.stdout.write(chunk)
+    sys.stdout.flush()
+"""
+
+
+def _unread_pipe_bytes(fd: int) -> int:
+    import fcntl
+    import termios
+
+    pending = bytearray(4)
+    fcntl.ioctl(fd, termios.FIONREAD, pending)
+    return int.from_bytes(pending, sys.byteorder)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux supervisor only")
+def test_interrupted_cleanup_lets_a_supervisor_blocked_on_full_output_exit(
+    tmp_path: Path,
+) -> None:
+    import fcntl
+
+    noisy = tmp_path / "noisy.py"
+    noisy.write_text(_NOISY_SCRIPT, encoding="utf-8")
+
+    process, containment = command_client._start_process(
+        [sys.executable, str(noisy)], cwd=tmp_path, input_text=None, env=None
+    )
+    try:
+        assert isinstance(containment, command_client._TreeSupervisor)
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        stdout_fd = process.stdout.fileno()
+        capacity = fcntl.fcntl(stdout_fd, fcntl.F_GETPIPE_SZ)
+        # Wait until the unread pipe is full, so the supervisor is blocked relaying into it. The
+        # bound only keeps a regression from hanging the suite.
+        deadline = time.monotonic() + 60
+        while _unread_pipe_bytes(stdout_fd) < capacity:
+            assert time.monotonic() < deadline, "the output pipe never filled"
+            time.sleep(0.01)
+
+        command_client._terminate_process_tree(process, containment)
+        command_client._reap_interrupted_process(process)
+
+        # The supervisor exited within the bounded wait rather than staying blocked on the pipe.
+        assert process.returncode is not None
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if containment is not None:
+            containment.close()
 
 
 _LAUNCHER_SCRIPT = """\

@@ -274,6 +274,7 @@ def _drain_terminated_process(
         logger.warning(
             "[command] Output stayed open after terminating timed-out process %s", process.pid
         )
+        _close_unread_pipes(process)
         try:
             process.wait(timeout=_POST_KILL_DRAIN_SECONDS)
         except subprocess.TimeoutExpired:
@@ -358,10 +359,31 @@ def _run_process(
 
 def _reap_interrupted_process(process: subprocess.Popen[str]) -> None:
     """Wait, with a bound, for an interrupted command to exit so it does not linger."""
+    _close_unread_pipes(process)
     try:
         process.wait(timeout=_POST_KILL_DRAIN_SECONDS)
     except subprocess.TimeoutExpired:
         logger.warning("[command] Interrupted process %s did not exit", process.pid)
+
+
+def _close_unread_pipes(process: subprocess.Popen[str]) -> None:
+    """Close a stopped command's pipes before an unread wait, as ``Popen.__exit__`` does.
+
+    Otherwise a Linux supervisor relaying already-produced output into a full pipe would block
+    and outlive the wait; with the read ends closed its writes fail, so it finishes stopping the
+    tree and exits. Windows is skipped: an interrupted ``communicate`` may leave reader threads
+    there, which a close would wait on, and its job kill involves no relaying.
+    """
+    if _is_windows():
+        return
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            # Closing stdin flushes pending input, which the stopped command cannot accept.
+            pass
 
 
 @dataclass(slots=True)

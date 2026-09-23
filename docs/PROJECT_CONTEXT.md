@@ -320,6 +320,9 @@
   closed. On timeout it kills every descendant found through `/proc` and reports `stopped` only
   once it has no children left. Neither mechanism kills on normal completion, so completed
   commands, including background processes that released their output, behave as before.
+  Whenever the orchestrator stops reading a stopped command (interruption such as Ctrl+C, or a
+  post-timeout drain that expired), it first closes the command's pipes on POSIX, so a supervisor
+  relaying into a full pipe gets `EPIPE` and exits instead of outliving the bounded wait.
 - A timeout becomes `CommandTimeoutError` only once the tree is confirmed stopped: job empty or
   supervisor reported `stopped`, output closed, and the command reaped. On other POSIX platforms
   (e.g. macOS), or on Linux when the supervisor is unavailable, the command leads its own process
