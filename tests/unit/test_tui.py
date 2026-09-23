@@ -4145,7 +4145,11 @@ def test_task_checkbox_mouse_click_updates_selection_and_screen_on_first_click(
             # Keyboard focus still reaches a row in a short viewport.
             await pilot.resize_terminal(100, 20)
             row.focus()
-            await settle_tui(pilot)
+            await wait_for_tui(
+                pilot,
+                lambda: screen.can_view_partial(row),
+                description="focused task row in short viewport",
+            )
             assert row.has_focus
             assert screen.can_view_partial(row)
             await pilot.press("space")

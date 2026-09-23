@@ -461,6 +461,98 @@ def test_validation_failures_render_timeouts_alongside_completed_failures() -> N
     assert "ruff" not in rendered
 
 
+def test_validation_correction_prompt_keeps_each_pytest_failure_and_full_summary(
+    tmp_path: Path,
+) -> None:
+    large_detail = "oversized start api_key=hunter2\n" + "x" * 10_000 + "\noversized end"
+    small_detail = "small start\n" + "y" * 3_800 + "\nsmall end"
+    large_header = "_______________________________ test_crash ________________________________\n"
+    small_header = "_______________________________ test_sibling ______________________________\n"
+    later_header = "________________________________ test_later ________________________________\n"
+    long_summary_reason = "z" * 5_000 + " summary tail"
+    summary = (
+        "=========================== short test summary info ===========================\n"
+        "FAILED tests/test_widget.py::test_crash - RuntimeError: crash\n"
+        "FAILED tests/test_widget.py::test_sibling - AssertionError: sibling\n"
+        f"FAILED tests/test_other.py::test_later - AssertionError: {long_summary_reason}\n"
+        "============================== 3 failed in 0.01s ==============================\n"
+    )
+    assert len(summary) > 4_000
+    output = (
+        "============================= test session starts =============================\n"
+        "=================================== FAILURES ===================================\n"
+        f"{large_header}"
+        f"{large_detail}\n"
+        f"{small_header}"
+        f"{small_detail}\n"
+        f"{later_header}"
+        "later detail\n"
+        f"{summary}"
+    )
+    provider = RecordingProvider(AgentResult(output="corrected"))
+    validation = ValidationResult(
+        success=False,
+        checks=[
+            ValidationCheck(
+                name="custom validation",
+                command=["make", "check"],
+                success=False,
+                exit_code=1,
+                stderr=output,
+            )
+        ],
+    )
+
+    ImplementationService(provider, ChangedFilesGit()).correct_validation_failures(  # type: ignore[arg-type]
+        _task(), _spec(), validation, tmp_path
+    )
+    prompt = provider.requests[0].instructions
+
+    assert "Command: make check\nExit code: 1" in prompt
+    assert "test session starts" in prompt
+    assert "oversized start" in prompt
+    assert "oversized end" not in prompt
+    assert "api_key=[REDACTED]" in prompt
+    assert "hunter2" not in prompt
+    assert (large_header + large_detail.replace("hunter2", "[REDACTED]"))[:4_000] in prompt
+    assert small_detail in prompt
+    assert "later detail" in prompt
+    assert summary in prompt
+    assert prompt.index("test_crash __________________") < prompt.index(
+        "test_sibling ______________"
+    )
+    assert prompt.index("test_sibling ______________") < prompt.index(
+        "test_later _________________"
+    )
+    assert prompt.index("later detail") < prompt.index(summary)
+
+
+def test_validation_correction_uses_whole_output_cap_for_other_formats(tmp_path: Path) -> None:
+    output = "z" * 5_000 + "late detail"
+    validation = ValidationResult(
+        success=False,
+        checks=[
+            ValidationCheck(
+                name="custom validation",
+                command=["make", "check"],
+                success=False,
+                exit_code=1,
+                stdout=output,
+            )
+        ],
+    )
+
+    provider = RecordingProvider(AgentResult(output="corrected"))
+    ImplementationService(provider, ChangedFilesGit()).correct_validation_failures(  # type: ignore[arg-type]
+        _task(), _spec(), validation, tmp_path
+    )
+    prompt = provider.requests[0].instructions
+
+    assert "Command: make check\nExit code: 1\nOutput:\n" + "z" * 4_000 in prompt
+    assert "z" * 4_001 not in prompt
+    assert "late detail" not in prompt
+
+
 def test_timed_out_validation_output_keeps_the_tail_and_reports_missing_output() -> None:
     long_output = "early line\n" + "x" * 5_000 + "\nlast line before hang"
     validation = ValidationResult(

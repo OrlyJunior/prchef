@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from orchestrator.clients.git_client import GitClient
@@ -20,6 +21,40 @@ from orchestrator.services.structured_output import parse_json_object
 
 _CORRECTION_OUTPUT_LIMIT = 4_000
 _TRUNCATED_OUTPUT_MARKER = "[... earlier output truncated ...]\n"
+_PYTEST_FAILURES_HEADER = re.compile(r"^={2,} FAILURES ={2,}\r?$", re.MULTILINE)
+_PYTEST_FAILURE_HEADER = re.compile(r"^_+ .+ _+\r?$", re.MULTILINE)
+_PYTEST_SECTION_HEADER = re.compile(r"^={2,} [^\r\n]+ ={2,}\r?$", re.MULTILINE)
+_PYTEST_SUMMARY_HEADER = re.compile(
+    r"^={2,} short test summary info ={2,}\r?$", re.MULTILINE
+)
+
+
+def _render_completed_failure_output(output: str) -> str:
+    """Cap pytest failure details per test while retaining its complete failure summary."""
+    failures = _PYTEST_FAILURES_HEADER.search(output)
+    if failures is None:
+        return output[:_CORRECTION_OUTPUT_LIMIT]
+    summary = _PYTEST_SUMMARY_HEADER.search(output, failures.end())
+    if summary is None:
+        return output[:_CORRECTION_OUTPUT_LIMIT]
+    if re.search(r"^FAILED\s+\S+", output[summary.start():], re.MULTILINE) is None:
+        return output[:_CORRECTION_OUTPUT_LIMIT]
+
+    next_section = _PYTEST_SECTION_HEADER.search(output, failures.end(), summary.start())
+    details_end = next_section.start() if next_section is not None else summary.start()
+    headers = list(_PYTEST_FAILURE_HEADER.finditer(output, failures.end(), details_end))
+    if not headers:
+        return output[:_CORRECTION_OUTPUT_LIMIT]
+
+    blocks = []
+    for index, header in enumerate(headers):
+        block_end = headers[index + 1].start() if index + 1 < len(headers) else details_end
+        blocks.append(output[header.start() : block_end][:_CORRECTION_OUTPUT_LIMIT])
+    parts = []
+    if failures.start():
+        parts.append(output[: failures.start()][:_CORRECTION_OUTPUT_LIMIT])
+    parts.extend((failures.group(), *blocks, output[summary.start() :]))
+    return "\n\n".join(parts)
 
 
 def _bounded_tail(output: str, limit: int) -> str:
@@ -32,8 +67,8 @@ def _bounded_tail(output: str, limit: int) -> str:
 def _bounded_tails(stdout: str, stderr: str) -> tuple[str, str]:
     """Share one output budget between both streams of a killed process.
 
-    A timed-out check then contributes no more output than a completed failure. A stream shorter
-    than half the budget leaves its unused share to the other stream.
+    A timed-out check contributes at most one output budget. A stream shorter than half the
+    budget leaves its unused share to the other stream.
     """
     stderr_budget = min(
         len(stderr),
@@ -198,7 +233,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
 
     @staticmethod
     def render_validation_failures(validation: ValidationResult) -> str:
-        """Render the same bounded validation context used for automatic corrections."""
+        """Render the redacted validation context used for automatic corrections."""
         return ImplementationService._render_validation_failures(validation)
 
     @staticmethod
@@ -331,7 +366,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
                         f"Command: {format_command(check.command)}",
                         f"Exit code: {check.exit_code}",
                         "Output:",
-                        redact_text(output)[:_CORRECTION_OUTPUT_LIMIT],
+                        _render_completed_failure_output(redact_text(output)),
                     )
                 )
             )
