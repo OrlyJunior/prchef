@@ -138,6 +138,22 @@ class OrchestratorApp(App[None]):
     #workflow-progress { margin-top: 2; text-style: bold; }
     #workflow-progress.cancelled, #execution-status.cancelled { color: $warning; }
     #workflow-events { margin-top: 1; color: $text-muted; }
+    #workflow-outcome {
+        display: none;
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        padding: 1;
+        border: round $primary;
+    }
+    #workflow-outcome.awaiting-user { border: round $accent; }
+    #workflow-outcome.completed { border: round $success; }
+    #workflow-outcome.failed { border: round $error; }
+    #workflow-outcome.cancelled { border: round $warning; }
+    #workflow-outcome-title { text-style: bold; }
+    #workflow-outcome-message { height: auto; margin-top: 1; }
+    #workflow-outcome-actions { height: auto; }
+    #workflow-outcome-actions Button { width: auto; max-width: 100%; }
     #batch-progress { margin-top: 1; height: auto; }
     .batch-progress-summary { text-style: bold; }
     #batch-provider-availability { height: auto; margin-top: 1; }
@@ -181,11 +197,15 @@ class OrchestratorApp(App[None]):
         display: none;
         height: auto;
         margin-top: 1;
-        padding: 1;
-        border: round $warning;
     }
     #human-input-prompt { margin-bottom: 1; }
     #human-response { height: 7; }
+    WorkflowRunnerScreen.-narrow #human-input-panel .screen-actions { layout: vertical; }
+    WorkflowRunnerScreen.-narrow #human-input-panel .screen-actions Button {
+        width: auto;
+        max-width: 100%;
+        margin-right: 0;
+    }
     /* TextArea defaults to height 1fr, which resolves to zero rows beside the
        auto-height detail content and hides the feedback this action edits. */
     #execution-continuation-feedback { height: 7; }

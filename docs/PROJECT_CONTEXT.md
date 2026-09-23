@@ -39,6 +39,14 @@
   vertical log viewport, so long entries remain readable in live runs and execution history.
   This does not alter the CLI's concise progress view or workflow observer semantics. `--verbose`
   emits that same structured diagnostic stream to stderr.
+- The single-task runner renders stopped execution outcomes in a separate panel after the stage
+  timeline instead of adding `WORKFLOW_FINISHED` as another stage line. NEEDS_HUMAN identifies the
+  pending response and exposes the answer/resume form; CHANGES_REQUESTED and eligible FAILED
+  executions link to the existing continuation screen. Ineligible failures, approvals, and
+  cancellations state that no further action is available. These controls follow persisted human
+  interactions and `WorkflowController.continuation_stage`; batch row labels and actions are
+  unchanged. The runner refreshes its outcome and persisted stage timeline when returning from
+  execution detail.
 - TUI screens use `OrchestratorSelect` for Select controls in vertical scroll regions. It reserves
   visible overlay space after mouse or keyboard activation and restores focus without triggering
   parent-scroll jumps. Repository controls use its `RepositorySelect` specialization: configured
