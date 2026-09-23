@@ -10,7 +10,10 @@ from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.services.exceptions import StructuredOutputError
-from orchestrator.services.project_context import project_context_prompt
+from orchestrator.services.project_context import (
+    planner_instructions_prompt,
+    project_context_prompt,
+)
 from orchestrator.services.repository_context import (
     RepositoryContextRequest,
     RepositoryContextStrategy,
@@ -140,6 +143,7 @@ ORIGINAL TASK (preserve as authoritative):
 
 {project_context_prompt(repository_path)}
 {repository_context}
+{planner_instructions_prompt(repository_path)}
 USER-FACING PLANNING:
 - Apply the following only when the task or repository evidence affects a TUI, CLI, GUI, other
   user-facing interface, or user-facing messaging. Treat the TUI as a first-class product

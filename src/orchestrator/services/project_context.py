@@ -5,6 +5,7 @@ from pathlib import Path
 
 PROJECT_CONTEXT_FILE = "docs/PROJECT_CONTEXT.md"
 MAX_PROJECT_CONTEXT_CHARS = 12_000
+PLANNER_INSTRUCTIONS_FILE = "PLANNER.md"
 IMPLEMENTER_INSTRUCTIONS_FILE = "IMPLEMENTER.md"
 REVIEWER_INSTRUCTIONS_FILE = "REVIEWER.md"
 MAX_AGENT_INSTRUCTIONS_CHARS = 12_000
@@ -37,6 +38,11 @@ def project_context_prompt(repository_path: Path) -> str:
     )
 
 
+def load_planner_instructions(repository_path: Path) -> str | None:
+    """Return root PLANNER.md content when available."""
+    return _load_instruction_file(repository_path, PLANNER_INSTRUCTIONS_FILE)
+
+
 def load_implementer_instructions(repository_path: Path) -> str | None:
     """Return root IMPLEMENTER.md content when available."""
     return _load_instruction_file(repository_path, IMPLEMENTER_INSTRUCTIONS_FILE)
@@ -45,6 +51,17 @@ def load_implementer_instructions(repository_path: Path) -> str | None:
 def load_reviewer_instructions(repository_path: Path) -> str | None:
     """Return root REVIEWER.md content when available."""
     return _load_instruction_file(repository_path, REVIEWER_INSTRUCTIONS_FILE)
+
+
+def planner_instructions_prompt(repository_path: Path) -> str:
+    """Render local planner guidance from the configured checkout."""
+    return _agent_instructions_prompt(
+        repository_path,
+        None,
+        PLANNER_INSTRUCTIONS_FILE,
+        load_planner_instructions,
+        "planner",
+    )
 
 
 def implementer_instructions_prompt(
@@ -76,7 +93,7 @@ def reviewer_instructions_prompt(
 def _load_instruction_file(repository_path: Path, filename: str) -> str | None:
     try:
         content = (repository_path / filename).read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeError):
         return None
     return content or None
 

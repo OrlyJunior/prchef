@@ -18,7 +18,9 @@ from orchestrator.models import (
 )
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.project_context import (
+    MAX_AGENT_INSTRUCTIONS_CHARS,
     load_implementer_instructions,
+    load_planner_instructions,
     load_reviewer_instructions,
 )
 from orchestrator.services.repository_context import (
@@ -92,16 +94,19 @@ def _write_project_context(path: Path) -> None:
 
 
 def _write_role_instructions(path: Path) -> None:
+    (path / "PLANNER.md").write_text("Plan with concise steps.", encoding="utf-8")
     (path / "IMPLEMENTER.md").write_text("Prefer small, tested changes.", encoding="utf-8")
     (path / "REVIEWER.md").write_text("Prioritize regression risks.", encoding="utf-8")
 
 
 def test_role_instruction_loaders_handle_present_and_missing_files(tmp_path: Path) -> None:
+    assert load_planner_instructions(tmp_path) is None
     assert load_implementer_instructions(tmp_path) is None
     assert load_reviewer_instructions(tmp_path) is None
 
     _write_role_instructions(tmp_path)
 
+    assert load_planner_instructions(tmp_path) == "Plan with concise steps."
     assert load_implementer_instructions(tmp_path) == "Prefer small, tested changes."
     assert load_reviewer_instructions(tmp_path) == "Prioritize regression risks."
 
@@ -140,6 +145,7 @@ def test_implementer_instructions_use_the_control_checkout_then_worktree_fallbac
 def test_repository_ignores_local_agent_instruction_files() -> None:
     gitignore = Path(__file__).parents[2] / ".gitignore"
 
+    assert "PLANNER.md" in gitignore.read_text(encoding="utf-8")
     assert "IMPLEMENTER.md" in gitignore.read_text(encoding="utf-8")
     assert "REVIEWER.md" in gitignore.read_text(encoding="utf-8")
 
@@ -174,6 +180,9 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     assert spec.safe_to_implement
     assert provider.requests[0].structured_output is not None
     assert provider.requests[0].structured_output.name == "repository-spec"
+    assert "STRICT SAFETY RULES:" in provider.requests[0].instructions
+    assert "Return exactly one JSON object with this shape:" in provider.requests[0].instructions
+    assert '"safe_to_implement": true' in provider.requests[0].instructions
     assert "Stable architecture rule." in provider.requests[0].instructions
     assert "LOCAL REPOSITORY CONTEXT" in provider.requests[0].instructions
     assert "src/provider_contract.py" in provider.requests[0].instructions
@@ -206,6 +215,66 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
         "Do not invent UX requirements for backend-only changes."
         in provider.requests[0].instructions
     )
+
+
+def test_planner_instructions_reload_and_stay_isolated(tmp_path: Path) -> None:
+    _write_role_instructions(tmp_path)
+    planner_file = tmp_path / "PLANNER.md"
+    planner_file.write_text("First planner preference.", encoding="utf-8")
+    service = SpecService(
+        RecordingProvider(AgentResult(output="unused")), MarkerRepositoryContextStrategy()
+    )
+
+    first = service._build_prompt(_task(), tmp_path, "owner/repo", "develop")
+    planner_file.write_text("Second planner preference.", encoding="utf-8")
+    second = service._build_prompt(_task(), tmp_path, "owner/repo", "develop")
+
+    assert first.count("First planner preference.") == 1
+    assert "First planner preference." not in second
+    assert second.count("Second planner preference.") == 1
+    assert "REPOSITORY PLANNER INSTRUCTIONS (PLANNER.md):" in second
+    assert "Prefer small, tested changes." not in second
+    assert "Prioritize regression risks." not in second
+
+    implementer = RecordingProvider(AgentResult(output="implemented"))
+    ImplementationService(implementer, ChangedFilesGit()).implement(  # type: ignore[arg-type]
+        _task(), _spec(), tmp_path
+    )
+    assert "Second planner preference." not in implementer.requests[0].instructions
+
+
+def test_planner_instructions_handle_empty_oversized_and_unreadable_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner_file = tmp_path / "PLANNER.md"
+    service = SpecService(
+        RecordingProvider(AgentResult(output="unused")), MarkerRepositoryContextStrategy()
+    )
+
+    planner_file.write_text(" \n ", encoding="utf-8")
+    empty = service._build_prompt(_task(), tmp_path, "owner/repo", "develop")
+    assert "REPOSITORY PLANNER INSTRUCTIONS" not in empty
+    assert "OUTPUT CONTRACT:" in empty
+
+    planner_file.write_text("x" * (MAX_AGENT_INSTRUCTIONS_CHARS + 10), encoding="utf-8")
+    oversized = service._build_prompt(_task(), tmp_path, "owner/repo", "develop")
+    assert "x" * (MAX_AGENT_INSTRUCTIONS_CHARS + 1) not in oversized
+    assert (
+        "[PLANNER.md truncated; inspect the repository file for the full instructions.]"
+        in oversized
+    )
+
+    original_read_text = Path.read_text
+
+    def fail_planner_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == planner_file:
+            raise OSError("unreadable")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_planner_read)
+    unreadable = service._build_prompt(_task(), tmp_path, "owner/repo", "develop")
+    assert "REPOSITORY PLANNER INSTRUCTIONS" not in unreadable
+    assert "OUTPUT CONTRACT:" in unreadable
 
 
 def test_planner_uses_injected_repository_context_strategy(tmp_path: Path) -> None:
@@ -250,6 +319,7 @@ def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> No
     assert "Stable architecture rule." in provider.requests[0].instructions
     assert "Keep docs/PROJECT_CONTEXT.md accurate" in provider.requests[0].instructions
     assert provider.requests[0].instructions.count("Prefer small, tested changes.") == 1
+    assert "Plan with concise steps." not in provider.requests[0].instructions
     assert "Prioritize regression risks." not in provider.requests[0].instructions
 
 
@@ -488,6 +558,7 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     assert "blocking" in review_schema["properties"]["blocking_findings"]["description"]
     assert "Non-blocking" in review_schema["properties"]["suggestions"]["description"]
     assert "Stable architecture rule." in provider.requests[0].instructions
+    assert "Plan with concise steps." not in provider.requests[0].instructions
     assert "adversarial, evidence-based risk analysis" in provider.requests[0].instructions
     assert "concurrency and races" in provider.requests[0].instructions
     assert (

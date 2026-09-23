@@ -192,8 +192,12 @@ remote `origin` para localizar a source correspondente na API.
 Cada repositorio pode versionar `docs/PROJECT_CONTEXT.md` como contexto duravel do projeto. O
 orquestrador fornece esse arquivo aos agentes de planejamento, implementacao e revisao como
 contexto complementar; a tarefa atual e o estado do repositorio continuam sendo autoritativos.
-O conteudo enviado a cada prompt e limitado a 12.000 caracteres. `IMPLEMENTER.md` e `REVIEWER.md`
-continuam sendo instrucoes locais e opcionais especificas de cada papel.
+O conteudo enviado a cada prompt e limitado a 12.000 caracteres. `PLANNER.md`,
+`IMPLEMENTER.md` e `REVIEWER.md` sao instrucoes locais e opcionais especificas de cada papel,
+lidas da raiz do repositorio configurado em cada execucao. O planner usa `PLANNER.md` durante
+planejamento normal, retomado e debug; sem ele, as regras padrao de seguranca e JSON continuam
+valendo. A tela Agent Instructions permite editar e salvar cada arquivo separadamente, sem stage
+ou commit; os arquivos sao ignorados pelo Git por padrao.
 
 A recuperacao de contexto do checkout e uma politica propria do orquestrador, separada dos agent
 providers. Configure-a em `defaults.repository_context.strategy` ou sobrescreva-a em
@@ -207,8 +211,8 @@ FastEmbed. Ela so pode ser usada por uma entrada registrada em `repositories`, c
 deterministica por chave/caminho configurado e separa o checkout de controle de cada worktree no
 payload. O orquestrador descobre, filtra, calcula hashes e divide os arquivos; arquivos inalterados
 nao sao re-embeddados, enquanto chunks alterados/removidos sao sincronizados sob demanda. Arquivos
-ignorados pelo Git, binarios, symlinks, artefatos gerados conhecidos, `IMPLEMENTER.md`,
-`REVIEWER.md` e `docs/PROJECT_CONTEXT.md` nao entram no indice.
+ignorados pelo Git, binarios, symlinks, artefatos gerados conhecidos, `PLANNER.md`,
+`IMPLEMENTER.md`, `REVIEWER.md` e `docs/PROJECT_CONTEXT.md` nao entram no indice.
 
 Exemplo local persistente (o caminho deve ficar fora de todo checkout):
 

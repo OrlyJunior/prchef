@@ -13,5 +13,6 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+PLANNER.md
 IMPLEMENTER.md
 REVIEWER.md

@@ -2797,9 +2797,20 @@ def test_tui_creates_updates_and_switches_agent_instruction_files(tmp_path: Path
             repository = screen.query_one("#agent-instructions-repository", OrchestratorSelect)
             repository.value = "example"
             await settle_tui(pilot)
+            assert "No PLANNER.md yet" in str(
+                screen.query_one("#planner-instructions-status", Static).renderable
+            )
+            assert not (tmp_path / "PLANNER.md").exists()
             assert "No IMPLEMENTER.md yet" in str(
                 screen.query_one("#implementer-instructions-status", Static).renderable
             )
+            assert not (tmp_path / "IMPLEMENTER.md").exists()
+            assert not (tmp_path / "REVIEWER.md").exists()
+
+            screen.query_one("#planner-instructions", TextArea).text = "Plan scoped changes."
+            screen.query_one("#save-planner-instructions", Button).press()
+            await settle_tui(pilot)
+            assert (tmp_path / "PLANNER.md").read_text(encoding="utf-8") == "Plan scoped changes."
             assert not (tmp_path / "IMPLEMENTER.md").exists()
             assert not (tmp_path / "REVIEWER.md").exists()
 
@@ -2819,9 +2830,21 @@ def test_tui_creates_updates_and_switches_agent_instruction_files(tmp_path: Path
 
             repository.value = "other"
             await settle_tui(pilot)
+            assert screen.query_one("#planner-instructions", TextArea).text == ""
+            assert "No PLANNER.md yet" in str(
+                screen.query_one("#planner-instructions-status", Static).renderable
+            )
             assert screen.query_one("#implementer-instructions", TextArea).text == ""
             assert "No REVIEWER.md yet" in str(
                 screen.query_one("#reviewer-instructions-status", Static).renderable
+            )
+            assert not (other_path / "PLANNER.md").exists()
+
+            repository.value = "example"
+            await settle_tui(pilot)
+            assert (
+                screen.query_one("#planner-instructions", TextArea).text
+                == "Plan scoped changes."
             )
 
     asyncio.run(drive())

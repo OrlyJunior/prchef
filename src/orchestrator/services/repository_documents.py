@@ -13,7 +13,9 @@ from orchestrator.models.repository_context import RepositoryChunk, RepositorySo
 MAX_INDEXED_FILES = 2_000
 MAX_INDEXED_FILE_BYTES = 512_000
 MAX_FALLBACK_DEPTH = 12
-_PRIVATE_PATHS = frozenset({"implementer.md", "reviewer.md", "docs/project_context.md"})
+_PRIVATE_PATHS = frozenset(
+    {"planner.md", "implementer.md", "reviewer.md", "docs/project_context.md"}
+)
 _IGNORED_DIRECTORIES = frozenset(
     {
         ".git",
