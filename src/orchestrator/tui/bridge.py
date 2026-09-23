@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import tempfile
 import threading
 from collections.abc import Callable, Mapping
@@ -292,6 +293,15 @@ class WorkflowController:
         path = self.repository_path(repository) / filename
         if path.is_symlink():
             raise ValueError(f"Cannot save instructions through a symlink: {filename}")
+        existing_mode: int | None = None
+        if os.name == "posix":
+            try:
+                existing_status = path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if stat.S_ISREG(existing_status.st_mode):
+                    existing_mode = stat.S_IMODE(existing_status.st_mode)
         # Replacing the directory entry avoids following a link introduced after the check.
         temporary_path: Path | None = None
         try:
@@ -301,6 +311,8 @@ class WorkflowController:
             ) as temporary_file:
                 temporary_path = Path(temporary_file.name)
                 temporary_file.write(content)
+            if existing_mode is not None:
+                temporary_path.chmod(existing_mode)
             os.replace(temporary_path, path)
         finally:
             if temporary_path is not None:

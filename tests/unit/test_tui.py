@@ -1112,6 +1112,19 @@ def test_agent_instructions_save_cannot_follow_a_link_added_during_write(
     assert not instruction_path.is_symlink()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes required")
+def test_agent_instructions_save_preserves_existing_file_mode(tmp_path: Path) -> None:
+    instruction_path = tmp_path / "PLANNER.md"
+    instruction_path.write_text("Old guidance", encoding="utf-8")
+    instruction_path.chmod(0o640)
+    controller, _, _ = _controller(tmp_path)
+
+    controller.save_agent_instructions("example", AgentRole.PLANNER, "New guidance")
+
+    assert instruction_path.read_text(encoding="utf-8") == "New guidance"
+    assert instruction_path.stat().st_mode & 0o777 == 0o640
+
+
 def test_agent_instructions_navigation_uses_a_compact_distinct_control(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     application = OrchestratorApp(controller)
