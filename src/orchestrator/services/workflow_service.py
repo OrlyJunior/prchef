@@ -164,7 +164,9 @@ class WorkflowService:
     def cancel_execution(self, execution_id: str) -> bool:
         """Request cancellation without coupling the caller to a provider.
 
-        Queued, provider-blocked, and running executions are all cancellable.
+        Queued, provider-blocked, running, and human-blocked executions are
+        cancellable. Human-blocked work has no running stage and settles
+        immediately in the repository.
         Providers remain responsible for any interruption mechanism they can
         safely offer. The workflow itself observes this persisted request at
         stage and provider-admission boundaries, so a request made by another

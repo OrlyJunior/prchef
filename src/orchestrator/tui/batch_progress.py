@@ -49,6 +49,8 @@ SUMMARY_CATEGORIES: tuple[str, ...] = (
     "CANCELLED",
 )
 
+CANCELLABLE_ROW_STATUSES = ACTIVE_WORKFLOW_STATUSES | {WorkflowStatus.NEEDS_HUMAN}
+
 SUMMARY_LABELS: dict[str, str] = {
     "QUEUED": "Queued",
     "WAITING": "Waiting for provider",
@@ -99,6 +101,7 @@ class BatchRowView:
     timeline: tuple[str, ...] = ()
     held_by_provider: str | None = None
     action: str | None = None
+    can_cancel: bool = False
 
 
 def category_for_execution(execution: WorkflowExecution) -> str:
@@ -141,10 +144,10 @@ class _LiveItem:
 def _live_status(item: _LiveItem) -> tuple[str, str]:
     if item.status is None:
         return "QUEUED", "QUEUED"
-    if item.status is WorkflowStatus.NEEDS_HUMAN:
-        return "NEEDS_HUMAN", "AWAITING HUMAN"
     if item.cancellation_requested and item.status in ACTIVE_WORKFLOW_STATUSES:
         return _CATEGORY_FOR_STATUS[item.status], "CANCELLATION REQUESTED"
+    if item.status is WorkflowStatus.NEEDS_HUMAN:
+        return "NEEDS_HUMAN", "AWAITING HUMAN"
     if item.status is WorkflowStatus.PENDING:
         return "QUEUED", "QUEUED"
     if item.status is WorkflowStatus.WAITING:
@@ -376,6 +379,10 @@ class LiveBatchProgress:
                         or (item.status is WorkflowStatus.FAILED and item.continuation_eligible)
                         else None
                     ),
+                    can_cancel=(
+                        item.status in CANCELLABLE_ROW_STATUSES
+                        and not item.cancellation_requested
+                    ),
                     stage_label=(
                         item.stage.value.replace("_", " ").title() if item.stage else ""
                     ),
@@ -458,6 +465,10 @@ def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> Ba
             "continue"
             if WorkflowService.continuation_stage(execution, lambda: diagnostics) is not None
             else None
+        ),
+        can_cancel=(
+            execution.status in CANCELLABLE_ROW_STATUSES
+            and execution.cancellation_requested_at is None
         ),
     )
 

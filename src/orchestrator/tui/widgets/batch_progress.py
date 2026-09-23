@@ -52,6 +52,11 @@ class BatchItemRow(Vertical):
             self.position = position
             super().__init__()
 
+    class CancelRequested(Message):
+        def __init__(self, position: int) -> None:
+            self.position = position
+            super().__init__()
+
     def __init__(self, row: BatchRowView) -> None:
         super().__init__(id=f"batch-row-{row.position}", classes="batch-item-row")
         self.position = row.position
@@ -71,7 +76,9 @@ class BatchItemRow(Vertical):
                 )
                 yield Button("Copy detailed logs", id=f"{prefix}-copy-logs", disabled=True)
                 yield Button("Open execution", id=f"{prefix}-open-execution", disabled=True)
-            yield Button("Answer…", id=f"{prefix}-action", disabled=True)
+            with Horizontal(classes="batch-item-actions"):
+                yield Button("Answer…", id=f"{prefix}-action", disabled=True)
+                yield Button("Cancel", id=f"{prefix}-cancel", disabled=True)
             yield Static("Detailed logs", id=f"{prefix}-detailed-title")
             yield Static("", id=f"{prefix}-detailed", markup=False, expand=True)
 
@@ -110,6 +117,9 @@ class BatchItemRow(Vertical):
         action.display = row.action is not None
         action.disabled = row.action is None
         action.label = "Answer…" if row.action == "answer" else "Continue…"
+        cancel = self.query_one(f"#{prefix}-cancel", Button)
+        cancel.display = row.can_cancel
+        cancel.disabled = not row.can_cancel
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         prefix = self.id
@@ -147,6 +157,10 @@ class BatchItemRow(Vertical):
         if event.button.id == f"{prefix}-action":
             event.stop()
             self.post_message(self.ActionRequested(self.position))
+            return
+        if event.button.id == f"{prefix}-cancel":
+            event.stop()
+            self.post_message(self.CancelRequested(self.position))
             return
 
     def set_detailed_logs(self, text: str) -> None:

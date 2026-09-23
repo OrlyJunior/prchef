@@ -776,8 +776,24 @@ class WorkflowController:
         """
         service = self._active_services.get(execution_id)
         if service is not None:
-            return service.cancel_execution(execution_id)
-        return self._repository.request_cancellation(execution_id)
+            accepted = service.cancel_execution(execution_id)
+        else:
+            accepted = self._repository.request_cancellation(execution_id)
+        if accepted:
+            batch_id = self._execution_batches.get(execution_id)
+            run = self._active_batches.get(batch_id) if batch_id is not None else None
+            if run is not None:
+                with run.condition:
+                    position = run.positions.get(execution_id)
+                    if (
+                        position is not None
+                        and run.statuses.get(position) is WorkflowStatus.NEEDS_HUMAN
+                        and self._repository.get_execution(execution_id).status
+                        is WorkflowStatus.CANCELLED
+                    ):
+                        run.statuses[position] = WorkflowStatus.CANCELLED
+                        run.condition.notify_all()
+        return accepted
 
     def cancel_batch(self, batch_id: str) -> bool:
         run = self._active_batches.get(batch_id)

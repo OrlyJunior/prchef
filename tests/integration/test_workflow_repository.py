@@ -289,7 +289,6 @@ def test_cancellation_is_accepted_for_every_active_status(
     [
         WorkflowStatus.APPROVED,
         WorkflowStatus.CHANGES_REQUESTED,
-        WorkflowStatus.NEEDS_HUMAN,
         WorkflowStatus.CANCELLED,
         WorkflowStatus.FAILED,
     ],
@@ -303,6 +302,18 @@ def test_cancellation_is_rejected_for_terminal_statuses(
 
     assert repository.request_cancellation(execution.id) is False
     assert repository.cancellation_requested(execution.id) is False
+
+
+def test_human_blocked_execution_can_be_cancelled_immediately(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "cancel-human.db")
+    execution = repository.create_execution("card-human")
+    repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+
+    assert repository.request_cancellation(execution.id) is True
+    persisted = repository.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.CANCELLED
+    assert persisted.cancellation_requested_at is not None
+    assert repository.request_cancellation(execution.id) is False
 
 
 def test_queue_execution_returns_a_resumed_execution_to_pending(tmp_path: Path) -> None:

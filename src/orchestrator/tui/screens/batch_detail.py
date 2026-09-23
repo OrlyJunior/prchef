@@ -1,4 +1,4 @@
-"""Read-only view of an ordered, persisted workflow batch.
+"""View of an ordered, persisted workflow batch with per-item actions.
 
 Every batch item renders as an expandable row using the same
 ``BatchProgressView`` projection the active launcher uses, so a persisted or
@@ -133,6 +133,20 @@ class BatchDetailScreen(Screen[None]):
         self.on_batch_item_row_open_execution_requested(
             BatchItemRow.OpenExecutionRequested(message.position)
         )
+
+    def on_batch_item_row_cancel_requested(self, message: BatchItemRow.CancelRequested) -> None:
+        execution_id = self._execution_id(message.position)
+        if execution_id is None:
+            self.notify("That batch task has no execution to cancel.", severity="warning")
+            return
+        try:
+            accepted = self.controller.cancel_workflow(execution_id)
+        except Exception as exc:
+            self.notify(f"Could not cancel batch task: {exc}", severity="error")
+            return
+        if not accepted:
+            self.notify("This batch task has already finished.", severity="warning")
+        self.load_batch()
 
     def _execution_id(self, position: int) -> str | None:
         if self._batch is None:

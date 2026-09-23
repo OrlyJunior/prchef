@@ -233,7 +233,7 @@ class WorkflowRepository:
         self._mutate(execution_id, lambda entity: setattr(entity, "status", status.value))
 
     def request_cancellation(self, execution_id: str) -> bool:
-        """Durably request cooperative cancellation of an active execution.
+        """Cancel a human-blocked execution or request cooperative cancellation.
 
         Queued (``PENDING``) and provider-blocked (``WAITING``) work is
         cancellable too: it has not reached a terminal status and its user is
@@ -246,6 +246,13 @@ class WorkflowRepository:
             entity = session.get(WorkflowExecutionEntity, execution_id)
             if entity is None:
                 raise KeyError(f"Workflow execution not found: {execution_id}")
+            if entity.status == WorkflowStatus.NEEDS_HUMAN.value:
+                now = _utcnow()
+                entity.cancellation_requested_at = now
+                entity.status = WorkflowStatus.CANCELLED.value
+                entity.finished_at = now
+                entity.updated_at = now
+                return True
             if entity.status not in _ACTIVE_STATUS_VALUES:
                 return False
             if entity.cancellation_requested_at is None:

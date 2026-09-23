@@ -41,6 +41,7 @@ from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.tui.app import OrchestratorApp
+from orchestrator.tui.batch_progress import BatchRowView
 from orchestrator.tui.bridge import (
     WorkflowBatchLaunch,
     WorkflowController,
@@ -191,6 +192,10 @@ class _Repository:
 
     def request_cancellation(self, execution_id: str) -> bool:
         assert execution_id == self.execution.id
+        if self.execution.status is WorkflowStatus.NEEDS_HUMAN:
+            self.cancellation_requests.append(execution_id)
+            self.execution.status = WorkflowStatus.CANCELLED
+            return True
         if self.execution.status not in {
             WorkflowStatus.PENDING,
             WorkflowStatus.WAITING,
@@ -855,6 +860,23 @@ def test_controller_batch_cancellation_is_accepted_between_items(tmp_path: Path)
     controller._execution_batches[repository.execution.id] = "batch-1"
 
     assert controller.cancel_workflow(repository.execution.id) is True
+    assert repository.cancellation_requests == [repository.execution.id]
+
+
+def test_controller_cancelling_last_human_blocked_item_completes_batch(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.NEEDS_HUMAN
+    run = _BatchRun("batch-1", 2, frozenset(), None)
+    run.submissions_done = True
+    run.statuses = {0: WorkflowStatus.APPROVED, 1: WorkflowStatus.NEEDS_HUMAN}
+    run.positions[repository.execution.id] = 1
+    controller._active_batches[run.batch_id] = run
+    controller._execution_batches[repository.execution.id] = run.batch_id
+
+    assert not run.complete()
+    assert controller.cancel_workflow(repository.execution.id)
+    assert run.statuses == {0: WorkflowStatus.APPROVED, 1: WorkflowStatus.CANCELLED}
+    assert run.complete()
     assert repository.cancellation_requests == [repository.execution.id]
 
 
@@ -3882,6 +3904,127 @@ def test_batch_detail_screen_renders_mixed_batch_and_supports_refresh(
             screen.query_one("#refresh-batch", Button).press()
             await settle_tui(pilot)
             assert "RUNNING" in str(screen.query_one("#batch-row-1-header", Button).label)
+
+    asyncio.run(drive())
+
+
+def test_batch_detail_cancel_reconciles_human_blocked_row(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.NEEDS_HUMAN
+    batch = repository.create_batch(
+        "example", "github",
+        [DevelopmentTask("12", "github", "First task", "", "https://example/12")],
+    )
+    repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(BatchDetailScreen(batch.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#batch-row-0-header", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#batch-row-0-action", Button).display
+            cancel = screen.query_one("#batch-row-0-cancel", Button)
+            assert cancel.display and not cancel.disabled
+            cancel.press()
+            await settle_tui(pilot)
+            assert repository.cancellation_requests == [repository.execution.id]
+            assert "CANCELLED" in str(screen.query_one("#batch-row-0-header", Button).label)
+            assert "Cancelled: 1" in str(
+                screen.query_one("#batch-progress-summary", Static).renderable
+            )
+
+    asyncio.run(drive())
+
+
+def test_batch_item_row_cancel_emits_distinct_request_beside_answer() -> None:
+    class RowApp(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancellations: list[int] = []
+            self.actions: list[int] = []
+
+        def compose(self) -> ComposeResult:
+            yield BatchItemRow(BatchRowView(
+                position=0, task_id="12", task_title="First task",
+                execution_id="execution-1", category="NEEDS_HUMAN",
+                status_label="AWAITING HUMAN", stage_label="Review",
+                action="answer", can_cancel=True,
+            ))
+
+        def on_batch_item_row_cancel_requested(
+            self, message: BatchItemRow.CancelRequested
+        ) -> None:
+            self.cancellations.append(message.position)
+
+        def on_batch_item_row_action_requested(
+            self, message: BatchItemRow.ActionRequested
+        ) -> None:
+            self.actions.append(message.position)
+
+    application = RowApp()
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 30)) as pilot:
+            await settle_tui(pilot)
+            application.query_one("#batch-row-0-header", Button).press()
+            await settle_tui(pilot)
+            assert application.query_one("#batch-row-0-action", Button).display
+            application.query_one("#batch-row-0-cancel", Button).press()
+            await settle_tui(pilot)
+            assert application.cancellations == [0]
+            assert application.actions == []
+
+    asyncio.run(drive())
+
+
+def test_live_batch_cancel_updates_only_selected_row(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.NEEDS_HUMAN
+    other = WorkflowExecution(id="execution-2", status=WorkflowStatus.WAITING)
+    repository.executions.append(other)
+    application = OrchestratorApp(controller)
+    batch = WorkflowBatch(
+        id="batch-1", repository="example", task_source="github",
+        items=(
+            WorkflowBatchItem(0, "12", "First task", repository.execution.id),
+            WorkflowBatchItem(1, "7", "Second task", other.id),
+        ),
+    )
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            screen._batch_running = True
+            screen._batch_created(batch, _batch_launch("12", "7"))
+            await settle_tui(pilot)
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id=repository.execution.id,
+                kind=WorkflowEventKind.STATUS_CHANGED,
+                status=WorkflowStatus.NEEDS_HUMAN,
+                payload={"batch_position": 0},
+            ))
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id=other.id,
+                kind=WorkflowEventKind.STATUS_CHANGED,
+                status=WorkflowStatus.WAITING,
+                payload={"batch_position": 1},
+            ))
+            screen.query_one("#batch-row-0-header", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#batch-row-0-action", Button).display
+            screen.query_one("#batch-row-0-cancel", Button).press()
+            await settle_tui(pilot)
+            assert repository.cancellation_requests == [repository.execution.id]
+            assert "CANCELLED" in str(screen.query_one("#batch-row-0-header", Button).label)
+            assert "WAITING" in str(screen.query_one("#batch-row-1-header", Button).label)
+            assert other.status is WorkflowStatus.WAITING
+            summary = str(screen.query_one("#batch-progress-summary", Static).renderable)
+            assert "Cancelled: 1" in summary and "Waiting for provider: 1" in summary
 
     asyncio.run(drive())
 
