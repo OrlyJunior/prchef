@@ -79,6 +79,34 @@ class GitHubIssueClient:
             raise GitHubClientError("GitHub CLI issue list response must be a JSON array")
         return payload
 
+    def list_labels(self, repository: str) -> list[dict[str, Any]]:
+        """Return the repository's complete label catalog for interactive task filtering."""
+
+        normalized_repository = self._normalize_repository(repository)
+        # `gh label list` stops at a fixed --limit, which would silently drop
+        # labels from large catalogs. The REST endpoint is paginated to the
+        # end instead; jq emits each name as one JSON string per line so the
+        # output stays parseable across every page and any label spelling.
+        result = self._run(
+            "api",
+            "--paginate",
+            f"repos/{normalized_repository}/labels?per_page=100",
+            "--jq",
+            ".[].name | tojson",
+        )
+        labels: list[dict[str, Any]] = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                name = json.loads(line)
+            except (ValueError, TypeError) as exc:
+                raise GitHubClientError("GitHub CLI returned invalid label list JSON") from exc
+            if not isinstance(name, str):
+                raise GitHubClientError("GitHub CLI label list entries must be label names")
+            labels.append({"name": name})
+        return labels
+
     def _normalize_repository(self, repository: str) -> str:
         normalized_repository = repository.strip()
         if not self._REPOSITORY_PATTERN.fullmatch(normalized_repository):

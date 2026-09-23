@@ -1081,9 +1081,29 @@ class WorkflowRunnerScreen(Screen[None]):
         except Exception as exc:
             self.app.call_from_thread(self._task_loading_failed, str(exc), token)
             return
-        self.app.call_from_thread(self._set_available_tasks, tasks, provider, token)
+        # Labels share the task request token, so a stale catalog is discarded
+        # with its tasks. A failed lookup is reported rather than treated as
+        # a provider without label support.
+        labels: tuple[str, ...] | None = None
+        label_error = ""
+        try:
+            labels = self.controller.list_task_labels(
+                repository=repository, task_provider=provider
+            )
+        except Exception as exc:
+            label_error = str(exc) or type(exc).__name__
+        self.app.call_from_thread(
+            self._set_available_tasks, tasks, provider, token, labels, label_error
+        )
 
-    def _set_available_tasks(self, tasks: list[DevelopmentTask], provider: str, token: int) -> None:
+    def _set_available_tasks(
+        self,
+        tasks: list[DevelopmentTask],
+        provider: str,
+        token: int,
+        labels: tuple[str, ...] | None = None,
+        label_error: str = "",
+    ) -> None:
         if token == self._task_load_token:
             repository = self._selected("#repository")
             try:
@@ -1099,7 +1119,11 @@ class WorkflowRunnerScreen(Screen[None]):
                     severity="warning",
                 )
             self.query_one("#task-selector", TaskSelector).set_tasks(
-                tasks, provider=provider, executions=executions
+                tasks,
+                provider=provider,
+                executions=executions,
+                labels=labels,
+                label_error=label_error,
             )
             if repository is not None:
                 self._task_context = (repository, provider)
