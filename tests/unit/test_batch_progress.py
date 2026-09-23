@@ -7,13 +7,14 @@ Textual screen, so the event-to-row mapping stays fast and deterministic.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from orchestrator.models.human_interaction import HumanInteraction
 from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
@@ -508,3 +509,117 @@ def test_step_timeline_lines_render_retry_labels_on_a_second_attempt() -> None:
         "✓ Implementing corrections",
         "✓ Validation passed",
     ]
+
+
+@pytest.mark.parametrize("stage", [WorkflowStage.GENERATE_SPEC, WorkflowStage.REVIEW])
+def test_live_human_blocked_stage_replaces_success_and_preserves_resumed_attempt(
+    stage: WorkflowStage,
+) -> None:
+    progress = LiveBatchProgress(_batch(1))
+    execution_id = "execution-1"
+    progress.apply(WorkflowEvent(execution_id, WorkflowEventKind.EXECUTION_CREATED,
+                                 payload={"batch_position": 0}))
+
+    def stage_event(kind: WorkflowEventKind, status: StepStatus) -> WorkflowEvent:
+        return WorkflowEvent(execution_id, kind, stage=stage, step_status=status)
+
+    progress.apply(stage_event(WorkflowEventKind.STAGE_STARTED, StepStatus.RUNNING))
+    progress.apply(stage_event(WorkflowEventKind.STAGE_FINISHED, StepStatus.SUCCEEDED))
+    assert progress.rows()[0].timeline == (
+        "✓ Specification generated" if stage is WorkflowStage.GENERATE_SPEC
+        else "✓ Review completed",
+    )
+    progress.apply(WorkflowEvent(execution_id, WorkflowEventKind.STATUS_CHANGED,
+                                 stage=stage, status=WorkflowStatus.NEEDS_HUMAN))
+    waiting = (
+        "! Generating specification — waiting for human input"
+        if stage is WorkflowStage.GENERATE_SPEC
+        else "! Reviewing pull request — waiting for human input"
+    )
+    assert progress.rows()[0].timeline == (waiting,)
+    progress.apply(WorkflowEvent(execution_id, WorkflowEventKind.WORKFLOW_FINISHED,
+                                 stage=stage, status=WorkflowStatus.NEEDS_HUMAN))
+    assert progress.rows()[0].timeline[0] == waiting
+
+    progress.apply(WorkflowEvent(execution_id, WorkflowEventKind.STATUS_CHANGED,
+                                 status=WorkflowStatus.RUNNING))
+    progress.apply(stage_event(WorkflowEventKind.STAGE_STARTED, StepStatus.RUNNING))
+    progress.apply(stage_event(WorkflowEventKind.STAGE_FINISHED, StepStatus.SUCCEEDED))
+    assert progress.rows()[0].timeline[-1] == (
+        "✓ Specification generated" if stage is WorkflowStage.GENERATE_SPEC
+        else "✓ Review completed"
+    )
+    assert progress.rows()[0].timeline[0] == waiting
+
+
+@pytest.mark.parametrize("stage", [WorkflowStage.GENERATE_SPEC, WorkflowStage.REVIEW])
+def test_persisted_human_blocked_stage_and_resumed_attempt(stage: WorkflowStage) -> None:
+    controller = _Controller()
+    execution = WorkflowExecution(id="execution-1", status=WorkflowStatus.NEEDS_HUMAN,
+                                  current_stage=stage)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    first = WorkflowStep(1, execution.id, stage, StepStatus.SUCCEEDED, start,
+                         start + timedelta(seconds=1))
+    execution.human_interactions = [HumanInteraction(
+        1, execution.id, stage, "Clarify", start + timedelta(seconds=2)
+    )]
+    execution.spec_snapshot = {"safe_to_implement": False}
+    execution.review_snapshot = {"result": "NEEDS_HUMAN"}
+    controller.executions[execution.id] = (execution, [first])
+    item = WorkflowBatchItem(0, "task-1", "Task 1", execution.id)
+
+    waiting = (
+        "! Generating specification — waiting for human input"
+        if stage is WorkflowStage.GENERATE_SPEC
+        else "! Reviewing pull request — waiting for human input"
+    )
+    assert persisted_row(item, controller).timeline == (waiting,)  # type: ignore[arg-type]
+
+    execution.human_interactions[0].response = "Clarification"
+    execution.status = WorkflowStatus.RUNNING
+    steps = controller.executions[execution.id][1]
+    steps.append(WorkflowStep(2, execution.id, stage, StepStatus.SUCCEEDED,
+                              start + timedelta(seconds=3), start + timedelta(seconds=4)))
+    if stage is WorkflowStage.GENERATE_SPEC:
+        execution.spec_snapshot = {"safe_to_implement": True}
+    else:
+        execution.review_snapshot = {"result": "APPROVED"}
+    assert persisted_row(item, controller).timeline == (  # type: ignore[arg-type]
+        waiting,
+        "✓ Specification generated" if stage is WorkflowStage.GENERATE_SPEC
+        else "✓ Review completed",
+    )
+
+
+def test_human_pause_after_failed_attempt_keeps_failure_in_both_projections() -> None:
+    stage = WorkflowStage.GENERATE_SPEC
+    progress = LiveBatchProgress(_batch(1))
+    progress.apply(WorkflowEvent("execution-1", WorkflowEventKind.EXECUTION_CREATED,
+                                 payload={"batch_position": 0}))
+    progress.apply(WorkflowEvent("execution-1", WorkflowEventKind.STAGE_STARTED,
+                                 stage=stage, step_status=StepStatus.RUNNING))
+    progress.apply(WorkflowEvent("execution-1", WorkflowEventKind.STAGE_FAILED,
+                                 stage=stage, step_status=StepStatus.FAILED, message="blocked"))
+    progress.apply(WorkflowEvent("execution-1", WorkflowEventKind.STATUS_CHANGED,
+                                 stage=stage, status=WorkflowStatus.NEEDS_HUMAN))
+    assert progress.rows()[0].timeline == ("✗ Generating specification failed: blocked",)
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    execution = WorkflowExecution(id="execution-1", status=WorkflowStatus.NEEDS_HUMAN,
+                                  current_stage=stage,
+                                  human_interactions=[HumanInteraction(
+                                      1, "execution-1", stage, "Clarify",
+                                      start + timedelta(seconds=4)
+                                  )])
+    steps = [
+        WorkflowStep(1, execution.id, stage, StepStatus.SUCCEEDED, start,
+                     start + timedelta(seconds=1)),
+        WorkflowStep(2, execution.id, stage, StepStatus.FAILED,
+                     start + timedelta(seconds=2), start + timedelta(seconds=3), "blocked"),
+    ]
+    controller = _Controller()
+    controller.executions[execution.id] = (execution, steps)
+    timeline = persisted_row(
+        WorkflowBatchItem(0, "task-1", "Task 1", execution.id), controller  # type: ignore[arg-type]
+    ).timeline
+    assert timeline == ("✓ Specification generated", "✗ Generating specification failed: blocked")

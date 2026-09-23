@@ -75,6 +75,57 @@ from orchestrator.tui.widgets import (
 from tests.unit.tui_sync import settle_tui, wait_for_tui
 
 
+@pytest.mark.parametrize("stage", [WorkflowStage.GENERATE_SPEC, WorkflowStage.REVIEW])
+def test_single_task_timeline_revises_human_blocked_attempt_and_keeps_retry(
+    tmp_path: Path, stage: WorkflowStage
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            execution_id = "execution-1"
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id, WorkflowEventKind.STAGE_STARTED, stage=stage,
+                step_status=StepStatus.RUNNING
+            ))
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id, WorkflowEventKind.STAGE_FINISHED, stage=stage,
+                step_status=StepStatus.SUCCEEDED
+            ))
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id, WorkflowEventKind.STATUS_CHANGED, stage=stage,
+                status=WorkflowStatus.NEEDS_HUMAN
+            ))
+            waiting = (
+                "! Generating specification — waiting for human input"
+                if stage is WorkflowStage.GENERATE_SPEC
+                else "! Reviewing pull request — waiting for human input"
+            )
+            assert screen._event_lines == [waiting]
+            assert waiting in str(screen.query_one("#workflow-events", Static).renderable)
+
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id, WorkflowEventKind.STAGE_STARTED, stage=stage,
+                step_status=StepStatus.RUNNING
+            ))
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id, WorkflowEventKind.STAGE_FINISHED, stage=stage,
+                step_status=StepStatus.SUCCEEDED
+            ))
+            assert screen._event_lines == [
+                waiting,
+                "✓ Specification generated" if stage is WorkflowStage.GENERATE_SPEC
+                else "✓ Review completed",
+            ]
+
+    asyncio.run(drive())
+
+
 class _ScrollableSelectApp(App[None]):
     """Small viewport used to exercise the Select/VerticalScroll interaction."""
 

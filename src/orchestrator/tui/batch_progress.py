@@ -20,6 +20,7 @@ from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
     ACTIVE_WORKFLOW_STATUSES,
+    StepStatus,
     WorkflowStage,
     WorkflowStatus,
 )
@@ -29,6 +30,7 @@ from orchestrator.tui.workflow_presentation import (
     STAGE_ROLES,
     step_timeline_lines,
     timeline_message,
+    update_human_blocked_line,
 )
 
 if TYPE_CHECKING:
@@ -130,6 +132,7 @@ class _LiveItem:
     finished: bool = False
     timeline: list[str] = field(default_factory=list)
     active_stage_line: dict[WorkflowStage, int] = field(default_factory=dict)
+    successful_stage_lines: dict[WorkflowStage, int] = field(default_factory=dict)
     stage_attempts: dict[WorkflowStage, int] = field(default_factory=dict)
     diagnostics: list[ExecutionDiagnostic] = field(default_factory=list)
     continuation_eligible: bool = False
@@ -229,6 +232,7 @@ class LiveBatchProgress:
             item.finished = False
             item.timeline.clear()
             item.active_stage_line.clear()
+            item.successful_stage_lines.clear()
             item.stage_attempts.clear()
             item.diagnostics.clear()
         elif event.execution_id != item.execution_id:
@@ -237,6 +241,7 @@ class LiveBatchProgress:
 
         if event.kind in (WorkflowEventKind.STATUS_CHANGED, WorkflowEventKind.WORKFLOW_FINISHED):
             item.status = event.status
+            update_human_blocked_line(event, item.timeline, item.successful_stage_lines)
             if event.status is WorkflowStatus.WAITING:
                 provider = payload.get("provider")
                 item.provider_wait = provider if isinstance(provider, str) else None
@@ -249,6 +254,7 @@ class LiveBatchProgress:
 
         message = timeline_message(event, item.stage_attempts, agent_context=self._agent_context)
         if event.stage is not None and event.kind == WorkflowEventKind.STAGE_STARTED:
+            item.successful_stage_lines.pop(event.stage, None)
             item.stage_attempts[event.stage] = item.stage_attempts.get(event.stage, 0) + 1
         if event.stage is not None:
             item.stage = event.stage
@@ -277,9 +283,17 @@ class LiveBatchProgress:
         ):
             active_line = item.active_stage_line.pop(event.stage, None)
             if active_line is None:
+                active_line = len(item.timeline)
                 item.timeline.append(message)
             else:
                 item.timeline[active_line] = message
+            if (
+                event.kind is WorkflowEventKind.STAGE_FINISHED
+                and event.step_status is StepStatus.SUCCEEDED
+            ):
+                item.successful_stage_lines[event.stage] = active_line
+            else:
+                item.successful_stage_lines.pop(event.stage, None)
         else:
             item.timeline.append(message)
 
@@ -410,7 +424,7 @@ def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> Ba
             status_label=f"EXECUTION UNAVAILABLE: {exc}",
             stage_label="",
         )
-    timeline = step_timeline_lines(steps)
+    timeline = step_timeline_lines(steps, execution.human_interactions)
     diagnostics: list[ExecutionDiagnostic] = []
     diagnostics_method = getattr(controller, "execution_diagnostics", None)
     if callable(diagnostics_method):

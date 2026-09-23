@@ -27,6 +27,10 @@
   presentation/controller layer over configuration, task providers, the workflow service, and
   persisted execution reads; it must not implement workflow policy or a second state machine.
 - The TUI presents workflow observer events as a concise user-facing stage timeline by default.
+  A successful planner or reviewer step that leads to NEEDS_HUMAN is shown as waiting for human
+  input in live single-task and batch timelines and persisted batch timelines, since step success
+  alone does not make its result usable. A later successful attempt gets its own completed line;
+  failed attempts stay failed.
   Sanitized persisted diagnostics are available through its detailed-log toggle and a full-log
   clipboard export action; they record effective agent requests/responses, validation command
   results, errors, and workflow events. Clipboard exports preserve readable section metadata and
