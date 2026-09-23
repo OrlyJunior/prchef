@@ -333,6 +333,38 @@ def test_queue_execution_returns_a_resumed_execution_to_pending(tmp_path: Path) 
     assert repository.request_cancellation(execution.id) is True
 
 
+def test_human_answer_and_cancellation_cannot_overwrite_each_other(tmp_path: Path) -> None:
+    database = tmp_path / "human-cancel-race.db"
+    first = _migrated_repository(tmp_path, database.name)
+    second = WorkflowRepository(build_session_factory(build_engine(f"sqlite:///{database.as_posix()}")))
+
+    cancelled = first.create_execution("cancel-first")
+    first.request_human_input(cancelled.id, WorkflowStage.REVIEW, "Review finding?")
+    first.finish(cancelled.id, WorkflowStatus.NEEDS_HUMAN)
+    stale_view = second.get_execution(cancelled.id)
+    assert stale_view.status is WorkflowStatus.NEEDS_HUMAN
+    assert first.request_cancellation(cancelled.id)
+    with pytest.raises(ValueError, match="not awaiting human input"):
+        second.respond_to_human_input(cancelled.id, "False positive")
+    with pytest.raises(ValueError, match="cancelled"):
+        second.queue_execution(cancelled.id)
+    assert second.get_execution(cancelled.id).status is WorkflowStatus.CANCELLED
+    assert second.list_human_interactions(cancelled.id)[0].response is None
+
+    answered = first.create_execution("answer-first")
+    first.request_human_input(answered.id, WorkflowStage.REVIEW, "Review finding?")
+    first.finish(answered.id, WorkflowStatus.NEEDS_HUMAN)
+    second.respond_to_human_input(answered.id, "Proceed")
+    assert first.get_execution(answered.id).status is WorkflowStatus.PENDING
+    assert first.request_cancellation(answered.id)
+    persisted = second.get_execution(answered.id)
+    assert persisted.status is WorkflowStatus.PENDING
+    assert persisted.cancellation_requested_at is not None
+    assert second.list_human_interactions(answered.id)[0].response == "Proceed"
+    with pytest.raises(ValueError, match="cancelled"):
+        second.queue_execution(answered.id)
+
+
 def test_workflow_batches_round_trip_order_links_and_restart(tmp_path: Path) -> None:
     database_url = f"sqlite:///{(tmp_path / 'batches.db').as_posix()}"
     project_root = Path(__file__).resolve().parents[2]

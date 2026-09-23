@@ -226,11 +226,17 @@ class FakeWorkflowRepository:
         return interaction
 
     def respond_to_human_input(self, execution_id: str, response: str) -> HumanInteraction:
+        execution = self._execution()
+        if execution.status is not WorkflowStatus.NEEDS_HUMAN:
+            raise ValueError(f"Execution {execution_id} is not awaiting human input")
         interaction = next(
-            item for item in reversed(self._execution().human_interactions) if item.response is None
+            item for item in reversed(execution.human_interactions) if item.response is None
         )
         interaction.response = response.strip()
         interaction.responded_at = datetime.now(UTC)
+        execution.status = WorkflowStatus.PENDING
+        execution.error_message = None
+        execution.finished_at = None
         return interaction
 
     def resume_execution(self, execution_id: str) -> None:

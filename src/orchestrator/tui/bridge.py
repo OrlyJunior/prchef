@@ -669,13 +669,36 @@ class WorkflowController:
                 run.submissions_done = True
                 run.condition.notify_all()
                 while not run.complete():
-                    run.condition.wait()
+                    self._reconcile_batch_statuses(run)
+                    if not run.complete():
+                        # A different controller/process can cancel a settled
+                        # NEEDS_HUMAN item without emitting an event here.
+                        run.condition.wait(timeout=1.0)
             return self._repository.get_batch(batch.id)
         finally:
             self._active_batches.pop(batch.id, None)
             for execution_id, owning_batch in list(self._execution_batches.items()):
                 if owning_batch == batch.id:
                     self._execution_batches.pop(execution_id, None)
+
+    def _reconcile_batch_statuses(self, run: _BatchRun) -> None:
+        """Refresh unresolved items from durable state while holding the run condition."""
+        final = {
+            WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED,
+            WorkflowStatus.FAILED, WorkflowStatus.CANCELLED,
+        }
+        for execution_id, position in run.positions.items():
+            if run.statuses.get(position) in final:
+                continue
+            try:
+                persisted = self._repository.get_execution(execution_id).status
+            except Exception:
+                logger.exception(
+                    "Could not reconcile batch %s execution %s", run.batch_id, execution_id
+                )
+                continue
+            if persisted not in ACTIVE_WORKFLOW_STATUSES:
+                run.statuses[position] = persisted
 
     def _observe_batch_event(
         self, run: _BatchRun, position: int, event: WorkflowEvent

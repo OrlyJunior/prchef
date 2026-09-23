@@ -5,9 +5,10 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from orchestrator.models.agent import AgentRole
@@ -243,22 +244,46 @@ class WorkflowRepository:
         safe stage or provider boundary.
         """
         with self._sessions() as session, session.begin():
+            now = _utcnow()
+            # A conditional database write arbitrates with an answer being
+            # queued by another session or process. A prior ORM read here
+            # would allow a stale NEEDS_HUMAN value to overwrite that queue.
+            cancelled = cast(
+                CursorResult[Any],
+                session.execute(
+                    update(WorkflowExecutionEntity)
+                    .where(
+                        WorkflowExecutionEntity.id == execution_id,
+                        WorkflowExecutionEntity.status == WorkflowStatus.NEEDS_HUMAN.value,
+                    )
+                    .values(
+                        cancellation_requested_at=now,
+                        status=WorkflowStatus.CANCELLED.value,
+                        finished_at=now,
+                        updated_at=now,
+                    )
+                ),
+            )
+            if cancelled.rowcount:
+                return True
+            requested = cast(
+                CursorResult[Any],
+                session.execute(
+                    update(WorkflowExecutionEntity)
+                    .where(
+                        WorkflowExecutionEntity.id == execution_id,
+                        WorkflowExecutionEntity.status.in_(_ACTIVE_STATUS_VALUES),
+                        WorkflowExecutionEntity.cancellation_requested_at.is_(None),
+                    )
+                    .values(cancellation_requested_at=now, updated_at=now)
+                ),
+            )
+            if requested.rowcount:
+                return True
             entity = session.get(WorkflowExecutionEntity, execution_id)
             if entity is None:
                 raise KeyError(f"Workflow execution not found: {execution_id}")
-            if entity.status == WorkflowStatus.NEEDS_HUMAN.value:
-                now = _utcnow()
-                entity.cancellation_requested_at = now
-                entity.status = WorkflowStatus.CANCELLED.value
-                entity.finished_at = now
-                entity.updated_at = now
-                return True
-            if entity.status not in _ACTIVE_STATUS_VALUES:
-                return False
-            if entity.cancellation_requested_at is None:
-                entity.cancellation_requested_at = _utcnow()
-                entity.updated_at = _utcnow()
-            return True
+            return entity.status in _ACTIVE_STATUS_VALUES
 
     def cancellation_requested(self, execution_id: str) -> bool:
         with self._sessions() as session:
@@ -380,6 +405,26 @@ class WorkflowRepository:
         if not response:
             raise ValueError("Human response must not be empty")
         with self._sessions() as session, session.begin():
+            now = _utcnow()
+            queued = cast(
+                CursorResult[Any],
+                session.execute(
+                    update(WorkflowExecutionEntity)
+                    .where(
+                        WorkflowExecutionEntity.id == execution_id,
+                        WorkflowExecutionEntity.status == WorkflowStatus.NEEDS_HUMAN.value,
+                        WorkflowExecutionEntity.cancellation_requested_at.is_(None),
+                    )
+                    .values(
+                        status=WorkflowStatus.PENDING.value,
+                        error_message=None,
+                        finished_at=None,
+                        updated_at=now,
+                    )
+                ),
+            )
+            if not queued.rowcount:
+                raise ValueError(f"Execution {execution_id} is not awaiting human input")
             entity = session.scalars(
                 select(HumanInteractionEntity)
                 .where(
@@ -391,11 +436,7 @@ class WorkflowRepository:
             if entity is None:
                 raise ValueError(f"Execution {execution_id} is not awaiting human input")
             entity.response = redact_text(response)
-            entity.responded_at = _utcnow()
-            execution = session.get(WorkflowExecutionEntity, execution_id)
-            if execution is None:
-                raise KeyError(f"Workflow execution not found: {execution_id}")
-            execution.updated_at = _utcnow()
+            entity.responded_at = now
             return self._interaction_to_domain(entity)
 
     def resume_execution(self, execution_id: str) -> None:
@@ -415,6 +456,11 @@ class WorkflowRepository:
         """
 
         def mutate(entity: WorkflowExecutionEntity) -> None:
+            if (
+                entity.status == WorkflowStatus.CANCELLED.value
+                or entity.cancellation_requested_at is not None
+            ):
+                raise ValueError(f"Execution {execution_id} has been cancelled")
             entity.status = WorkflowStatus.PENDING.value
             entity.error_message = None
             entity.finished_at = None

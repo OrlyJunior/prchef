@@ -384,6 +384,27 @@ def test_planner_human_response_resumes_same_execution_without_prior_workspace(
     assert context_roles == ["planner", "planner", "reviewer"]
 
 
+def test_human_response_rejects_cancellation_after_initial_status_read(
+    workflow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.ambiguous = True
+    paused = service.run("card-cancelled-before-answer")
+    assert paused.status is WorkflowStatus.NEEDS_HUMAN
+    original = repository.respond_to_human_input
+
+    def cancel_before_answer(execution_id: str, response: str):
+        repository.execution.status = WorkflowStatus.CANCELLED
+        return original(execution_id, response)
+
+    monkeypatch.setattr(repository, "respond_to_human_input", cancel_before_answer)
+    with pytest.raises(ValueError, match="not awaiting human input"):
+        service.submit_response(paused.id, "Proceed")
+
+    assert repository.execution.status is WorkflowStatus.CANCELLED
+    assert repository.execution.human_interactions[-1].response is None
+
+
 def test_human_resume_preserves_role_local_claude_effort(workflow) -> None:
     service, _, _, factory = workflow
     loader = service._config_loader

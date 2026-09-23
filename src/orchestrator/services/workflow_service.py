@@ -658,7 +658,9 @@ class WorkflowService:
             raise ValueError(f"Execution {execution_id} is not awaiting human input")
         interaction = self._repository.respond_to_human_input(execution_id, response)
         self._begin_runtime(execution_id, event_listener)
-        self._queue_resumed(execution_id)
+        # The repository atomically records the answer and queues it, so a
+        # concurrent human-blocked cancellation cannot be undone here.
+        self._emit(execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.PENDING)
         return self._submit(
             execution_id,
             lambda: self._execute_response(execution, interaction, response),

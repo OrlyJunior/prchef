@@ -227,13 +227,20 @@ class _Repository:
 
     def respond_to_human_input(self, execution_id: str, response: str) -> HumanInteraction:
         with self._lock:
+            execution = self._execution(execution_id)
+            if execution.status is not WorkflowStatus.NEEDS_HUMAN:
+                raise ValueError(f"Execution {execution_id} is not awaiting human input")
             interaction = next(
                 item
-                for item in reversed(self._execution(execution_id).human_interactions)
+                for item in reversed(execution.human_interactions)
                 if item.response is None
             )
             interaction.response = response.strip()
             interaction.responded_at = datetime.now(UTC)
+            execution.status = WorkflowStatus.PENDING
+            execution.error_message = None
+            execution.finished_at = None
+            self.status_changes[execution_id].append(WorkflowStatus.PENDING)
             return interaction
 
     def resume_execution(self, execution_id: str) -> None:

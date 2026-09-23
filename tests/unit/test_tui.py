@@ -880,6 +880,55 @@ def test_controller_cancelling_last_human_blocked_item_completes_batch(tmp_path:
     assert repository.cancellation_requests == [repository.execution.id]
 
 
+def test_batch_reconciles_human_cancellation_from_another_controller(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.NEEDS_HUMAN
+    provider = _TaskProvider()
+    controller._task_provider_factory = lambda source, repository: provider
+
+    class HumanBlockedService(_WorkflowService):
+        def submit_execution(self, task_id: str, repository: str | None = None, **kwargs: Any):
+            return _Handle(WorkflowExecution(
+                id="execution-1", task_id=task_id, status=WorkflowStatus.NEEDS_HUMAN
+            ))
+
+    controller._workflow_service_factory = lambda provider: HumanBlockedService()
+    other_controller = WorkflowController(
+        workflow_repository=repository,  # type: ignore[arg-type]
+        config_loader=controller._config_loader,
+        client_factory=object(),  # type: ignore[arg-type]
+        task_provider_factory=lambda source, repository: provider,
+    )
+    created = threading.Event()
+    runs: list[_BatchRun] = []
+    outcomes: list[WorkflowBatch] = []
+
+    def on_created(batch: WorkflowBatch) -> None:
+        runs.append(controller._active_batches[batch.id])
+        created.set()
+
+    worker = threading.Thread(
+        target=lambda: outcomes.append(controller.start_batch(
+            _batch_launch("12"), on_batch_created=on_created
+        )),
+        daemon=True,
+    )
+    worker.start()
+    assert created.wait(timeout=5)
+    run = runs[0]
+    with run.condition:
+        assert run.condition.wait_for(
+            lambda: run.submissions_done
+            and run.statuses.get(0) is WorkflowStatus.NEEDS_HUMAN,
+            timeout=5,
+        )
+    assert other_controller.cancel_workflow("execution-1")
+    worker.join(timeout=5)
+    assert not worker.is_alive(), "batch did not reconcile cancellation from another controller"
+    assert run.statuses == {0: WorkflowStatus.CANCELLED}
+    assert outcomes and outcomes[0].id == run.batch_id
+
+
 def test_controller_stopping_batch_cancels_current_and_skips_later_tasks(
     tmp_path: Path,
 ) -> None:

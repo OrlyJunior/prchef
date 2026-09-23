@@ -103,9 +103,12 @@
   An individual linked batch item in PENDING, WAITING, RUNNING, or NEEDS_HUMAN can be
   cancelled from either batch view. Active work observes a durable request at a safe
   boundary; explicit cancellation of NEEDS_HUMAN transitions it directly to CANCELLED
-  and wakes live batch completion bookkeeping. The persisted view reloads after a
-  request; running rows show cancellation requested until they settle. Other items
-  are unaffected.
+  and wakes live batch completion bookkeeping. Answer recording and requeueing are
+  one durable transition that cannot revive a concurrently cancelled item. Live
+  batches also reconcile unresolved items from durable status while waiting, so
+  cancellation from another controller can close the original batch. The persisted
+  view reloads after a request; running rows show cancellation requested until they
+  settle. Other items are unaffected.
   Stored batches remain browsable after restart. `on_batch_created` fires synchronously after the
   durable batch row commits and before the first submission, exposing its stable identity and order.
 - Batch progress is a read-side TUI projection (`orchestrator.tui.batch_progress`), not a second
