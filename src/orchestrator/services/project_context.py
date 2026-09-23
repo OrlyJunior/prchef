@@ -1,6 +1,9 @@
 """Load compact, durable repository context for agent prompts."""
 
+import os
+import sys
 from collections.abc import Callable
+from io import TextIOBase
 from pathlib import Path
 
 PROJECT_CONTEXT_FILE = "docs/PROJECT_CONTEXT.md"
@@ -93,13 +96,82 @@ def reviewer_instructions_prompt(
 def _load_instruction_file(repository_path: Path, filename: str) -> str | None:
     path = repository_path / filename
     try:
-        # A role file is local guidance, never an alias to an arbitrary file on the host.
-        if path.is_symlink():
-            return None
-        content = path.read_text(encoding="utf-8").strip()
+        with _open_instruction_file(path) as instruction_file:
+            content = instruction_file.read().strip()
     except (OSError, UnicodeError):
         return None
     return content or None
+
+
+def _open_instruction_file(path: Path) -> TextIOBase:
+    """Open the role file itself, refusing symlinks even if the path changes."""
+    if sys.platform == "win32":
+        return _open_windows_instruction_file(path)
+
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError("Opening role files without following symlinks is unsupported")
+    descriptor = os.open(path, os.O_RDONLY | nofollow)
+    try:
+        return os.fdopen(descriptor, "r", encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_windows_instruction_file(path: Path) -> TextIOBase:
+    """Open a Windows role file with reparse-point following disabled."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    file_attribute_reparse_point = 0x400
+    file_flag_open_reparse_point = 0x00200000
+    file_attribute_tag_info = 9
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    file_info = kernel32.GetFileInformationByHandleEx
+    file_info.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    file_info.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    # OPEN_REPARSE_POINT makes the handle refer to the link, not its target.
+    handle = create_file(str(path), 0x80000000, 0x7, None, 3, file_flag_open_reparse_point, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        attributes = FileAttributeTagInfo()
+        if not file_info(
+            handle, file_attribute_tag_info, ctypes.byref(attributes), ctypes.sizeof(attributes)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if attributes.FileAttributes & file_attribute_reparse_point:
+            raise OSError("Role file is a reparse point")
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except BaseException:
+        close_handle(handle)
+        raise
+    try:
+        return os.fdopen(descriptor, "r", encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _agent_instructions_prompt(

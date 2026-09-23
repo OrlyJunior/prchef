@@ -16,6 +16,7 @@ from orchestrator.models import (
     ReviewDecision,
     ValidationResult,
 )
+from orchestrator.services import project_context
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.project_context import (
     MAX_AGENT_INSTRUCTIONS_CHARS,
@@ -111,7 +112,9 @@ def test_role_instruction_loaders_handle_present_and_missing_files(tmp_path: Pat
     assert load_reviewer_instructions(tmp_path) == "Prioritize regression risks."
 
 
-def test_planner_ignores_symlink_to_file_outside_repository(tmp_path: Path) -> None:
+def test_planner_ignores_symlink_to_file_outside_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
     outside = tmp_path / "private.md"
@@ -121,6 +124,8 @@ def test_planner_ignores_symlink_to_file_outside_repository(tmp_path: Path) -> N
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"Symlinks unavailable: {exc}")
 
+    # Simulate a stale path-only check: the opened file must still be rejected.
+    monkeypatch.setattr(Path, "is_symlink", lambda path: False)
     assert load_planner_instructions(repository) is None
     prompt = SpecService(
         RecordingProvider(AgentResult(output="unused")), MarkerRepositoryContextStrategy()
@@ -282,14 +287,14 @@ def test_planner_instructions_handle_empty_oversized_and_unreadable_files(
         in oversized
     )
 
-    original_read_text = Path.read_text
+    original_open = project_context._open_instruction_file
 
-    def fail_planner_read(path: Path, *args: Any, **kwargs: Any) -> str:
+    def fail_planner_read(path: Path) -> Any:
         if path == planner_file:
             raise OSError("unreadable")
-        return original_read_text(path, *args, **kwargs)
+        return original_open(path)
 
-    monkeypatch.setattr(Path, "read_text", fail_planner_read)
+    monkeypatch.setattr(project_context, "_open_instruction_file", fail_planner_read)
     unreadable = service._build_prompt(_task(), tmp_path, "owner/repo", "develop")
     assert "REPOSITORY PLANNER INSTRUCTIONS" not in unreadable
     assert "OUTPUT CONTRACT:" in unreadable
