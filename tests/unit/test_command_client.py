@@ -382,7 +382,9 @@ def test_interrupted_command_terminates_the_process_tree(
     with pytest.raises(KeyboardInterrupt):
         CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
 
-    assert events == ["communicate:30", "terminate:4321"]
+    drain = command_client._POST_KILL_DRAIN_SECONDS
+    assert events == ["communicate:30", "terminate:4321", f"wait:{drain}"]
+    assert process.returncode is not None
 
 
 _LAUNCHER_SCRIPT = """\

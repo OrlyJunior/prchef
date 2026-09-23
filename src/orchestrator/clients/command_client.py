@@ -348,11 +348,20 @@ def _run_process(
         ) from None
     except BaseException:
         _terminate_process_tree(process, containment)
+        _reap_interrupted_process(process)
         raise
     finally:
         if containment is not None:
             containment.close()
     return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)
+
+
+def _reap_interrupted_process(process: subprocess.Popen[str]) -> None:
+    """Wait, with a bound, for an interrupted command to exit so it does not linger."""
+    try:
+        process.wait(timeout=_POST_KILL_DRAIN_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.warning("[command] Interrupted process %s did not exit", process.pid)
 
 
 @dataclass(slots=True)
