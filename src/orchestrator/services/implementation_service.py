@@ -22,7 +22,10 @@ from orchestrator.services.structured_output import parse_json_object
 _CORRECTION_OUTPUT_LIMIT = 4_000
 _TRUNCATED_OUTPUT_MARKER = "[... earlier output truncated ...]\n"
 _PYTEST_FAILURES_HEADER = re.compile(r"^={2,} FAILURES ={2,}\r?$", re.MULTILINE)
-_PYTEST_FAILURE_HEADER = re.compile(r"^_+ .+ _+\r?$", re.MULTILINE)
+# A traceback frame separator contains only underscores and spaces, even when it ends in "_".
+_PYTEST_FAILURE_HEADER = re.compile(
+    r"^_+ (?=[^\r\n]*[^_ \r\n])[^\r\n]+ _+\r?$", re.MULTILINE
+)
 _PYTEST_SECTION_HEADER = re.compile(r"^={2,} [^\r\n]+ ={2,}\r?$", re.MULTILINE)
 _PYTEST_SUMMARY_HEADER = re.compile(
     r"^={2,} short test summary info ={2,}\r?$", re.MULTILINE

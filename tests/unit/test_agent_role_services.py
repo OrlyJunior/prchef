@@ -464,7 +464,16 @@ def test_validation_failures_render_timeouts_alongside_completed_failures() -> N
 def test_validation_correction_prompt_keeps_each_pytest_failure_and_full_summary(
     tmp_path: Path,
 ) -> None:
-    large_detail = "oversized start api_key=hunter2\n" + "x" * 10_000 + "\noversized end"
+    # Pytest's Windows frame separator ends in an underscore and must stay inside one failure.
+    frame_separator = "_ " * 39 + "_\n"
+    large_detail = (
+        "oversized start api_key=hunter2\n"
+        + "x" * 2_500
+        + "\n"
+        + frame_separator
+        + "f" * 8_000
+        + "\noversized end"
+    )
     small_detail = "small start\n" + "y" * 3_800 + "\nsmall end"
     large_header = "_______________________________ test_crash ________________________________\n"
     small_header = "_______________________________ test_sibling ______________________________\n"
@@ -515,6 +524,9 @@ def test_validation_correction_prompt_keeps_each_pytest_failure_and_full_summary
     assert "api_key=[REDACTED]" in prompt
     assert "hunter2" not in prompt
     assert (large_header + large_detail.replace("hunter2", "[REDACTED]"))[:4_000] in prompt
+    large_block = prompt.split(large_header, 1)[1].split(small_header, 1)[0]
+    assert len(large_header + large_block.removesuffix("\n\n")) == 4_000
+    assert frame_separator in large_block
     assert small_detail in prompt
     assert "later detail" in prompt
     assert summary in prompt
