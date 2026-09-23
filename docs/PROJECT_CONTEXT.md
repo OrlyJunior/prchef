@@ -316,7 +316,10 @@
   The correction prompt includes failed commands, exit codes, and redacted output. Recognized
   pytest `FAILURES` sections cap each test's failure block independently at 4,000 characters,
   then append the complete redacted `short test summary info` section so every failed test name
-  remains visible. Other completed failure output uses the existing 4,000-character prefix cap.
+  remains visible. Multiple recognized summaries in one command are retained; text after the
+  last summary has a separate 4,000-character prefix cap. Other completed failure output uses
+  the existing 4,000-character prefix cap. Intervening pytest output remains subject to the
+  preceding failure block's cap.
 - A validation command that exceeds `validation.timeout_seconds` is a failed check, not a workflow
   error: `CommandClient` raises `CommandTimeoutError` (a `CommandExecutionError` subtype) carrying
   the configured duration and the partial stdout/stderr, decoded as UTF-8 with replacement.

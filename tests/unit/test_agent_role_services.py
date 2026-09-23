@@ -565,6 +565,104 @@ def test_validation_correction_uses_whole_output_cap_for_other_formats(tmp_path:
     assert "late detail" not in prompt
 
 
+def test_pytest_summary_does_not_uncap_nested_output_or_later_commands() -> None:
+    nested_summary = (
+        "================ short test summary info ================\n"
+        "FAILED nested/test_child.py::test_child - nested failure\n"
+        "================ 1 failed in 0.01s ================\n"
+    )
+    outer_summary = (
+        "================ short test summary info ================\n"
+        "FAILED tests/test_widget.py::test_crash - crash\n"
+        "FAILED tests/test_widget.py::test_sibling - sibling\n"
+        "================ 2 failed in 0.02s ================\n"
+    )
+    later_summary = (
+        "================ short test summary info ================\n"
+        "FAILED tests/test_later.py::test_later - later failure\n"
+        "================ 1 failed in 0.03s ================\n"
+    )
+    sibling_header = "________________ test_sibling ________________\n"
+    output = (
+        "================ FAILURES ================\n"
+        "________________ test_crash ________________\n"
+        "crash details\n"
+        "================ plugin banner ================\n"
+        f"{nested_summary}"
+        + "n" * 10_000
+        + "\n"
+        + sibling_header
+        + "sibling details\n"
+        + outer_summary
+        + "later command output\n"
+        + "================ FAILURES ================\n"
+        + "________________ test_later ________________\n"
+        + "later failure details\n"
+        + later_summary
+        + "p" * 10_000
+        + "late tail"
+    )
+    rendered = ImplementationService.render_validation_failures(
+        ValidationResult(
+            success=False,
+            checks=[
+                ValidationCheck(
+                    name="custom validation",
+                    command=["make", "check"],
+                    success=False,
+                    exit_code=1,
+                    stderr=output,
+                )
+            ],
+        )
+    )
+
+    assert nested_summary in rendered
+    assert "n" * 4_001 not in rendered
+    assert sibling_header + "sibling details" in rendered
+    assert outer_summary in rendered
+    assert later_summary in rendered
+    assert "later failure details" in rendered
+    assert rendered.index("sibling details") < rendered.index(outer_summary)
+    assert "later command output" in rendered
+    assert "p" * 4_000 in rendered
+    assert "p" * 4_001 not in rendered
+    assert "late tail" not in rendered
+
+
+def test_pytest_summary_without_result_line_stops_after_summary_entries() -> None:
+    summary = (
+        "================ short test summary info ================\n"
+        "FAILED tests/test_widget.py::test_crash - crash\n"
+    )
+    output = (
+        "================ FAILURES ================\n"
+        "________________ test_crash ________________\n"
+        "crash details\n"
+        + summary
+        + "later command output\n"
+        + "x" * 10_000
+    )
+    rendered = ImplementationService.render_validation_failures(
+        ValidationResult(
+            success=False,
+            checks=[
+                ValidationCheck(
+                    name="pytest",
+                    command=["pytest"],
+                    success=False,
+                    exit_code=1,
+                    stderr=output,
+                )
+            ],
+        )
+    )
+
+    assert summary in rendered
+    assert "later command output" in rendered
+    assert "x" * 4_001 not in rendered
+
+
 def test_timed_out_validation_output_keeps_the_tail_and_reports_missing_output() -> None:
     long_output = "early line\n" + "x" * 5_000 + "\nlast line before hang"
     validation = ValidationResult(

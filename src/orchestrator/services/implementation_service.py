@@ -26,10 +26,35 @@ _PYTEST_FAILURES_HEADER = re.compile(r"^={2,} FAILURES ={2,}\r?$", re.MULTILINE)
 _PYTEST_FAILURE_HEADER = re.compile(
     r"^_+ (?=[^\r\n]*[^_ \r\n])[^\r\n]+ _+\r?$", re.MULTILINE
 )
-_PYTEST_SECTION_HEADER = re.compile(r"^={2,} [^\r\n]+ ={2,}\r?$", re.MULTILINE)
 _PYTEST_SUMMARY_HEADER = re.compile(
     r"^={2,} short test summary info ={2,}\r?$", re.MULTILINE
 )
+_PYTEST_SUMMARY_ENTRY = re.compile(
+    r"^(?:FAILED|ERROR|SKIPPED|XFAIL|XPASS|PASSED)\s+\S+"
+)
+_PYTEST_SESSION_RESULT = re.compile(
+    r"^={2,} (?:\d+ [^=\r\n]+|no tests ran[^=\r\n]*) ={2,}\r?$"
+)
+
+
+def _pytest_summary_end(output: str, header_end: int) -> int | None:
+    """Find the end of a real pytest summary without swallowing later command output."""
+    position = header_end
+    if output[position : position + 1] == "\n":
+        position += 1
+    has_failure = False
+    while position < len(output):
+        line_end = output.find("\n", position)
+        line_end = len(output) if line_end < 0 else line_end + 1
+        line = output[position:line_end].rstrip("\r\n")
+        if _PYTEST_SUMMARY_ENTRY.match(line):
+            has_failure |= line.startswith("FAILED ") or line.startswith("ERROR ")
+            position = line_end
+            continue
+        if has_failure and _PYTEST_SESSION_RESULT.fullmatch(line):
+            return line_end
+        return position if has_failure else None
+    return position if has_failure else None
 
 
 def _render_completed_failure_output(output: str) -> str:
@@ -37,14 +62,18 @@ def _render_completed_failure_output(output: str) -> str:
     failures = _PYTEST_FAILURES_HEADER.search(output)
     if failures is None:
         return output[:_CORRECTION_OUTPUT_LIMIT]
-    summary = _PYTEST_SUMMARY_HEADER.search(output, failures.end())
-    if summary is None:
+    summaries = [
+        (match, end)
+        for match in _PYTEST_SUMMARY_HEADER.finditer(output, failures.end())
+        if (end := _pytest_summary_end(output, match.end())) is not None
+    ]
+    if not summaries:
         return output[:_CORRECTION_OUTPUT_LIMIT]
-    if re.search(r"^FAILED\s+\S+", output[summary.start():], re.MULTILINE) is None:
-        return output[:_CORRECTION_OUTPUT_LIMIT]
+    # The last summary delimits the detailed blocks; earlier summaries may come
+    # from nested pytest output or multiple pytest invocations in one command.
+    summary, summary_end = summaries[-1]
 
-    next_section = _PYTEST_SECTION_HEADER.search(output, failures.end(), summary.start())
-    details_end = next_section.start() if next_section is not None else summary.start()
+    details_end = summary.start()
     headers = list(_PYTEST_FAILURE_HEADER.finditer(output, failures.end(), details_end))
     if not headers:
         return output[:_CORRECTION_OUTPUT_LIMIT]
@@ -56,7 +85,10 @@ def _render_completed_failure_output(output: str) -> str:
     parts = []
     if failures.start():
         parts.append(output[: failures.start()][:_CORRECTION_OUTPUT_LIMIT])
-    parts.extend((failures.group(), *blocks, output[summary.start() :]))
+    parts.extend((failures.group(), *blocks))
+    parts.extend(output[match.start() : end] for match, end in summaries)
+    if summary_end < len(output):
+        parts.append(output[summary_end : summary_end + _CORRECTION_OUTPUT_LIMIT])
     return "\n\n".join(parts)
 
 
