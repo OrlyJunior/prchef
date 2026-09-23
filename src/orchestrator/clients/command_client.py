@@ -24,6 +24,7 @@ _WINDOWS_EXECUTABLE_SUFFIXES = (".exe", ".com", ".cmd", ".bat")
 # kill and still holds an output pipe cannot keep the timeout from being reported.
 _POST_KILL_DRAIN_SECONDS = 10.0
 _TASKKILL_TIMEOUT_SECONDS = 30.0
+_PROCESS_GROUP_POLL_SECONDS = 0.05
 # Run as a standalone script, never imported; its status lines are mirrored here.
 _SUPERVISOR_SCRIPT = Path(__file__).with_name("process_supervisor.py")
 _SUPERVISOR_STOPPED = "stopped"
@@ -139,8 +140,8 @@ def _start_process(
     Windows commands start suspended inside a job object, so every descendant is contained before
     the command can launch one. Linux commands run under ``process_supervisor.py``, a child
     subreaper that keeps every descendant killable, even one that left the process group with
-    ``setsid``. Other POSIX commands only lead their own session and process group, which cannot
-    confirm that the whole tree stopped.
+    ``setsid``. Other POSIX commands, such as on macOS, only lead their own session and process
+    group, whose members are killed and awaited as a group.
     """
     if sys.platform == "win32":
         return _start_in_job(command, cwd=cwd, input_text=input_text, env=env)
@@ -219,6 +220,7 @@ def _terminate_process_tree(
     elif sys.platform == "win32":
         stopped = _taskkill_process_tree(process.pid)
     else:
+        stopped = True
         try:
             # The group outlives its leader, so this also reaches orphaned descendants.
             os.killpg(process.pid, signal.SIGKILL)
@@ -226,8 +228,7 @@ def _terminate_process_tree(
             pass
         except PermissionError:
             logger.warning("[command] Could not terminate process group %s", process.pid)
-        # A descendant may have left the group with setsid, so a group kill proves nothing.
-        stopped = False
+            stopped = False
     try:
         process.kill()
     except OSError:
@@ -281,10 +282,40 @@ def _drain_terminated_process(
 
 
 def _stop_confirmed(process: subprocess.Popen[str], containment: _Containment | None) -> bool:
-    """Whether a supervised command reported that its tree stopped; others report no outcome."""
+    """Whether a terminated command's tree is known to have stopped, once it has been reaped.
+
+    A supervised command relies on its supervisor's report and a POSIX process group on no member
+    remaining; Windows commands report their outcome from ``_terminate_process_tree``.
+    """
     if isinstance(containment, _TreeSupervisor):
         return containment.stopped(process)
+    if containment is None:
+        return _process_group_emptied(process.pid)
     return True
+
+
+def _process_group_emptied(pgid: int) -> bool:
+    """Wait, with a bound, until no member of a killed POSIX process group remains.
+
+    Killed members that are not the reaped leader are reparented to init, which reaps them. A
+    descendant that left the group with ``setsid`` is not a member, so it is only detected when it
+    still holds an output pipe; the Linux supervisor exists to close that gap.
+    """
+    if sys.platform == "win32":
+        return True
+    deadline = time.monotonic() + _POST_KILL_DRAIN_SECONDS
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            # A member that cannot be signalled still exists.
+            pass
+        if time.monotonic() >= deadline:
+            logger.warning("[command] Process group %s still has members after the kill", pgid)
+            return False
+        time.sleep(_PROCESS_GROUP_POLL_SECONDS)
 
 
 def _run_process(

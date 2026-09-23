@@ -320,12 +320,15 @@
   closed. On timeout it kills every descendant found through `/proc` and reports `stopped` only
   once it has no children left. Neither mechanism kills on normal completion, so completed
   commands, including background processes that released their output, behave as before.
-- A timeout becomes `CommandTimeoutError` only once the tree is confirmed stopped (job empty or
-  supervisor reported `stopped`, and output closed). A process-group kill never confirms it,
-  because a descendant can leave the group. So on other POSIX platforms (e.g. macOS), when the
-  subreaper is unavailable, or when a descendant outlives the kill, the timeout raises a plain
-  `CommandExecutionError` and the workflow fails without correction. An implementer never edits
-  a worktree that a validation process may still be using.
+- A timeout becomes `CommandTimeoutError` only once the tree is confirmed stopped: job empty or
+  supervisor reported `stopped`, output closed, and the command reaped. On other POSIX platforms
+  (e.g. macOS), or on Linux when the supervisor is unavailable, the command leads its own process
+  group; the group is `SIGKILL`ed and confirmed once a bounded `killpg(pgid, 0)` poll finds no
+  member left, so macOS timeouts also reach the correction loop. Known limit there: a descendant
+  that left the group (`setsid`) and released its output cannot be detected. Whenever
+  confirmation fails (a member or pipe-holder survives, or the group cannot be signalled), the
+  timeout raises a plain `CommandExecutionError` and the workflow fails without correction, so an
+  implementer never edits a worktree that a known-live validation process may still be using.
 - Planning, execution ID, branch, and worktree are never recreated during corrections. A passing
   retry continues to commit/push/PR/review. Exhaustion or correction failure ends as `FAILED` and
   preserves the worktree.

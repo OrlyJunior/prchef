@@ -301,6 +301,8 @@ def _install_scripted_process(
         command_client, "_start_process", lambda command, **kwargs: (process, None)
     )
     monkeypatch.setattr(command_client, "_terminate_process_tree", terminate)
+    # The scripted pid is not a real process group.
+    monkeypatch.setattr(command_client, "_process_group_emptied", lambda pgid: True)
 
 
 def test_timeout_terminates_the_process_tree_before_collecting_output(
@@ -411,13 +413,6 @@ time.sleep(600)
 """
 
 
-_contains_process_trees = pytest.mark.skipif(
-    sys.platform not in ("win32", "linux"),
-    reason="Only Windows job objects and the Linux supervisor can confirm a tree stopped",
-)
-
-
-@_contains_process_trees
 @pytest.mark.parametrize(
     "launcher_script",
     [_LAUNCHER_SCRIPT, _EXITING_LAUNCHER_SCRIPT],
@@ -574,23 +569,108 @@ def test_timeout_confirms_only_after_stopping_descendants_that_left_the_session(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
-def test_process_group_kill_alone_does_not_confirm_the_tree_stopped(
+@pytest.mark.parametrize(
+    "launcher_script",
+    [_LAUNCHER_SCRIPT, _EXITING_LAUNCHER_SCRIPT],
+    ids=["running-launcher", "exited-launcher"],
+)
+def test_process_group_timeout_is_confirmed_without_a_supervisor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, launcher_script: str
+) -> None:
+    # The path used on macOS, and on Linux whenever the supervisor is unavailable.
+    monkeypatch.setattr(command_client, "_can_supervise", lambda command: False)
+    launcher = tmp_path / "launcher.py"
+    descendant = tmp_path / "descendant.py"
+    launcher.write_text(launcher_script, encoding="utf-8")
+    descendant.write_text(_DESCENDANT_SCRIPT, encoding="utf-8")
+
+    process, containment = command_client._start_process(
+        [sys.executable, str(launcher), str(descendant)],
+        cwd=tmp_path,
+        input_text=None,
+        env=None,
+    )
+    try:
+        assert containment is None
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        if launcher_script is _EXITING_LAUNCHER_SCRIPT:
+            # Only the descendant is left in the group, holding the output pipe.
+            process.wait(timeout=60)
+
+        assert command_client._terminate_process_tree(process, containment)
+        _, _, drained = command_client._drain_terminated_process(process)
+
+        assert drained
+        assert command_client._stop_confirmed(process, containment)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+class _GroupLeader:
+    pid = 4321
+
+    def kill(self) -> None:
+        pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+def test_process_group_kill_is_confirmed_once_no_member_remains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    killed: list[tuple[int, int]] = []
+    signals: list[tuple[int, int]] = []
+    members_left = [1]
 
-    class Process:
-        pid = 4321
+    def killpg(pgid: int, signum: int) -> None:
+        signals.append((pgid, signum))
+        if signum == 0:
+            if not members_left:
+                raise ProcessLookupError
+            members_left.pop()
 
-        def kill(self) -> None:
-            pass
+    monkeypatch.setattr(command_client.os, "killpg", killpg)
+    monkeypatch.setattr(command_client.time, "sleep", lambda seconds: None)
+    process: Any = _GroupLeader()
 
+    assert command_client._terminate_process_tree(process, None)
+    assert command_client._stop_confirmed(process, None)
+    assert signals == [(4321, signal.SIGKILL), (4321, 0), (4321, 0)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+@pytest.mark.parametrize("probe_error", [None, PermissionError], ids=["member", "foreign-member"])
+def test_process_group_with_a_surviving_member_is_not_confirmed(
+    monkeypatch: pytest.MonkeyPatch, probe_error: type[OSError] | None
+) -> None:
+    def killpg(pgid: int, signum: int) -> None:
+        if signum == 0 and probe_error is not None:
+            raise probe_error
+
+    monkeypatch.setattr(command_client.os, "killpg", killpg)
+    # No waiting: the first probe that still finds a member decides.
+    monkeypatch.setattr(command_client, "_POST_KILL_DRAIN_SECONDS", 0.0)
     monkeypatch.setattr(
-        command_client.os, "killpg", lambda pid, signum: killed.append((pid, signum))
+        command_client.time, "sleep", lambda seconds: pytest.fail("waited past the bound")
     )
 
-    assert not command_client._terminate_process_tree(Process(), None)  # type: ignore[arg-type]
-    assert killed == [(4321, signal.SIGKILL)]
+    process: Any = _GroupLeader()
+
+    assert not command_client._stop_confirmed(process, None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+def test_process_group_that_cannot_be_killed_is_not_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def killpg(pgid: int, signum: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(command_client.os, "killpg", killpg)
+    process: Any = _GroupLeader()
+
+    assert not command_client._terminate_process_tree(process, None)
 
 
 @pytest.mark.parametrize(
