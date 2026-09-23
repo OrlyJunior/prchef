@@ -310,15 +310,22 @@
   output. Other command execution errors still fail the workflow.
 - On any timeout, `CommandClient` kills the command's whole process tree, reaps the command, then
   waits a bounded time for output, so children (e.g. behind `npm run test`/Gradle) cannot keep
-  running in the worktree. POSIX commands lead a new session and are killed via their process
-  group, which outlives its leader. Windows commands start suspended inside a job object
+  running in the worktree. Windows commands start suspended inside a job object
   (`clients/windows_job.py`) that is terminated on timeout, reaching descendants even after the
   launcher (e.g. a `.cmd` shim) exited; `taskkill /F /T` is only a fallback when a job is
-  unavailable. The job has no kill-on-close limit, so completed commands behave as before.
-- A timeout becomes `CommandTimeoutError` only once the tree is confirmed stopped (kill succeeded,
-  job empty, pipes closed). Otherwise — e.g. a descendant that escaped via `setsid` still holds
-  output — it raises a plain `CommandExecutionError` and the workflow fails without correction,
-  so an implementer never edits a worktree a validation process may still be using.
+  unavailable. Linux commands run under `clients/process_supervisor.py`, a stdlib-only script
+  started as `python -I -S` that registers as a child subreaper: descendants that leave the
+  process group (`setsid`, double fork) are still reparented to it. It relays output through its
+  own pipes and exits with the command's own status once the command exited and its output
+  closed. On timeout it kills every descendant found through `/proc` and reports `stopped` only
+  once it has no children left. Neither mechanism kills on normal completion, so completed
+  commands, including background processes that released their output, behave as before.
+- A timeout becomes `CommandTimeoutError` only once the tree is confirmed stopped (job empty or
+  supervisor reported `stopped`, and output closed). A process-group kill never confirms it,
+  because a descendant can leave the group. So on other POSIX platforms (e.g. macOS), when the
+  subreaper is unavailable, or when a descendant outlives the kill, the timeout raises a plain
+  `CommandExecutionError` and the workflow fails without correction. An implementer never edits
+  a worktree that a validation process may still be using.
 - Planning, execution ID, branch, and worktree are never recreated during corrections. A passing
   retry continues to commit/push/PR/review. Exhaustion or correction failure ends as `FAILED` and
   preserves the worktree.

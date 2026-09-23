@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -408,6 +411,13 @@ time.sleep(600)
 """
 
 
+_contains_process_trees = pytest.mark.skipif(
+    sys.platform not in ("win32", "linux"),
+    reason="Only Windows job objects and the Linux supervisor can confirm a tree stopped",
+)
+
+
+@_contains_process_trees
 @pytest.mark.parametrize(
     "launcher_script",
     [_LAUNCHER_SCRIPT, _EXITING_LAUNCHER_SCRIPT],
@@ -431,9 +441,12 @@ def test_terminating_the_process_tree_stops_descendants_holding_output(
         assert process.stdout is not None
         # Wait until the descendant is running and holds the inherited output pipe.
         assert process.stdout.readline().strip() == "ready"
-        if launcher_script is _EXITING_LAUNCHER_SCRIPT:
+        if launcher_script is _EXITING_LAUNCHER_SCRIPT and not isinstance(
+            job, command_client._TreeSupervisor
+        ):
             # Like a .cmd shim that returned while its child still runs: only the descendant is
-            # left, so the kill cannot reach it through the launcher.
+            # left, so the kill cannot reach it through the launcher. A Linux supervisor outlives
+            # the launcher; its orphan case is covered by the session-escape test below.
             process.wait(timeout=60)
 
         assert command_client._terminate_process_tree(process, job)
@@ -441,6 +454,7 @@ def test_terminating_the_process_tree_stops_descendants_holding_output(
         # Output reaches EOF only after every process holding the pipe has exited; the bound only
         # keeps a regression from hanging the suite.
         process.communicate(timeout=60)
+        assert command_client._stop_confirmed(process, job)
     finally:
         if process.poll() is None:
             process.kill()
@@ -449,6 +463,206 @@ def test_terminating_the_process_tree_stops_descendants_holding_output(
             job.close()
 
     assert process.returncode is not None
+
+
+# Each launcher starts a descendant in a new session, beyond the reach of a process-group kill,
+# and prints "ready <pid>" once it runs.
+_REDIRECTED_SESSION_ESCAPE_SCRIPT = """\
+import subprocess
+import sys
+import time
+
+descendant = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+print("ready", descendant.pid, flush=True)
+time.sleep(600)
+"""
+
+_ORPHANED_SESSION_ESCAPE_SCRIPT = """\
+import subprocess
+import sys
+
+descendant = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    stdin=subprocess.DEVNULL,
+    start_new_session=True,
+)
+print("ready", descendant.pid, flush=True)
+"""
+
+_DETACHING_LAUNCHER_SCRIPT = """\
+import subprocess
+import sys
+
+descendant = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+print("ready", descendant.pid, flush=True)
+"""
+
+
+def _parent_pid(pid: int) -> int | None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_bytes()
+    except OSError:
+        return None
+    return int(stat[stat.rfind(b")") + 2 :].split()[1])
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux supervisor only")
+@pytest.mark.parametrize(
+    "launcher_script",
+    [_REDIRECTED_SESSION_ESCAPE_SCRIPT, _ORPHANED_SESSION_ESCAPE_SCRIPT],
+    ids=["hung-launcher-redirected-descendant", "exited-launcher-orphaned-descendant"],
+)
+def test_timeout_confirms_only_after_stopping_descendants_that_left_the_session(
+    tmp_path: Path, launcher_script: str
+) -> None:
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(launcher_script, encoding="utf-8")
+
+    process, containment = command_client._start_process(
+        [sys.executable, str(launcher)], cwd=tmp_path, input_text=None, env=None
+    )
+    descendant: int | None = None
+    try:
+        assert isinstance(containment, command_client._TreeSupervisor)
+        assert process.stdout is not None
+        ready, pid = process.stdout.readline().split()
+        assert ready == "ready"
+        descendant = int(pid)
+        if launcher_script is _ORPHANED_SESSION_ESCAPE_SCRIPT:
+            # Wait for the launcher to exit: its orphan is then reparented to the supervisor
+            # rather than to init. The bound only keeps a regression from hanging the suite.
+            deadline = time.monotonic() + 60
+            while _parent_pid(descendant) != process.pid:
+                assert time.monotonic() < deadline, "orphan was not kept by the supervisor"
+                time.sleep(0.01)
+
+        assert command_client._terminate_process_tree(process, containment)
+        _, _, drained = command_client._drain_terminated_process(process)
+
+        assert drained
+        assert command_client._stop_confirmed(process, containment)
+        # The supervisor confirms only once it reaped every descendant, so the pid is gone.
+        assert not _process_exists(descendant)
+    finally:
+        if descendant is not None and _process_exists(descendant):
+            os.kill(descendant, signal.SIGKILL)
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if containment is not None:
+            containment.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+def test_process_group_kill_alone_does_not_confirm_the_tree_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    killed: list[tuple[int, int]] = []
+
+    class Process:
+        pid = 4321
+
+        def kill(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        command_client.os, "killpg", lambda pid, signum: killed.append((pid, signum))
+    )
+
+    assert not command_client._terminate_process_tree(Process(), None)  # type: ignore[arg-type]
+    assert killed == [(4321, signal.SIGKILL)]
+
+
+@pytest.mark.parametrize(
+    ("report", "returncode", "confirmed"),
+    [
+        (b"stopped\n", -9, True),
+        (b"", -9, False),
+        (b"stopped\n", None, False),
+    ],
+    ids=["reported", "not-reported", "still-running"],
+)
+def test_supervised_timeout_is_confirmed_only_by_the_supervisor_report(
+    report: bytes, returncode: int | None, confirmed: bool
+) -> None:
+    read_end, write_end = os.pipe()
+    os.write(write_end, report)
+    os.close(write_end)
+    supervisor = command_client._TreeSupervisor(read_end)
+    process: Any = SimpleNamespace(returncode=returncode)
+    try:
+        assert command_client._stop_confirmed(process, supervisor) is confirmed
+    finally:
+        supervisor.close()
+
+
+def test_completed_command_keeps_its_exit_code_and_both_streams(tmp_path: Path) -> None:
+    script = (
+        "import sys; data = sys.stdin.read(); print(data.upper()); "
+        "print('warning', file=sys.stderr); sys.exit(3)"
+    )
+
+    result = CommandClient().run(
+        [sys.executable, "-c", script], cwd=tmp_path, input_text="checked", timeout_seconds=60
+    )
+
+    assert result.exit_code == 3
+    assert result.stdout == "CHECKED\n"
+    assert result.stderr == "warning\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals only")
+def test_command_killed_by_a_signal_keeps_its_signal_status(tmp_path: Path) -> None:
+    script = "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"
+
+    result = CommandClient().run([sys.executable, "-c", script], cwd=tmp_path, timeout_seconds=60)
+
+    assert result.exit_code == -signal.SIGKILL
+
+
+def test_missing_executable_is_reported_as_before(tmp_path: Path) -> None:
+    with pytest.raises(CommandExecutionError, match="Executable not found: orchestrator-no-such"):
+        CommandClient().run(["orchestrator-no-such-tool"], cwd=tmp_path, timeout_seconds=60)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions only")
+def test_background_process_that_released_output_does_not_delay_completion(
+    tmp_path: Path,
+) -> None:
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(_DETACHING_LAUNCHER_SCRIPT, encoding="utf-8")
+
+    result = CommandClient().run([sys.executable, str(launcher)], cwd=tmp_path, timeout_seconds=60)
+
+    ready, pid = result.stdout.split()
+    background = int(pid)
+    try:
+        assert result.exit_code == 0
+        assert ready == "ready"
+        # Like a build daemon, it is left running exactly as when the command ran directly.
+        assert _process_exists(background)
+    finally:
+        os.kill(background, signal.SIGKILL)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Job objects are Windows-specific")

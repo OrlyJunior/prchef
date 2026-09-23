@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeAlias
 
 from orchestrator.clients.exceptions import CommandExecutionError, CommandTimeoutError
 from orchestrator.clients.windows_job import CREATE_SUSPENDED, WindowsJob
@@ -23,6 +24,10 @@ _WINDOWS_EXECUTABLE_SUFFIXES = (".exe", ".com", ".cmd", ".bat")
 # kill and still holds an output pipe cannot keep the timeout from being reported.
 _POST_KILL_DRAIN_SECONDS = 10.0
 _TASKKILL_TIMEOUT_SECONDS = 30.0
+# Run as a standalone script, never imported; its status lines are mirrored here.
+_SUPERVISOR_SCRIPT = Path(__file__).with_name("process_supervisor.py")
+_SUPERVISOR_STOPPED = "stopped"
+_SUPERVISOR_SPAWN_ERROR = "spawn-error"
 
 
 def _is_windows() -> bool:
@@ -42,32 +47,137 @@ class _ProcessTreeSurvivedError(Exception):
     """A timed-out command's process tree could not be confirmed terminated."""
 
 
+class _TreeSupervisor:
+    """The orchestrator's side of a Linux command launched under ``process_supervisor.py``."""
+
+    def __init__(self, status_fd: int) -> None:
+        self._status_fd: int | None = status_fd
+        self._status: list[str] | None = None
+
+    def request_stop(self, process: subprocess.Popen[str]) -> None:
+        # Never kill the supervisor itself: that would release descendants it still contains.
+        try:
+            process.send_signal(signal.SIGTERM)
+        except OSError:
+            pass
+
+    def stopped(self, process: subprocess.Popen[str]) -> bool:
+        """Whether the supervisor reported that no descendant of the command survived."""
+        return _SUPERVISOR_STOPPED in self._status_lines(process)
+
+    def raise_spawn_error(self, process: subprocess.Popen[str], command: Sequence[str]) -> None:
+        """Raise the error the supervisor hit launching the command, as a direct launch would."""
+        for line in self._status_lines(process):
+            name, _, value = line.partition(" ")
+            if name == _SUPERVISOR_SPAWN_ERROR:
+                code = int(value) if value.isdigit() else 0
+                # OSError picks the matching subclass, such as FileNotFoundError for ENOENT.
+                raise OSError(code, os.strerror(code), command[0])
+
+    def close(self) -> None:
+        if self._status_fd is not None:
+            os.close(self._status_fd)
+            self._status_fd = None
+
+    def _status_lines(self, process: subprocess.Popen[str]) -> list[str]:
+        # The report is complete, and reading cannot block, only once the supervisor has exited.
+        if self._status is None and process.returncode is not None and self._status_fd is not None:
+            chunks: list[bytes] = []
+            while chunk := os.read(self._status_fd, 4096):
+                chunks.append(chunk)
+            self._status = b"".join(chunks).decode("ascii", errors="replace").splitlines()
+        return self._status or []
+
+
+_Containment: TypeAlias = WindowsJob | _TreeSupervisor
+
+
+def _popen(
+    args: Sequence[str],
+    *,
+    cwd: Path,
+    input_text: str | None,
+    env: Mapping[str, str] | None,
+    creationflags: int = 0,
+    pass_fds: Sequence[int] = (),
+) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        list(args),
+        cwd=cwd,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=dict(env) if env is not None else None,
+        shell=False,
+        start_new_session=sys.platform != "win32",
+        creationflags=creationflags,
+        pass_fds=pass_fds,
+    )
+
+
+def _can_supervise(command: Sequence[str]) -> bool:
+    return (
+        sys.platform == "linux"
+        and bool(command)
+        and bool(sys.executable)
+        and _SUPERVISOR_SCRIPT.is_file()
+    )
+
+
 def _start_process(
     command: Sequence[str],
     *,
     cwd: Path,
     input_text: str | None,
     env: Mapping[str, str] | None,
-) -> tuple[subprocess.Popen[str], WindowsJob | None]:
+) -> tuple[subprocess.Popen[str], _Containment | None]:
     """Launch a command so that its whole process tree can later be killed.
 
-    POSIX commands lead their own session and process group. Windows commands start suspended
-    inside a job object, so every descendant is contained before the command can launch one.
+    Windows commands start suspended inside a job object, so every descendant is contained before
+    the command can launch one. Linux commands run under ``process_supervisor.py``, a child
+    subreaper that keeps every descendant killable, even one that left the process group with
+    ``setsid``. Other POSIX commands only lead their own session and process group, which cannot
+    confirm that the whole tree stopped.
     """
-    job: WindowsJob | None = WindowsJob.create() if sys.platform == "win32" else None
+    if sys.platform == "win32":
+        return _start_in_job(command, cwd=cwd, input_text=input_text, env=env)
+    if not _can_supervise(command):
+        return _popen(command, cwd=cwd, input_text=input_text, env=env), None
+    status_read, status_write = os.pipe()
     try:
-        process = subprocess.Popen(
-            list(command),
+        process = _popen(
+            [sys.executable, "-I", "-S", str(_SUPERVISOR_SCRIPT), str(status_write), *command],
             cwd=cwd,
-            stdin=subprocess.PIPE if input_text is not None else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=dict(env) if env is not None else None,
-            shell=False,
-            start_new_session=sys.platform != "win32",
+            input_text=input_text,
+            env=env,
+            pass_fds=(status_write,),
+        )
+    except BaseException:
+        os.close(status_read)
+        raise
+    finally:
+        # Only the supervisor holds the write end, so the report ends when it exits.
+        os.close(status_write)
+    return process, _TreeSupervisor(status_read)
+
+
+def _start_in_job(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    input_text: str | None,
+    env: Mapping[str, str] | None,
+) -> tuple[subprocess.Popen[str], WindowsJob | None]:
+    job = WindowsJob.create()
+    try:
+        process = _popen(
+            command,
+            cwd=cwd,
+            input_text=input_text,
+            env=env,
             creationflags=CREATE_SUSPENDED if job is not None else 0,
         )
     except BaseException:
@@ -93,25 +203,31 @@ def _start_process(
     return process, job
 
 
-def _terminate_process_tree(process: subprocess.Popen[str], job: WindowsJob | None) -> bool:
+def _terminate_process_tree(
+    process: subprocess.Popen[str], containment: _Containment | None
+) -> bool:
     """Kill a command and the descendants it launched, such as test runners behind npm/Gradle.
 
-    Returns whether every descendant is known to have been stopped.
+    Returns False when some descendant is not known to have been stopped. A supervised command
+    kills its tree asynchronously; ``_stop_confirmed`` reports its outcome once it has exited.
     """
-    if job is not None:
-        stopped = job.terminate(wait_seconds=_POST_KILL_DRAIN_SECONDS)
+    if isinstance(containment, _TreeSupervisor):
+        containment.request_stop(process)
+        return True
+    if containment is not None:
+        stopped = containment.terminate(wait_seconds=_POST_KILL_DRAIN_SECONDS)
     elif sys.platform == "win32":
         stopped = _taskkill_process_tree(process.pid)
     else:
         try:
             # The group outlives its leader, so this also reaches orphaned descendants.
             os.killpg(process.pid, signal.SIGKILL)
-            stopped = True
         except ProcessLookupError:
-            stopped = True
+            pass
         except PermissionError:
             logger.warning("[command] Could not terminate process group %s", process.pid)
-            stopped = False
+        # A descendant may have left the group with setsid, so a group kill proves nothing.
+        stopped = False
     try:
         process.kill()
     except OSError:
@@ -164,6 +280,13 @@ def _drain_terminated_process(
         return exc.stdout, exc.stderr, False
 
 
+def _stop_confirmed(process: subprocess.Popen[str], containment: _Containment | None) -> bool:
+    """Whether a supervised command reported that its tree stopped; others report no outcome."""
+    if isinstance(containment, _TreeSupervisor):
+        return containment.stopped(process)
+    return True
+
+
 def _run_process(
     command: Sequence[str],
     *,
@@ -179,23 +302,25 @@ def _run_process(
     ``TimeoutExpired`` only once the tree is confirmed stopped, since callers may then act in the
     same working directory; otherwise ``_ProcessTreeSurvivedError`` is raised.
     """
-    process, job = _start_process(command, cwd=cwd, input_text=input_text, env=env)
+    process, containment = _start_process(command, cwd=cwd, input_text=input_text, env=env)
     try:
         stdout, stderr = process.communicate(input_text, timeout=timeout_seconds)
+        if isinstance(containment, _TreeSupervisor):
+            containment.raise_spawn_error(process, command)
     except subprocess.TimeoutExpired:
-        stopped = _terminate_process_tree(process, job)
+        stopped = _terminate_process_tree(process, containment)
         partial_stdout, partial_stderr, drained = _drain_terminated_process(process)
-        if not (stopped and drained):
+        if not (stopped and drained and _stop_confirmed(process, containment)):
             raise _ProcessTreeSurvivedError from None
         raise subprocess.TimeoutExpired(
             list(command), timeout_seconds, output=partial_stdout, stderr=partial_stderr
         ) from None
     except BaseException:
-        _terminate_process_tree(process, job)
+        _terminate_process_tree(process, containment)
         raise
     finally:
-        if job is not None:
-            job.close()
+        if containment is not None:
+            containment.close()
     return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)
 
 
