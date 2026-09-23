@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -16,6 +18,10 @@ from orchestrator.runtime_logging import format_command
 logger = logging.getLogger(__name__)
 
 _WINDOWS_EXECUTABLE_SUFFIXES = (".exe", ".com", ".cmd", ".bat")
+# Bounds on waiting after a timed-out process tree is killed, so a descendant that escaped the
+# kill and still holds an output pipe cannot keep the timeout from being reported.
+_POST_KILL_DRAIN_SECONDS = 10.0
+_TASKKILL_TIMEOUT_SECONDS = 30.0
 
 
 def _is_windows() -> bool:
@@ -29,6 +35,103 @@ def _partial_output(value: bytes | str | None) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
+
+
+def _start_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    input_text: str | None,
+    env: Mapping[str, str] | None,
+) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        list(command),
+        cwd=cwd,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=dict(env) if env is not None else None,
+        shell=False,
+        # Its own session makes the command the leader of a process group, so a timeout can kill
+        # everything it launched. Windows trees are terminated through taskkill instead.
+        start_new_session=sys.platform != "win32",
+    )
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """Kill a command and the descendants it launched, such as test runners behind npm/Gradle."""
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=_TASKKILL_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            logger.warning(
+                "[command] Could not terminate process tree %s", process.pid, exc_info=True
+            )
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
+def _drain_terminated_process(
+    process: subprocess.Popen[str],
+) -> tuple[bytes | str | None, bytes | str | None]:
+    """Collect output produced before termination and reap the command, with a bounded wait."""
+    try:
+        stdout, stderr = process.communicate(timeout=_POST_KILL_DRAIN_SECONDS)
+        return stdout, stderr
+    except subprocess.TimeoutExpired as exc:
+        # A descendant outside the terminated tree still holds an output pipe. Keep what was read
+        # so far and stop waiting so the timeout still reaches the caller.
+        logger.warning(
+            "[command] Output stayed open after terminating timed-out process %s", process.pid
+        )
+        try:
+            process.wait(timeout=_POST_KILL_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.warning("[command] Timed-out process %s did not exit", process.pid)
+        return exc.stdout, exc.stderr
+
+
+def _run_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    input_text: str | None,
+    timeout_seconds: float,
+    env: Mapping[str, str] | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command; on timeout, terminate its whole process tree before raising.
+
+    ``subprocess.run`` kills only the launched process and then waits without a bound for its
+    output pipes, which a surviving child can hold open indefinitely.
+    """
+    process = _start_process(command, cwd=cwd, input_text=input_text, env=env)
+    try:
+        stdout, stderr = process.communicate(input_text, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        partial_stdout, partial_stderr = _drain_terminated_process(process)
+        raise subprocess.TimeoutExpired(
+            list(command), timeout_seconds, output=partial_stdout, stderr=partial_stderr
+        ) from None
+    except BaseException:
+        _terminate_process_tree(process)
+        raise
+    return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)
 
 
 @dataclass(slots=True)
@@ -85,18 +188,12 @@ class CommandClient:
             heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
             heartbeat_thread.start()
         try:
-            completed = subprocess.run(
+            completed = _run_process(
                 resolved_command,
                 cwd=cwd,
-                input=input_text,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout_seconds,
-                check=False,
-                env=dict(env) if env is not None else None,
-                shell=False,
+                input_text=input_text,
+                timeout_seconds=timeout_seconds,
+                env=env,
             )
         except FileNotFoundError as exc:
             details = self._os_error_details(exc)

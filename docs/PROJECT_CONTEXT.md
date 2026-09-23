@@ -307,6 +307,11 @@
   and it uses the same retry budget. Its correction prompt names the command and timeout and
   includes the redacted tail of both captured streams. Detection relies only on the subprocess
   timeout and never parses tool output. Other command execution errors still fail the workflow.
+- On any timeout, `CommandClient` kills the command's whole process tree (a new POSIX session
+  killed via its process group; `taskkill /F /T` on Windows), reaps the command, then waits a
+  bounded time for output so children (e.g. behind `npm run test`/Gradle) cannot keep running in
+  the worktree or hold pipes open. A descendant that escapes the tree (e.g. calls `setsid`
+  itself) is not killed; its output is abandoned after that bound and the timeout still reports.
 - Planning, execution ID, branch, and worktree are never recreated during corrections. A passing
   retry continues to commit/push/PR/review. Exhaustion or correction failure ends as `FAILED` and
   preserves the worktree.

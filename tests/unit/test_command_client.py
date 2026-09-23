@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -32,8 +33,8 @@ def test_non_windows_command_is_passed_to_subprocess_unchanged(
         lambda *args, **kwargs: pytest.fail("non-Windows should not resolve shims"),
     )
     monkeypatch.setattr(
-        command_client.subprocess,
-        "run",
+        command_client,
+        "_run_process",
         lambda command, **kwargs: (launched.append(command), _completed(command))[1],
     )
 
@@ -64,7 +65,7 @@ def test_windows_native_shim_is_resolved_without_shell_parsing(
         return _completed(command)
 
     monkeypatch.setattr(command_client.shutil, "which", fake_which)
-    monkeypatch.setattr(command_client.subprocess, "run", fake_run)
+    monkeypatch.setattr(command_client, "_run_process", fake_run)
 
     configured = ["codex", "exec", "argument with spaces", "&literal"]
     result = CommandClient().run(
@@ -78,15 +79,9 @@ def test_windows_native_shim_is_resolved_without_shell_parsing(
             [f"C:\\tools\\codex{suffix}", "exec", "argument with spaces", "&literal"],
             {
                 "cwd": tmp_path,
-                "input": None,
-                "capture_output": True,
-                "text": True,
-                "encoding": "utf-8",
-                "errors": "replace",
-                "timeout": 900,
-                "check": False,
+                "input_text": None,
+                "timeout_seconds": 900,
                 "env": {"Path": "C:\\tools", "PATHEXT": ".CMD;.BAT"},
-                "shell": False,
             },
         )
     ]
@@ -132,8 +127,8 @@ def test_launch_diagnostics_log_resolved_command_without_stdin(
             lambda candidate, path=None: "C:\\npm\\codex.cmd",
         )
         monkeypatch.setattr(
-            command_client.subprocess,
-            "run",
+            command_client,
+            "_run_process",
             lambda command, **kwargs: _completed(command),
         )
 
@@ -175,7 +170,7 @@ def test_file_not_found_includes_safe_os_error_diagnostics(
         def missing(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
             raise error
 
-        monkeypatch.setattr(command_client.subprocess, "run", missing)
+        monkeypatch.setattr(command_client, "_run_process", missing)
 
         with caplog.at_level(logging.INFO, logger=target_logger.name):
             with pytest.raises(CommandExecutionError, match="Executable not found: missing-tool"):
@@ -202,7 +197,7 @@ def test_missing_executable_keeps_existing_error_semantics(
         launched.append(command)
         raise FileNotFoundError
 
-    monkeypatch.setattr(command_client.subprocess, "run", missing)
+    monkeypatch.setattr(command_client, "_run_process", missing)
 
     with pytest.raises(CommandExecutionError, match="Executable not found: missing-tool"):
         CommandClient().run(["missing-tool", "argument with spaces"], cwd=tmp_path)
@@ -229,11 +224,11 @@ def test_timeout_carries_partial_output_and_configured_duration(
 ) -> None:
     def hang(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(
-            command, kwargs["timeout"], output=stdout, stderr=stderr
+            command, kwargs["timeout_seconds"], output=stdout, stderr=stderr
         )
 
     monkeypatch.setattr(command_client, "_is_windows", lambda: False)
-    monkeypatch.setattr(command_client.subprocess, "run", hang)
+    monkeypatch.setattr(command_client, "_run_process", hang)
 
     with pytest.raises(CommandTimeoutError) as raised:
         CommandClient().run(["tool", "check"], cwd=tmp_path, timeout_seconds=30)
@@ -252,13 +247,161 @@ def test_timeout_remains_catchable_as_command_execution_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     def hang(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        raise subprocess.TimeoutExpired(command, kwargs["timeout_seconds"])
 
     monkeypatch.setattr(command_client, "_is_windows", lambda: False)
-    monkeypatch.setattr(command_client.subprocess, "run", hang)
+    monkeypatch.setattr(command_client, "_run_process", hang)
 
     with pytest.raises(CommandExecutionError, match="Command timed out after 900s: tool"):
         CommandClient().run(["tool"], cwd=tmp_path)
+
+
+class _ScriptedProcess:
+    """Popen stand-in whose communicate calls follow a script of results or exceptions."""
+
+    pid = 4321
+
+    def __init__(self, events: list[str], *outcomes: object) -> None:
+        self.events = events
+        self._outcomes = list(outcomes)
+        self.returncode: int | None = None
+
+    def communicate(
+        self, input: str | None = None, timeout: float | None = None
+    ) -> tuple[Any, Any]:
+        self.events.append(f"communicate:{timeout}")
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        self.returncode = -9
+        return outcome  # type: ignore[return-value]
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.events.append(f"wait:{timeout}")
+        self.returncode = -9
+        return self.returncode
+
+
+def _install_scripted_process(
+    monkeypatch: pytest.MonkeyPatch, process: _ScriptedProcess, events: list[str]
+) -> None:
+    monkeypatch.setattr(command_client, "_is_windows", lambda: False)
+    monkeypatch.setattr(command_client, "_start_process", lambda command, **kwargs: process)
+    monkeypatch.setattr(
+        command_client,
+        "_terminate_process_tree",
+        lambda terminated: events.append(f"terminate:{terminated.pid}"),
+    )
+
+
+def test_timeout_terminates_the_process_tree_before_collecting_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    process = _ScriptedProcess(
+        events,
+        subprocess.TimeoutExpired(["tool"], 30),
+        ("collected 3 items\n", "hung in test_worker"),
+    )
+    _install_scripted_process(monkeypatch, process, events)
+
+    with pytest.raises(CommandTimeoutError) as raised:
+        CommandClient().run(["tool", "check"], cwd=tmp_path, timeout_seconds=30)
+
+    drain = command_client._POST_KILL_DRAIN_SECONDS
+    assert events == ["communicate:30", "terminate:4321", f"communicate:{drain}"]
+    assert raised.value.stdout == "collected 3 items\n"
+    assert raised.value.stderr == "hung in test_worker"
+    assert process.returncode is not None
+
+
+def test_timeout_is_reported_when_an_escaped_descendant_keeps_output_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    drain = command_client._POST_KILL_DRAIN_SECONDS
+    process = _ScriptedProcess(
+        events,
+        subprocess.TimeoutExpired(["tool"], 30),
+        subprocess.TimeoutExpired(["tool"], drain, output=b"partial \xff", stderr=None),
+    )
+    _install_scripted_process(monkeypatch, process, events)
+
+    with pytest.raises(CommandTimeoutError) as raised:
+        CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
+
+    assert events == [
+        "communicate:30",
+        "terminate:4321",
+        f"communicate:{drain}",
+        f"wait:{drain}",
+    ]
+    assert raised.value.stdout == "partial �"
+    assert raised.value.stderr == ""
+
+
+def test_interrupted_command_terminates_the_process_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    process = _ScriptedProcess(events, KeyboardInterrupt())
+    _install_scripted_process(monkeypatch, process, events)
+
+    with pytest.raises(KeyboardInterrupt):
+        CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
+
+    assert events == ["communicate:30", "terminate:4321"]
+
+
+_LAUNCHER_SCRIPT = """\
+import subprocess
+import sys
+import time
+
+subprocess.Popen(
+    [sys.executable, sys.argv[1]], stdout=sys.stdout, stderr=sys.stderr
+)
+time.sleep(600)
+"""
+
+_DESCENDANT_SCRIPT = """\
+import time
+
+print("ready", flush=True)
+time.sleep(600)
+"""
+
+
+def test_terminating_the_process_tree_stops_descendants_holding_output(
+    tmp_path: Path,
+) -> None:
+    launcher = tmp_path / "launcher.py"
+    descendant = tmp_path / "descendant.py"
+    launcher.write_text(_LAUNCHER_SCRIPT, encoding="utf-8")
+    descendant.write_text(_DESCENDANT_SCRIPT, encoding="utf-8")
+
+    process = command_client._start_process(
+        [sys.executable, str(launcher), str(descendant)],
+        cwd=tmp_path,
+        input_text=None,
+        env=None,
+    )
+    try:
+        assert process.stdout is not None
+        # Wait until the descendant is running and holds the inherited output pipe.
+        assert process.stdout.readline().strip() == "ready"
+
+        command_client._terminate_process_tree(process)
+
+        # Output reaches EOF only after every process holding the pipe has exited; the bound only
+        # keeps a regression from hanging the suite.
+        process.communicate(timeout=60)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+    assert process.returncode is not None
 
 
 class RecordingCommandClient:
