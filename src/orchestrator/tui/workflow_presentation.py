@@ -8,10 +8,12 @@ translation in one place means the two views cannot drift apart.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from orchestrator.models.agent import AgentRole
+from orchestrator.models.human_interaction import HumanInteraction
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.models.workflow_step import WorkflowStep
@@ -70,6 +72,34 @@ def stage_activity(stage: WorkflowStage, attempt: int) -> str:
 
 def stage_complete(stage: WorkflowStage) -> str:
     return _COMPLETE_LABELS[stage]
+
+
+def human_waiting_line(stage: WorkflowStage) -> str:
+    return f"! {stage_activity(stage, 1)} — waiting for human input"
+
+
+def update_human_blocked_line(
+    event: WorkflowEvent,
+    lines: list[str],
+    successful_stage_lines: dict[WorkflowStage, int],
+) -> None:
+    """Revise a successful attempt when its later outcome requests clarification."""
+
+    if (
+        event.kind not in {WorkflowEventKind.STATUS_CHANGED, WorkflowEventKind.WORKFLOW_FINISHED}
+        or event.status is not WorkflowStatus.NEEDS_HUMAN
+        or event.stage is None
+    ):
+        return
+    index = successful_stage_lines.pop(event.stage, None)
+    if index is None:
+        return
+    lines[index] = human_waiting_line(event.stage)
+
+
+def _utc_timestamp(value: datetime) -> datetime:
+    # SQLite may return naive UTC datetimes even when the domain wrote aware ones.
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def status_message(status: WorkflowStatus | None, payload: dict[str, Any] | None = None) -> str:
@@ -139,24 +169,46 @@ def timeline_message(
     return None
 
 
-def step_timeline_lines(steps: list[WorkflowStep]) -> list[str]:
+def step_timeline_lines(
+    steps: list[WorkflowStep],
+    human_interactions: Sequence[HumanInteraction] = (),
+) -> list[str]:
     """Render persisted ``WorkflowStep`` rows with the same wording/glyphs.
 
     This is the persisted equivalent of ``timeline_message``: it lets a
     restarted or history-inspected batch row show the same concise timeline
     vocabulary as a live run, without a diagnostics read or a schema change.
+    Human interaction timestamps identify successful attempts whose result
+    requested clarification, including attempts before a later resume.
     """
+
+    blocked_steps: set[int] = set()
+    for interaction in human_interactions:
+        # A request follows the stage attempt it is about. Select the latest
+        # attempt, including failed ones, so an error-driven pause cannot
+        # relabel an older successful attempt.
+        candidates = [
+            index
+            for index, step in enumerate(steps)
+            if step.stage is interaction.requesting_stage
+            and step.finished_at is not None
+            and _utc_timestamp(step.finished_at) <= _utc_timestamp(interaction.requested_at)
+        ]
+        if candidates and steps[candidates[-1]].status is StepStatus.SUCCEEDED:
+            blocked_steps.add(candidates[-1])
 
     lines: list[str] = []
     attempts: dict[WorkflowStage, int] = {}
     previous_status: StepStatus | None = None
-    for step in steps:
+    for index, step in enumerate(steps):
         attempts[step.stage] = attempts.get(step.stage, 0) + 1
         attempt = attempts[step.stage]
         if step.status is StepStatus.RUNNING:
             lines.append(f"● {stage_activity(step.stage, attempt)}…")
         elif step.status is StepStatus.SUCCEEDED:
-            if attempt > 1 and previous_status is StepStatus.FAILED:
+            if index in blocked_steps:
+                lines.append(human_waiting_line(step.stage))
+            elif attempt > 1 and previous_status is StepStatus.FAILED:
                 lines.append(f"✓ {stage_activity(step.stage, attempt)}")
             else:
                 lines.append(f"✓ {stage_complete(step.stage)}")

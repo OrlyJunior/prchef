@@ -21,6 +21,7 @@ from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
     ACTIVE_WORKFLOW_STATUSES,
+    StepStatus,
     WorkflowStage,
     WorkflowStatus,
 )
@@ -42,6 +43,7 @@ from orchestrator.tui.workflow_presentation import (
     stage_complete,
     status_message,
     timeline_message,
+    update_human_blocked_line,
 )
 
 if TYPE_CHECKING:
@@ -92,6 +94,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._raw_event_lines: list[str] = []
         self._live_diagnostics: list[ExecutionDiagnostic] = []
         self._active_timeline_stages: dict[WorkflowStage, int] = {}
+        self._successful_timeline_stages: dict[WorkflowStage, int] = {}
         self._stage_attempts: dict[WorkflowStage, int] = {}
         self._show_raw_events = False
         self._role_providers: dict[AgentRole, str] = {}
@@ -1168,6 +1171,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._active_execution_id = None
         self.query_one("#copy-detailed-logs-button", Button).disabled = True
         self._active_timeline_stages.clear()
+        self._successful_timeline_stages.clear()
         self._stage_attempts.clear()
         self.query_one("#workflow-events", Static).update("")
         self.query_one("#workflow-raw-events", Static).update("")
@@ -1289,12 +1293,16 @@ class WorkflowRunnerScreen(Screen[None]):
             self._reset_active_workflow_controls()
         self._append_raw_event(event)
         self._append_live_diagnostic(event)
+        update_human_blocked_line(
+            event, self._event_lines, self._successful_timeline_stages
+        )
         message = self._timeline_message(event)
         if message is None:
             return
         self.query_one("#workflow-progress", Static).update(message)
 
         if event.kind == WorkflowEventKind.STAGE_STARTED and event.stage is not None:
+            self._successful_timeline_stages.pop(event.stage, None)
             self._stage_attempts[event.stage] = self._stage_attempts.get(event.stage, 0) + 1
             self._active_timeline_stages[event.stage] = len(self._event_lines)
             self._event_lines.append(message)
@@ -1304,9 +1312,17 @@ class WorkflowRunnerScreen(Screen[None]):
         } and event.stage is not None:
             active_line = self._active_timeline_stages.pop(event.stage, None)
             if active_line is None:
+                active_line = len(self._event_lines)
                 self._event_lines.append(message)
             else:
                 self._event_lines[active_line] = message
+            if (
+                event.kind is WorkflowEventKind.STAGE_FINISHED
+                and event.step_status is StepStatus.SUCCEEDED
+            ):
+                self._successful_timeline_stages[event.stage] = active_line
+            else:
+                self._successful_timeline_stages.pop(event.stage, None)
         elif event.kind == WorkflowEventKind.WORKFLOW_FINISHED:
             self._event_lines.append(message)
         elif event.kind == WorkflowEventKind.AGENT_FALLBACK:
