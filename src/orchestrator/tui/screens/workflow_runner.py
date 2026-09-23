@@ -42,6 +42,7 @@ from orchestrator.tui.workflow_presentation import (
     stage_activity,
     stage_complete,
     status_message,
+    step_timeline_lines,
     timeline_message,
     update_human_blocked_line,
 )
@@ -111,6 +112,8 @@ class WorkflowRunnerScreen(Screen[None]):
         self._task_context: tuple[str, str] | None = None
         self._suppressed_task_provider_change: tuple[str, str] | None = None
         self._active_execution_id: str | None = None
+        self._outcome_visible = False
+        self._human_input_dismissed = False
         self._batch_tasks: tuple[DevelopmentTask, ...] = ()
         self._batch_running = False
         self._batch_progress: LiveBatchProgress | None = None
@@ -248,19 +251,25 @@ class WorkflowRunnerScreen(Screen[None]):
             yield BatchProgressView(id="batch-progress")
             with Horizontal(classes="screen-actions", id="workflow-stop-actions"):
                 yield Button("Stop workflow", variant="error", id="stop-workflow")
-            with Vertical(id="human-input-panel"):
-                yield Static("Human input required", id="human-input-title")
-                yield Static("", id="human-input-prompt")
-                yield TextArea("", id="human-response")
-                with Horizontal(classes="screen-actions"):
-                    yield Button(
-                        "Resume workflow",
-                        variant="primary",
-                        id="resume-workflow",
-                        disabled=True,
-                    )
-                    yield Button("Return later", id="return-later")
             yield Static("", id="workflow-events")
+            with Vertical(id="workflow-outcome"):
+                yield Static("", id="workflow-outcome-title")
+                yield Static("", id="workflow-outcome-message")
+                with Horizontal(classes="screen-actions", id="workflow-outcome-actions"):
+                    yield Button("Answer…", id="outcome-answer-later")
+                    yield Button("Continue…", variant="primary", id="outcome-continue")
+                with Vertical(id="human-input-panel"):
+                    yield Static("Human input required", id="human-input-title")
+                    yield Static("", id="human-input-prompt")
+                    yield TextArea("", id="human-response")
+                    with Horizontal(classes="screen-actions"):
+                        yield Button(
+                            "Answer and Resume",
+                            variant="primary",
+                            id="resume-workflow",
+                            disabled=True,
+                        )
+                        yield Button("Return later", id="return-later")
             with Horizontal(classes="workflow-log-actions", id="workflow-log-actions"):
                 yield Button("Show detailed logs", id="toggle-workflow-logs")
                 yield Button(
@@ -281,6 +290,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._set_layout_mode(self.size.width)
         self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.query_one("#batch-progress", BatchProgressView).display = False
+        self._clear_workflow_outcome()
         try:
             repositories = self.controller.repositories()
         except Exception as exc:
@@ -307,7 +317,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._set_layout_mode(event.size.width)
 
     def on_screen_resume(self) -> None:
-        """Reload repository choices after returning from repository settings."""
+        """Reload repository choices and reconcile execution state on return."""
 
         try:
             repositories = self.controller.repositories()
@@ -320,6 +330,8 @@ class WorkflowRunnerScreen(Screen[None]):
             repositories,
             selected_repository=self.controller.selected_repository,
         )
+        if self._batch_progress is None and self._active_execution_id is not None:
+            self._reconcile_active_execution()
         repository = self._selected("#repository")
         provider = self._selected("#task-provider")
         if (
@@ -1005,8 +1017,21 @@ class WorkflowRunnerScreen(Screen[None]):
         elif event.button.id == "resume-workflow":
             self._resume_active_workflow()
         elif event.button.id == "return-later":
+            self._human_input_dismissed = True
             self._hide_human_panel()
+            self.query_one("#workflow-outcome-message", Static).update(
+                "The execution remains stopped until you answer. Select Answer to open the "
+                "response form, or return through execution history later."
+            )
+            self.query_one("#outcome-answer-later", Button).display = True
+            self.query_one("#workflow-outcome-actions", Horizontal).display = True
+            self.query_one("#outcome-answer-later", Button).focus()
             self.notify("The execution remains available in execution history.")
+        elif event.button.id == "outcome-answer-later":
+            self._human_input_dismissed = False
+            self._open_active_execution_detail()
+        elif event.button.id == "outcome-continue":
+            self._open_active_execution_detail()
         elif event.button.id == "workflow-history":
             self._show_history()
         elif event.button.id == "workflow-agent-presets":
@@ -1067,6 +1092,13 @@ class WorkflowRunnerScreen(Screen[None]):
         from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 
         self.app.push_screen(ExecutionHistoryScreen())
+
+    def _open_active_execution_detail(self) -> None:
+        if self._active_execution_id is None:
+            return
+        from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
+
+        self.app.push_screen(ExecutionDetailScreen(self._active_execution_id))
 
     def _request_task_load(self, repository: str, provider: str) -> None:
         self._task_load_token += 1
@@ -1165,10 +1197,12 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#start-workflow", Button).disabled = True
         self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.query_one("#workflow-progress", Static).update("Starting workflow…")
+        self._human_input_dismissed = False
         self._event_lines.clear()
         self._raw_event_lines.clear()
         self._live_diagnostics.clear()
         self._active_execution_id = None
+        self._clear_workflow_outcome()
         self.query_one("#copy-detailed-logs-button", Button).disabled = True
         self._active_timeline_stages.clear()
         self._successful_timeline_stages.clear()
@@ -1207,7 +1241,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._run_batch(batch_launch)
 
     def _set_single_task_controls_visible(self, visible: bool) -> None:
-        """Hide the single-task timeline/log controls while a batch is active.
+        """Hide single-task timeline/outcome/log controls while a batch is active.
 
         A batch renders its own per-task timeline and logs through
         ``BatchProgressView``; showing both would duplicate the same
@@ -1215,6 +1249,7 @@ class WorkflowRunnerScreen(Screen[None]):
         """
 
         self.query_one("#workflow-events", Static).display = visible
+        self.query_one("#workflow-outcome", Vertical).display = visible and self._outcome_visible
         self.query_one("#workflow-log-actions", Horizontal).display = visible
         self.query_one("#workflow-raw-events-title", Static).display = (
             visible and self._show_raw_events
@@ -1323,8 +1358,6 @@ class WorkflowRunnerScreen(Screen[None]):
                 self._successful_timeline_stages[event.stage] = active_line
             else:
                 self._successful_timeline_stages.pop(event.stage, None)
-        elif event.kind == WorkflowEventKind.WORKFLOW_FINISHED:
-            self._event_lines.append(message)
         elif event.kind == WorkflowEventKind.AGENT_FALLBACK:
             self._event_lines.append(message)
 
@@ -1592,11 +1625,154 @@ class WorkflowRunnerScreen(Screen[None]):
         progress.update(self._status_message(execution.status))
         progress.set_class(execution.status is WorkflowStatus.CANCELLED, "cancelled")
         self.notify(self._status_message(execution.status))
-        if execution.status is WorkflowStatus.NEEDS_HUMAN:
-            self._show_human_panel(execution)
-        else:
-            self._hide_human_panel()
+        self._render_workflow_outcome(execution)
         self._refresh_task_statuses()
+
+    def _render_workflow_outcome(self, execution: WorkflowExecution) -> None:
+        """Render stopped single-task outcomes separately from stage attempts."""
+
+        self._clear_workflow_outcome()
+        status = execution.status
+        title = "Workflow stopped"
+        message = "No further action is available."
+        outcome_class = "stopped"
+
+        pending_interaction = next(
+            (item for item in reversed(execution.human_interactions) if item.awaiting_response),
+            None,
+        )
+        continuation_stage = None
+        if status in {WorkflowStatus.CHANGES_REQUESTED, WorkflowStatus.FAILED}:
+            try:
+                continuation_stage = self.controller.continuation_stage(execution)
+            except Exception:
+                continuation_stage = None
+
+        if status is WorkflowStatus.NEEDS_HUMAN:
+            outcome_class = "awaiting-user"
+            if pending_interaction is not None:
+                title = "Workflow stopped — waiting for your response"
+                if self._human_input_dismissed:
+                    message = (
+                        "The workflow remains paused until you answer. Select Answer to "
+                        "open the response form."
+                    )
+                    self.query_one("#outcome-answer-later", Button).display = True
+                else:
+                    message = "The workflow is paused until you answer the pending question."
+                    self._show_human_panel(execution)
+            else:
+                title = "Workflow stopped — needs human input"
+                message = (
+                    "No pending response was found. Open execution history to inspect this run."
+                )
+        elif status is WorkflowStatus.CHANGES_REQUESTED:
+            outcome_class = "awaiting-user"
+            title = "Workflow stopped — changes requested"
+            if continuation_stage is not None:
+                message = "Review the requested changes, then continue the execution when ready."
+                self.query_one("#outcome-continue", Button).display = True
+            else:
+                message = "No continuation is available for this execution."
+        elif status is WorkflowStatus.FAILED:
+            outcome_class = "failed"
+            title = "Workflow stopped — failed"
+            if continuation_stage is not None:
+                message = "A continuation is available for this execution."
+                self.query_one("#outcome-continue", Button).display = True
+            else:
+                message = "No continuation is available for this failure."
+        elif status is WorkflowStatus.APPROVED:
+            outcome_class = "completed"
+            title = "Workflow completed"
+            message = "Execution approved. No further action is available."
+        elif status is WorkflowStatus.CANCELLED:
+            outcome_class = "cancelled"
+            title = "Workflow stopped — cancelled"
+            message = "No further action is available."
+        elif status in ACTIVE_WORKFLOW_STATUSES:
+            return
+
+        panel = self.query_one("#workflow-outcome", Vertical)
+        panel.set_class(False, "awaiting-user")
+        panel.set_class(False, "failed")
+        panel.set_class(False, "completed")
+        panel.set_class(False, "cancelled")
+        panel.set_class(False, "stopped")
+        panel.add_class(outcome_class)
+        self.query_one("#workflow-outcome-title", Static).update(title)
+        self.query_one("#workflow-outcome-message", Static).update(message)
+        has_action = any(
+            self.query_one(f"#{widget_id}", Button).display
+            for widget_id in ("outcome-answer-later", "outcome-continue")
+        )
+        self.query_one("#workflow-outcome-actions", Horizontal).display = has_action
+        self._outcome_visible = True
+        panel.display = not self._batch_running
+        if panel.display:
+            self.query_one("#workflow-runner", VerticalScroll).scroll_to_widget(
+                panel, animate=False, top=True
+            )
+
+    def _clear_workflow_outcome(self) -> None:
+        """Hide and reset terminal controls before new work or a live resume."""
+
+        self._outcome_visible = False
+        self.query_one("#workflow-outcome", Vertical).display = False
+        self.query_one("#workflow-outcome-actions", Horizontal).display = False
+        self.query_one("#workflow-outcome-title", Static).update("")
+        self.query_one("#workflow-outcome-message", Static).update("")
+        self.query_one("#outcome-answer-later", Button).display = False
+        self.query_one("#outcome-continue", Button).display = False
+        self.query_one("#human-input-panel", Vertical).display = False
+
+    def _reconcile_active_execution(self) -> None:
+        """Refresh the timeline and terminal controls from persisted execution state."""
+
+        assert self._active_execution_id is not None
+        try:
+            execution, steps = self.controller.execution_detail(self._active_execution_id)
+        except Exception:
+            return
+
+        self._event_lines = step_timeline_lines(steps, execution.human_interactions)
+        self._active_timeline_stages.clear()
+        self._successful_timeline_stages.clear()
+        self._stage_attempts.clear()
+        for index, step in enumerate(steps):
+            self._stage_attempts[step.stage] = self._stage_attempts.get(step.stage, 0) + 1
+            if step.status is StepStatus.RUNNING:
+                self._active_timeline_stages[step.stage] = index
+            elif (
+                step.status is StepStatus.SUCCEEDED
+                and "waiting for human input" not in self._event_lines[index]
+            ):
+                self._successful_timeline_stages[step.stage] = index
+        self.query_one("#workflow-events", Static).update("\n".join(self._event_lines[-10:]))
+
+        progress = self.query_one("#workflow-progress", Static)
+        stop = self.query_one("#stop-workflow", Button)
+        cancellation_pending = execution.status in ACTIVE_WORKFLOW_STATUSES and (
+            execution.cancellation_requested_at is not None
+            or (stop.disabled and str(stop.label) == "Cancellation requested")
+        )
+        progress.update(
+            "Cancellation requested; stopping after the current operation..."
+            if cancellation_pending
+            else self._status_message(execution.status)
+        )
+        progress.set_class(
+            cancellation_pending or execution.status is WorkflowStatus.CANCELLED, "cancelled"
+        )
+        if execution.status in ACTIVE_WORKFLOW_STATUSES:
+            self._clear_workflow_outcome()
+            self.query_one("#start-workflow", Button).disabled = True
+            self.query_one("#workflow-stop-actions", Horizontal).display = True
+            stop.disabled = cancellation_pending
+            stop.label = "Cancellation requested" if cancellation_pending else "Stop workflow"
+        else:
+            self._reset_active_workflow_controls()
+            self._render_workflow_outcome(execution)
 
     def _batch_finished(self, batch: WorkflowBatch | None) -> None:
         task_count = len(self._batch_tasks)
@@ -1651,7 +1827,6 @@ class WorkflowRunnerScreen(Screen[None]):
         response.text = ""
         self.query_one("#resume-workflow", Button).disabled = True
         self.query_one("#human-input-panel", Vertical).display = True
-        response.focus()
 
     def _hide_human_panel(self) -> None:
         self.query_one("#human-input-panel", Vertical).display = False
@@ -1705,6 +1880,10 @@ class WorkflowRunnerScreen(Screen[None]):
         if not response:
             return
         self.query_one("#resume-workflow", Button).disabled = True
+        self._human_input_dismissed = False
+        self._clear_workflow_outcome()
+        self.query_one("#start-workflow", Button).disabled = True
+        self.query_one("#workflow-stop-actions", Horizontal).display = True
         self.query_one("#workflow-progress", Static).update("Resuming workflow…")
         self._resume_workflow(self._active_execution_id, response)
 
@@ -1732,6 +1911,8 @@ class WorkflowRunnerScreen(Screen[None]):
             self._set_single_task_controls_visible(True)
         self.query_one("#workflow-progress", Static).update(f"Could not start workflow: {message}")
         self.notify(f"Could not start workflow: {message}", severity="error")
+        if not was_batch and self._active_execution_id is not None:
+            self._reconcile_active_execution()
         self._refresh_task_statuses()
 
     def _selected(self, selector: str) -> str | None:
