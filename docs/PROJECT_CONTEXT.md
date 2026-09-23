@@ -318,8 +318,10 @@
   then append the complete redacted `short test summary info` section so every failed test name
   remains visible. Multiple recognized summaries in one command are retained; text after the
   last summary has a separate 4,000-character prefix cap. Other completed failure output uses
-  the existing 4,000-character prefix cap. Intervening pytest output remains subject to the
-  preceding failure block's cap.
+  the existing 4,000-character prefix cap. When pytest's report is on stdout and stderr also
+  has output, the prompt includes the parsed stdout report and a capped, redacted stderr excerpt.
+  Text between the `FAILURES` heading and first test header has its own prefix cap; intervening
+  pytest output remains subject to the preceding failure block's cap.
 - A validation command that exceeds `validation.timeout_seconds` is a failed check, not a workflow
   error: `CommandClient` raises `CommandTimeoutError` (a `CommandExecutionError` subtype) carrying
   the configured duration and the partial stdout/stderr, decoded as UTF-8 with replacement.

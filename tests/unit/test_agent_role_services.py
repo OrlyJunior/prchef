@@ -565,6 +565,50 @@ def test_validation_correction_uses_whole_output_cap_for_other_formats(tmp_path:
     assert "late detail" not in prompt
 
 
+def test_pytest_stdout_summary_survives_separate_stderr_output(tmp_path: Path) -> None:
+    summary = (
+        "================ short test summary info ================\n"
+        "FAILED tests/test_widget.py::test_crash - crash\n"
+        "FAILED tests/test_widget.py::test_sibling - sibling\n"
+        "================ 2 failed in 0.01s ================\n"
+    )
+    stdout = (
+        "================ FAILURES ================\n"
+        "plugin note before test header\n"
+        "________________ test_crash ________________\n"
+        + "x" * 8_000
+        + "\n________________ test_sibling ________________\n"
+        + "sibling details\n"
+        + summary
+    )
+    validation = ValidationResult(
+        success=False,
+        checks=[
+            ValidationCheck(
+                name="custom validation",
+                command=["make", "check"],
+                success=False,
+                exit_code=1,
+                stdout=stdout,
+                stderr="plugin warning api_key=hunter2",
+            )
+        ],
+    )
+    provider = RecordingProvider(AgentResult(output="corrected"))
+
+    ImplementationService(provider, ChangedFilesGit()).correct_validation_failures(  # type: ignore[arg-type]
+        _task(), _spec(), validation, tmp_path
+    )
+    prompt = provider.requests[0].instructions
+
+    assert "Stderr:\nplugin warning api_key=[REDACTED]" in prompt
+    assert "hunter2" not in prompt
+    assert "plugin note before test header" in prompt
+    assert "sibling details" in prompt
+    assert summary in prompt
+    assert prompt.index("sibling details") < prompt.index(summary)
+
+
 def test_pytest_summary_does_not_uncap_nested_output_or_later_commands() -> None:
     nested_summary = (
         "================ short test summary info ================\n"

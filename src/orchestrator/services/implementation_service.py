@@ -57,18 +57,18 @@ def _pytest_summary_end(output: str, header_end: int) -> int | None:
     return position if has_failure else None
 
 
-def _render_completed_failure_output(output: str) -> str:
-    """Cap pytest failure details per test while retaining its complete failure summary."""
+def _render_pytest_failure_output(output: str) -> str | None:
+    """Cap recognized pytest details per test and retain their complete summaries."""
     failures = _PYTEST_FAILURES_HEADER.search(output)
     if failures is None:
-        return output[:_CORRECTION_OUTPUT_LIMIT]
+        return None
     summaries = [
         (match, end)
         for match in _PYTEST_SUMMARY_HEADER.finditer(output, failures.end())
         if (end := _pytest_summary_end(output, match.end())) is not None
     ]
     if not summaries:
-        return output[:_CORRECTION_OUTPUT_LIMIT]
+        return None
     # The last summary delimits the detailed blocks; earlier summaries may come
     # from nested pytest output or multiple pytest invocations in one command.
     summary, summary_end = summaries[-1]
@@ -76,7 +76,7 @@ def _render_completed_failure_output(output: str) -> str:
     details_end = summary.start()
     headers = list(_PYTEST_FAILURE_HEADER.finditer(output, failures.end(), details_end))
     if not headers:
-        return output[:_CORRECTION_OUTPUT_LIMIT]
+        return None
 
     blocks = []
     for index, header in enumerate(headers):
@@ -85,11 +85,21 @@ def _render_completed_failure_output(output: str) -> str:
     parts = []
     if failures.start():
         parts.append(output[: failures.start()][:_CORRECTION_OUTPUT_LIMIT])
-    parts.extend((failures.group(), *blocks))
+    parts.append(failures.group())
+    # Plugins can print text before the first test header; keep a bounded copy.
+    leading_detail = output[failures.end() : headers[0].start()]
+    if leading_detail.strip():
+        parts.append(leading_detail[:_CORRECTION_OUTPUT_LIMIT])
+    parts.extend(blocks)
     parts.extend(output[match.start() : end] for match, end in summaries)
     if summary_end < len(output):
         parts.append(output[summary_end : summary_end + _CORRECTION_OUTPUT_LIMIT])
     return "\n\n".join(parts)
+
+
+def _render_completed_failure_output(output: str) -> str:
+    pytest_output = _render_pytest_failure_output(output)
+    return pytest_output if pytest_output is not None else output[:_CORRECTION_OUTPUT_LIMIT]
 
 
 def _bounded_tail(output: str, limit: int) -> str:
@@ -394,14 +404,23 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
             if check.timed_out:
                 rendered.append(ImplementationService._render_timed_out_check(check))
                 continue
-            output = check.stderr or check.stdout or "no output"
+            stderr = redact_text(check.stderr)
+            stdout = redact_text(check.stdout)
+            rendered_output = _render_completed_failure_output(stderr or stdout or "no output")
+            if check.stderr and check.stdout:
+                pytest_stdout = _render_pytest_failure_output(stdout)
+                if pytest_stdout is not None:
+                    rendered_output = (
+                        f"Stderr:\n{stderr[:_CORRECTION_OUTPUT_LIMIT]}"
+                        f"\n\nStdout:\n{pytest_stdout}"
+                    )
             rendered.append(
                 "\n".join(
                     (
                         f"Command: {format_command(check.command)}",
                         f"Exit code: {check.exit_code}",
                         "Output:",
-                        _render_completed_failure_output(redact_text(output)),
+                        rendered_output,
                     )
                 )
             )
