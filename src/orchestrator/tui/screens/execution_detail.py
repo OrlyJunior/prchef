@@ -125,7 +125,12 @@ class ExecutionDetailScreen(Screen[None]):
     @work(thread=True, exclusive=True)
     def _resume_execution(self, response: str) -> None:
         try:
-            execution = self.controller.respond_and_resume(self.execution_id, response)
+            in_batch = self.controller.execution_in_live_batch(self.execution_id)
+            if in_batch:
+                self.controller.submit_response(self.execution_id, response)
+                execution, _ = self.controller.execution_detail(self.execution_id)
+            else:
+                execution = self.controller.respond_and_resume(self.execution_id, response)
             _, steps = self.controller.execution_detail(self.execution_id)
             diagnostics = self.controller.execution_diagnostics(self.execution_id)
         except Exception as exc:
@@ -134,11 +139,20 @@ class ExecutionDetailScreen(Screen[None]):
             )
             return
         self.app.call_from_thread(self._render_execution, execution, steps, diagnostics)
+        if in_batch:
+            self.app.call_from_thread(
+                self.notify, "Response submitted; the task rejoined the batch queue."
+            )
 
     @work(thread=True, exclusive=True)
     def _continue_execution(self, feedback: str) -> None:
         try:
-            execution = self.controller.continue_execution(self.execution_id, feedback)
+            in_batch = self.controller.execution_in_live_batch(self.execution_id)
+            if in_batch:
+                self.controller.submit_continuation(self.execution_id, feedback)
+                execution, _ = self.controller.execution_detail(self.execution_id)
+            else:
+                execution = self.controller.continue_execution(self.execution_id, feedback)
             _, steps = self.controller.execution_detail(self.execution_id)
             diagnostics = self.controller.execution_diagnostics(self.execution_id)
         except Exception as exc:
@@ -148,6 +162,10 @@ class ExecutionDetailScreen(Screen[None]):
             self.app.call_from_thread(self._reenable_continue_button)
             return
         self.app.call_from_thread(self._render_execution, execution, steps, diagnostics)
+        if in_batch:
+            self.app.call_from_thread(
+                self.notify, "Continuation submitted; the task rejoined the batch queue."
+            )
 
     def _reenable_continue_button(self) -> None:
         self.query_one("#execution-continue", Button).disabled = False

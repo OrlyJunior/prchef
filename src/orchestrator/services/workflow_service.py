@@ -208,6 +208,7 @@ class WorkflowService:
         agent_providers: Mapping[AgentRole, str] | None = None,
         agent_runtime_options: Mapping[AgentRole, Mapping[str, object]] | None = None,
         event_listener: WorkflowEventListener | None = None,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> ExecutionHandle:
         """Persist a fresh execution and queue it for bounded admission.
 
@@ -245,6 +246,7 @@ class WorkflowService:
             lambda: self._execute_workflow(
                 execution, task_id, repository_override, provider_overrides, runtime_overrides
             ),
+            admission_gate=admission_gate,
         )
 
     def run(
@@ -267,7 +269,8 @@ class WorkflowService:
         ).result()
 
     def _submit(
-        self, execution_id: str, work: Callable[[], WorkflowExecution]
+        self, execution_id: str, work: Callable[[], WorkflowExecution], *,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> ExecutionHandle:
         """Queue already-persisted work and clean its runtime up afterwards."""
 
@@ -283,7 +286,9 @@ class WorkflowService:
             finally:
                 self._end_runtime(execution_id)
 
-        return self._dispatcher.submit(execution_id, run_job, on_dropped=drop_job)
+        return self._dispatcher.submit(
+            execution_id, run_job, on_dropped=drop_job, ready=admission_gate
+        )
 
     def _start_admitted(self, execution_id: str) -> None:
         """Move admitted work from the queue into a genuinely running state."""
@@ -604,6 +609,7 @@ class WorkflowService:
             return result
         except Exception as exc:
             self._repository.record_error(execution.id, str(exc))
+            self._record_quota_failure(execution.id, exc)
             result = self._finish(execution.id, WorkflowStatus.FAILED, config)
             if workspace_path is not None:
                 logger.error(
@@ -617,6 +623,7 @@ class WorkflowService:
         response: str,
         *,
         event_listener: WorkflowEventListener | None = None,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> ExecutionHandle:
         """Persist a human response and queue the same execution for admission.
 
@@ -634,6 +641,7 @@ class WorkflowService:
         return self._submit(
             execution_id,
             lambda: self._execute_response(execution, interaction, response),
+            admission_gate=admission_gate,
         )
 
     def respond_and_resume(
@@ -722,6 +730,7 @@ class WorkflowService:
             )
         except Exception as exc:
             self._repository.record_error(execution_id, str(exc))
+            self._record_quota_failure(execution_id, exc)
             return self._finish(execution_id, WorkflowStatus.FAILED, config)
 
     def continuation_feedback(self, execution_id: str) -> str:
@@ -751,6 +760,7 @@ class WorkflowService:
         feedback: str,
         *,
         event_listener: WorkflowEventListener | None = None,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> ExecutionHandle:
         """Validate a manual continuation, then queue it for bounded admission."""
 
@@ -798,6 +808,7 @@ class WorkflowService:
                 working_branch,
                 feedback,
             ),
+            admission_gate=admission_gate,
         )
 
     def continue_execution(
@@ -1253,7 +1264,31 @@ class WorkflowService:
             )
         except Exception as exc:
             self._repository.record_error(execution_id, str(exc))
+            self._record_quota_failure(execution_id, exc)
             return self._finish(execution_id, WorkflowStatus.FAILED, config)
+
+    def _record_quota_failure(self, execution_id: str, exc: Exception) -> None:
+        if not isinstance(exc, AgentProviderError) or exc.category != "quota":
+            return
+        if not exc.provider_name:
+            return
+        try:
+            stage = self._repository.get_execution(execution_id).current_stage
+        except Exception:
+            stage = None
+        stage_roles = {
+            WorkflowStage.GENERATE_SPEC: AgentRole.PLANNER,
+            WorkflowStage.IMPLEMENT: AgentRole.IMPLEMENTER,
+            WorkflowStage.POLISH: AgentRole.IMPLEMENTER,
+            WorkflowStage.REVIEW: AgentRole.REVIEWER,
+        }
+        role = stage_roles.get(stage) if stage is not None else None
+        payload = {"kind": "PROVIDER_QUOTA_EXHAUSTED", "provider": exc.provider_name}
+        if role is not None:
+            payload["role"] = role.value
+        self._record_diagnostic(
+            execution_id, DiagnosticCategory.WORKFLOW_EVENT, payload, stage=stage, role=role
+        )
 
     def _pause_for_human(
         self,

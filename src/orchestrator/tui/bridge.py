@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from orchestrator.models.workflow_event import (
     WorkflowEventListener,
 )
 from orchestrator.models.workflow_execution import WorkflowExecution
+from orchestrator.models.workflow_status import ACTIVE_WORKFLOW_STATUSES, WorkflowStatus
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.providers.concurrency import ProviderConcurrencyCoordinator
 from orchestrator.repositories.workflow_repository import WorkflowRepository
@@ -73,6 +75,41 @@ class WorkflowBatchLaunch:
     agent_runtime_options: Mapping[AgentRole, Mapping[str, Any]] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class _BatchRun:
+    batch_id: str
+    size: int
+    required_providers: frozenset[str]
+    listener: WorkflowEventListener | None
+    condition: threading.Condition = field(default_factory=threading.Condition)
+    unavailable: set[str] = field(default_factory=set)
+    positions: dict[str, int] = field(default_factory=dict)
+    statuses: dict[int, WorkflowStatus] = field(default_factory=dict)
+    generations: dict[int, int] = field(default_factory=dict)
+    skipped: set[int] = field(default_factory=set)
+    stopping: bool = False
+    submissions_done: bool = False
+
+    def ready(self) -> bool:
+        # Dispatcher evaluates this under its own lock. Never acquire a
+        # controller lock or call back into the dispatcher here.
+        return not any(provider in self.unavailable for provider in self.required_providers)
+
+    def complete(self) -> bool:
+        if not self.submissions_done:
+            return False
+        final = {
+            WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED,
+            WorkflowStatus.FAILED, WorkflowStatus.CANCELLED,
+        }
+        if self.stopping:
+            final.add(WorkflowStatus.NEEDS_HUMAN)
+        return all(
+            position in self.skipped or self.statuses.get(position) in final
+            for position in range(self.size)
+        )
+
+
 class WorkflowController:
     """Expose existing orchestration services in forms useful to terminal views.
 
@@ -107,7 +144,7 @@ class WorkflowController:
         self._repository_index_clients = repository_index_clients
         self._selected_repository: str | None = None
         self._active_services: dict[str, WorkflowService] = {}
-        self._batch_cancellations: dict[str, threading.Event] = {}
+        self._active_batches: dict[str, _BatchRun] = {}
         self._execution_batches: dict[str, str] = {}
         self._index_operations: set[str] = set()
         self._index_operation_lock = threading.RLock()
@@ -393,6 +430,7 @@ class WorkflowController:
         launch: WorkflowLaunch,
         *,
         event_listener: WorkflowEventListener | None = None,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> ExecutionHandle:
         """Submit a launch through the shared dispatcher and return its handle."""
 
@@ -427,12 +465,16 @@ class WorkflowController:
             logger.debug("[config] TUI agent resolution: %s", "; ".join(resolutions))
         provider = self._task_provider_factory(launch.task_provider, launch.repository)
         service = self._create_service(provider)
+        submission_options: dict[str, Any] = {}
+        if admission_gate is not None:
+            submission_options["admission_gate"] = admission_gate
         handle = service.submit_execution(
             task_id,
             launch.repository,
             agent_providers=launch.agent_providers,
             agent_runtime_options=launch.agent_runtime_options,
             event_listener=self._tracking_listener(service, event_listener),
+            **submission_options,
         )
         record_repository = getattr(self._repository, "record_submission_repository", None)
         if callable(record_repository):
@@ -456,15 +498,7 @@ class WorkflowController:
         event_listener: WorkflowEventListener | None = None,
         on_batch_created: Callable[[WorkflowBatch], None] | None = None,
     ) -> WorkflowBatch | None:
-        """Persist and sequentially run an ordered batch through ``submit_workflow``.
-
-        Submission/result failures are isolated to their item. Cancelling the
-        current execution marks the batch so no later items are submitted.
-        ``on_batch_created`` fires synchronously right after the durable batch
-        row is committed, before the first item is submitted, so a caller
-        blocked on this method (typically from a background worker) can still
-        expose the batch identity and render every queued item immediately.
-        """
+        """Persist a batch, submit its items in order, and wait until it closes."""
 
         task_ids = tuple(
             dict.fromkeys(
@@ -480,7 +514,7 @@ class WorkflowController:
         # durable batch row is created. Individual submissions validate again
         # through their normal path, but a shared configuration error should
         # fail once rather than leave a batch with every item unstarted.
-        self.project_config(launch.repository).with_agent_runtime_overrides(
+        config = self.project_config(launch.repository).with_agent_runtime_overrides(
             {role.value: provider for role, provider in launch.agent_providers.items()},
             {
                 role.value: options
@@ -510,19 +544,32 @@ class WorkflowController:
         batch = self._repository.create_batch(
             launch.repository, launch.task_provider, ordered_tasks
         )
-        if on_batch_created is not None:
-            on_batch_created(batch)
-        cancellation = threading.Event()
-        self._batch_cancellations[batch.id] = cancellation
+        required: set[str] = set()
+        for role in AgentRole:
+            settings = getattr(config.agents, role.value)
+            required.add(config.provider_concurrency_name(settings.provider))
+            if settings.fallback_preset:
+                preset = config.presets_for_role(role.value)[settings.fallback_preset]
+                required.add(config.provider_concurrency_name(preset.provider))
+        run = _BatchRun(batch.id, len(ordered_tasks), frozenset(required), event_listener)
+        self._active_batches[batch.id] = run
         try:
+            if on_batch_created is not None:
+                on_batch_created(batch)
             for position, task in enumerate(ordered_tasks):
-                if cancellation.is_set():
+                if run.stopping:
+                    with run.condition:
+                        run.skipped.update(range(position, len(ordered_tasks)))
+                        run.condition.notify_all()
                     break
                 # Close the list/start race as far as the repository boundary
                 # permits. A task that gained an execution is skipped.
                 if self._repository.executions_for_tasks(
                     launch.task_provider, [task.id], launch.repository
                 ):
+                    with run.condition:
+                        run.skipped.add(position)
+                        run.condition.notify_all()
                     continue
                 item_launch = WorkflowLaunch(
                     repository=launch.repository,
@@ -533,25 +580,11 @@ class WorkflowController:
                 )
 
                 def observe_item(event: WorkflowEvent, *, item_position: int = position) -> None:
-                    if event.kind is WorkflowEventKind.EXECUTION_CREATED:
-                        self._repository.record_batch_item_execution(
-                            batch.id, item_position, event.execution_id
-                        )
-                        self._execution_batches[event.execution_id] = batch.id
-                    if event_listener is not None:
-                        payload = dict(event.payload or {})
-                        payload.update(
-                            {
-                                "batch_id": batch.id,
-                                "batch_position": item_position,
-                                "batch_size": len(ordered_tasks),
-                            }
-                        )
-                        event_listener(replace(event, payload=payload))
+                    self._observe_batch_event(run, item_position, event)
 
                 try:
                     handle = self.submit_workflow(
-                        item_launch, event_listener=observe_item
+                        item_launch, event_listener=observe_item, admission_gate=run.ready
                     )
                     # Test doubles and legacy-compatible services may not emit
                     # EXECUTION_CREATED, while the handle still exposes the
@@ -560,20 +593,100 @@ class WorkflowController:
                         batch.id, position, handle.execution_id
                     )
                     self._execution_batches[handle.execution_id] = batch.id
-                    handle.result()
+                    with run.condition:
+                        run.positions[handle.execution_id] = position
+                        run.statuses.setdefault(position, WorkflowStatus.PENDING)
+                        run.generations.setdefault(position, 0)
+                    threading.Thread(
+                        target=self._watch_batch_handle,
+                        args=(run, position, 0, handle),
+                        daemon=True,
+                    ).start()
+                    if run.stopping:
+                        self.cancel_workflow(handle.execution_id)
                 except Exception:
                     logger.exception(
                         "Batch %s task %s failed; continuing with the next task",
                         batch.id,
                         task.id,
                     )
+                    with run.condition:
+                        run.skipped.add(position)
+                        run.condition.notify_all()
                     continue
+            with run.condition:
+                run.submissions_done = True
+                run.condition.notify_all()
+                while not run.complete():
+                    run.condition.wait()
             return self._repository.get_batch(batch.id)
         finally:
-            self._batch_cancellations.pop(batch.id, None)
+            self._active_batches.pop(batch.id, None)
             for execution_id, owning_batch in list(self._execution_batches.items()):
                 if owning_batch == batch.id:
                     self._execution_batches.pop(execution_id, None)
+
+    def _observe_batch_event(
+        self, run: _BatchRun, position: int, event: WorkflowEvent
+    ) -> None:
+        """Keep batch bookkeeping isolated from workflow observer failures."""
+        try:
+            if event.kind is WorkflowEventKind.EXECUTION_CREATED:
+                self._repository.record_batch_item_execution(
+                    run.batch_id, position, event.execution_id
+                )
+                self._execution_batches[event.execution_id] = run.batch_id
+            with run.condition:
+                run.positions[event.execution_id] = position
+                if event.status is not None:
+                    run.statuses[position] = event.status
+                payload = event.payload or {}
+                if (
+                    event.kind is WorkflowEventKind.DIAGNOSTIC
+                    and payload.get("kind") == "PROVIDER_QUOTA_EXHAUSTED"
+                    and isinstance(payload.get("provider"), str)
+                ):
+                    run.unavailable.add(payload["provider"])
+                run.condition.notify_all()
+        except Exception:
+            logger.exception("Could not update batch %s from workflow event", run.batch_id)
+        if run.listener is not None:
+            try:
+                payload = dict(event.payload or {})
+                payload.update({
+                    "batch_id": run.batch_id,
+                    "batch_position": position,
+                    "batch_size": run.size,
+                })
+                run.listener(replace(event, payload=payload))
+            except Exception:
+                logger.exception("Batch %s listener failed", run.batch_id)
+
+    def _watch_batch_handle(
+        self, run: _BatchRun, position: int, generation: int, handle: ExecutionHandle
+    ) -> None:
+        try:
+            status = handle.result().status
+        except Exception:
+            logger.exception("Batch %s execution %s failed", run.batch_id, handle.execution_id)
+            status = WorkflowStatus.FAILED
+        with run.condition:
+            if run.generations.get(position, 0) != generation:
+                return
+            # The handle has settled, so this generation will not report again.
+            # A persisted status may refine the outcome (for example a
+            # cancellation recorded after the result), but an active one is a
+            # stale read: recording it would leave the item open forever and
+            # start_batch would never be woken to observe completion.
+            try:
+                persisted = self._repository.get_execution(handle.execution_id).status
+            except Exception:
+                pass
+            else:
+                if persisted not in ACTIVE_WORKFLOW_STATUSES:
+                    status = persisted
+            run.statuses[position] = status
+            run.condition.notify_all()
 
     def _create_service(self, provider: TaskProvider) -> WorkflowService:
         if self._workflow_service_factory is not None:
@@ -610,20 +723,70 @@ class WorkflowController:
         Falling back to the repository keeps a request durable when the TUI was
         restarted while an execution is still marked running.
         """
-        batch_cancellation_requested = False
-        batch_id = self._execution_batches.get(execution_id)
-        if batch_id is not None:
-            cancellation = self._batch_cancellations.get(batch_id)
-            if cancellation is not None:
-                cancellation.set()
-                batch_cancellation_requested = True
         service = self._active_services.get(execution_id)
         if service is not None:
-            return service.cancel_execution(execution_id) or batch_cancellation_requested
-        return (
-            self._repository.request_cancellation(execution_id)
-            or batch_cancellation_requested
-        )
+            return service.cancel_execution(execution_id)
+        return self._repository.request_cancellation(execution_id)
+
+    def cancel_batch(self, batch_id: str) -> bool:
+        run = self._active_batches.get(batch_id)
+        if run is None:
+            return False
+        with run.condition:
+            run.stopping = True
+            active_ids = [
+                execution_id for execution_id, position in run.positions.items()
+                if run.statuses.get(position) in ACTIVE_WORKFLOW_STATUSES
+            ]
+            run.condition.notify_all()
+        for execution_id in active_ids:
+            try:
+                self.cancel_workflow(execution_id)
+            except Exception:
+                logger.exception("Could not cancel batch %s execution %s", batch_id, execution_id)
+        return True
+
+    def batch_unavailable_providers(self, batch_id: str) -> tuple[str, ...]:
+        run = self._active_batches.get(batch_id)
+        if run is None:
+            return ()
+        with run.condition:
+            return tuple(sorted(run.unavailable))
+
+    def batch_required_providers(self, batch_id: str) -> frozenset[str]:
+        run = self._active_batches.get(batch_id)
+        return run.required_providers if run is not None else frozenset()
+
+    def mark_batch_provider_available(self, batch_id: str, provider: str) -> None:
+        run = self._active_batches.get(batch_id)
+        if run is None:
+            raise ValueError("The batch is no longer running")
+        with run.condition:
+            run.unavailable.discard(provider)
+            run.condition.notify_all()
+        self._dispatcher.reevaluate()
+
+    def execution_in_live_batch(self, execution_id: str) -> bool:
+        run = self._active_batches.get(self._execution_batches.get(execution_id, ""))
+        return run is not None and not run.stopping and not run.complete()
+
+    def _batch_submission_options(
+        self, execution_id: str, listener: WorkflowEventListener | None
+    ) -> tuple[WorkflowEventListener | None, dict[str, Any]]:
+        run = self._active_batches.get(self._execution_batches.get(execution_id, ""))
+        if run is None or run.stopping or run.complete():
+            return listener, {}
+        position = run.positions[execution_id]
+
+        def observe(event: WorkflowEvent) -> None:
+            self._observe_batch_event(run, position, event)
+            if listener is not None:
+                try:
+                    listener(event)
+                except Exception:
+                    logger.exception("Execution %s listener failed", execution_id)
+
+        return observe, {"admission_gate": run.ready}
 
     def executions(self, query: str = "") -> list[WorkflowExecution]:
         normalized = query.strip().casefold()
@@ -687,11 +850,27 @@ class WorkflowController:
         # through its own service; a rejected submission is rolled back.
         self._active_services[execution_id] = service
         try:
-            return service.submit_response(
-                execution_id,
-                response,
-                event_listener=self._tracking_listener(service, event_listener),
-            )
+            run = self._active_batches.get(self._execution_batches.get(execution_id, ""))
+            with run.condition if run is not None else nullcontext():
+                batch_listener, options = self._batch_submission_options(
+                    execution_id, event_listener
+                )
+                handle = service.submit_response(
+                    execution_id,
+                    response,
+                    event_listener=self._tracking_listener(service, batch_listener),
+                    **options,
+                )
+                if options and run is not None:
+                    position = run.positions[execution_id]
+                    generation = run.generations.get(position, 0) + 1
+                    run.generations[position] = generation
+            if options and run is not None:
+                threading.Thread(
+                    target=self._watch_batch_handle,
+                    args=(run, position, generation, handle), daemon=True,
+                ).start()
+            return handle
         except Exception:
             self._active_services.pop(execution_id, None)
             raise
@@ -730,11 +909,27 @@ class WorkflowController:
         service = self._service_for_execution(self._repository.get_execution(execution_id))
         self._active_services[execution_id] = service
         try:
-            return service.submit_continuation(
-                execution_id,
-                feedback,
-                event_listener=self._tracking_listener(service, event_listener),
-            )
+            run = self._active_batches.get(self._execution_batches.get(execution_id, ""))
+            with run.condition if run is not None else nullcontext():
+                batch_listener, options = self._batch_submission_options(
+                    execution_id, event_listener
+                )
+                handle = service.submit_continuation(
+                    execution_id,
+                    feedback,
+                    event_listener=self._tracking_listener(service, batch_listener),
+                    **options,
+                )
+                if options and run is not None:
+                    position = run.positions[execution_id]
+                    generation = run.generations.get(position, 0) + 1
+                    run.generations[position] = generation
+            if options and run is not None:
+                threading.Thread(
+                    target=self._watch_batch_handle,
+                    args=(run, position, generation, handle), daemon=True,
+                ).start()
+            return handle
         except Exception:
             self._active_services.pop(execution_id, None)
             raise

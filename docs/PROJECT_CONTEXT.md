@@ -68,13 +68,16 @@
   Refresh, loading, empty, and inline-error states remain available, while explicit CLI task
   identifiers remain supported.
 - Batch policy is owned by `WorkflowController` and `WorkflowRepository`, not TUI widgets. A batch
-  is persisted before its first item is submitted, then its tasks are submitted sequentially
-  through `submit_execution`; an item failure does not prevent later submissions. Stopping the
-  active item also stops later batch submissions. Stored batches are browsable from execution
-  history after restart. `WorkflowController.start_batch` accepts an optional `on_batch_created`
-  callback invoked synchronously right after the durable batch row commits (before the first item
-  submits), so a caller blocked on this method from a background worker can still expose the batch
-  identity and its stable task order immediately.
+  is persisted before its tasks are submitted in list order through `submit_execution`; it adds no
+  concurrency limit beyond the shared dispatcher and per-provider ceilings. The dispatcher may skip
+  queued jobs behind a closed admission gate while leaving them PENDING, and reevaluates gates when
+  notified. NEEDS_HUMAN, FAILED, and CHANGES_REQUESTED items do not delay other submissions. Answers
+  and continuations for a live batch rejoin the dispatcher tail. The batch stays open while any item
+  is queued, running, waiting for provider capacity, or awaiting human input; it closes when every
+  item is APPROVED, CHANGES_REQUESTED, FAILED, CANCELLED, skipped, or never submitted. Stopping a
+  batch cancels all active items and closes it without requiring answers to NEEDS_HUMAN items.
+  Stored batches remain browsable after restart. `on_batch_created` fires synchronously after the
+  durable batch row commits and before the first submission, exposing its stable identity and order.
 - Batch progress is a read-side TUI projection (`orchestrator.tui.batch_progress`), not a second
   workflow state machine: it reshapes durable batch items, workflow observer events, and persisted
   execution/step rows into one ordered, per-position view shared by the active `WorkflowRunnerScreen`
@@ -86,14 +89,14 @@
   batch item (no execution yet) renders as queued rather than disappearing. Each row is independently
   expandable in the owning screen's existing main scroll region (no nested scroll viewport), showing
   a concise timeline plus its own show/copy detailed-log and open-execution controls.
-- A batch item's "held by provider" annotation is defined strictly by the existing WAITING/
-  provider-capacity event and diagnostic semantics: while the sequential scheduler's current item is
-  WAITING on a named provider, later unsubmitted (unlinked) rows are annotated as queued and held by
-  that provider; the annotation clears once that item is admitted (RUNNING) or reaches a terminal
-  status. This only applies to the live in-process projection. Provider concurrency state is
-  process-local and does not persist, so a persisted or restarted batch never claims a queued or
-  provider-waiting item is actively held in a live queue; those rows read as plain QUEUED/WAITING
-  from durable storage, and the TUI does not imply PENDING/WAITING work resumes automatically.
+- Only a normalized `quota` failure attributed to a named provider makes that provider unavailable
+  for the current batch. Queued items whose selected role or fallback presets use it remain PENDING;
+  other queued items proceed. The live batch view labels held rows, counts them, and lets the user
+  mark the provider available again manually. Availability is batch-scoped and process-local; reset
+  times do not reopen it automatically. Persisted or restarted batches show plain QUEUED/WAITING
+  with no availability state and do not imply queued work resumes after restart. Submitting every
+  item up front can leave multiple PENDING executions after a crash; queued recovery is separate.
+  A quota failure before a worktree/spec exists cannot use the current continuation flow.
 - The TUI's Agent Instructions view edits the selected repository's optional `IMPLEMENTER.md` and
   `REVIEWER.md` independently. Missing files remain absent until their own save action; the TUI
   never stages or commits either file.
@@ -164,7 +167,9 @@
 - Every execution enters through one process-scoped submission seam. `submit_execution`,
   `submit_response`, and `submit_continuation` synchronously persist the row, return an
   `ExecutionHandle` exposing the persisted ID plus non-blocking polling and blocking wait/result,
-  and queue bounded in-process work. `run`, `respond_and_resume`, and `continue_execution` are thin
+  and queue bounded in-process work. Submissions may supply a cheap admission gate; a closed gate
+  leaves its job PENDING while workers admit later eligible jobs in FIFO order. `run`,
+  `respond_and_resume`, and `continue_execution` are thin
   wrappers that submit and immediately wait, so CLI/TUI output and exit behavior are unchanged.
   Batch, scheduling, continuous-execution, and label-selection features (#44/#45/#46/#147) must
   submit here rather than adding their own concurrency handling.

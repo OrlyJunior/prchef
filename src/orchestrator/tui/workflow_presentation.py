@@ -112,6 +112,13 @@ def timeline_message(
         return status_message(event.status)
     if event.kind == WorkflowEventKind.AGENT_FALLBACK:
         return f"↳ {event.message or 'Agent fallback activated'}"
+    if event.kind == WorkflowEventKind.DIAGNOSTIC:
+        payload = event.payload or {}
+        if payload.get("kind") == "PROVIDER_QUOTA_EXHAUSTED":
+            return (
+                f"Provider {payload.get('provider', 'unknown')} quota exhausted — "
+                "tasks that use it are held"
+            )
     if event.stage is None:
         return None
 

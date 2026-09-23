@@ -66,6 +66,7 @@ _TIMELINE_EVENT_KINDS: frozenset[WorkflowEventKind] = frozenset(
         WorkflowEventKind.STAGE_FAILED,
         WorkflowEventKind.WORKFLOW_FINISHED,
         WorkflowEventKind.AGENT_FALLBACK,
+        WorkflowEventKind.DIAGNOSTIC,
     }
 )
 
@@ -94,6 +95,7 @@ class BatchRowView:
     stage_label: str
     timeline: tuple[str, ...] = ()
     held_by_provider: str | None = None
+    action: str | None = None
 
 
 def category_for_execution(execution: WorkflowExecution) -> str:
@@ -129,6 +131,7 @@ class _LiveItem:
     active_stage_line: dict[WorkflowStage, int] = field(default_factory=dict)
     stage_attempts: dict[WorkflowStage, int] = field(default_factory=dict)
     diagnostics: list[ExecutionDiagnostic] = field(default_factory=list)
+    continuation_eligible: bool = False
 
 
 def _live_status(item: _LiveItem) -> tuple[str, str]:
@@ -159,6 +162,7 @@ class LiveBatchProgress:
         *,
         role_providers: Mapping[AgentRole, str] | None = None,
         role_models: Mapping[AgentRole, str | None] | None = None,
+        required_providers: frozenset[str] = frozenset(),
     ) -> None:
         self.batch_id = batch.id
         self._items = [
@@ -170,11 +174,25 @@ class LiveBatchProgress:
         }
         self._role_providers = dict(role_providers or {})
         self._role_models = dict(role_models or {})
-        self._held_provider: str | None = None
+        self._required_providers = required_providers
+        self._unavailable: set[str] = set()
 
     @property
     def held_provider(self) -> str | None:
-        return self._held_provider
+        return next(iter(sorted(self._required_providers & self._unavailable)), None)
+
+    def set_unavailable_providers(self, providers: set[str]) -> None:
+        self._unavailable = set(providers)
+
+    def set_continuation_eligible(self, position: int, eligible: bool) -> None:
+        self._items[position].continuation_eligible = eligible
+
+    def held_count(self, provider: str) -> int:
+        if provider not in self._required_providers:
+            return 0
+        return sum(
+            item.status in (None, WorkflowStatus.PENDING) for item in self._items
+        )
 
     def position_for_execution(self, execution_id: str) -> int | None:
         return self._by_execution.get(execution_id)
@@ -212,7 +230,6 @@ class LiveBatchProgress:
             item.active_stage_line.clear()
             item.stage_attempts.clear()
             item.diagnostics.clear()
-            self._held_provider = None
         elif event.execution_id != item.execution_id:
             # A stale event for a position whose item has since been replaced.
             return None
@@ -222,11 +239,8 @@ class LiveBatchProgress:
             if event.status is WorkflowStatus.WAITING:
                 provider = payload.get("provider")
                 item.provider_wait = provider if isinstance(provider, str) else None
-                if item.provider_wait:
-                    self._held_provider = item.provider_wait
             else:
                 item.provider_wait = None
-                self._held_provider = None
             if event.status is not None and event.status not in ACTIVE_WORKFLOW_STATUSES:
                 item.cancellation_requested = False
         if event.kind is WorkflowEventKind.WORKFLOW_FINISHED:
@@ -314,7 +328,7 @@ class LiveBatchProgress:
         rows: list[BatchRowView] = []
         for item in self._items:
             if item.execution_id is None:
-                held = self._held_provider
+                held = self.held_provider
                 rows.append(
                     BatchRowView(
                         position=item.position,
@@ -322,13 +336,16 @@ class LiveBatchProgress:
                         task_title=item.task_title,
                         execution_id=None,
                         category="QUEUED",
-                        status_label=f"QUEUED — held by {held}" if held else "QUEUED",
+                        status_label=(f"QUEUED — {held} unavailable (quota)" if held else "QUEUED"),
                         stage_label="",
                         held_by_provider=held,
                     )
                 )
                 continue
             category, label = _live_status(item)
+            held = self.held_provider if item.status is WorkflowStatus.PENDING else None
+            if held:
+                label = f"QUEUED — {held} unavailable (quota)"
             rows.append(
                 BatchRowView(
                     position=item.position,
@@ -337,6 +354,13 @@ class LiveBatchProgress:
                     execution_id=item.execution_id,
                     category=category,
                     status_label=label,
+                    held_by_provider=held,
+                    action=(
+                        "answer" if item.status is WorkflowStatus.NEEDS_HUMAN else
+                        "continue" if item.status is WorkflowStatus.CHANGES_REQUESTED
+                        or (item.status is WorkflowStatus.FAILED and item.continuation_eligible)
+                        else None
+                    ),
                     stage_label=(
                         item.stage.value.replace("_", " ").title() if item.stage else ""
                     ),
@@ -385,6 +409,25 @@ def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> Ba
             status_label=f"EXECUTION UNAVAILABLE: {exc}",
             stage_label="",
         )
+    timeline = step_timeline_lines(steps)
+    diagnostics_method = getattr(controller, "execution_diagnostics", None)
+    if callable(diagnostics_method):
+        try:
+            diagnostics = diagnostics_method(item.execution_id)
+        except Exception:
+            diagnostics = []
+        for diagnostic in diagnostics:
+            if diagnostic.payload.get("kind") == "PROVIDER_QUOTA_EXHAUSTED":
+                message = timeline_message(
+                    WorkflowEvent(
+                        execution_id=item.execution_id,
+                        kind=WorkflowEventKind.DIAGNOSTIC,
+                        payload=diagnostic.payload,
+                    ),
+                    {},
+                )
+                if message:
+                    timeline.append(message)
     return BatchRowView(
         position=item.position,
         task_id=item.task_id,
@@ -393,7 +436,17 @@ def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> Ba
         category=category_for_execution(execution),
         status_label=execution_status_label(execution),
         stage_label=execution.current_stage.value.replace("_", " ").title(),
-        timeline=tuple(step_timeline_lines(steps)),
+        timeline=tuple(timeline),
+        action=(
+            "answer" if execution.status is WorkflowStatus.NEEDS_HUMAN else
+            "continue" if execution.status is WorkflowStatus.CHANGES_REQUESTED
+            or (
+                execution.status is WorkflowStatus.FAILED
+                and execution.workspace_path is not None
+                and execution.working_branch is not None
+                and execution.spec_snapshot is not None
+            ) else None
+        ),
     )
 
 

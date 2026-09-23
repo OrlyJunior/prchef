@@ -465,6 +465,78 @@ def test_submission_persists_the_execution_and_returns_its_id_before_completion(
     assert handle.result(TIMEOUT).status is WorkflowStatus.APPROVED
 
 
+def test_fresh_submission_gate_keeps_execution_pending_until_reevaluated(
+    tmp_path: Path, dispatchers
+) -> None:
+    service, repository = _service(
+        tmp_path,
+        gate=_AgentGate(),
+        dispatcher=_dispatcher(dispatchers, 1),
+        coordinator=ProviderConcurrencyCoordinator(),
+    )
+    ready = False
+    handle = service.submit_execution("card-1", admission_gate=lambda: ready)
+    assert repository.get_execution(handle.execution_id).status is WorkflowStatus.PENDING
+    assert not handle.done()
+    ready = True
+    service._dispatcher.reevaluate()
+    assert handle.result(TIMEOUT).status is WorkflowStatus.APPROVED
+
+
+@pytest.mark.parametrize("category", ["quota", "rate_limit", "capacity", "unknown", None])
+def test_provider_quota_failure_emits_named_diagnostic_only_for_quota(
+    tmp_path: Path, dispatchers, category: str | None
+) -> None:
+    service, repository = _service(
+        tmp_path,
+        gate=_AgentGate(),
+        dispatcher=_dispatcher(dispatchers, 1),
+        coordinator=ProviderConcurrencyCoordinator(),
+    )
+    factory = service._client_factory
+    original_create = factory.create
+
+    class FailingAgent:
+        def execute(self, request: Any, *, on_started: Any = None) -> AgentResult:
+            del request, on_started
+            if category is None:
+                raise RuntimeError("ordinary failure")
+            raise AgentProviderError("provider failed", category=category)
+
+    def failing_create(config: Any, *, agent_roles: Any = None) -> Any:
+        clients = original_create(config, agent_roles=agent_roles)
+        original_agent = clients.agent
+        clients.agent = lambda role: (  # type: ignore[method-assign]
+            FailingAgent() if role is AgentRole.PLANNER else original_agent(role)
+        )
+        return clients
+
+    factory.create = failing_create  # type: ignore[method-assign]
+    events: list[WorkflowEvent] = []
+    result = service.submit_execution("card-1", event_listener=events.append).result(TIMEOUT)
+    assert result.status is WorkflowStatus.FAILED
+    quota_events = [
+        event for event in events
+        if event.kind is WorkflowEventKind.DIAGNOSTIC
+        and (event.payload or {}).get("kind") == "PROVIDER_QUOTA_EXHAUSTED"
+    ]
+    assert len(quota_events) == (1 if category == "quota" else 0)
+    if quota_events:
+        assert quota_events[0].payload == {
+            "kind": "PROVIDER_QUOTA_EXHAUSTED",
+            "provider": PLANNER_PROVIDER,
+            "role": "planner",
+        }
+        assert events.index(quota_events[0]) < next(
+            index for index, event in enumerate(events)
+            if event.kind is WorkflowEventKind.WORKFLOW_FINISHED
+        )
+        assert any(
+            diagnostic.payload.get("kind") == "PROVIDER_QUOTA_EXHAUSTED"
+            for diagnostic in repository.list_diagnostics(result.id)
+        )
+
+
 def test_excess_submissions_stay_pending_rather_than_failing(
     tmp_path: Path, dispatchers
 ) -> None:
@@ -901,10 +973,16 @@ def test_human_response_resume_uses_the_shared_submission_seam(
     service, repository, gate, paused = _paused_planner_execution(tmp_path, dispatchers)
     planner_calls_before = gate.call_count("planner")
 
-    handle = service.submit_response(paused.id, "Use a 30 day retention period.")
+    ready = False
+    handle = service.submit_response(
+        paused.id, "Use a 30 day retention period.", admission_gate=lambda: ready
+    )
 
     # The resume keeps the original execution ID and returns a handle.
     assert handle.execution_id == paused.id
+    assert repository.get_execution(paused.id).status is WorkflowStatus.PENDING
+    ready = True
+    service._dispatcher.reevaluate()
     resumed = handle.result(TIMEOUT)
 
     assert resumed.id == paused.id
@@ -985,9 +1063,15 @@ def test_manual_continuation_uses_the_shared_submission_seam(
     factory.create = plain_create  # type: ignore[method-assign]
     service._client_factory.created[0].jules.changes_requested = False
 
-    handle = service.submit_continuation(terminal.id, "Also cover the boundary case.")
+    ready = False
+    handle = service.submit_continuation(
+        terminal.id, "Also cover the boundary case.", admission_gate=lambda: ready
+    )
 
     assert handle.execution_id == terminal.id
+    assert repository.get_execution(terminal.id).status is WorkflowStatus.PENDING
+    ready = True
+    service._dispatcher.reevaluate()
     continued = handle.result(TIMEOUT)
 
     assert continued.id == terminal.id

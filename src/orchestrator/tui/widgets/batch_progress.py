@@ -43,6 +43,11 @@ class BatchItemRow(Vertical):
             self.position = position
             super().__init__()
 
+    class ActionRequested(Message):
+        def __init__(self, position: int) -> None:
+            self.position = position
+            super().__init__()
+
     def __init__(self, row: BatchRowView) -> None:
         super().__init__(id=f"batch-row-{row.position}", classes="batch-item-row")
         self.position = row.position
@@ -62,6 +67,7 @@ class BatchItemRow(Vertical):
                 )
                 yield Button("Copy detailed logs", id=f"{prefix}-copy-logs", disabled=True)
                 yield Button("Open execution", id=f"{prefix}-open-execution", disabled=True)
+            yield Button("Answer…", id=f"{prefix}-action", disabled=True)
             yield Static("Detailed logs", id=f"{prefix}-detailed-title")
             yield Static("", id=f"{prefix}-detailed", markup=False, expand=True)
 
@@ -96,6 +102,10 @@ class BatchItemRow(Vertical):
         self.query_one(f"#{prefix}-toggle-logs", Button).disabled = not has_execution
         self.query_one(f"#{prefix}-copy-logs", Button).disabled = not has_execution
         self.query_one(f"#{prefix}-open-execution", Button).disabled = not has_execution
+        action = self.query_one(f"#{prefix}-action", Button)
+        action.display = row.action is not None
+        action.disabled = row.action is None
+        action.label = "Answer…" if row.action == "answer" else "Continue…"
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         prefix = self.id
@@ -130,6 +140,10 @@ class BatchItemRow(Vertical):
             event.stop()
             self.post_message(self.OpenExecutionRequested(self.position))
             return
+        if event.button.id == f"{prefix}-action":
+            event.stop()
+            self.post_message(self.ActionRequested(self.position))
+            return
 
     def set_detailed_logs(self, text: str) -> None:
         self.query_one(f"#{self.id}-detailed", Static).update(
@@ -140,8 +154,14 @@ class BatchItemRow(Vertical):
 class BatchProgressView(Vertical):
     """Ordered, expandable batch rows plus a status summary that stays visible."""
 
+    class ProviderAvailableRequested(Message):
+        def __init__(self, provider: str) -> None:
+            self.provider = provider
+            super().__init__()
+
     def compose(self) -> ComposeResult:
         yield Static("", id="batch-progress-summary", classes="batch-progress-summary")
+        yield Vertical(id="batch-provider-availability")
         yield Static("", id="batch-progress-note", classes="batch-progress-note")
         yield Vertical(id="batch-progress-rows")
 
@@ -151,6 +171,41 @@ class BatchProgressView(Vertical):
         # than from the ``set_rows`` argument, so live updates that arrive
         # while a rebuild is still in flight are not lost.
         self._rows: dict[int, BatchRowView] = {}
+        self._provider_buttons: dict[str, str] = {}
+        self._availability: dict[str, int] = {}
+
+    def on_mount(self) -> None:
+        self.query_one("#batch-provider-availability", Vertical).display = False
+
+    def set_provider_availability(self, held: dict[str, int]) -> None:
+        self._availability = dict(held)
+        self.screen.run_worker(self._rebuild_provider_availability())
+
+    async def _rebuild_provider_availability(self) -> None:
+        container = self.query_one("#batch-provider-availability", Vertical)
+        async with container.batch():
+            await container.remove_children()
+            self._provider_buttons = {}
+            for index, (provider, count) in enumerate(sorted(self._availability.items())):
+                button_id = f"batch-provider-available-{index}"
+                self._provider_buttons[button_id] = provider
+                line = Vertical(classes="batch-provider-line")
+                await container.mount(line)
+                await line.mount(
+                    Static(
+                        f"Provider {provider} unavailable (quota exhausted) — "
+                        f"{count} queued task(s) held",
+                        markup=False,
+                    ),
+                    Button(f"Mark {provider} available", id=button_id),
+                )
+            container.display = bool(self._availability)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        provider = self._provider_buttons.get(event.button.id or "")
+        if provider is not None:
+            event.stop()
+            self.post_message(self.ProviderAvailableRequested(provider))
 
     def set_rows(self, rows: list[BatchRowView]) -> None:
         """(Re)build every row. Only used for a fresh batch load or reload."""

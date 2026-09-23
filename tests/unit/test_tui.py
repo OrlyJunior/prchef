@@ -31,7 +31,12 @@ from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.tui.app import OrchestratorApp
-from orchestrator.tui.bridge import WorkflowBatchLaunch, WorkflowController, WorkflowLaunch
+from orchestrator.tui.bridge import (
+    WorkflowBatchLaunch,
+    WorkflowController,
+    WorkflowLaunch,
+    _BatchRun,
+)
 from orchestrator.tui.diagnostics import format_diagnostics_for_export
 from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
 from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
@@ -418,7 +423,9 @@ class _WorkflowService:
         agent_providers: dict[AgentRole, str],
         agent_runtime_options: dict[AgentRole, Any],
         event_listener: Callable[..., None] | None,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> _Handle:
+        del admission_gate
         if self.before_submit is not None:
             self.before_submit()
         self.calls.append((task_id, repository, agent_providers, agent_runtime_options))
@@ -477,8 +484,9 @@ class _WorkflowService:
         feedback: str,
         *,
         event_listener: Callable[..., None] | None = None,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> _Handle:
-        del event_listener
+        del event_listener, admission_gate
         self.continuations.append((execution_id, feedback))
         if self.continuation_error is not None:
             raise self.continuation_error
@@ -501,8 +509,9 @@ class _WorkflowService:
         response: str,
         *,
         event_listener: Callable[..., None] | None = None,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> _Handle:
-        del event_listener
+        del event_listener, admission_gate
         self.responses.append((execution_id, response))
         return _Handle(WorkflowExecution(id=execution_id, status=WorkflowStatus.APPROVED))
 
@@ -601,6 +610,34 @@ def test_controller_persists_and_runs_batch_in_order_with_shared_role_options(
     assert all(item.execution_id is not None for item in batch.items)
 
 
+def test_controller_batch_closes_when_persisted_status_lags_a_settled_handle(
+    tmp_path: Path,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    tasks = [
+        DevelopmentTask("12", "github", "First", "", "https://example/12"),
+        DevelopmentTask("3", "github", "Second", "", "https://example/3"),
+    ]
+    provider = _TaskProvider()
+    provider.list_tasks = lambda limit=50: tasks  # type: ignore[method-assign]
+    controller._task_provider_factory = lambda source, repository: provider
+    # The first item's handle settles APPROVED while its persisted row still
+    # reads RUNNING; that stale read must not keep the batch open.
+    repository.execution.status = WorkflowStatus.RUNNING
+    outcome: list[WorkflowBatch | None] = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(controller.start_batch(_batch_launch("12", "3"))),
+        daemon=True,
+    )
+
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "start_batch did not observe batch completion"
+    assert outcome[0] is not None
+    assert [call[0] for call in service.calls] == ["12", "3"]
+
+
 def test_controller_exposes_batch_identity_before_first_item_submits(
     tmp_path: Path,
 ) -> None:
@@ -659,6 +696,81 @@ def test_controller_batch_empty_selection_is_a_no_op(tmp_path: Path) -> None:
     assert repository.batch_rows == []
 
 
+def test_controller_quota_event_closes_gate_until_provider_is_marked_available(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    run = _BatchRun("batch-1", 1, frozenset({"planner"}), None)
+    controller._active_batches[run.batch_id] = run
+    awakened = False
+
+    def reevaluate() -> None:
+        nonlocal awakened
+        awakened = True
+
+    controller._dispatcher.reevaluate = reevaluate  # type: ignore[method-assign]
+    controller._observe_batch_event(
+        run,
+        0,
+        WorkflowEvent(
+            execution_id="execution-1",
+            kind=WorkflowEventKind.DIAGNOSTIC,
+            payload={"kind": "PROVIDER_ERROR", "provider": "planner", "category": "rate_limit"},
+        ),
+    )
+    assert run.ready()
+    controller._observe_batch_event(
+        run,
+        0,
+        WorkflowEvent(
+            execution_id="execution-1",
+            kind=WorkflowEventKind.DIAGNOSTIC,
+            payload={"kind": "PROVIDER_QUOTA_EXHAUSTED", "provider": "planner"},
+        ),
+    )
+    assert controller.batch_unavailable_providers(run.batch_id) == ("planner",)
+    assert not run.ready()
+
+    controller.mark_batch_provider_available(run.batch_id, "planner")
+    assert run.ready()
+    assert awakened
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        WorkflowStatus.APPROVED,
+        WorkflowStatus.CHANGES_REQUESTED,
+        WorkflowStatus.FAILED,
+        WorkflowStatus.CANCELLED,
+    ],
+)
+def test_batch_completion_accepts_final_statuses(status: WorkflowStatus) -> None:
+    run = _BatchRun("batch-1", 2, frozenset(), None)
+    run.submissions_done = True
+    run.skipped.add(1)
+    run.statuses[0] = status
+    assert run.complete()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        WorkflowStatus.PENDING,
+        WorkflowStatus.WAITING,
+        WorkflowStatus.RUNNING,
+        WorkflowStatus.NEEDS_HUMAN,
+    ],
+)
+def test_batch_completion_waits_for_open_statuses(status: WorkflowStatus) -> None:
+    run = _BatchRun("batch-1", 1, frozenset(), None)
+    run.submissions_done = True
+    run.statuses[0] = status
+    assert not run.complete()
+    run.stopping = True
+    assert run.complete() is (status is WorkflowStatus.NEEDS_HUMAN)
+
+
 def test_controller_validates_shared_batch_launch_before_persisting(tmp_path: Path) -> None:
     controller, service, repository = _controller(tmp_path)
 
@@ -678,13 +790,11 @@ def test_controller_validates_shared_batch_launch_before_persisting(tmp_path: Pa
 
 def test_controller_batch_cancellation_is_accepted_between_items(tmp_path: Path) -> None:
     controller, _, repository = _controller(tmp_path)
-    cancellation = threading.Event()
-    controller._batch_cancellations["batch-1"] = cancellation
+    repository.execution.status = WorkflowStatus.RUNNING
     controller._execution_batches[repository.execution.id] = "batch-1"
 
     assert controller.cancel_workflow(repository.execution.id) is True
-    assert cancellation.is_set()
-    assert repository.cancellation_requests == []
+    assert repository.cancellation_requests == [repository.execution.id]
 
 
 def test_controller_stopping_batch_cancels_current_and_skips_later_tasks(
@@ -698,16 +808,18 @@ def test_controller_stopping_batch_cancels_current_and_skips_later_tasks(
     provider = _TaskProvider()
     provider.list_tasks = lambda limit=50: tasks  # type: ignore[method-assign]
     controller._task_provider_factory = lambda source, selected_repository: provider
-    entered = threading.Event()
-    release = threading.Event()
+    entered = {task_id: threading.Event() for task_id in ("12", "7")}
+    release = {task_id: threading.Event() for task_id in ("12", "7")}
     calls: list[str] = []
 
     class BlockingHandle:
-        execution_id = "execution-batch-current"
+        def __init__(self, task_id: str) -> None:
+            self.task_id = task_id
+            self.execution_id = f"execution-{task_id}"
 
         def result(self, timeout: float | None = None) -> WorkflowExecution:
-            entered.set()
-            assert release.wait(timeout=5), "batch cancellation did not release current task"
+            entered[self.task_id].set()
+            assert release[self.task_id].wait(timeout=5), "batch cancellation did not release task"
             return WorkflowExecution(
                 id=self.execution_id, status=WorkflowStatus.CANCELLED
             )
@@ -719,16 +831,15 @@ def test_controller_stopping_batch_cancels_current_and_skips_later_tasks(
             assert listener is not None
             listener(
                 WorkflowEvent(
-                    execution_id=BlockingHandle.execution_id,
+                    execution_id=f"execution-{task_id}",
                     kind=WorkflowEventKind.EXECUTION_CREATED,
                     status=WorkflowStatus.PENDING,
                 )
             )
-            return BlockingHandle()
+            return BlockingHandle(task_id)
 
         def cancel_execution(self, execution_id: str) -> bool:
-            assert execution_id == BlockingHandle.execution_id
-            release.set()
+            release[execution_id.removeprefix("execution-")].set()
             return True
 
     blocking_service = BlockingService()
@@ -754,15 +865,16 @@ def test_controller_stopping_batch_cancels_current_and_skips_later_tasks(
 
     worker = threading.Thread(target=run_batch)
     worker.start()
-    assert entered.wait(timeout=5), "batch did not start its first task"
+    assert entered["12"].wait(timeout=5), "batch did not start its first task"
+    assert entered["7"].wait(timeout=5), "batch did not submit its second task"
 
-    assert controller.cancel_workflow(BlockingHandle.execution_id) is True
+    assert controller.cancel_batch("batch-1") is True
     worker.join(timeout=5)
 
     assert not worker.is_alive()
     assert errors == []
-    assert calls == ["12"]
-    assert repository.get_batch("batch-1").items[1].execution_id is None
+    assert calls == ["12", "7"]
+    assert repository.get_batch("batch-1").items[1].execution_id == "execution-7"
 
 
 def test_controller_rejects_batch_task_with_an_existing_execution(tmp_path: Path) -> None:
@@ -3292,6 +3404,7 @@ def test_workflow_runner_batch_progress_renders_every_task_in_order(
 
             view = screen.query_one("#batch-progress", BatchProgressView)
             assert view.display is True
+            assert str(screen.query_one("#stop-workflow", Button).label) == "Stop batch"
             headers = [
                 str(screen.query_one(f"#batch-row-{position}-header", Button).label)
                 for position in range(3)
@@ -3310,6 +3423,12 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
+    unavailable: set[str] = set()
+    controller.batch_required_providers = lambda batch_id: frozenset({"jules"})  # type: ignore[method-assign]
+    controller.batch_unavailable_providers = lambda batch_id: tuple(unavailable)  # type: ignore[method-assign]
+    def mark_available(batch_id: str, provider: str) -> None:
+        unavailable.discard(provider)
+    controller.mark_batch_provider_available = mark_available  # type: ignore[method-assign]
     application = OrchestratorApp(controller)
     batch = WorkflowBatch(
         id="batch-1",
@@ -3351,18 +3470,38 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
             assert "WAITING FOR AGENT (jules)" in str(
                 screen.query_one("#batch-row-0-header", Button).label
             )
-            assert "held by jules" in str(
+            assert "QUEUED" in str(
                 screen.query_one("#batch-row-1-header", Button).label
             )
-            assert "held by jules" in str(
+            assert "QUEUED" in str(
                 screen.query_one("#batch-row-2-header", Button).label
             )
             summary = str(screen.query_one("#batch-progress-summary", Static).renderable)
             assert "Waiting for provider: 1" in summary
             assert "Queued: 2" in summary
 
-            # Admission clears the provider hold on the still-queued rows, and
-            # only the affected row (position 0) changed category.
+            unavailable.add("jules")
+            screen._render_workflow_event(
+                WorkflowEvent(
+                    execution_id="execution-1",
+                    kind=WorkflowEventKind.DIAGNOSTIC,
+                    payload={
+                        "batch_position": 0,
+                        "kind": "PROVIDER_QUOTA_EXHAUSTED",
+                        "provider": "jules",
+                    },
+                )
+            )
+            await settle_tui(pilot)
+            assert "jules unavailable (quota)" in str(
+                screen.query_one("#batch-row-1-header", Button).label
+            )
+            assert "2 queued task(s) held" in str(
+                screen.query_one("#batch-provider-availability", Vertical)
+                .query_one(Static)
+                .renderable
+            )
+
             screen._render_workflow_event(
                 WorkflowEvent(
                     execution_id="execution-1",
@@ -3373,12 +3512,10 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
             )
             await settle_tui(pilot)
             assert "RUNNING" in str(screen.query_one("#batch-row-0-header", Button).label)
-            assert "held by" not in str(
-                screen.query_one("#batch-row-1-header", Button).label
-            )
-            assert "held by" not in str(
-                screen.query_one("#batch-row-2-header", Button).label
-            )
+            await pilot.click("#batch-provider-available-0")
+            await settle_tui(pilot)
+            assert not unavailable
+            assert "unavailable" not in str(screen.query_one("#batch-row-1-header", Button).label)
             summary = str(screen.query_one("#batch-progress-summary", Static).renderable)
             assert "Running: 1" in summary
             assert "Queued: 2" in summary
