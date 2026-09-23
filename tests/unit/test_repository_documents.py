@@ -14,6 +14,7 @@ def test_source_pipeline_excludes_private_generated_binary_and_ignored_files(
     (tmp_path / ".git").mkdir()
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "service.py").write_text("def useful():\n    return 1\n")
+    (tmp_path / "PLANNER.md").write_text("private")
     (tmp_path / "IMPLEMENTER.md").write_text("private")
     (tmp_path / "REVIEWER.md").write_text("private")
     (tmp_path / "docs").mkdir()
@@ -57,6 +58,21 @@ def test_source_pipeline_honors_gitignore(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
     (tmp_path / "ignored.py").write_text("ignored semantic text", encoding="utf-8")
     (tmp_path / "included.py").write_text("included semantic text", encoding="utf-8")
+
+    sources = RepositorySourcePipeline("repo", tmp_path).discover()
+
+    assert [source.path for source in sources] == ["included.py"]
+
+
+def test_source_pipeline_excludes_tracked_planner_instructions(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / "PLANNER.md").write_text("private planning guidance", encoding="utf-8")
+    (tmp_path / "included.py").write_text("def included(): pass", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "PLANNER.md", "included.py"],
+        check=True,
+        capture_output=True,
+    )
 
     sources = RepositorySourcePipeline("repo", tmp_path).discover()
 

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import stat
+import tempfile
 import threading
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -42,8 +45,10 @@ from orchestrator.repositories.workflow_repository import WorkflowRepository
 from orchestrator.services.execution_dispatcher import ExecutionDispatcher, ExecutionHandle
 from orchestrator.services.project_context import (
     IMPLEMENTER_INSTRUCTIONS_FILE,
+    PLANNER_INSTRUCTIONS_FILE,
     REVIEWER_INSTRUCTIONS_FILE,
     load_implementer_instructions,
+    load_planner_instructions,
     load_reviewer_instructions,
 )
 from orchestrator.services.repository_context import resolve_repository_context_strategy
@@ -265,10 +270,11 @@ class WorkflowController:
         github = self.project_config(repository).integrations.github
         return github.implementer_app, github.app
 
-    def agent_instructions(self, repository: str) -> tuple[str | None, str | None]:
+    def agent_instructions(self, repository: str) -> tuple[str | None, str | None, str | None]:
         """Load role-specific local guidance from a configured repository root."""
         repository_path = self.repository_path(repository)
         return (
+            load_planner_instructions(repository_path),
             load_implementer_instructions(repository_path),
             load_reviewer_instructions(repository_path),
         )
@@ -276,15 +282,41 @@ class WorkflowController:
     def save_agent_instructions(self, repository: str, role: AgentRole, content: str) -> Path:
         """Save one role's local instructions without changing Git state."""
         filename = {
+            AgentRole.PLANNER: PLANNER_INSTRUCTIONS_FILE,
             AgentRole.IMPLEMENTER: IMPLEMENTER_INSTRUCTIONS_FILE,
             AgentRole.REVIEWER: REVIEWER_INSTRUCTIONS_FILE,
         }.get(role)
         if filename is None:
             raise ValueError(
-                "Agent instructions are only supported for implementer and reviewer"
+                "Agent instructions are only supported for planner, implementer, and reviewer"
             )
         path = self.repository_path(repository) / filename
-        path.write_text(content, encoding="utf-8")
+        if path.is_symlink():
+            raise ValueError(f"Cannot save instructions through a symlink: {filename}")
+        existing_mode: int | None = None
+        if os.name == "posix":
+            try:
+                existing_status = path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if stat.S_ISREG(existing_status.st_mode):
+                    existing_mode = stat.S_IMODE(existing_status.st_mode)
+        # Replacing the directory entry avoids following a link introduced after the check.
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent, prefix=f".{filename}.",
+                delete=False,
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+                temporary_file.write(content)
+            if existing_mode is not None:
+                temporary_path.chmod(existing_mode)
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
         return path
 
     def repository_path(self, repository: str) -> Path:

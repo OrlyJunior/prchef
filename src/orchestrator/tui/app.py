@@ -38,6 +38,7 @@ class OrchestratorApp(App[None]):
     .screen-title { text-style: bold; margin-bottom: 1; }
     .field-label { margin-top: 1; }
     .workflow-form { max-width: 100; height: auto; }
+    .agent-instructions-editor { height: 7; }
     #runtime-settings-note { margin-top: 1; color: $text-muted; }
     .role-section { height: auto; margin-top: 1; padding: 0 1 1 1; border: round $primary; }
     .role-title { text-style: bold; }
