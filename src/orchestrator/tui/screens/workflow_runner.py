@@ -10,7 +10,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus, Resize
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Input, Static, TextArea
+from textual.widgets import Button, Checkbox, Input, Static, TextArea
 
 from orchestrator.config.project_config import AgentPresetConfig
 from orchestrator.models.agent import AgentRole
@@ -341,12 +341,12 @@ class WorkflowRunnerScreen(Screen[None]):
         self.set_class(width <= 96, "-compact-navigation")
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
-        # A mouse press focuses a button before Textual dispatches its matching
-        # release/click. Scrolling here can move that button out from under the
-        # pointer, which turns the first click into a focus-only click. Selects
-        # and inputs still scroll into view so their keyboard
-        # interaction remain usable on short terminals.
-        if isinstance(event.widget, Button) or is_orchestrator_select_widget(event.widget):
+        # A mouse press focuses a clickable control before its release/click.
+        # Scrolling it under the pointer turns that first click into focus only.
+        # Textual still scrolls controls into view during keyboard navigation.
+        if isinstance(event.widget, (Button, Checkbox)) or is_orchestrator_select_widget(
+            event.widget
+        ):
             return
         self.query_one("#workflow-runner", VerticalScroll).scroll_to_widget(
             event.widget, animate=False, top=True
