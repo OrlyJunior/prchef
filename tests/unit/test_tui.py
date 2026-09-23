@@ -4105,6 +4105,52 @@ def test_task_checkbox_mouse_click_updates_selection_and_screen_on_first_click(
     asyncio.run(drive())
 
 
+def test_later_task_checkbox_click_in_short_viewport_updates_on_first_click(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _backlog_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 20)) as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(TaskRow)) == 33,
+                description="backlog task rows",
+            )
+            screen = application.screen
+            selector = screen.query_one("#task-selector", TaskSelector)
+            content = screen.query_one("#workflow-runner", VerticalScroll)
+            row = screen.query_one("#task-checkbox-12", TaskRow)
+            content.scroll_to_widget(row, animate=False, center=True)
+            await settle_tui(pilot)
+            assert content.scroll_y > 0
+            assert screen.can_view_entire(row)
+            scroll_y = content.scroll_y
+
+            def painted_glyph() -> str:
+                line = screen._compositor.render_strips()[row.region.y]
+                return line.crop(row.region.x, row.region.x + 3).text
+
+            assert painted_glyph() == "[ ]"
+            assert await pilot.click(row, offset=(1, 0))
+            await settle_tui(pilot)
+            assert row.value is True
+            assert selector.selected_task_ids == ("209",)
+            assert painted_glyph() == "[x]"
+            assert content.scroll_y == scroll_y
+
+            assert await pilot.click(row, offset=(1, 0))
+            await settle_tui(pilot)
+            assert row.value is False
+            assert selector.selected_task_ids == ()
+            assert painted_glyph() == "[ ]"
+            assert content.scroll_y == scroll_y
+
+    asyncio.run(drive())
+
+
 def test_task_selector_separates_select_all_from_the_task_rows(tmp_path: Path) -> None:
     controller, _, _ = _backlog_controller(tmp_path)
     application = OrchestratorApp(controller)
