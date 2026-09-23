@@ -305,13 +305,20 @@
   the configured duration and the partial stdout/stderr, decoded as UTF-8 with replacement.
   The check has no exit code and sets `timed_out`/`timeout_seconds`, later commands still run,
   and it uses the same retry budget. Its correction prompt names the command and timeout and
-  includes the redacted tail of both captured streams. Detection relies only on the subprocess
-  timeout and never parses tool output. Other command execution errors still fail the workflow.
-- On any timeout, `CommandClient` kills the command's whole process tree (a new POSIX session
-  killed via its process group; `taskkill /F /T` on Windows), reaps the command, then waits a
-  bounded time for output so children (e.g. behind `npm run test`/Gradle) cannot keep running in
-  the worktree or hold pipes open. A descendant that escapes the tree (e.g. calls `setsid`
-  itself) is not killed; its output is abandoned after that bound and the timeout still reports.
+  includes the redacted tails of both captured streams, sharing one output budget no larger than
+  a completed failure's. Detection relies only on the subprocess timeout and never parses tool
+  output. Other command execution errors still fail the workflow.
+- On any timeout, `CommandClient` kills the command's whole process tree, reaps the command, then
+  waits a bounded time for output, so children (e.g. behind `npm run test`/Gradle) cannot keep
+  running in the worktree. POSIX commands lead a new session and are killed via their process
+  group, which outlives its leader. Windows commands start suspended inside a job object
+  (`clients/windows_job.py`) that is terminated on timeout, reaching descendants even after the
+  launcher (e.g. a `.cmd` shim) exited; `taskkill /F /T` is only a fallback when a job is
+  unavailable. The job has no kill-on-close limit, so completed commands behave as before.
+- A timeout becomes `CommandTimeoutError` only once the tree is confirmed stopped (kill succeeded,
+  job empty, pipes closed). Otherwise — e.g. a descendant that escaped via `setsid` still holds
+  output — it raises a plain `CommandExecutionError` and the workflow fails without correction,
+  so an implementer never edits a worktree a validation process may still be using.
 - Planning, execution ID, branch, and worktree are never recreated during corrections. A passing
   retry continues to commit/push/PR/review. Exhaustion or correction failure ends as `FAILED` and
   preserves the worktree.

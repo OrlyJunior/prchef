@@ -22,11 +22,25 @@ _CORRECTION_OUTPUT_LIMIT = 4_000
 _TRUNCATED_OUTPUT_MARKER = "[... earlier output truncated ...]\n"
 
 
-def _bounded_tail(output: str) -> str:
+def _bounded_tail(output: str, limit: int) -> str:
     """Keep the end of output from a killed process, where a hang is usually visible."""
-    if len(output) <= _CORRECTION_OUTPUT_LIMIT:
+    if len(output) <= limit:
         return output
-    return _TRUNCATED_OUTPUT_MARKER + output[-_CORRECTION_OUTPUT_LIMIT:]
+    return _TRUNCATED_OUTPUT_MARKER + output[-limit:]
+
+
+def _bounded_tails(stdout: str, stderr: str) -> tuple[str, str]:
+    """Share one output budget between both streams of a killed process.
+
+    A timed-out check then contributes no more output than a completed failure. A stream shorter
+    than half the budget leaves its unused share to the other stream.
+    """
+    stderr_budget = min(
+        len(stderr),
+        max(_CORRECTION_OUTPUT_LIMIT // 2, _CORRECTION_OUTPUT_LIMIT - len(stdout)),
+    )
+    stdout_budget = _CORRECTION_OUTPUT_LIMIT - stderr_budget
+    return _bounded_tail(stdout, stdout_budget), _bounded_tail(stderr, stderr_budget)
 
 
 class ImplementationService:
@@ -335,11 +349,10 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         ]
         if not check.stdout and not check.stderr:
             lines.extend(("Output captured before timeout:", "no output"))
-        for label, stream in (("Stdout", check.stdout), ("Stderr", check.stderr)):
+        stdout, stderr = _bounded_tails(redact_text(check.stdout), redact_text(check.stderr))
+        for label, stream in (("Stdout", stdout), ("Stderr", stderr)):
             if stream:
-                lines.extend(
-                    (f"{label} captured before timeout:", _bounded_tail(redact_text(stream)))
-                )
+                lines.extend((f"{label} captured before timeout:", stream))
         return "\n".join(lines)
 
     @staticmethod

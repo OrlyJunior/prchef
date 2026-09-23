@@ -283,15 +283,21 @@ class _ScriptedProcess:
 
 
 def _install_scripted_process(
-    monkeypatch: pytest.MonkeyPatch, process: _ScriptedProcess, events: list[str]
+    monkeypatch: pytest.MonkeyPatch,
+    process: _ScriptedProcess,
+    events: list[str],
+    *,
+    tree_stopped: bool = True,
 ) -> None:
+    def terminate(terminated: _ScriptedProcess, job: object) -> bool:
+        events.append(f"terminate:{terminated.pid}")
+        return tree_stopped
+
     monkeypatch.setattr(command_client, "_is_windows", lambda: False)
-    monkeypatch.setattr(command_client, "_start_process", lambda command, **kwargs: process)
     monkeypatch.setattr(
-        command_client,
-        "_terminate_process_tree",
-        lambda terminated: events.append(f"terminate:{terminated.pid}"),
+        command_client, "_start_process", lambda command, **kwargs: (process, None)
     )
+    monkeypatch.setattr(command_client, "_terminate_process_tree", terminate)
 
 
 def test_timeout_terminates_the_process_tree_before_collecting_output(
@@ -315,7 +321,7 @@ def test_timeout_terminates_the_process_tree_before_collecting_output(
     assert process.returncode is not None
 
 
-def test_timeout_is_reported_when_an_escaped_descendant_keeps_output_open(
+def test_timeout_is_not_correctable_when_an_escaped_descendant_keeps_output_open(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     events: list[str] = []
@@ -327,17 +333,38 @@ def test_timeout_is_reported_when_an_escaped_descendant_keeps_output_open(
     )
     _install_scripted_process(monkeypatch, process, events)
 
-    with pytest.raises(CommandTimeoutError) as raised:
+    with pytest.raises(CommandExecutionError) as raised:
         CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
 
+    assert not isinstance(raised.value, CommandTimeoutError)
+    assert str(raised.value) == (
+        "Command timed out after 30s and its process tree could not be confirmed "
+        "terminated: tool"
+    )
     assert events == [
         "communicate:30",
         "terminate:4321",
         f"communicate:{drain}",
         f"wait:{drain}",
     ]
-    assert raised.value.stdout == "partial �"
-    assert raised.value.stderr == ""
+
+
+def test_timeout_is_not_correctable_when_the_process_tree_kill_is_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[str] = []
+    process = _ScriptedProcess(
+        events,
+        subprocess.TimeoutExpired(["tool"], 30),
+        ("partial", ""),
+    )
+    _install_scripted_process(monkeypatch, process, events, tree_stopped=False)
+
+    with pytest.raises(CommandExecutionError) as raised:
+        CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
+
+    assert not isinstance(raised.value, CommandTimeoutError)
+    assert "could not be confirmed terminated" in str(raised.value)
 
 
 def test_interrupted_command_terminates_the_process_tree(
@@ -364,6 +391,15 @@ subprocess.Popen(
 time.sleep(600)
 """
 
+_EXITING_LAUNCHER_SCRIPT = """\
+import subprocess
+import sys
+
+subprocess.Popen(
+    [sys.executable, sys.argv[1]], stdout=sys.stdout, stderr=sys.stderr
+)
+"""
+
 _DESCENDANT_SCRIPT = """\
 import time
 
@@ -372,15 +408,20 @@ time.sleep(600)
 """
 
 
+@pytest.mark.parametrize(
+    "launcher_script",
+    [_LAUNCHER_SCRIPT, _EXITING_LAUNCHER_SCRIPT],
+    ids=["running-launcher", "exited-launcher"],
+)
 def test_terminating_the_process_tree_stops_descendants_holding_output(
-    tmp_path: Path,
+    tmp_path: Path, launcher_script: str
 ) -> None:
     launcher = tmp_path / "launcher.py"
     descendant = tmp_path / "descendant.py"
-    launcher.write_text(_LAUNCHER_SCRIPT, encoding="utf-8")
+    launcher.write_text(launcher_script, encoding="utf-8")
     descendant.write_text(_DESCENDANT_SCRIPT, encoding="utf-8")
 
-    process = command_client._start_process(
+    process, job = command_client._start_process(
         [sys.executable, str(launcher), str(descendant)],
         cwd=tmp_path,
         input_text=None,
@@ -390,8 +431,12 @@ def test_terminating_the_process_tree_stops_descendants_holding_output(
         assert process.stdout is not None
         # Wait until the descendant is running and holds the inherited output pipe.
         assert process.stdout.readline().strip() == "ready"
+        if launcher_script is _EXITING_LAUNCHER_SCRIPT:
+            # Like a .cmd shim that returned while its child still runs: only the descendant is
+            # left, so the kill cannot reach it through the launcher.
+            process.wait(timeout=60)
 
-        command_client._terminate_process_tree(process)
+        assert command_client._terminate_process_tree(process, job)
 
         # Output reaches EOF only after every process holding the pipe has exited; the bound only
         # keeps a regression from hanging the suite.
@@ -400,8 +445,25 @@ def test_terminating_the_process_tree_stops_descendants_holding_output(
         if process.poll() is None:
             process.kill()
             process.wait()
+        if job is not None:
+            job.close()
 
     assert process.returncode is not None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Job objects are Windows-specific")
+def test_windows_commands_are_contained_in_a_job_object(tmp_path: Path) -> None:
+    process, job = command_client._start_process(
+        [sys.executable, "-c", "print('ran')"], cwd=tmp_path, input_text=None, env=None
+    )
+    try:
+        stdout, _ = process.communicate(timeout=60)
+    finally:
+        if job is not None:
+            job.close()
+
+    assert job is not None
+    assert stdout.strip() == "ran"
 
 
 class RecordingCommandClient:

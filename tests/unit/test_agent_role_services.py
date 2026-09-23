@@ -496,6 +496,40 @@ def test_timed_out_validation_output_keeps_the_tail_and_reports_missing_output()
     assert without_output.endswith("Output captured before timeout:\nno output")
 
 
+@pytest.mark.parametrize(
+    ("stdout_length", "stderr_length", "expected_stdout", "expected_stderr"),
+    [
+        (5_000, 5_000, 2_000, 2_000),
+        (5_000, 100, 3_900, 100),
+        (100, 5_000, 100, 3_900),
+        (1_000, 1_000, 1_000, 1_000),
+    ],
+)
+def test_timed_out_validation_streams_share_one_output_budget(
+    stdout_length: int, stderr_length: int, expected_stdout: int, expected_stderr: int
+) -> None:
+    validation = ValidationResult(
+        success=False,
+        checks=[
+            ValidationCheck(
+                name="make test",
+                command=["make", "test"],
+                success=False,
+                exit_code=None,
+                stdout="o" * stdout_length,
+                stderr="e" * stderr_length,
+                timed_out=True,
+                timeout_seconds=30,
+            )
+        ],
+    )
+
+    lines = ImplementationService.render_validation_failures(validation).splitlines()
+
+    assert "o" * expected_stdout in lines
+    assert "e" * expected_stderr in lines
+
+
 def test_implementation_inspects_changes_after_a_structured_provider_failure(
     tmp_path: Path,
 ) -> None:

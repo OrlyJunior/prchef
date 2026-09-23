@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from orchestrator.clients.exceptions import CommandExecutionError, CommandTimeoutError
+from orchestrator.clients.windows_job import CREATE_SUSPENDED, WindowsJob
 from orchestrator.runtime_logging import format_command
 
 logger = logging.getLogger(__name__)
@@ -37,65 +38,122 @@ def _partial_output(value: bytes | str | None) -> str:
     return value
 
 
+class _ProcessTreeSurvivedError(Exception):
+    """A timed-out command's process tree could not be confirmed terminated."""
+
+
 def _start_process(
     command: Sequence[str],
     *,
     cwd: Path,
     input_text: str | None,
     env: Mapping[str, str] | None,
-) -> subprocess.Popen[str]:
-    return subprocess.Popen(
-        list(command),
-        cwd=cwd,
-        stdin=subprocess.PIPE if input_text is not None else None,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=dict(env) if env is not None else None,
-        shell=False,
-        # Its own session makes the command the leader of a process group, so a timeout can kill
-        # everything it launched. Windows trees are terminated through taskkill instead.
-        start_new_session=sys.platform != "win32",
-    )
+) -> tuple[subprocess.Popen[str], WindowsJob | None]:
+    """Launch a command so that its whole process tree can later be killed.
 
-
-def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
-    """Kill a command and the descendants it launched, such as test runners behind npm/Gradle."""
-    if sys.platform == "win32":
+    POSIX commands lead their own session and process group. Windows commands start suspended
+    inside a job object, so every descendant is contained before the command can launch one.
+    """
+    job: WindowsJob | None = WindowsJob.create() if sys.platform == "win32" else None
+    try:
+        process = subprocess.Popen(
+            list(command),
+            cwd=cwd,
+            stdin=subprocess.PIPE if input_text is not None else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=dict(env) if env is not None else None,
+            shell=False,
+            start_new_session=sys.platform != "win32",
+            creationflags=CREATE_SUSPENDED if job is not None else 0,
+        )
+    except BaseException:
+        if job is not None:
+            job.close()
+        raise
+    if job is not None:
+        created_job = job
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                capture_output=True,
-                timeout=_TASKKILL_TIMEOUT_SECONDS,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            logger.warning(
-                "[command] Could not terminate process tree %s", process.pid, exc_info=True
-            )
+            if not created_job.adopt_suspended(process.pid):
+                # Fall back to taskkill, which reaches descendants only through a live root.
+                created_job.close()
+                job = None
+        except BaseException:
+            created_job.close()
+            # It never ran, so it launched nothing; closing the pipes needs only this process.
+            try:
+                process.kill()
+            except OSError:
+                pass
+            process.communicate()
+            raise
+    return process, job
+
+
+def _terminate_process_tree(process: subprocess.Popen[str], job: WindowsJob | None) -> bool:
+    """Kill a command and the descendants it launched, such as test runners behind npm/Gradle.
+
+    Returns whether every descendant is known to have been stopped.
+    """
+    if job is not None:
+        stopped = job.terminate(wait_seconds=_POST_KILL_DRAIN_SECONDS)
+    elif sys.platform == "win32":
+        stopped = _taskkill_process_tree(process.pid)
     else:
         try:
+            # The group outlives its leader, so this also reaches orphaned descendants.
             os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+            stopped = True
+        except ProcessLookupError:
+            stopped = True
+        except PermissionError:
+            logger.warning("[command] Could not terminate process group %s", process.pid)
+            stopped = False
     try:
         process.kill()
     except OSError:
         pass
+    return stopped
+
+
+def _taskkill_process_tree(pid: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+            timeout=_TASKKILL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.warning("[command] Could not terminate process tree %s", pid, exc_info=True)
+        return False
+    if result.returncode != 0:
+        # Typically the launched command already exited; descendants it left are unreachable.
+        logger.warning(
+            "[command] taskkill could not terminate process tree %s (exit %s)",
+            pid,
+            result.returncode,
+        )
+        return False
+    return True
 
 
 def _drain_terminated_process(
     process: subprocess.Popen[str],
-) -> tuple[bytes | str | None, bytes | str | None]:
-    """Collect output produced before termination and reap the command, with a bounded wait."""
+) -> tuple[bytes | str | None, bytes | str | None, bool]:
+    """Collect output produced before termination and reap the command, with a bounded wait.
+
+    The final flag reports whether every output pipe closed and the command was reaped.
+    """
     try:
         stdout, stderr = process.communicate(timeout=_POST_KILL_DRAIN_SECONDS)
-        return stdout, stderr
+        return stdout, stderr, True
     except subprocess.TimeoutExpired as exc:
         # A descendant outside the terminated tree still holds an output pipe. Keep what was read
-        # so far and stop waiting so the timeout still reaches the caller.
+        # so far and stop waiting.
         logger.warning(
             "[command] Output stayed open after terminating timed-out process %s", process.pid
         )
@@ -103,7 +161,7 @@ def _drain_terminated_process(
             process.wait(timeout=_POST_KILL_DRAIN_SECONDS)
         except subprocess.TimeoutExpired:
             logger.warning("[command] Timed-out process %s did not exit", process.pid)
-        return exc.stdout, exc.stderr
+        return exc.stdout, exc.stderr, False
 
 
 def _run_process(
@@ -117,20 +175,27 @@ def _run_process(
     """Run a command; on timeout, terminate its whole process tree before raising.
 
     ``subprocess.run`` kills only the launched process and then waits without a bound for its
-    output pipes, which a surviving child can hold open indefinitely.
+    output pipes, which a surviving child can hold open indefinitely. A timeout is reported as
+    ``TimeoutExpired`` only once the tree is confirmed stopped, since callers may then act in the
+    same working directory; otherwise ``_ProcessTreeSurvivedError`` is raised.
     """
-    process = _start_process(command, cwd=cwd, input_text=input_text, env=env)
+    process, job = _start_process(command, cwd=cwd, input_text=input_text, env=env)
     try:
         stdout, stderr = process.communicate(input_text, timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
-        _terminate_process_tree(process)
-        partial_stdout, partial_stderr = _drain_terminated_process(process)
+        stopped = _terminate_process_tree(process, job)
+        partial_stdout, partial_stderr, drained = _drain_terminated_process(process)
+        if not (stopped and drained):
+            raise _ProcessTreeSurvivedError from None
         raise subprocess.TimeoutExpired(
             list(command), timeout_seconds, output=partial_stdout, stderr=partial_stderr
         ) from None
     except BaseException:
-        _terminate_process_tree(process)
+        _terminate_process_tree(process, job)
         raise
+    finally:
+        if job is not None:
+            job.close()
     return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)
 
 
@@ -208,6 +273,13 @@ class CommandClient:
                 stdout=_partial_output(exc.stdout),
                 stderr=_partial_output(exc.stderr),
                 duration_seconds=time.monotonic() - started,
+            ) from exc
+        except _ProcessTreeSurvivedError as exc:
+            # Deliberately not a CommandTimeoutError: callers must not treat this as a completed,
+            # correctable failure while part of the command may still be running.
+            raise CommandExecutionError(
+                f"Command timed out after {timeout_seconds}s and its process tree could not be "
+                f"confirmed terminated: {format_command(command)}"
             ) from exc
         except OSError as exc:
             raise CommandExecutionError(f"Cannot execute {format_command(command)}: {exc}") from exc
