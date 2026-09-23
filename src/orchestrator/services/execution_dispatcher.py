@@ -3,8 +3,8 @@
 Every workflow execution — fresh runs, human-response resumes, and manual
 continuations alike — is submitted here and returns an :class:`ExecutionHandle`
 before it completes. Synchronous commands simply wait on the handle, while
-future batch/scheduling/continuous/label-selection features are expected to
-submit through this same seam instead of adding their own concurrency handling.
+batches and future scheduling features submit through the same seam instead
+of adding their own concurrency handling.
 
 Queueing is in-memory and single-process by design. The execution row for
 queued work is already persisted as ``PENDING``, but automatic recovery of
@@ -89,6 +89,7 @@ class _Job:
     execution_id: str
     run: ExecutionWork
     on_dropped: ExecutionWork | None
+    ready: Callable[[], bool] | None = None
     outcome: _Outcome = field(default_factory=_Outcome)
 
 
@@ -131,10 +132,11 @@ class ExecutionDispatcher:
         run: ExecutionWork,
         *,
         on_dropped: ExecutionWork | None = None,
+        ready: Callable[[], bool] | None = None,
     ) -> ExecutionHandle:
         """Queue already-persisted work and return its handle immediately."""
 
-        job = _Job(execution_id=execution_id, run=run, on_dropped=on_dropped)
+        job = _Job(execution_id=execution_id, run=run, on_dropped=on_dropped, ready=ready)
         with self._condition:
             if self._shutdown:
                 raise RuntimeError("The execution dispatcher is shut down")
@@ -143,6 +145,12 @@ class ExecutionDispatcher:
             self._start_worker_if_needed()
             self._condition.notify()
         return ExecutionHandle(execution_id, job.outcome)
+
+    def reevaluate(self) -> None:
+        """Wake workers after admission predicates may have changed."""
+
+        with self._condition:
+            self._condition.notify_all()
 
     def cancel(self, execution_id: str) -> bool:
         """Remove still-queued work so it never starts a stage.
@@ -200,11 +208,20 @@ class ExecutionDispatcher:
     def _work(self) -> None:
         while True:
             with self._condition:
-                while not self._queue and not self._shutdown:
+                while True:
+                    if not self._queue and self._shutdown:
+                        return
+                    job = next(
+                        (candidate for candidate in self._queue
+                         if candidate.ready is None or candidate.ready()),
+                        None,
+                    )
+                    if job is not None:
+                        self._queue.remove(job)
+                        break
+                    if self._shutdown:
+                        return
                     self._condition.wait()
-                if not self._queue:
-                    return
-                job = self._queue.popleft()
                 self._busy += 1
             try:
                 job.outcome.set(job.run())

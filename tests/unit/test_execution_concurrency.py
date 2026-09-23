@@ -14,11 +14,13 @@ import pytest
 
 from orchestrator.models.agent import AgentRequest, AgentResult
 from orchestrator.models.workflow_execution import WorkflowExecution
+from orchestrator.providers.agent_provider import AgentProviderError
 from orchestrator.providers.concurrency import (
     ConcurrencyLimitedAgentProvider,
     ProviderConcurrencyCoordinator,
     ProviderSlotCancelled,
 )
+from orchestrator.providers.fallback_provider import FallbackAgentProvider
 from orchestrator.services.execution_dispatcher import ExecutionDispatcher
 
 # Every blocking wait in this module is bounded so a regression fails the suite
@@ -70,6 +72,89 @@ class _RecordingProvider:
 
 def _request(title: str = "work") -> AgentRequest:
     return AgentRequest(instructions="do the thing", title=title)
+
+
+def test_dispatcher_skips_held_jobs_and_reevaluates_in_fifo_order() -> None:
+    dispatcher = ExecutionDispatcher(max_workers=1)
+    ready = False
+    completed: list[str] = []
+
+    def run(name: str) -> WorkflowExecution:
+        completed.append(name)
+        return WorkflowExecution(id=name)
+
+    first = dispatcher.submit("first", lambda: run("first"), ready=lambda: ready)
+    second = dispatcher.submit("second", lambda: run("second"))
+    third = dispatcher.submit("third", lambda: run("third"))
+    assert second.result(TIMEOUT).id == "second"
+    assert third.result(TIMEOUT).id == "third"
+    assert not first.done()
+    ready = True
+    dispatcher.reevaluate()
+    assert first.result(TIMEOUT).id == "first"
+    assert completed == ["second", "third", "first"]
+    dispatcher.shutdown()
+
+
+def test_dispatcher_cancels_held_job_without_running_it() -> None:
+    dispatcher = ExecutionDispatcher(max_workers=1)
+    ran = False
+    dropped = False
+
+    def run() -> WorkflowExecution:
+        nonlocal ran
+        ran = True
+        return WorkflowExecution(id="held")
+
+    def on_dropped() -> WorkflowExecution:
+        nonlocal dropped
+        dropped = True
+        return WorkflowExecution(id="held")
+
+    handle = dispatcher.submit("held", run, ready=lambda: False, on_dropped=on_dropped)
+    assert dispatcher.cancel("held")
+    assert handle.result(TIMEOUT).id == "held"
+    assert dropped and not ran
+    dispatcher.shutdown()
+
+
+def test_concurrency_wrapper_attributes_provider_errors() -> None:
+    provider = _RecordingProvider()
+    error = AgentProviderError("quota", category="quota")
+    provider.error = error
+    wrapped = ConcurrencyLimitedAgentProvider(
+        provider, provider_name="primary", coordinator=ProviderConcurrencyCoordinator()
+    )
+    with pytest.raises(AgentProviderError) as raised:
+        wrapped.execute(_request())
+    assert raised.value.provider_name == "primary"
+
+    existing = AgentProviderError("quota", category="quota", provider_name="fallback")
+    provider.error = existing
+    with pytest.raises(AgentProviderError) as raised:
+        wrapped.execute(_request())
+    assert raised.value.provider_name == "fallback"
+
+
+def test_fallback_failure_is_attributed_to_fallback_provider() -> None:
+    coordinator = ProviderConcurrencyCoordinator()
+    primary = _RecordingProvider()
+    primary.error = AgentProviderError("quota", category="quota")
+    backup = _RecordingProvider()
+    backup.error = AgentProviderError("backup quota", category="quota")
+    provider = FallbackAgentProvider(
+        ConcurrencyLimitedAgentProvider(
+            primary, provider_name="primary", coordinator=coordinator
+        ),
+        lambda: ConcurrencyLimitedAgentProvider(
+            backup, provider_name="backup", coordinator=coordinator
+        ),
+        on_fallback=lambda error: None,
+    )
+
+    with pytest.raises(AgentProviderError) as raised:
+        provider.execute(_request())
+    assert raised.value.provider_name == "backup"
 
 
 def test_default_ceiling_is_one_and_serializes_a_provider(threads) -> None:

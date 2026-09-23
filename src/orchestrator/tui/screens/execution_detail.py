@@ -16,7 +16,11 @@ from textual.widgets import Button, Static, TextArea
 
 from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
 from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import ACTIVE_WORKFLOW_STATUSES, WorkflowStatus
+from orchestrator.models.workflow_status import (
+    ACTIVE_WORKFLOW_STATUSES,
+    WorkflowStage,
+    WorkflowStatus,
+)
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.runtime_logging import redact_payload
 from orchestrator.tui.bridge import WorkflowController
@@ -125,7 +129,12 @@ class ExecutionDetailScreen(Screen[None]):
     @work(thread=True, exclusive=True)
     def _resume_execution(self, response: str) -> None:
         try:
-            execution = self.controller.respond_and_resume(self.execution_id, response)
+            in_batch = self.controller.execution_in_live_batch(self.execution_id)
+            if in_batch:
+                self.controller.submit_response(self.execution_id, response)
+                execution, _ = self.controller.execution_detail(self.execution_id)
+            else:
+                execution = self.controller.respond_and_resume(self.execution_id, response)
             _, steps = self.controller.execution_detail(self.execution_id)
             diagnostics = self.controller.execution_diagnostics(self.execution_id)
         except Exception as exc:
@@ -134,11 +143,20 @@ class ExecutionDetailScreen(Screen[None]):
             )
             return
         self.app.call_from_thread(self._render_execution, execution, steps, diagnostics)
+        if in_batch:
+            self.app.call_from_thread(
+                self.notify, "Response submitted; the task rejoined the batch queue."
+            )
 
     @work(thread=True, exclusive=True)
     def _continue_execution(self, feedback: str) -> None:
         try:
-            execution = self.controller.continue_execution(self.execution_id, feedback)
+            in_batch = self.controller.execution_in_live_batch(self.execution_id)
+            if in_batch:
+                self.controller.submit_continuation(self.execution_id, feedback)
+                execution, _ = self.controller.execution_detail(self.execution_id)
+            else:
+                execution = self.controller.continue_execution(self.execution_id, feedback)
             _, steps = self.controller.execution_detail(self.execution_id)
             diagnostics = self.controller.execution_diagnostics(self.execution_id)
         except Exception as exc:
@@ -148,6 +166,10 @@ class ExecutionDetailScreen(Screen[None]):
             self.app.call_from_thread(self._reenable_continue_button)
             return
         self.app.call_from_thread(self._render_execution, execution, steps, diagnostics)
+        if in_batch:
+            self.app.call_from_thread(
+                self.notify, "Continuation submitted; the task rejoined the batch queue."
+            )
 
     def _reenable_continue_button(self) -> None:
         self.query_one("#execution-continue", Button).disabled = False
@@ -204,11 +226,8 @@ class ExecutionDetailScreen(Screen[None]):
             response.text = ""
             self.query_one("#execution-resume", Button).disabled = True
 
-        continuation_eligible = execution.status.value == "CHANGES_REQUESTED" or (
-            execution.status.value == "FAILED"
-            and execution.workspace_path is not None
-            and execution.working_branch is not None
-        )
+        continuation_stage = self.controller.continuation_stage(execution)
+        continuation_eligible = continuation_stage is not None
         for widget_id in (
             "execution-continuation-title",
             "execution-continuation-feedback",
@@ -217,8 +236,9 @@ class ExecutionDetailScreen(Screen[None]):
             self.query_one(f"#{widget_id}").display = continuation_eligible
         if continuation_eligible:
             feedback = self.query_one("#execution-continuation-feedback", TextArea)
+            role = "planner" if continuation_stage is WorkflowStage.GENERATE_SPEC else "implementer"
             self.query_one("#execution-continuation-title", Static).update(
-                "Edit the feedback sent to a fresh implementer invocation:"
+                f"Edit the feedback sent to a fresh {role} invocation:"
             )
             try:
                 feedback.text = self.controller.continuation_feedback(execution.id)

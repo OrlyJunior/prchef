@@ -5,7 +5,7 @@ import logging
 import re
 import threading
 import unicodedata
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -99,6 +99,25 @@ _STAGE_LABELS = {
 _RUNTIME_OVERRIDES_DIAGNOSTIC_KIND = "RUNTIME_OVERRIDES_APPLIED"
 _PROVIDER_WAIT_DIAGNOSTIC_KIND = "PROVIDER_SLOT_WAIT"
 _PROVIDER_ADMITTED_DIAGNOSTIC_KIND = "PROVIDER_SLOT_ADMITTED"
+_QUOTA_EXHAUSTED_DIAGNOSTIC_KIND = "PROVIDER_QUOTA_EXHAUSTED"
+_MANUAL_CONTINUATION_DIAGNOSTIC_KIND = "MANUAL_CONTINUATION"
+
+
+def _latest_failure_was_quota(diagnostics: Sequence[ExecutionDiagnostic]) -> bool:
+    """Whether the newest quota/continuation marker is a quota exhaustion.
+
+    A continuation records its own marker, so a quota failure that was already
+    continued does not make a later, ordinary failure eligible again.
+    """
+    for diagnostic in reversed(diagnostics):
+        if diagnostic.category is not DiagnosticCategory.WORKFLOW_EVENT:
+            continue
+        kind = diagnostic.payload.get("kind")
+        if kind == _QUOTA_EXHAUSTED_DIAGNOSTIC_KIND:
+            return True
+        if kind == _MANUAL_CONTINUATION_DIAGNOSTIC_KIND:
+            return False
+    return False
 
 
 @dataclass(slots=True)
@@ -208,6 +227,7 @@ class WorkflowService:
         agent_providers: Mapping[AgentRole, str] | None = None,
         agent_runtime_options: Mapping[AgentRole, Mapping[str, object]] | None = None,
         event_listener: WorkflowEventListener | None = None,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> ExecutionHandle:
         """Persist a fresh execution and queue it for bounded admission.
 
@@ -245,6 +265,7 @@ class WorkflowService:
             lambda: self._execute_workflow(
                 execution, task_id, repository_override, provider_overrides, runtime_overrides
             ),
+            admission_gate=admission_gate,
         )
 
     def run(
@@ -267,7 +288,8 @@ class WorkflowService:
         ).result()
 
     def _submit(
-        self, execution_id: str, work: Callable[[], WorkflowExecution]
+        self, execution_id: str, work: Callable[[], WorkflowExecution], *,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> ExecutionHandle:
         """Queue already-persisted work and clean its runtime up afterwards."""
 
@@ -283,7 +305,9 @@ class WorkflowService:
             finally:
                 self._end_runtime(execution_id)
 
-        return self._dispatcher.submit(execution_id, run_job, on_dropped=drop_job)
+        return self._dispatcher.submit(
+            execution_id, run_job, on_dropped=drop_job, ready=admission_gate
+        )
 
     def _start_admitted(self, execution_id: str) -> None:
         """Move admitted work from the queue into a genuinely running state."""
@@ -604,6 +628,7 @@ class WorkflowService:
             return result
         except Exception as exc:
             self._repository.record_error(execution.id, str(exc))
+            self._record_quota_failure(execution.id, exc)
             result = self._finish(execution.id, WorkflowStatus.FAILED, config)
             if workspace_path is not None:
                 logger.error(
@@ -617,6 +642,7 @@ class WorkflowService:
         response: str,
         *,
         event_listener: WorkflowEventListener | None = None,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> ExecutionHandle:
         """Persist a human response and queue the same execution for admission.
 
@@ -634,6 +660,7 @@ class WorkflowService:
         return self._submit(
             execution_id,
             lambda: self._execute_response(execution, interaction, response),
+            admission_gate=admission_gate,
         )
 
     def respond_and_resume(
@@ -722,12 +749,17 @@ class WorkflowService:
             )
         except Exception as exc:
             self._repository.record_error(execution_id, str(exc))
+            self._record_quota_failure(execution_id, exc)
             return self._finish(execution_id, WorkflowStatus.FAILED, config)
 
     def continuation_feedback(self, execution_id: str) -> str:
         """Return the editable feedback shown before a terminal execution is continued."""
         execution = self._repository.get_execution(execution_id)
-        self._assert_continuation_eligible(execution)
+        if self._assert_continuation_eligible(execution) is WorkflowStage.GENERATE_SPEC:
+            return (
+                "Planning stopped because the provider's quota was exhausted before a "
+                "workspace was created. Repeat planning now that the provider is available."
+            )
         if execution.status is WorkflowStatus.CHANGES_REQUESTED:
             if not execution.review_snapshot:
                 raise WorkflowError("Cannot continue: the terminal review output was not persisted")
@@ -751,19 +783,17 @@ class WorkflowService:
         feedback: str,
         *,
         event_listener: WorkflowEventListener | None = None,
+        admission_gate: Callable[[], bool] | None = None,
     ) -> ExecutionHandle:
         """Validate a manual continuation, then queue it for bounded admission."""
 
         if not feedback.strip():
             raise ValueError("Continuation feedback must not be empty")
         execution = self._repository.get_execution(execution_id)
-        self._assert_continuation_eligible(execution)
+        stage = self._assert_continuation_eligible(execution)
         task = self._task_from_snapshot(execution)
-        if not execution.spec_snapshot:
+        if stage is WorkflowStage.IMPLEMENT and not execution.spec_snapshot:
             raise WorkflowError("Cannot continue: the original repository spec was not persisted")
-        assert execution.workspace_path is not None and execution.working_branch is not None
-        workspace_path = Path(execution.workspace_path)
-        working_branch = execution.working_branch
         config = self._config_loader.load(
             task, execution.repository_ref or execution.repository or None
         )
@@ -773,6 +803,26 @@ class WorkflowService:
         if provider_overrides or runtime_overrides:
             config = config.with_agent_runtime_overrides(provider_overrides, runtime_overrides)
         clients = self._client_factory.create(config)
+        if stage is WorkflowStage.GENERATE_SPEC:
+            # No workspace exists yet, so there is nothing to verify: planning
+            # runs again and creates the workspace exactly as a fresh run would.
+            self._begin_runtime(execution_id, event_listener)
+            self._record_diagnostic(
+                execution_id,
+                DiagnosticCategory.WORKFLOW_EVENT,
+                {"kind": _MANUAL_CONTINUATION_DIAGNOSTIC_KIND, "feedback": feedback},
+                stage=WorkflowStage.GENERATE_SPEC,
+            )
+            self._queue_resumed(execution_id)
+            return self._submit(
+                execution_id,
+                lambda: self._execute_planning_retry(execution, task, config, clients, feedback),
+                admission_gate=admission_gate,
+            )
+        assert execution.workspace_path is not None and execution.working_branch is not None
+        assert execution.spec_snapshot
+        workspace_path = Path(execution.workspace_path)
+        working_branch = execution.working_branch
         execution_clients = clients.at_path(workspace_path)
         # Do this before changing status or queueing the implementer: a human
         # can safely correct a missing/moved worktree and try again.
@@ -781,7 +831,7 @@ class WorkflowService:
         self._record_diagnostic(
             execution_id,
             DiagnosticCategory.WORKFLOW_EVENT,
-            {"kind": "MANUAL_CONTINUATION", "feedback": feedback},
+            {"kind": _MANUAL_CONTINUATION_DIAGNOSTIC_KIND, "feedback": feedback},
             stage=WorkflowStage.IMPLEMENT,
         )
         self._queue_resumed(execution_id)
@@ -798,6 +848,7 @@ class WorkflowService:
                 working_branch,
                 feedback,
             ),
+            admission_gate=admission_gate,
         )
 
     def continue_execution(
@@ -843,6 +894,53 @@ class WorkflowService:
             force_polish=True,
         )
 
+    def _execute_planning_retry(
+        self,
+        execution: WorkflowExecution,
+        task: DevelopmentTask,
+        config: ProjectConfig,
+        clients: WorkflowClients,
+        feedback: str,
+    ) -> WorkflowExecution:
+        execution_id = execution.id
+        try:
+            self._start_admitted(execution_id)
+        except WorkflowCancelledError:
+            return self._finish(execution_id, WorkflowStatus.CANCELLED, config)
+        try:
+            repository_slug = clients.git.github_repository()
+            repository_context_strategy = self._repository_context_strategy(config)
+            # Earlier answers still apply to the repeated planning attempt.
+            clarified_task = self._task_with_responses(
+                task,
+                [
+                    *(
+                        (item.prompt, item.response)
+                        for item in execution.human_interactions
+                        if item.response
+                    ),
+                    ("Continuation feedback for repeating planning:", feedback.strip()),
+                ],
+            )
+            return self._resume_planning(
+                execution,
+                clarified_task,
+                config,
+                clients,
+                repository_slug,
+                repository_context_strategy,
+            )
+        except WorkflowCancelledError:
+            return self._finish(execution_id, WorkflowStatus.CANCELLED, config)
+        except AgentNeedsHumanError as exc:
+            return self._pause_for_human(
+                execution_id, WorkflowStage.GENERATE_SPEC, str(exc), config
+            )
+        except Exception as exc:
+            self._repository.record_error(execution_id, str(exc))
+            self._record_quota_failure(execution_id, exc)
+            return self._finish(execution_id, WorkflowStatus.FAILED, config)
+
     def _queue_resumed(self, execution_id: str) -> None:
         """Park a resumed or continued execution in the shared submission queue."""
 
@@ -861,17 +959,39 @@ class WorkflowService:
         )
 
     @staticmethod
-    def _assert_continuation_eligible(execution: WorkflowExecution) -> None:
-        eligible_failed = (
-            execution.status is WorkflowStatus.FAILED
-            and execution.workspace_path is not None
-            and execution.working_branch is not None
+    def continuation_stage(
+        execution: WorkflowExecution,
+        diagnostics: Callable[[], Sequence[ExecutionDiagnostic]],
+    ) -> WorkflowStage | None:
+        """Return where a manual continuation restarts, or ``None`` if it cannot.
+
+        Continuations normally re-enter implementation in the retained
+        workspace. A provider quota failure during planning happens before any
+        workspace exists, so continuing it repeats planning instead. Diagnostics
+        are only loaded for that case.
+        """
+        if execution.status is WorkflowStatus.CHANGES_REQUESTED:
+            return WorkflowStage.IMPLEMENT
+        if execution.status is not WorkflowStatus.FAILED:
+            return None
+        if execution.workspace_path is not None and execution.working_branch is not None:
+            return WorkflowStage.IMPLEMENT
+        if execution.workspace_path is None and _latest_failure_was_quota(diagnostics()):
+            return WorkflowStage.GENERATE_SPEC
+        return None
+
+    def _assert_continuation_eligible(self, execution: WorkflowExecution) -> WorkflowStage:
+        list_diagnostics = getattr(self._repository, "list_diagnostics", None)
+        stage = self.continuation_stage(
+            execution,
+            lambda: list_diagnostics(execution.id) if callable(list_diagnostics) else [],
         )
-        if execution.status is WorkflowStatus.CHANGES_REQUESTED or eligible_failed:
-            return
+        if stage is not None:
+            return stage
         raise WorkflowError(
-            "Only CHANGES_REQUESTED executions, or FAILED executions with a retained "
-            "workspace and branch, can be continued"
+            "Only CHANGES_REQUESTED executions, FAILED executions with a retained "
+            "workspace and branch, or executions whose planning hit a provider quota "
+            "can be continued"
         )
 
     def _resume_planning(
@@ -1253,7 +1373,31 @@ class WorkflowService:
             )
         except Exception as exc:
             self._repository.record_error(execution_id, str(exc))
+            self._record_quota_failure(execution_id, exc)
             return self._finish(execution_id, WorkflowStatus.FAILED, config)
+
+    def _record_quota_failure(self, execution_id: str, exc: Exception) -> None:
+        if not isinstance(exc, AgentProviderError) or exc.category != "quota":
+            return
+        if not exc.provider_name:
+            return
+        try:
+            stage = self._repository.get_execution(execution_id).current_stage
+        except Exception:
+            stage = None
+        stage_roles = {
+            WorkflowStage.GENERATE_SPEC: AgentRole.PLANNER,
+            WorkflowStage.IMPLEMENT: AgentRole.IMPLEMENTER,
+            WorkflowStage.POLISH: AgentRole.IMPLEMENTER,
+            WorkflowStage.REVIEW: AgentRole.REVIEWER,
+        }
+        role = stage_roles.get(stage) if stage is not None else None
+        payload = {"kind": _QUOTA_EXHAUSTED_DIAGNOSTIC_KIND, "provider": exc.provider_name}
+        if role is not None:
+            payload["role"] = role.value
+        self._record_diagnostic(
+            execution_id, DiagnosticCategory.WORKFLOW_EVENT, payload, stage=stage, role=role
+        )
 
     def _pause_for_human(
         self,

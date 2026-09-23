@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from orchestrator.models.agent import AgentRole
-from orchestrator.models.execution_diagnostic import DiagnosticCategory
+from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
 from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
@@ -61,11 +61,15 @@ class _Controller:
     def __init__(self) -> None:
         self.executions: dict[str, tuple[WorkflowExecution, list[WorkflowStep]]] = {}
         self.errors: dict[str, Exception] = {}
+        self.diagnostics: dict[str, list[ExecutionDiagnostic]] = {}
 
     def execution_detail(self, execution_id: str) -> tuple[WorkflowExecution, list[WorkflowStep]]:
         if execution_id in self.errors:
             raise self.errors[execution_id]
         return self.executions[execution_id]
+
+    def execution_diagnostics(self, execution_id: str) -> list[ExecutionDiagnostic]:
+        return self.diagnostics.get(execution_id, [])
 
 
 def test_unlinked_items_render_as_queued_in_original_order() -> None:
@@ -99,8 +103,8 @@ def test_execution_created_links_the_row_and_resets_its_timeline() -> None:
     assert rows[1].execution_id is None
 
 
-def test_waiting_event_holds_only_later_unsubmitted_rows() -> None:
-    progress = LiveBatchProgress(_batch(3))
+def test_waiting_event_does_not_hold_queued_rows() -> None:
+    progress = LiveBatchProgress(_batch(3), required_providers=frozenset({"jules"}))
     progress.apply(
         WorkflowEvent(
             execution_id="execution-1",
@@ -115,13 +119,13 @@ def test_waiting_event_holds_only_later_unsubmitted_rows() -> None:
     rows = progress.rows()
     assert rows[0].category == "WAITING"
     assert rows[0].status_label == "WAITING FOR AGENT (jules)"
-    assert rows[1].held_by_provider == "jules"
-    assert rows[1].status_label == "QUEUED — held by jules"
-    assert rows[2].held_by_provider == "jules"
+    assert rows[1].held_by_provider is None
+    assert rows[1].status_label == "QUEUED"
+    assert rows[2].held_by_provider is None
 
 
-def test_provider_hold_clears_on_admission() -> None:
-    progress = LiveBatchProgress(_batch(2))
+def test_quota_hold_clears_when_provider_is_available() -> None:
+    progress = LiveBatchProgress(_batch(2), required_providers=frozenset({"jules"}))
     progress.apply(
         WorkflowEvent(
             execution_id="execution-1",
@@ -132,16 +136,19 @@ def test_provider_hold_clears_on_admission() -> None:
     progress.apply(
         _status_event("execution-1", WorkflowStatus.WAITING, position=0, provider="jules")
     )
-    progress.apply(_status_event("execution-1", WorkflowStatus.RUNNING, position=0))
+    progress.set_unavailable_providers({"jules"})
 
     rows = progress.rows()
-    assert rows[0].category == "RUNNING"
+    assert rows[0].category == "WAITING"
+    assert rows[1].held_by_provider == "jules"
+    progress.set_unavailable_providers(set())
+    rows = progress.rows()
     assert rows[1].held_by_provider is None
     assert rows[1].status_label == "QUEUED"
 
 
-def test_provider_hold_clears_on_terminal_status_without_admission() -> None:
-    progress = LiveBatchProgress(_batch(2))
+def test_quota_hold_survives_other_item_terminal_status() -> None:
+    progress = LiveBatchProgress(_batch(2), required_providers=frozenset({"jules"}))
     progress.apply(
         WorkflowEvent(
             execution_id="execution-1",
@@ -152,6 +159,7 @@ def test_provider_hold_clears_on_terminal_status_without_admission() -> None:
     progress.apply(
         _status_event("execution-1", WorkflowStatus.WAITING, position=0, provider="jules")
     )
+    progress.set_unavailable_providers({"jules"})
     progress.apply(
         _status_event(
             "execution-1",
@@ -161,7 +169,37 @@ def test_provider_hold_clears_on_terminal_status_without_admission() -> None:
         )
     )
 
-    assert progress.rows()[1].held_by_provider is None
+    assert progress.rows()[1].held_by_provider == "jules"
+
+
+def test_quota_timeline_and_batch_actions_survive_resume() -> None:
+    progress = LiveBatchProgress(_batch(2), required_providers=frozenset({"jules"}))
+    progress.apply(
+        WorkflowEvent(
+            execution_id="execution-1",
+            kind=WorkflowEventKind.EXECUTION_CREATED,
+            payload={"batch_position": 0},
+        )
+    )
+    progress.apply(
+        WorkflowEvent(
+            execution_id="execution-1",
+            kind=WorkflowEventKind.DIAGNOSTIC,
+            payload={
+                "batch_position": 0,
+                "kind": "PROVIDER_QUOTA_EXHAUSTED",
+                "provider": "jules",
+            },
+        )
+    )
+    progress.apply(_status_event("execution-1", WorkflowStatus.NEEDS_HUMAN, position=0))
+    assert progress.rows()[0].action == "answer"
+    progress.apply(_status_event("execution-1", WorkflowStatus.PENDING, position=0))
+    assert progress.rows()[0].action is None
+    assert "Provider jules quota exhausted" in progress.rows()[0].timeline[0]
+    progress.set_continuation_eligible(0, True)
+    progress.apply(_status_event("execution-1", WorkflowStatus.FAILED, position=0))
+    assert progress.rows()[0].action == "continue"
 
 
 @pytest.mark.parametrize(
@@ -368,7 +406,37 @@ def test_persisted_row_uses_execution_status_and_step_timeline() -> None:
     assert row.category == "CHANGES_REQUESTED"
     assert row.status_label == "CHANGES_REQUESTED"
     assert row.stage_label == "Review"
+    assert row.action == "continue"
     assert row.timeline == ("✓ Changes implemented", "✗ Reviewing pull request failed: boom")
+
+
+def test_persisted_failed_row_only_offers_continue_with_retained_workspace() -> None:
+    controller = _Controller()
+    execution = WorkflowExecution(id="execution-1", status=WorkflowStatus.FAILED)
+    controller.executions[execution.id] = (execution, [])
+    item = WorkflowBatchItem(0, "task-1", "Task 1", execution.id)
+    assert persisted_row(item, controller).action is None  # type: ignore[arg-type]
+
+    execution.workspace_path = "worktree"
+    execution.working_branch = "branch"
+    execution.spec_snapshot = {"title": "Specification"}
+    assert persisted_row(item, controller).action == "continue"  # type: ignore[arg-type]
+
+
+def test_persisted_row_offers_continue_after_planning_quota_failure() -> None:
+    controller = _Controller()
+    execution = WorkflowExecution(id="execution-1", status=WorkflowStatus.FAILED)
+    controller.executions[execution.id] = (execution, [])
+    item = WorkflowBatchItem(0, "task-1", "Task 1", execution.id)
+    controller.diagnostics[execution.id] = [
+        ExecutionDiagnostic(
+            execution_id=execution.id,
+            category=DiagnosticCategory.WORKFLOW_EVENT,
+            payload={"kind": "PROVIDER_QUOTA_EXHAUSTED", "provider": "jules"},
+        )
+    ]
+
+    assert persisted_row(item, controller).action == "continue"  # type: ignore[arg-type]
 
 
 def test_persisted_row_reports_unavailable_execution_without_losing_the_task() -> None:

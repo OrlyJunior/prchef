@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from orchestrator.models.agent import AgentRequest, AgentResult, AgentStartedCallback
-from orchestrator.providers.agent_provider import AgentProvider
+from orchestrator.providers.agent_provider import AgentProvider, AgentProviderError
 
 DEFAULT_PROVIDER_CONCURRENCY = 1
 
@@ -265,6 +265,10 @@ class ConcurrencyLimitedAgentProvider:
             ):
                 self._check_cancellation()
                 return self._provider.execute(request, on_started=on_started)
+        except AgentProviderError as exc:
+            if exc.provider_name is None:
+                exc.provider_name = self._provider_name
+            raise
         except ProviderSlotCancelled:
             # The persisted cancellation request is authoritative; let the
             # workflow raise its own cancellation error from the same check.

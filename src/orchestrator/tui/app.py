@@ -130,6 +130,10 @@ class OrchestratorApp(App[None]):
     #workflow-events { margin-top: 1; color: $text-muted; }
     #batch-progress { margin-top: 1; height: auto; }
     .batch-progress-summary { text-style: bold; }
+    #batch-provider-availability { height: auto; margin-top: 1; }
+    .batch-provider-line { height: auto; width: 100%; margin-top: 1; }
+    .batch-provider-line Static { width: 100%; height: auto; }
+    .batch-provider-line Button { width: auto; max-width: 100%; }
     .batch-progress-note { margin-top: 1; color: $text-muted; }
     #batch-progress-rows { height: auto; margin-top: 1; }
     .batch-item-row {
@@ -147,6 +151,7 @@ class OrchestratorApp(App[None]):
     .batch-item-body Static { color: $text-muted; }
     .batch-item-log-actions { height: auto; margin-top: 1; }
     .batch-item-log-actions Button { width: auto; margin-right: 1; }
+    .batch-item-body > Button { width: auto; max-width: 100%; margin-top: 1; }
     .workflow-log-actions { height: auto; margin-top: 1; }
     .workflow-log-actions Button { width: auto; }
     #workflow-raw-events-title {

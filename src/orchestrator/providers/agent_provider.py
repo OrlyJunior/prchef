@@ -20,11 +20,13 @@ class AgentProviderError(RuntimeError):
         category: str = "unknown",
         retry_after_seconds: float | None = None,
         metadata: Mapping[str, Any] | None = None,
+        provider_name: str | None = None,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.retry_after_seconds = retry_after_seconds
         self.metadata = dict(metadata or {})
+        self.provider_name = provider_name
 
     @property
     def is_retryable_quota_failure(self) -> bool:
