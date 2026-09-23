@@ -2847,13 +2847,16 @@ def test_tui_creates_updates_and_switches_agent_instruction_files(tmp_path: Path
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
-        async with application.run_test() as pilot:
+        async with application.run_test(size=(80, 24)) as pilot:
             await pilot.press("i")
             assert isinstance(application.screen, AgentInstructionsScreen)
             screen = application.screen
             repository = screen.query_one("#agent-instructions-repository", OrchestratorSelect)
             repository.value = "example"
             await settle_tui(pilot)
+            for role in ("planner", "implementer", "reviewer"):
+                editor = screen.query_one(f"#{role}-instructions", TextArea)
+                assert editor.outer_size.height == 7
             assert "No PLANNER.md yet" in str(
                 screen.query_one("#planner-instructions-status", Static).renderable
             )

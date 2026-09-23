@@ -46,7 +46,9 @@ class AgentInstructionsScreen(Screen[None]):
                     ("reviewer", "Reviewer instructions (REVIEWER.md)"),
                 ):
                     yield Static(label, classes="field-label")
-                    yield TextArea("", id=f"{role}-instructions")
+                    yield TextArea(
+                        "", id=f"{role}-instructions", classes="agent-instructions-editor"
+                    )
                     with Horizontal(classes="screen-actions"):
                         yield Button(
                             f"Save {role.title()} instructions",
