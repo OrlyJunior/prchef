@@ -129,6 +129,11 @@ class BatchDetailScreen(Screen[None]):
 
         self.app.push_screen(ExecutionDetailScreen(execution_id))
 
+    def on_batch_item_row_action_requested(self, message: BatchItemRow.ActionRequested) -> None:
+        self.on_batch_item_row_open_execution_requested(
+            BatchItemRow.OpenExecutionRequested(message.position)
+        )
+
     def _execution_id(self, position: int) -> str | None:
         if self._batch is None:
             return None

@@ -1231,11 +1231,17 @@ class WorkflowRunnerScreen(Screen[None]):
             role: options.get("model") for role, options in launch.agent_runtime_options.items()
         }
         self._batch_progress = LiveBatchProgress(
-            batch, role_providers=launch.agent_providers, role_models=role_models
+            batch, role_providers=launch.agent_providers, role_models=role_models,
+            required_providers=self.controller.batch_required_providers(batch.id),
         )
         view = self.query_one("#batch-progress", BatchProgressView)
         view.set_rows(self._batch_progress.rows())
+        view.set_provider_availability({})
         view.display = True
+        self.query_one("#workflow-stop-actions", Horizontal).display = True
+        stop = self.query_one("#stop-workflow", Button)
+        stop.disabled = False
+        stop.label = "Stop batch"
         self.query_one("#workflow-progress", Static).update(
             f"Batch running: {len(batch.items)} task(s)."
         )
@@ -1308,22 +1314,73 @@ class WorkflowRunnerScreen(Screen[None]):
         assert progress is not None
         if event.kind is WorkflowEventKind.EXECUTION_CREATED:
             self._active_execution_id = event.execution_id
-        self._ensure_stop_controls_visible(event)
-        held_before = progress.held_provider
         position = progress.apply(event)
         if position is None:
             return
+        if (
+            event.kind is WorkflowEventKind.WORKFLOW_FINISHED
+            and event.status is WorkflowStatus.FAILED
+        ):
+            try:
+                execution, _ = self.controller.execution_detail(event.execution_id)
+            except Exception:
+                progress.set_continuation_eligible(position, False)
+            else:
+                progress.set_continuation_eligible(
+                    position, self.controller.continuation_stage(execution) is not None
+                )
         view = self.query_one("#batch-progress", BatchProgressView)
+        progress.set_unavailable_providers(
+            set(self.controller.batch_unavailable_providers(progress.batch_id))
+        )
         rows = progress.rows()
-        if progress.held_provider != held_before:
-            # A provider hold started or cleared: every still-queued row's
-            # "held by" annotation depends on this shared batch state, not
-            # just the row that triggered the change.
-            for row in rows:
-                view.update_row(row)
-        else:
-            view.update_row(rows[position])
-        view.update_summary(summarize(rows))
+        for row in rows:
+            view.update_row(row)
+        counts = summarize(rows)
+        view.update_summary(counts)
+        unavailable = self.controller.batch_unavailable_providers(progress.batch_id)
+        newly_unavailable = set(unavailable) - view.unavailable_providers
+        view.set_provider_availability({
+            provider: progress.held_count(provider) for provider in unavailable
+        })
+        # The availability controls sit below the launch form, usually out of
+        # view while a batch runs, so say when a provider starts holding tasks.
+        for provider in sorted(newly_unavailable):
+            self.notify(
+                f"Provider {provider} quota exhausted; queued tasks that use it are held. "
+                "Mark it available in the batch progress once its quota resets.",
+                severity="warning",
+            )
+        self.query_one("#workflow-progress", Static).update(
+            f"Batch running: {len(rows)} task(s) — {counts['NEEDS_HUMAN']} waiting for you."
+        )
+
+    def on_batch_progress_view_provider_available_requested(
+        self, message: BatchProgressView.ProviderAvailableRequested
+    ) -> None:
+        progress = self._batch_progress
+        if progress is None:
+            return
+        try:
+            self.controller.mark_batch_provider_available(progress.batch_id, message.provider)
+        except Exception as exc:
+            self.notify(f"Could not mark provider available: {exc}", severity="error")
+            return
+        progress.set_unavailable_providers(
+            set(self.controller.batch_unavailable_providers(progress.batch_id))
+        )
+        view = self.query_one("#batch-progress", BatchProgressView)
+        for row in progress.rows():
+            view.update_row(row)
+        view.set_provider_availability({
+            provider: progress.held_count(provider)
+            for provider in self.controller.batch_unavailable_providers(progress.batch_id)
+        })
+
+    def on_batch_item_row_action_requested(self, message: BatchItemRow.ActionRequested) -> None:
+        self.on_batch_item_row_open_execution_requested(
+            BatchItemRow.OpenExecutionRequested(message.position)
+        )
 
     def on_batch_item_row_show_logs_requested(
         self, message: BatchItemRow.ShowLogsRequested
@@ -1511,6 +1568,7 @@ class WorkflowRunnerScreen(Screen[None]):
             f"Batch finished: {linked_count} of {task_count} task(s) submitted."
         )
         self.query_one("#workflow-stop-actions", Horizontal).display = False
+        self.query_one("#batch-progress", BatchProgressView).set_provider_availability({})
         # Reconcile with durable storage once the batch stops running.
         # Existing rows are updated in place rather than rebuilt so an
         # operator's expanded rows and visible detailed logs are not disturbed.
@@ -1559,26 +1617,32 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#human-input-panel", Vertical).display = False
 
     def _request_stop_workflow(self) -> None:
-        if self._active_execution_id is None:
+        if self._active_execution_id is None and not self._batch_running:
             self.notify("No active workflow is available to stop.", severity="warning")
             return
         self.app.push_screen(StopWorkflowConfirmation(), self._confirm_stop_workflow)
 
     def _confirm_stop_workflow(self, confirmed: bool | None) -> None:
-        if not confirmed or self._active_execution_id is None:
+        if not confirmed:
+            return
+        if not self._batch_running and self._active_execution_id is None:
             return
         stop = self.query_one("#stop-workflow", Button)
         stop.disabled = True
         stop.label = "Cancellation requested"
         progress = self.query_one("#workflow-progress", Static)
         progress.update(
-            "Batch cancellation requested; no later tasks will start."
+            "Batch cancellation requested; no further tasks will start."
             if self._batch_running
             else "Cancellation requested; stopping after the current operation..."
         )
         progress.add_class("cancelled")
         try:
-            accepted = self.controller.cancel_workflow(self._active_execution_id)
+            if self._batch_running and self._batch_progress is not None:
+                accepted = self.controller.cancel_batch(self._batch_progress.batch_id)
+            else:
+                assert self._active_execution_id is not None
+                accepted = self.controller.cancel_workflow(self._active_execution_id)
         except Exception as exc:
             stop.disabled = False
             stop.label = "Stop workflow"
@@ -1590,12 +1654,9 @@ class WorkflowRunnerScreen(Screen[None]):
             self.notify("This workflow has already finished.", severity="warning")
             return
         if self._batch_running and self._batch_progress is not None:
-            self._batch_progress.mark_cancellation_requested(self._active_execution_id)
-            position = self._batch_progress.position_for_execution(self._active_execution_id)
-            if position is not None:
-                view = self.query_one("#batch-progress", BatchProgressView)
-                view.update_row(self._batch_progress.rows()[position])
-                view.update_summary(self._batch_progress.summary())
+            view = self.query_one("#batch-progress", BatchProgressView)
+            for row in self._batch_progress.rows():
+                view.update_row(row)
 
     def _resume_active_workflow(self) -> None:
         if self._active_execution_id is None:
