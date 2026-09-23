@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from orchestrator.clients.github_issue_client import GitHubIssueClient
 from orchestrator.clients.trello_client import TrelloClient
@@ -19,7 +19,21 @@ class TaskProvider(Protocol):
     ) -> str: ...
 
 
+@runtime_checkable
+class LabelCatalogProvider(Protocol):
+    """Optional task-provider capability: name the labels its tasks can carry.
+
+    Names are returned exactly as the provider spells them and match the
+    ``labels`` entries in browsed task metadata. A provider without this
+    method has no label filter; that is distinct from an empty catalog.
+    """
+
+    def list_labels(self) -> list[str]: ...
+
+
 class TrelloTaskProvider:
+    # Deliberately not a LabelCatalogProvider: it has no browsable task list
+    # to filter, so the launcher offers no label filter for it.
     source = "trello"
 
     def __init__(self, client: TrelloClient) -> None:
@@ -58,6 +72,11 @@ class GitHubIssueTaskProvider:
             self._to_task(issue, fallback_id=str(issue.get("number", "")))
             for issue in self._client.list_issues(self._repository, limit=limit)
         ]
+
+    def list_labels(self) -> list[str]:
+        names = self._label_names(self._client.list_labels(self._repository))
+        # Labels differing only in case are distinct names for exact matching.
+        return sorted(set(names), key=lambda name: (name.casefold(), name))
 
     def _to_task(self, issue: dict[str, Any], *, fallback_id: str) -> DevelopmentTask:
         labels = self._label_names(issue.get("labels"))

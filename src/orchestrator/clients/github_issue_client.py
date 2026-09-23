@@ -79,6 +79,30 @@ class GitHubIssueClient:
             raise GitHubClientError("GitHub CLI issue list response must be a JSON array")
         return payload
 
+    def list_labels(self, repository: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Return the repository's label catalog for interactive task filtering."""
+
+        normalized_repository = self._normalize_repository(repository)
+        if limit <= 0:
+            raise GitHubClientError("GitHub label list limit must be positive")
+        result = self._run(
+            "label",
+            "list",
+            "--repo",
+            normalized_repository,
+            "--limit",
+            str(limit),
+            "--json",
+            "name",
+        )
+        try:
+            payload = json.loads(result.stdout)
+        except (ValueError, TypeError) as exc:
+            raise GitHubClientError("GitHub CLI returned invalid label list JSON") from exc
+        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+            raise GitHubClientError("GitHub CLI label list response must be a JSON array")
+        return payload
+
     def _normalize_repository(self, repository: str) -> str:
         normalized_repository = repository.strip()
         if not self._REPOSITORY_PATTERN.fullmatch(normalized_repository):

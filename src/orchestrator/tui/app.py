@@ -60,6 +60,15 @@ class OrchestratorApp(App[None]):
     WorkflowRunnerScreen.-narrow .role-config-row { layout: vertical; }
     WorkflowRunnerScreen.-narrow .role-field { width: 100%; margin-right: 0; }
     #task-selector { height: auto; }
+    /* Label filter sits directly above the task table. Its list stays short
+       so the table remains reachable on a constrained terminal. */
+    #task-label-filter { height: auto; margin-top: 1; display: none; }
+    #task-label-filter-bar { width: 100%; height: auto; }
+    #task-label-filter-summary { width: 1fr; height: auto; padding: 1 1 0 0; }
+    #task-label-options { width: 100%; height: auto; }
+    #task-label-list { width: 100%; height: auto; max-height: 8; }
+    #task-label-status { height: auto; color: $text-muted; }
+    #task-label-status.-error { color: $error; }
     /* The task list reads as a table: a distinct select-all band, a column
        header, then one single-line row per task that clips instead of
        spilling past the terminal width. */

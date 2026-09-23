@@ -69,6 +69,15 @@
   show that status and remain unselectable, with inspection/resume delegated to execution history.
   Refresh, loading, empty, and inline-error states remain available, while explicit CLI task
   identifiers remain supported.
+- Label filtering is an optional task-provider capability (`LabelCatalogProvider.list_labels`),
+  implemented only by GitHub issues (`gh label list`); Trello deliberately lacks it.
+  `WorkflowController.list_task_labels` returns `None` for unsupported providers, distinct from an
+  empty catalog, and failures surface as an explicit inline label error rather than hiding the
+  filter. The launcher loads labels with tasks under the same request token, and filters only the
+  loaded list (the default 50-issue browse limit) in memory by exact, case-sensitive names with
+  AND semantics. Selections persist while hidden and still launch; the hint counts them. Select
+  all affects only shown rows without executions. Refresh keeps labels still in the catalog;
+  repository/provider changes and load failures clear the filter.
 - Batch policy is owned by `WorkflowController` and `WorkflowRepository`, not TUI widgets. A batch
   is persisted before its tasks are submitted in list order through `submit_execution`; it adds no
   concurrency limit beyond the shared dispatcher and per-provider ceilings. The dispatcher may skip

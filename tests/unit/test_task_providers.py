@@ -12,6 +12,7 @@ from orchestrator.clients.github_issue_client import GitHubIssueClient
 from orchestrator.models import DevelopmentTask
 from orchestrator.services.task_provider import (
     GitHubIssueTaskProvider,
+    LabelCatalogProvider,
     TrelloTaskProvider,
 )
 from tests.unit.fakes import FakeTrelloClient
@@ -43,6 +44,17 @@ class StubIssueClient:
     def list_issues(self, repository: str, *, limit: int = 50) -> list[dict[str, Any]]:
         assert limit == 50
         return [self.get_issue(repository, "42")]
+
+    def list_labels(self, repository: str) -> list[dict[str, Any]]:
+        assert repository == "owner/api"
+        return [
+            {"name": "bug"},
+            {"name": "Tester Agent"},
+            {"name": "Bug"},
+            {"name": "RAG"},
+            {"name": "bug"},
+            {"color": "ffffff"},
+        ]
 
 
 def test_trello_task_is_resolved_through_provider() -> None:
@@ -83,6 +95,21 @@ def test_github_issues_can_be_browsed_as_common_tasks() -> None:
 
     assert [task.id for task in tasks] == ["42"]
     assert tasks[0].title == "Add audit log"
+
+
+def test_github_provider_supplies_exact_label_catalog_names() -> None:
+    provider = GitHubIssueTaskProvider(StubIssueClient(), "owner/api")  # type: ignore[arg-type]
+
+    assert isinstance(provider, LabelCatalogProvider)
+    # Case-distinct names stay distinct; duplicates and nameless entries drop.
+    assert provider.list_labels() == ["Bug", "bug", "RAG", "Tester Agent"]
+
+
+def test_trello_provider_explicitly_lacks_label_filter_capability() -> None:
+    provider = TrelloTaskProvider(FakeTrelloClient())
+
+    assert not isinstance(provider, LabelCatalogProvider)
+    assert not hasattr(provider, "list_labels")
 
 
 def test_github_issue_client_uses_gh_and_reports_missing_issue(tmp_path: Path) -> None:
@@ -169,6 +196,44 @@ def test_github_issue_client_lists_open_issues_for_task_browser(tmp_path: Path) 
             "number,title,body,url,labels,state,author,milestone",
         ]
     ]
+
+
+def test_github_issue_client_lists_repository_label_catalog(tmp_path: Path) -> None:
+    commands = StubCommands(
+        CommandResult(
+            command=[],
+            exit_code=0,
+            stdout=json.dumps([{"name": "bug"}, {"name": "Batch Execution"}]),
+            stderr="",
+            duration_seconds=0.1,
+        )
+    )
+
+    client = GitHubIssueClient(commands, cwd=tmp_path)  # type: ignore[arg-type]
+    labels = client.list_labels("owner/api")
+
+    assert labels == [{"name": "bug"}, {"name": "Batch Execution"}]
+    assert commands.calls == [
+        [
+            "gh",
+            "label",
+            "list",
+            "--repo",
+            "owner/api",
+            "--limit",
+            "200",
+            "--json",
+            "name",
+        ]
+    ]
+
+
+def test_github_issue_client_reports_label_catalog_failure(tmp_path: Path) -> None:
+    commands = StubCommands(CommandResult([], 1, "", "HTTP 403: Forbidden", 0.1))
+    client = GitHubIssueClient(commands, cwd=tmp_path)  # type: ignore[arg-type]
+
+    with pytest.raises(GitHubClientError, match="403"):
+        client.list_labels("owner/api")
 
 
 @pytest.mark.parametrize("repository", ["owner", "https://github.com/owner/api", "owner/api/x"])
