@@ -24,6 +24,7 @@ from orchestrator.models.workflow_status import (
     WorkflowStatus,
 )
 from orchestrator.runtime_logging import redact_payload
+from orchestrator.services.workflow_service import WorkflowService
 from orchestrator.tui.workflow_presentation import (
     STAGE_ROLES,
     step_timeline_lines,
@@ -410,6 +411,7 @@ def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> Ba
             stage_label="",
         )
     timeline = step_timeline_lines(steps)
+    diagnostics: list[ExecutionDiagnostic] = []
     diagnostics_method = getattr(controller, "execution_diagnostics", None)
     if callable(diagnostics_method):
         try:
@@ -439,13 +441,9 @@ def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> Ba
         timeline=tuple(timeline),
         action=(
             "answer" if execution.status is WorkflowStatus.NEEDS_HUMAN else
-            "continue" if execution.status is WorkflowStatus.CHANGES_REQUESTED
-            or (
-                execution.status is WorkflowStatus.FAILED
-                and execution.workspace_path is not None
-                and execution.working_branch is not None
-                and execution.spec_snapshot is not None
-            ) else None
+            "continue"
+            if WorkflowService.continuation_stage(execution, lambda: diagnostics) is not None
+            else None
         ),
     )
 

@@ -1327,12 +1327,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 progress.set_continuation_eligible(position, False)
             else:
                 progress.set_continuation_eligible(
-                    position,
-                    bool(
-                        execution.workspace_path
-                        and execution.working_branch
-                        and execution.spec_snapshot
-                    ),
+                    position, self.controller.continuation_stage(execution) is not None
                 )
         view = self.query_one("#batch-progress", BatchProgressView)
         progress.set_unavailable_providers(
@@ -1343,10 +1338,19 @@ class WorkflowRunnerScreen(Screen[None]):
             view.update_row(row)
         counts = summarize(rows)
         view.update_summary(counts)
+        unavailable = self.controller.batch_unavailable_providers(progress.batch_id)
+        newly_unavailable = set(unavailable) - view.unavailable_providers
         view.set_provider_availability({
-            provider: progress.held_count(provider)
-            for provider in self.controller.batch_unavailable_providers(progress.batch_id)
+            provider: progress.held_count(provider) for provider in unavailable
         })
+        # The availability controls sit below the launch form, usually out of
+        # view while a batch runs, so say when a provider starts holding tasks.
+        for provider in sorted(newly_unavailable):
+            self.notify(
+                f"Provider {provider} quota exhausted; queued tasks that use it are held. "
+                "Mark it available in the batch progress once its quota resets.",
+                severity="warning",
+            )
         self.query_one("#workflow-progress", Static).update(
             f"Batch running: {len(rows)} task(s) — {counts['NEEDS_HUMAN']} waiting for you."
         )

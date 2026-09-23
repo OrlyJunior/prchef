@@ -96,7 +96,13 @@
   times do not reopen it automatically. Persisted or restarted batches show plain QUEUED/WAITING
   with no availability state and do not imply queued work resumes after restart. Submitting every
   item up front can leave multiple PENDING executions after a crash; queued recovery is separate.
-  A quota failure before a worktree/spec exists cannot use the current continuation flow.
+  A quota failure during planning happens before a worktree/spec exists; continuing that execution
+  repeats planning (with earlier answers and the continuation feedback) and then proceeds exactly
+  like a fresh run. `WorkflowService.continuation_stage` is the single eligibility rule every view
+  uses; an already-continued quota failure does not make a later ordinary failure continuable.
+- The live batch view rebuilds its provider-availability controls only when the set of unavailable
+  providers changes (counts update in place, so focus and clicks survive events) and notifies when
+  a provider first starts holding tasks, since those controls usually sit below the launch form.
 - The TUI's Agent Instructions view edits the selected repository's optional `IMPLEMENTER.md` and
   `REVIEWER.md` independently. Missing files remain absent until their own save action; the TUI
   never stages or commits either file.

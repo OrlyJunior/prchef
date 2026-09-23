@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from orchestrator.models.agent import AgentRole
-from orchestrator.models.execution_diagnostic import DiagnosticCategory
+from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
 from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
@@ -61,11 +61,15 @@ class _Controller:
     def __init__(self) -> None:
         self.executions: dict[str, tuple[WorkflowExecution, list[WorkflowStep]]] = {}
         self.errors: dict[str, Exception] = {}
+        self.diagnostics: dict[str, list[ExecutionDiagnostic]] = {}
 
     def execution_detail(self, execution_id: str) -> tuple[WorkflowExecution, list[WorkflowStep]]:
         if execution_id in self.errors:
             raise self.errors[execution_id]
         return self.executions[execution_id]
+
+    def execution_diagnostics(self, execution_id: str) -> list[ExecutionDiagnostic]:
+        return self.diagnostics.get(execution_id, [])
 
 
 def test_unlinked_items_render_as_queued_in_original_order() -> None:
@@ -416,6 +420,22 @@ def test_persisted_failed_row_only_offers_continue_with_retained_workspace() -> 
     execution.workspace_path = "worktree"
     execution.working_branch = "branch"
     execution.spec_snapshot = {"title": "Specification"}
+    assert persisted_row(item, controller).action == "continue"  # type: ignore[arg-type]
+
+
+def test_persisted_row_offers_continue_after_planning_quota_failure() -> None:
+    controller = _Controller()
+    execution = WorkflowExecution(id="execution-1", status=WorkflowStatus.FAILED)
+    controller.executions[execution.id] = (execution, [])
+    item = WorkflowBatchItem(0, "task-1", "Task 1", execution.id)
+    controller.diagnostics[execution.id] = [
+        ExecutionDiagnostic(
+            execution_id=execution.id,
+            category=DiagnosticCategory.WORKFLOW_EVENT,
+            payload={"kind": "PROVIDER_QUOTA_EXHAUSTED", "provider": "jules"},
+        )
+    ]
+
     assert persisted_row(item, controller).action == "continue"  # type: ignore[arg-type]
 
 

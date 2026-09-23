@@ -31,7 +31,11 @@ from orchestrator.models.workflow_event import (
     WorkflowEventListener,
 )
 from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import ACTIVE_WORKFLOW_STATUSES, WorkflowStatus
+from orchestrator.models.workflow_status import (
+    ACTIVE_WORKFLOW_STATUSES,
+    WorkflowStage,
+    WorkflowStatus,
+)
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.providers.concurrency import ProviderConcurrencyCoordinator
 from orchestrator.repositories.workflow_repository import WorkflowRepository
@@ -891,6 +895,13 @@ class WorkflowController:
             execution.task_source, execution.repository_ref or execution.repository
         )
         return self._create_service(provider)
+
+    def continuation_stage(self, execution: WorkflowExecution) -> WorkflowStage | None:
+        """Where a manual continuation of this execution would restart, if anywhere."""
+
+        return WorkflowService.continuation_stage(
+            execution, lambda: self.execution_diagnostics(execution.id)
+        )
 
     def continuation_feedback(self, execution_id: str) -> str:
         return self._service_for_execution(

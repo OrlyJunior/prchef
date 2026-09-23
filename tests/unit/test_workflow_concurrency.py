@@ -37,6 +37,7 @@ from orchestrator.models.agent import AgentRequest, AgentResult
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.providers.agent_provider import AgentProviderError
 from orchestrator.providers.concurrency import ProviderConcurrencyCoordinator
+from orchestrator.services.exceptions import WorkflowError
 from orchestrator.services.execution_dispatcher import ExecutionDispatcher
 from orchestrator.services.task_provider import TrelloTaskProvider
 from orchestrator.services.workflow_service import WorkflowService
@@ -535,6 +536,108 @@ def test_provider_quota_failure_emits_named_diagnostic_only_for_quota(
             diagnostic.payload.get("kind") == "PROVIDER_QUOTA_EXHAUSTED"
             for diagnostic in repository.list_diagnostics(result.id)
         )
+
+
+def _fail_planner_while(service: WorkflowService, failing: Callable[[], Exception | None]) -> None:
+    """Make the planner raise ``failing()`` whenever it returns an exception."""
+
+    factory = service._client_factory
+    original_create = factory.create
+
+    class MaybeFailingPlanner:
+        def __init__(self, delegate: Any) -> None:
+            self._delegate = delegate
+
+        def execute(self, request: Any, *, on_started: Any = None) -> AgentResult:
+            error = failing()
+            if error is not None:
+                raise error
+            return self._delegate.execute(request, on_started=on_started)
+
+    def create(config: Any, *, agent_roles: Any = None) -> Any:
+        clients = original_create(config, agent_roles=agent_roles)
+        original_agent = clients.agent
+        clients.agent = lambda role: (  # type: ignore[method-assign]
+            MaybeFailingPlanner(original_agent(role))
+            if role is AgentRole.PLANNER
+            else original_agent(role)
+        )
+        return clients
+
+    factory.create = create  # type: ignore[method-assign]
+
+
+def test_planning_quota_failure_is_continued_by_repeating_planning(
+    tmp_path: Path, dispatchers
+) -> None:
+    service, repository = _service(
+        tmp_path,
+        gate=_AgentGate(),
+        dispatcher=_dispatcher(dispatchers, 1),
+        coordinator=ProviderConcurrencyCoordinator(),
+    )
+    quota_exhausted = True
+    _fail_planner_while(
+        service,
+        lambda: AgentProviderError("quota", category="quota") if quota_exhausted else None,
+    )
+
+    failed = service.submit_execution("card-1").result(TIMEOUT)
+
+    assert failed.status is WorkflowStatus.FAILED
+    assert failed.workspace_path is None and failed.working_branch is None
+    assert (
+        WorkflowService.continuation_stage(failed, lambda: repository.list_diagnostics(failed.id))
+        is WorkflowStage.GENERATE_SPEC
+    )
+    assert "quota was exhausted" in service.continuation_feedback(failed.id)
+
+    quota_exhausted = False
+    ready = False
+    handle = service.submit_continuation(
+        failed.id, "Quota reset; plan again.", admission_gate=lambda: ready
+    )
+    assert repository.get_execution(failed.id).status is WorkflowStatus.PENDING
+    ready = True
+    service._dispatcher.reevaluate()
+    continued = handle.result(TIMEOUT)
+
+    assert continued.id == failed.id
+    assert continued.status is WorkflowStatus.APPROVED
+    assert continued.workspace_path is not None
+    assert continued.working_branch is not None
+    assert continued.spec_snapshot
+
+
+@pytest.mark.parametrize("retried_quota", [False, True])
+def test_ordinary_planning_failure_is_not_continuable(
+    tmp_path: Path, dispatchers, retried_quota: bool
+) -> None:
+    service, repository = _service(
+        tmp_path,
+        gate=_AgentGate(),
+        dispatcher=_dispatcher(dispatchers, 1),
+        coordinator=ProviderConcurrencyCoordinator(),
+    )
+    failures: list[Exception] = [RuntimeError("ordinary failure")]
+    if retried_quota:
+        # A quota failure that was already continued must not make the
+        # ordinary failure of the repeated planning attempt eligible again.
+        failures.insert(0, AgentProviderError("quota", category="quota"))
+    _fail_planner_while(service, lambda: failures.pop(0) if failures else None)
+
+    failed = service.submit_execution("card-1").result(TIMEOUT)
+    if retried_quota:
+        failed = service.submit_continuation(failed.id, "Plan again.").result(TIMEOUT)
+
+    assert failed.status is WorkflowStatus.FAILED
+    assert failed.workspace_path is None
+    assert (
+        WorkflowService.continuation_stage(failed, lambda: repository.list_diagnostics(failed.id))
+        is None
+    )
+    with pytest.raises(WorkflowError, match="can be continued"):
+        service.submit_continuation(failed.id, "Try again.")
 
 
 def test_excess_submissions_stay_pending_rather_than_failing(

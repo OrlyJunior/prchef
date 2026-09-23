@@ -16,6 +16,10 @@ from orchestrator.tui.batch_progress import (
 )
 
 
+def _held_provider_text(provider: str, count: int) -> str:
+    return f"Provider {provider} unavailable (quota exhausted) — {count} queued task(s) held"
+
+
 class BatchItemRow(Vertical):
     """One batch task, collapsed to a summary line until the user expands it.
 
@@ -177,9 +181,28 @@ class BatchProgressView(Vertical):
     def on_mount(self) -> None:
         self.query_one("#batch-provider-availability", Vertical).display = False
 
+    @property
+    def unavailable_providers(self) -> frozenset[str]:
+        return frozenset(self._availability)
+
     def set_provider_availability(self, held: dict[str, int]) -> None:
-        self._availability = dict(held)
-        self.screen.run_worker(self._rebuild_provider_availability())
+        held = dict(held)
+        if held == self._availability:
+            return
+        providers_changed = held.keys() != self._availability.keys()
+        self._availability = held
+        if providers_changed:
+            self.screen.run_worker(self._rebuild_provider_availability())
+            return
+        # Only counts changed. Rebuilding on every workflow event would remount
+        # the "Mark available" buttons, dropping focus and clicks in between.
+        for index, provider in enumerate(sorted(held)):
+            try:
+                line = self.query_one(f"#batch-provider-held-{index}", Static)
+            except NoMatches:
+                # A rebuild is still in flight and renders the latest counts.
+                return
+            line.update(_held_provider_text(provider, held[provider]))
 
     async def _rebuild_provider_availability(self) -> None:
         container = self.query_one("#batch-provider-availability", Vertical)
@@ -193,8 +216,8 @@ class BatchProgressView(Vertical):
                 await container.mount(line)
                 await line.mount(
                     Static(
-                        f"Provider {provider} unavailable (quota exhausted) — "
-                        f"{count} queued task(s) held",
+                        _held_provider_text(provider, count),
+                        id=f"batch-provider-held-{index}",
                         markup=False,
                     ),
                     Button(f"Mark {provider} available", id=button_id),

@@ -2924,6 +2924,39 @@ def test_execution_detail_continuation_follows_status_not_completed_stage(
     asyncio.run(drive())
 
 
+def test_execution_detail_offers_planner_continuation_after_planning_quota_failure(
+    tmp_path: Path,
+) -> None:
+    """A quota failure during planning leaves no workspace, but can still be continued."""
+
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.FAILED
+    repository.execution.current_stage = WorkflowStage.COMPLETED
+    repository.execution.workspace_path = None
+    repository.execution.working_branch = None
+    repository.diagnostics = [
+        ExecutionDiagnostic(
+            execution_id=repository.execution.id,
+            category=DiagnosticCategory.WORKFLOW_EVENT,
+            payload={"kind": "PROVIDER_QUOTA_EXHAUSTED", "provider": "planner"},
+            stage=WorkflowStage.GENERATE_SPEC,
+        )
+    ]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert screen.query_one("#execution-continuation-feedback").display is True
+            assert "planner" in str(
+                screen.query_one("#execution-continuation-title", Static).renderable
+            )
+
+    asyncio.run(drive())
+
+
 def test_execution_detail_continuation_feedback_is_readable_beside_long_details(
     tmp_path: Path,
 ) -> None:
@@ -3420,7 +3453,7 @@ def test_workflow_runner_batch_progress_renders_every_task_in_order(
 
 
 def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_provider_hold(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     controller, _, _ = _controller(tmp_path)
     unavailable: set[str] = set()
@@ -3430,6 +3463,14 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
         unavailable.discard(provider)
     controller.mark_batch_provider_available = mark_available  # type: ignore[method-assign]
     application = OrchestratorApp(controller)
+    notifications: list[tuple[str, str | None]] = []
+
+    def record_notification(
+        _screen: WorkflowRunnerScreen, message: str, **kwargs: Any
+    ) -> None:
+        notifications.append((message, kwargs.get("severity")))
+
+    monkeypatch.setattr(WorkflowRunnerScreen, "notify", record_notification)
     batch = WorkflowBatch(
         id="batch-1",
         repository="example",
@@ -3501,6 +3542,9 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
                 .query_one(Static)
                 .renderable
             )
+            assert [severity for _, severity in notifications] == ["warning"]
+            assert "Provider jules quota exhausted" in notifications[0][0]
+            available = screen.query_one("#batch-provider-available-0", Button)
 
             screen._render_workflow_event(
                 WorkflowEvent(
@@ -3512,6 +3556,14 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
             )
             await settle_tui(pilot)
             assert "RUNNING" in str(screen.query_one("#batch-row-0-header", Button).label)
+            # Later events keep the same control mounted (focus and clicks
+            # survive) and do not repeat the notification.
+            assert screen.query_one("#batch-provider-available-0", Button) is available
+            assert len(notifications) == 1
+            # The batch progress sits below the launch form; reach it as a
+            # user would, by scrolling it into view.
+            available.scroll_visible(animate=False)
+            await settle_tui(pilot)
             await pilot.click("#batch-provider-available-0")
             await settle_tui(pilot)
             assert not unavailable
