@@ -8,7 +8,7 @@ from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
-from orchestrator.models.validation_result import ValidationResult
+from orchestrator.models.validation_result import ValidationCheck, ValidationResult
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.runtime_logging import format_command, redact_text
 from orchestrator.services.exceptions import StructuredOutputError
@@ -19,7 +19,28 @@ from orchestrator.services.project_context import (
 from orchestrator.services.structured_output import parse_json_object
 
 _CORRECTION_OUTPUT_LIMIT = 4_000
+_TRUNCATED_OUTPUT_MARKER = "[... earlier output truncated ...]\n"
 
+
+def _bounded_tail(output: str, limit: int) -> str:
+    """Keep the end of output from a killed process, where a hang is usually visible."""
+    if len(output) <= limit:
+        return output
+    return _TRUNCATED_OUTPUT_MARKER + output[-limit:]
+
+
+def _bounded_tails(stdout: str, stderr: str) -> tuple[str, str]:
+    """Share one output budget between both streams of a killed process.
+
+    A timed-out check then contributes no more output than a completed failure. A stream shorter
+    than half the budget leaves its unused share to the other stream.
+    """
+    stderr_budget = min(
+        len(stderr),
+        max(_CORRECTION_OUTPUT_LIMIT // 2, _CORRECTION_OUTPUT_LIMIT - len(stdout)),
+    )
+    stdout_budget = _CORRECTION_OUTPUT_LIMIT - stderr_budget
+    return _bounded_tail(stdout, stdout_budget), _bounded_tail(stderr, stderr_budget)
 
 
 class ImplementationService:
@@ -300,6 +321,9 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         for check in validation.checks:
             if check.success:
                 continue
+            if check.timed_out:
+                rendered.append(ImplementationService._render_timed_out_check(check))
+                continue
             output = check.stderr or check.stdout or "no output"
             rendered.append(
                 "\n".join(
@@ -312,6 +336,24 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
                 )
             )
         return "\n\n".join(rendered) or (validation.error_message or "Validation failed")
+
+    @staticmethod
+    def _render_timed_out_check(check: ValidationCheck) -> str:
+        timeout = (
+            f"{check.timeout_seconds:g}s" if check.timeout_seconds is not None else "its limit"
+        )
+        lines = [
+            f"Command: {format_command(check.command)}",
+            f"Result: timed out after {timeout}; the process was terminated before it finished "
+            "(no exit code). The current changes may have introduced a hang or deadlock.",
+        ]
+        if not check.stdout and not check.stderr:
+            lines.extend(("Output captured before timeout:", "no output"))
+        stdout, stderr = _bounded_tails(redact_text(check.stdout), redact_text(check.stderr))
+        for label, stream in (("Stdout", stdout), ("Stderr", stderr)):
+            if stream:
+                lines.extend((f"{label} captured before timeout:", stream))
+        return "\n".join(lines)
 
     @staticmethod
     def _parse_polish_skip_reasons(output: str, suggestions: list[str]) -> list[str]:

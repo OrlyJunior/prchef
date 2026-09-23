@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.clients.command_client import CommandClient
+from orchestrator.clients.exceptions import CommandTimeoutError
 from orchestrator.config.project_config import ValidationSettings
 from orchestrator.models.validation_result import ValidationCheck, ValidationResult
 from orchestrator.runtime_logging import format_command, format_duration, summarize_text
@@ -45,11 +46,49 @@ class ValidationService:
         for command in commands:
             command_text = format_command(command)
             logger.info("[validation] Running: %s", command_text)
-            result = self._commands.run(
-                command,
-                cwd=repository_path,
-                timeout_seconds=settings.timeout_seconds,
-            )
+            try:
+                result = self._commands.run(
+                    command,
+                    cwd=repository_path,
+                    timeout_seconds=settings.timeout_seconds,
+                )
+            except CommandTimeoutError as exc:
+                # A timeout is a validation failure like any other: it is recorded as a failed
+                # check (with no exit code) so the correction loop can act on it.
+                logger.error(
+                    "[validation] Timed out: %s (after %ss): %s",
+                    command_text,
+                    exc.timeout_seconds,
+                    summarize_text(exc.stderr or exc.stdout) or "no output",
+                )
+                check = ValidationCheck(
+                    name=" ".join(command),
+                    command=command,
+                    success=False,
+                    exit_code=None,
+                    stdout=exc.stdout,
+                    stderr=exc.stderr,
+                    duration_seconds=exc.duration_seconds,
+                    timed_out=True,
+                    timeout_seconds=exc.timeout_seconds,
+                )
+                checks.append(check)
+                if on_check_complete is not None:
+                    on_check_complete(
+                        {
+                            "command": command_text,
+                            "argv": command,
+                            "working_directory": str(repository_path),
+                            "exit_code": None,
+                            "elapsed_time_seconds": exc.duration_seconds,
+                            "stdout": exc.stdout,
+                            "stderr": exc.stderr,
+                            "result": "FAIL",
+                            "timed_out": True,
+                            "timeout_seconds": exc.timeout_seconds,
+                        }
+                    )
+                continue
             if result.success:
                 logger.info(
                     "[validation] Passed: %s (%s)",
