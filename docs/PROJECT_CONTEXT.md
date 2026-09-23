@@ -15,6 +15,7 @@
   reviewers receive only `REVIEWER.md`. All are supplementary; the current
   task, repository state, and core orchestrator invariants win. The role files are Git-ignored by
   default, can be versioned deliberately, and are editable from the TUI without staging or commit.
+  Symlinked role files are ignored when loading; the TUI refuses to save through one.
 
 ## Ownership and layering
 

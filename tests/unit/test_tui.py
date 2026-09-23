@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -1053,6 +1054,62 @@ def test_textual_app_navigates_to_workflow_runner(tmp_path: Path) -> None:
             assert isinstance(application.screen, WorkflowRunnerScreen)
 
     asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
+    "role, filename",
+    [
+        (AgentRole.PLANNER, "PLANNER.md"),
+        (AgentRole.IMPLEMENTER, "IMPLEMENTER.md"),
+        (AgentRole.REVIEWER, "REVIEWER.md"),
+    ],
+)
+def test_agent_instructions_refuse_symlinked_files(
+    tmp_path: Path, role: AgentRole, filename: str
+) -> None:
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir()
+    outside = tmp_path / "external.md"
+    outside.write_text("Keep this content", encoding="utf-8")
+    instruction_path = repository_path / filename
+    try:
+        instruction_path.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Symlinks unavailable: {exc}")
+
+    controller, _, _ = _controller(repository_path)
+    assert controller.agent_instructions("example") == (None, None, None)
+    with pytest.raises(ValueError, match="symlink"):
+        controller.save_agent_instructions("example", role, "New guidance")
+    assert outside.read_text(encoding="utf-8") == "Keep this content"
+    assert instruction_path.is_symlink()
+
+
+def test_agent_instructions_save_cannot_follow_a_link_added_during_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir()
+    outside = tmp_path / "external.md"
+    outside.write_text("Keep this content", encoding="utf-8")
+    instruction_path = repository_path / "PLANNER.md"
+    original_replace = os.replace
+
+    def replace_after_link(source: Path, destination: Path) -> None:
+        assert destination == instruction_path
+        try:
+            instruction_path.symlink_to(outside)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"Symlinks unavailable: {exc}")
+        original_replace(source, destination)
+
+    monkeypatch.setattr("orchestrator.tui.bridge.os.replace", replace_after_link)
+    controller, _, _ = _controller(repository_path)
+    controller.save_agent_instructions("example", AgentRole.PLANNER, "New guidance")
+
+    assert outside.read_text(encoding="utf-8") == "Keep this content"
+    assert instruction_path.read_text(encoding="utf-8") == "New guidance"
+    assert not instruction_path.is_symlink()
 
 
 def test_agent_instructions_navigation_uses_a_compact_distinct_control(tmp_path: Path) -> None:

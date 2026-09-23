@@ -111,6 +111,24 @@ def test_role_instruction_loaders_handle_present_and_missing_files(tmp_path: Pat
     assert load_reviewer_instructions(tmp_path) == "Prioritize regression risks."
 
 
+def test_planner_ignores_symlink_to_file_outside_repository(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    outside = tmp_path / "private.md"
+    outside.write_text("External secret guidance", encoding="utf-8")
+    try:
+        (repository / "PLANNER.md").symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"Symlinks unavailable: {exc}")
+
+    assert load_planner_instructions(repository) is None
+    prompt = SpecService(
+        RecordingProvider(AgentResult(output="unused")), MarkerRepositoryContextStrategy()
+    )._build_prompt(_task(), repository, "owner/repo", "develop")
+    assert "External secret guidance" not in prompt
+    assert "OUTPUT CONTRACT:" in prompt
+
+
 def test_implementer_instructions_use_the_control_checkout_then_worktree_fallback(
     tmp_path: Path,
 ) -> None:

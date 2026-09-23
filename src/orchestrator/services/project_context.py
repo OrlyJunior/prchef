@@ -91,8 +91,12 @@ def reviewer_instructions_prompt(
 
 
 def _load_instruction_file(repository_path: Path, filename: str) -> str | None:
+    path = repository_path / filename
     try:
-        content = (repository_path / filename).read_text(encoding="utf-8").strip()
+        # A role file is local guidance, never an alias to an arbitrary file on the host.
+        if path.is_symlink():
+            return None
+        content = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
         return None
     return content or None

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import threading
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -288,7 +290,21 @@ class WorkflowController:
                 "Agent instructions are only supported for planner, implementer, and reviewer"
             )
         path = self.repository_path(repository) / filename
-        path.write_text(content, encoding="utf-8")
+        if path.is_symlink():
+            raise ValueError(f"Cannot save instructions through a symlink: {filename}")
+        # Replacing the directory entry avoids following a link introduced after the check.
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent, prefix=f".{filename}.",
+                delete=False,
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+                temporary_file.write(content)
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
         return path
 
     def repository_path(self, repository: str) -> Path:
