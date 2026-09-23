@@ -641,6 +641,97 @@ def test_validation_retry_limit_fails_and_preserves_workspace(workflow) -> None:
     assert WorkflowStage.COMMIT not in repository.stage_changes
 
 
+def test_validation_timeout_requests_correction_then_proceeds(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.commands.timeout_sequence = [True]
+
+    result = service.run("card-timeout-correction")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert len(factory.codex.requests) == 2
+    assert repository.stage_changes.count(WorkflowStage.VALIDATE) == 2
+    correction = factory.codex.requests[1].instructions
+    assert "VALIDATION FAILURES FROM THE CURRENT IMPLEMENTATION" in correction
+    assert "Command: pytest" in correction
+    assert "timed out after 900s" in correction
+    assert "Stdout captured before timeout:\ncollected 12 items" in correction
+    assert "Stderr captured before timeout:\nwaiting on lock" in correction
+    assert factory.git.commit_calls == 1
+    failure = next(
+        diagnostic.payload
+        for diagnostic in repository.diagnostics
+        if diagnostic.payload.get("operation") == "validation"
+    )
+    assert failure["failing_commands"] == [
+        {
+            "command": ["pytest"],
+            "exit_code": None,
+            "stdout": "collected 12 items",
+            "stderr": "waiting on lock",
+            "timed_out": True,
+            "timeout_seconds": 900,
+        }
+    ]
+
+
+def test_repeated_validation_timeouts_exhaust_the_normal_retry_cap(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.commands.time_out = True
+
+    result = service.run("card-timeout-exhausted")
+
+    assert result.status is WorkflowStatus.FAILED
+    # One implementation plus exactly max_validation_retries (2) corrections.
+    assert len(factory.codex.requests) == 3
+    assert repository.stage_changes.count(WorkflowStage.VALIDATE) == 3
+    assert result.validation_snapshot is not None
+    assert result.validation_snapshot["checks"][0]["timed_out"] is True
+    assert result.validation_snapshot["checks"][0]["exit_code"] is None
+    assert factory.git.commit_calls == 0
+    assert factory.git.push_calls == 0
+    assert WorkflowStage.COMMIT not in repository.stage_changes
+    assert WorkflowStage.PUSH not in repository.stage_changes
+
+
+def test_optional_polish_timeout_is_discarded_without_correction(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.commands.timeout_sequence = [False, True]
+
+    result = service.run("card-polish-timeout")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert repository.stage_changes.count(WorkflowStage.VALIDATE) == 2
+    assert len(factory.codex.requests) == 2
+    assert factory.git.discard_calls == 1
+    assert factory.git.commit_calls == 1
+
+
+def test_validation_snapshot_without_timeout_fields_still_resumes() -> None:
+    validation = WorkflowService._validation_from_snapshot(
+        {
+            "success": True,
+            "checks": [
+                {
+                    "name": "pytest",
+                    "command": ["pytest"],
+                    "success": True,
+                    "exit_code": 0,
+                    "stdout": "ok",
+                    "stderr": "",
+                    "duration_seconds": 0.1,
+                }
+            ],
+            "error_message": None,
+        }
+    )
+
+    check = validation.checks[0]
+    assert check.exit_code == 0
+    assert check.timed_out is False
+    assert check.timeout_seconds is None
+
+
 def test_branch_creation_failure_is_terminal(workflow) -> None:
     service, repository, _, factory = workflow
     factory.git.branch_error = RuntimeError("cannot create branch")

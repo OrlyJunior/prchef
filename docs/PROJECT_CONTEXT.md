@@ -300,6 +300,13 @@
 - `max_validation_retries` defaults to `2` and must be non-negative. A failed validation records
   its result, then—while budget remains—asks the same implementer to correct the **same worktree**.
   The correction prompt includes failed commands, exit codes, and redacted/truncated output.
+- A validation command that exceeds `validation.timeout_seconds` is a failed check, not a workflow
+  error: `CommandClient` raises `CommandTimeoutError` (a `CommandExecutionError` subtype) carrying
+  the configured duration and the partial stdout/stderr, decoded as UTF-8 with replacement.
+  The check has no exit code and sets `timed_out`/`timeout_seconds`, later commands still run,
+  and it uses the same retry budget. Its correction prompt names the command and timeout and
+  includes the redacted tail of both captured streams. Detection relies only on the subprocess
+  timeout and never parses tool output. Other command execution errors still fail the workflow.
 - Planning, execution ID, branch, and worktree are never recreated during corrections. A passing
   retry continues to commit/push/PR/review. Exhaustion or correction failure ends as `FAILED` and
   preserves the worktree.

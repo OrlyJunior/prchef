@@ -12,7 +12,7 @@ import pytest
 from orchestrator.clients import codex_client, command_client
 from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.command_client import CommandClient, CommandResult
-from orchestrator.clients.exceptions import CommandExecutionError
+from orchestrator.clients.exceptions import CommandExecutionError, CommandTimeoutError
 from orchestrator.config.project_config import CodexCliProviderSettings
 
 
@@ -208,6 +208,57 @@ def test_missing_executable_keeps_existing_error_semantics(
         CommandClient().run(["missing-tool", "argument with spaces"], cwd=tmp_path)
 
     assert launched == [["missing-tool", "argument with spaces"]]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected_stdout", "expected_stderr"),
+    [
+        (b"collected 3 items\n", b"still running", "collected 3 items\n", "still running"),
+        (b"bad \xff byte", None, "bad � byte", ""),
+        ("text output", "text error", "text output", "text error"),
+        (None, None, "", ""),
+    ],
+)
+def test_timeout_carries_partial_output_and_configured_duration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stdout: bytes | str | None,
+    stderr: bytes | str | None,
+    expected_stdout: str,
+    expected_stderr: str,
+) -> None:
+    def hang(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            command, kwargs["timeout"], output=stdout, stderr=stderr
+        )
+
+    monkeypatch.setattr(command_client, "_is_windows", lambda: False)
+    monkeypatch.setattr(command_client.subprocess, "run", hang)
+
+    with pytest.raises(CommandTimeoutError) as raised:
+        CommandClient().run(["tool", "check"], cwd=tmp_path, timeout_seconds=30)
+
+    error = raised.value
+    assert isinstance(error, CommandExecutionError)
+    assert str(error) == "Command timed out after 30s: tool check"
+    assert error.timeout_seconds == 30
+    assert error.stdout == expected_stdout
+    assert error.stderr == expected_stderr
+    assert error.duration_seconds >= 0
+    assert isinstance(error.__cause__, subprocess.TimeoutExpired)
+
+
+def test_timeout_remains_catchable_as_command_execution_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def hang(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(command_client, "_is_windows", lambda: False)
+    monkeypatch.setattr(command_client.subprocess, "run", hang)
+
+    with pytest.raises(CommandExecutionError, match="Command timed out after 900s: tool"):
+        CommandClient().run(["tool"], cwd=tmp_path)
 
 
 class RecordingCommandClient:

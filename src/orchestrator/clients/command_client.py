@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from orchestrator.clients.exceptions import CommandExecutionError
+from orchestrator.clients.exceptions import CommandExecutionError, CommandTimeoutError
 from orchestrator.runtime_logging import format_command
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,15 @@ _WINDOWS_EXECUTABLE_SUFFIXES = (".exe", ".com", ".cmd", ".bat")
 
 def _is_windows() -> bool:
     return os.name == "nt"
+
+
+def _partial_output(value: bytes | str | None) -> str:
+    """Decode output captured before a timeout; it may be raw bytes even in text mode."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 @dataclass(slots=True)
@@ -96,8 +105,12 @@ class CommandClient:
             )
             raise CommandExecutionError(f"Executable not found: {command[0]}") from exc
         except subprocess.TimeoutExpired as exc:
-            raise CommandExecutionError(
-                f"Command timed out after {timeout_seconds}s: {format_command(command)}"
+            raise CommandTimeoutError(
+                f"Command timed out after {timeout_seconds}s: {format_command(command)}",
+                timeout_seconds=timeout_seconds,
+                stdout=_partial_output(exc.stdout),
+                stderr=_partial_output(exc.stderr),
+                duration_seconds=time.monotonic() - started,
             ) from exc
         except OSError as exc:
             raise CommandExecutionError(f"Cannot execute {format_command(command)}: {exc}") from exc

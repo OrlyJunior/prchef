@@ -15,6 +15,7 @@ from orchestrator.models import (
     PullRequest,
     RepositorySpec,
     ReviewDecision,
+    ValidationCheck,
     ValidationResult,
 )
 from orchestrator.services import project_context
@@ -418,6 +419,81 @@ def test_implementer_instructions_are_included_in_all_implementation_prompts(
 
     assert all(prompt.count("Prefer small, tested changes.") == 1 for prompt in prompts)
     assert all("Prioritize regression risks." not in prompt for prompt in prompts)
+
+
+def test_validation_failures_render_timeouts_alongside_completed_failures() -> None:
+    validation = ValidationResult(
+        success=False,
+        checks=[
+            ValidationCheck(
+                name="pytest",
+                command=["pytest"],
+                success=False,
+                exit_code=1,
+                stdout="1 failed",
+                stderr="assertion failed",
+            ),
+            ValidationCheck(
+                name="npm run e2e",
+                command=["npm", "run", "e2e"],
+                success=False,
+                exit_code=None,
+                stdout="starting server",
+                stderr="api_key=hunter2 waiting",
+                timed_out=True,
+                timeout_seconds=600,
+            ),
+            ValidationCheck(name="ruff", command=["ruff"], success=True, exit_code=0),
+        ],
+        error_message="One or more validation commands failed",
+    )
+
+    rendered = ImplementationService.render_validation_failures(validation)
+
+    completed, timed_out = rendered.split("\n\n")
+    assert completed == "Command: pytest\nExit code: 1\nOutput:\nassertion failed"
+    assert timed_out.startswith("Command: npm run e2e\nResult: timed out after 600s;")
+    assert "no exit code" in timed_out
+    assert "Exit code:" not in timed_out
+    assert "Stdout captured before timeout:\nstarting server" in timed_out
+    assert "Stderr captured before timeout:\napi_key=[REDACTED] waiting" in timed_out
+    assert "hunter2" not in rendered
+    assert "ruff" not in rendered
+
+
+def test_timed_out_validation_output_keeps_the_tail_and_reports_missing_output() -> None:
+    long_output = "early line\n" + "x" * 5_000 + "\nlast line before hang"
+    validation = ValidationResult(
+        success=False,
+        checks=[
+            ValidationCheck(
+                name="make test",
+                command=["make", "test"],
+                success=False,
+                exit_code=None,
+                stdout=long_output,
+                timed_out=True,
+                timeout_seconds=30,
+            ),
+            ValidationCheck(
+                name="make lint",
+                command=["make", "lint"],
+                success=False,
+                exit_code=None,
+                timed_out=True,
+                timeout_seconds=30,
+            ),
+        ],
+    )
+
+    rendered = ImplementationService.render_validation_failures(validation)
+
+    with_output, without_output = rendered.split("\n\n")
+    assert "[... earlier output truncated ...]" in with_output
+    assert with_output.endswith("last line before hang")
+    assert "early line" not in with_output
+    assert "Stderr captured" not in with_output
+    assert without_output.endswith("Output captured before timeout:\nno output")
 
 
 def test_implementation_inspects_changes_after_a_structured_provider_failure(
