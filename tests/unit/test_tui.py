@@ -3968,9 +3968,14 @@ def test_batch_detail_screen_renders_mixed_batch_and_supports_refresh(
     asyncio.run(drive())
 
 
-def test_batch_detail_cancel_reconciles_human_blocked_row(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_cancel_marker", [False, True])
+def test_batch_detail_cancel_reconciles_human_blocked_row(
+    tmp_path: Path, legacy_cancel_marker: bool
+) -> None:
     controller, _, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.NEEDS_HUMAN
+    if legacy_cancel_marker:
+        repository.execution.cancellation_requested_at = datetime.now(UTC)
     batch = repository.create_batch(
         "example", "github",
         [DevelopmentTask("12", "github", "First task", "", "https://example/12")],
@@ -3985,7 +3990,8 @@ def test_batch_detail_cancel_reconciles_human_blocked_row(tmp_path: Path) -> Non
             screen = application.screen
             screen.query_one("#batch-row-0-header", Button).press()
             await settle_tui(pilot)
-            assert screen.query_one("#batch-row-0-action", Button).display
+            action = screen.query_one("#batch-row-0-action", Button)
+            assert action.display is not legacy_cancel_marker
             cancel = screen.query_one("#batch-row-0-cancel", Button)
             assert cancel.display and not cancel.disabled
             cancel.press()
@@ -3995,6 +4001,32 @@ def test_batch_detail_cancel_reconciles_human_blocked_row(tmp_path: Path) -> Non
             assert "Cancelled: 1" in str(
                 screen.query_one("#batch-progress-summary", Static).renderable
             )
+
+    asyncio.run(drive())
+
+
+def test_execution_detail_hides_answer_for_legacy_human_cancellation(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.NEEDS_HUMAN
+    repository.execution.cancellation_requested_at = datetime.now(UTC)
+    repository.execution.human_interactions = [HumanInteraction(
+        id=1,
+        workflow_execution_id=repository.execution.id,
+        requesting_stage=WorkflowStage.REVIEW,
+        prompt="Review finding?",
+        requested_at=datetime.now(UTC),
+    )]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert "CANCELLATION REQUESTED" in str(
+                screen.query_one("#execution-status", Static).renderable
+            )
+            assert not screen.query_one("#execution-human-actions").display
 
     asyncio.run(drive())
 

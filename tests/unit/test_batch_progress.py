@@ -171,6 +171,27 @@ def test_running_cancellation_request_stays_pending_until_terminal_event() -> No
     assert not persisted.can_cancel
 
 
+def test_legacy_human_row_with_cancellation_marker_offers_recovery_cancel() -> None:
+    controller = _Controller()
+    controller.executions["execution-1"] = (
+        WorkflowExecution(
+            id="execution-1",
+            status=WorkflowStatus.NEEDS_HUMAN,
+            cancellation_requested_at=datetime.now(UTC),
+        ), []
+    )
+
+    row = persisted_row(
+        WorkflowBatchItem(0, "task-0", "Task 0", "execution-1"),
+        controller,  # type: ignore[arg-type]
+    )
+
+    assert row.category == "NEEDS_HUMAN"
+    assert row.status_label == "CANCELLATION REQUESTED"
+    assert row.action is None
+    assert row.can_cancel
+
+
 def test_late_finish_event_does_not_reopen_cancelled_row() -> None:
     progress = LiveBatchProgress(_batch(1))
     progress.apply(WorkflowEvent(

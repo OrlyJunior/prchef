@@ -470,14 +470,20 @@ def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> Ba
         stage_label=execution.current_stage.value.replace("_", " ").title(),
         timeline=tuple(timeline),
         action=(
-            "answer" if execution.status is WorkflowStatus.NEEDS_HUMAN else
+            "answer" if (
+                execution.status is WorkflowStatus.NEEDS_HUMAN
+                and execution.cancellation_requested_at is None
+            ) else
             "continue"
             if WorkflowService.continuation_stage(execution, lambda: diagnostics) is not None
             else None
         ),
         can_cancel=(
             execution.status in CANCELLABLE_ROW_STATUSES
-            and execution.cancellation_requested_at is None
+            and (
+                execution.status is WorkflowStatus.NEEDS_HUMAN
+                or execution.cancellation_requested_at is None
+            )
         ),
     )
 

@@ -316,6 +316,24 @@ def test_human_blocked_execution_can_be_cancelled_immediately(tmp_path: Path) ->
     assert repository.request_cancellation(execution.id) is False
 
 
+def test_legacy_human_row_with_cancellation_marker_can_settle(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "legacy-human-cancel.db")
+    execution = repository.create_execution("card-human")
+    repository.request_human_input(execution.id, WorkflowStage.REVIEW, "Review finding?")
+    repository.update_status(execution.id, WorkflowStatus.RUNNING)
+    assert repository.request_cancellation(execution.id)
+    # Reproduce the old finish race: NEEDS_HUMAN was written after the request.
+    repository.update_status(execution.id, WorkflowStatus.NEEDS_HUMAN)
+
+    with pytest.raises(ValueError, match="not awaiting human input"):
+        repository.respond_to_human_input(execution.id, "Proceed")
+    assert repository.request_cancellation(execution.id)
+    persisted = repository.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.CANCELLED
+    assert persisted.finished_at is not None
+    assert repository.list_human_interactions(execution.id)[0].response is None
+
+
 @pytest.mark.parametrize("status", [WorkflowStatus.NEEDS_HUMAN, WorkflowStatus.APPROVED])
 def test_finish_honors_cancellation_requested_after_last_check(
     tmp_path: Path, status: WorkflowStatus

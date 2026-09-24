@@ -113,7 +113,9 @@
   also reconcile unresolved items from durable status while waiting, so
   cancellation from another controller can close the original batch. The persisted
   view reloads after a request; running rows show cancellation requested until they
-  settle. Other items are unaffected.
+  settle. A legacy NEEDS_HUMAN row with a recorded cancellation request shows
+  Cancel so the request can be settled; it does not offer Answer, which the
+  repository would reject. Other items are unaffected.
   Stored batches remain browsable after restart. `on_batch_created` fires synchronously after the
   durable batch row commits and before the first submission, exposing its stable identity and order.
 - Batch progress is a read-side TUI projection (`orchestrator.tui.batch_progress`), not a second
