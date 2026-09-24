@@ -430,6 +430,16 @@ def test_workflow_batches_round_trip_order_links_and_restart(tmp_path: Path) -> 
     assert persisted.items[1].execution_id is None
     assert [stored.id for stored in restarted.list_batches()] == [batch.id]
 
+    second_execution = restarted.create_execution("7", "github")
+    restarted.update_status(second_execution.id, WorkflowStatus.RUNNING)
+    assert restarted.execution_statuses(
+        [execution.id, second_execution.id, "missing-execution"]
+    ) == {
+        execution.id: WorkflowStatus.PENDING,
+        second_execution.id: WorkflowStatus.RUNNING,
+    }
+    assert restarted.execution_statuses([]) == {}
+
     restarted.delete_batch(batch.id)
     assert restarted.list_batches() == []
     assert restarted.get_execution(execution.id).id == execution.id

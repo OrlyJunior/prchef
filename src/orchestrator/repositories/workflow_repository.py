@@ -539,6 +539,19 @@ class WorkflowRepository:
                 raise KeyError(f"Workflow execution not found: {execution_id}")
             return self._to_domain(entity)
 
+    def execution_statuses(self, execution_ids: list[str]) -> dict[str, WorkflowStatus]:
+        """Read multiple execution statuses in one repository round trip."""
+
+        if not execution_ids:
+            return {}
+        with self._sessions() as session:
+            rows = session.execute(
+                select(WorkflowExecutionEntity.id, WorkflowExecutionEntity.status).where(
+                    WorkflowExecutionEntity.id.in_(execution_ids)
+                )
+            ).all()
+            return {execution_id: WorkflowStatus(status) for execution_id, status in rows}
+
     def list_executions(self) -> list[WorkflowExecution]:
         """Return persisted executions in creation order for operational inspection."""
         with self._sessions() as session:

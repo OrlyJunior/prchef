@@ -687,14 +687,24 @@ class WorkflowController:
             WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED,
             WorkflowStatus.FAILED, WorkflowStatus.CANCELLED,
         }
-        for execution_id, position in run.positions.items():
-            if run.statuses.get(position) in final:
-                continue
-            try:
-                persisted = self._repository.get_execution(execution_id).status
-            except Exception:
-                logger.exception(
-                    "Could not reconcile batch %s execution %s", run.batch_id, execution_id
+        unresolved = {
+            execution_id: position
+            for execution_id, position in run.positions.items()
+            if run.statuses.get(position) not in final
+        }
+        if not unresolved:
+            return
+        try:
+            statuses = self._repository.execution_statuses(list(unresolved))
+        except Exception:
+            logger.exception("Could not reconcile batch %s execution statuses", run.batch_id)
+            return
+        for execution_id, position in unresolved.items():
+            persisted = statuses.get(execution_id)
+            if persisted is None:
+                logger.warning(
+                    "Could not reconcile batch %s execution %s: missing status",
+                    run.batch_id, execution_id,
                 )
                 continue
             if persisted not in ACTIVE_WORKFLOW_STATUSES:

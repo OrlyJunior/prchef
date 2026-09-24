@@ -182,6 +182,13 @@ class _Repository:
                 return execution
         raise KeyError(execution_id)
 
+    def execution_statuses(self, execution_ids: list[str]) -> dict[str, WorkflowStatus]:
+        return {
+            execution.id: execution.status
+            for execution in self.executions
+            if execution.id in execution_ids
+        }
+
     def list_steps(self, execution_id: str) -> list[Any]:
         assert any(execution.id == execution_id for execution in self.executions)
         return []
