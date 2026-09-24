@@ -200,9 +200,14 @@ class ExecutionDetailScreen(Screen[None]):
         for button_id, url in self._links.items():
             self.query_one(f"#{button_id}", Button).disabled = not bool(url)
 
-        interaction = next(
-            (item for item in reversed(execution.human_interactions) if item.awaiting_response),
-            None,
+        interaction = (
+            next(
+                (item for item in reversed(execution.human_interactions) if item.awaiting_response),
+                None,
+            )
+            if execution.status is WorkflowStatus.NEEDS_HUMAN
+            and execution.cancellation_requested_at is None
+            else None
         )
         for widget_id in (
             "execution-human-title",

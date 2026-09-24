@@ -164,7 +164,9 @@ class WorkflowService:
     def cancel_execution(self, execution_id: str) -> bool:
         """Request cancellation without coupling the caller to a provider.
 
-        Queued, provider-blocked, and running executions are all cancellable.
+        Queued, provider-blocked, running, and human-blocked executions are
+        cancellable. Human-blocked work has no running stage and settles
+        immediately in the repository.
         Providers remain responsible for any interruption mechanism they can
         safely offer. The workflow itself observes this persisted request at
         stage and provider-admission boundaries, so a request made by another
@@ -305,9 +307,18 @@ class WorkflowService:
             finally:
                 self._end_runtime(execution_id)
 
-        return self._dispatcher.submit(
+        handle = self._dispatcher.submit(
             execution_id, run_job, on_dropped=drop_job, ready=admission_gate
         )
+        # Cancellation may commit after the execution becomes PENDING but
+        # before this job is registered. In that window cancel_execution has
+        # no queued job to remove. Check again after registration so a closed
+        # admission gate cannot strand the accepted request indefinitely.
+        # If cancellation arrives after this read, cancel_execution sees the
+        # registered job; if a worker already started, it checks the request.
+        if self._repository.cancellation_requested(execution_id):
+            self._dispatcher.cancel(execution_id)
+        return handle
 
     def _start_admitted(self, execution_id: str) -> None:
         """Move admitted work from the queue into a genuinely running state."""
@@ -656,7 +667,9 @@ class WorkflowService:
             raise ValueError(f"Execution {execution_id} is not awaiting human input")
         interaction = self._repository.respond_to_human_input(execution_id, response)
         self._begin_runtime(execution_id, event_listener)
-        self._queue_resumed(execution_id)
+        # The repository atomically records the answer and queues it, so a
+        # concurrent human-blocked cancellation cannot be undone here.
+        self._emit(execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.PENDING)
         return self._submit(
             execution_id,
             lambda: self._execute_response(execution, interaction, response),
@@ -1553,6 +1566,7 @@ class WorkflowService:
                 status = WorkflowStatus.CANCELLED
         self._repository.finish(execution_id, status)
         execution = self._repository.get_execution(execution_id)
+        status = execution.status
         self._emit(
             execution_id,
             WorkflowEventKind.STATUS_CHANGED,

@@ -289,7 +289,6 @@ def test_cancellation_is_accepted_for_every_active_status(
     [
         WorkflowStatus.APPROVED,
         WorkflowStatus.CHANGES_REQUESTED,
-        WorkflowStatus.NEEDS_HUMAN,
         WorkflowStatus.CANCELLED,
         WorkflowStatus.FAILED,
     ],
@@ -303,6 +302,54 @@ def test_cancellation_is_rejected_for_terminal_statuses(
 
     assert repository.request_cancellation(execution.id) is False
     assert repository.cancellation_requested(execution.id) is False
+
+
+def test_human_blocked_execution_can_be_cancelled_immediately(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "cancel-human.db")
+    execution = repository.create_execution("card-human")
+    repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+
+    assert repository.request_cancellation(execution.id) is True
+    persisted = repository.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.CANCELLED
+    assert persisted.cancellation_requested_at is not None
+    assert repository.request_cancellation(execution.id) is False
+
+
+def test_legacy_human_row_with_cancellation_marker_can_settle(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "legacy-human-cancel.db")
+    execution = repository.create_execution("card-human")
+    repository.request_human_input(execution.id, WorkflowStage.REVIEW, "Review finding?")
+    repository.update_status(execution.id, WorkflowStatus.RUNNING)
+    assert repository.request_cancellation(execution.id)
+    # Reproduce the old finish race: NEEDS_HUMAN was written after the request.
+    repository.update_status(execution.id, WorkflowStatus.NEEDS_HUMAN)
+
+    with pytest.raises(ValueError, match="not awaiting human input"):
+        repository.respond_to_human_input(execution.id, "Proceed")
+    assert repository.request_cancellation(execution.id)
+    persisted = repository.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.CANCELLED
+    assert persisted.finished_at is not None
+    assert repository.list_human_interactions(execution.id)[0].response is None
+
+
+@pytest.mark.parametrize("status", [WorkflowStatus.NEEDS_HUMAN, WorkflowStatus.APPROVED])
+def test_finish_honors_cancellation_requested_after_last_check(
+    tmp_path: Path, status: WorkflowStatus
+) -> None:
+    repository = _migrated_repository(tmp_path, f"cancel-at-finish-{status.value.lower()}.db")
+    execution = repository.create_execution("card-finishing")
+    repository.update_status(execution.id, WorkflowStatus.RUNNING)
+    repository.update_stage(execution.id, WorkflowStage.REVIEW)
+
+    assert repository.request_cancellation(execution.id)
+    repository.finish(execution.id, status)
+
+    persisted = repository.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.CANCELLED
+    assert persisted.current_stage is WorkflowStage.REVIEW
+    assert persisted.finished_at is not None
 
 
 def test_queue_execution_returns_a_resumed_execution_to_pending(tmp_path: Path) -> None:
@@ -320,6 +367,38 @@ def test_queue_execution_returns_a_resumed_execution_to_pending(tmp_path: Path) 
     # A queued resume is cancellable again before it consumes any capacity.
     assert persisted.cancellation_requested_at is None
     assert repository.request_cancellation(execution.id) is True
+
+
+def test_human_answer_and_cancellation_cannot_overwrite_each_other(tmp_path: Path) -> None:
+    database = tmp_path / "human-cancel-race.db"
+    first = _migrated_repository(tmp_path, database.name)
+    second = WorkflowRepository(build_session_factory(build_engine(f"sqlite:///{database.as_posix()}")))
+
+    cancelled = first.create_execution("cancel-first")
+    first.request_human_input(cancelled.id, WorkflowStage.REVIEW, "Review finding?")
+    first.finish(cancelled.id, WorkflowStatus.NEEDS_HUMAN)
+    stale_view = second.get_execution(cancelled.id)
+    assert stale_view.status is WorkflowStatus.NEEDS_HUMAN
+    assert first.request_cancellation(cancelled.id)
+    with pytest.raises(ValueError, match="not awaiting human input"):
+        second.respond_to_human_input(cancelled.id, "False positive")
+    with pytest.raises(ValueError, match="cancelled"):
+        second.queue_execution(cancelled.id)
+    assert second.get_execution(cancelled.id).status is WorkflowStatus.CANCELLED
+    assert second.list_human_interactions(cancelled.id)[0].response is None
+
+    answered = first.create_execution("answer-first")
+    first.request_human_input(answered.id, WorkflowStage.REVIEW, "Review finding?")
+    first.finish(answered.id, WorkflowStatus.NEEDS_HUMAN)
+    second.respond_to_human_input(answered.id, "Proceed")
+    assert first.get_execution(answered.id).status is WorkflowStatus.PENDING
+    assert first.request_cancellation(answered.id)
+    persisted = second.get_execution(answered.id)
+    assert persisted.status is WorkflowStatus.PENDING
+    assert persisted.cancellation_requested_at is not None
+    assert second.list_human_interactions(answered.id)[0].response == "Proceed"
+    with pytest.raises(ValueError, match="cancelled"):
+        second.queue_execution(answered.id)
 
 
 def test_workflow_batches_round_trip_order_links_and_restart(tmp_path: Path) -> None:
@@ -350,6 +429,16 @@ def test_workflow_batches_round_trip_order_links_and_restart(tmp_path: Path) -> 
     assert persisted.items[0].execution_id == execution.id
     assert persisted.items[1].execution_id is None
     assert [stored.id for stored in restarted.list_batches()] == [batch.id]
+
+    second_execution = restarted.create_execution("7", "github")
+    restarted.update_status(second_execution.id, WorkflowStatus.RUNNING)
+    assert restarted.execution_statuses(
+        [execution.id, second_execution.id, "missing-execution"]
+    ) == {
+        execution.id: WorkflowStatus.PENDING,
+        second_execution.id: WorkflowStatus.RUNNING,
+    }
+    assert restarted.execution_statuses([]) == {}
 
     restarted.delete_batch(batch.id)
     assert restarted.list_batches() == []

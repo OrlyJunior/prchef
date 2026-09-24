@@ -84,6 +84,162 @@ def test_unlinked_items_render_as_queued_in_original_order() -> None:
         (2, "QUEUED", "QUEUED"),
     ]
     assert summarize(rows)["QUEUED"] == 3
+    assert all(not row.can_cancel for row in rows)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [WorkflowStatus.PENDING, WorkflowStatus.WAITING, WorkflowStatus.RUNNING,
+     WorkflowStatus.NEEDS_HUMAN],
+)
+def test_linked_open_rows_offer_cancel_in_live_and_persisted_views(
+    status: WorkflowStatus,
+) -> None:
+    progress = LiveBatchProgress(_batch(1))
+    progress.apply(WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.EXECUTION_CREATED,
+        payload={"batch_position": 0},
+    ))
+    progress.apply(_status_event("execution-1", status, position=0))
+    live_row = progress.rows()[0]
+    assert live_row.can_cancel
+    assert live_row.action == ("answer" if status is WorkflowStatus.NEEDS_HUMAN else None)
+
+    controller = _Controller()
+    controller.executions["execution-1"] = (
+        WorkflowExecution(id="execution-1", status=status), []
+    )
+    item = WorkflowBatchItem(0, "task-0", "Task 0", "execution-1")
+    persisted = persisted_row(item, controller)  # type: ignore[arg-type]
+    assert persisted.can_cancel
+    assert persisted.action == live_row.action
+
+
+def test_reconcile_execution_updates_one_live_row_and_preserves_other_work() -> None:
+    progress = LiveBatchProgress(_batch(2))
+    for position, status in enumerate((WorkflowStatus.NEEDS_HUMAN, WorkflowStatus.RUNNING)):
+        execution_id = f"execution-{position}"
+        progress.apply(WorkflowEvent(
+            execution_id=execution_id,
+            kind=WorkflowEventKind.EXECUTION_CREATED,
+            payload={"batch_position": position},
+        ))
+        progress.apply(_status_event(execution_id, status, position=position))
+
+    assert progress.reconcile_execution(
+        0, WorkflowExecution(id="execution-0", status=WorkflowStatus.CANCELLED)
+    )
+    rows = progress.rows()
+    assert rows[0].category == "CANCELLED"
+    assert not rows[0].can_cancel
+    assert rows[1].category == "RUNNING"
+    assert rows[1].can_cancel
+    assert progress.summary()["CANCELLED"] == 1
+    assert progress.summary()["RUNNING"] == 1
+
+    progress.apply(_status_event("execution-0", WorkflowStatus.NEEDS_HUMAN, position=0))
+    assert progress.rows()[0].category == "CANCELLED"
+
+    assert progress.reconcile_execution(1, WorkflowExecution(
+        id="execution-1", status=WorkflowStatus.RUNNING,
+        cancellation_requested_at=datetime.now(UTC),
+    ))
+    assert progress.rows()[1].status_label == "CANCELLATION REQUESTED"
+    assert not progress.rows()[1].can_cancel
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        WorkflowStatus.APPROVED,
+        WorkflowStatus.CHANGES_REQUESTED,
+        WorkflowStatus.FAILED,
+        WorkflowStatus.CANCELLED,
+    ],
+)
+def test_terminal_rows_do_not_offer_cancel(status: WorkflowStatus) -> None:
+    progress = LiveBatchProgress(_batch(1))
+    progress.apply(WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.EXECUTION_CREATED,
+        payload={"batch_position": 0},
+    ))
+    progress.apply(_status_event("execution-1", status, position=0))
+    assert not progress.rows()[0].can_cancel
+
+    controller = _Controller()
+    controller.executions["execution-1"] = (
+        WorkflowExecution(id="execution-1", status=status), []
+    )
+    item = WorkflowBatchItem(0, "task-0", "Task 0", "execution-1")
+    persisted = persisted_row(item, controller)  # type: ignore[arg-type]
+    assert not persisted.can_cancel
+
+
+def test_running_cancellation_request_stays_pending_until_terminal_event() -> None:
+    progress = LiveBatchProgress(_batch(1))
+    progress.apply(WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.EXECUTION_CREATED,
+        payload={"batch_position": 0},
+    ))
+    progress.apply(_status_event("execution-1", WorkflowStatus.RUNNING, position=0))
+    progress.mark_cancellation_requested("execution-1")
+    row = progress.rows()[0]
+    assert row.category == "RUNNING"
+    assert row.status_label == "CANCELLATION REQUESTED"
+    assert not row.can_cancel
+
+    progress.apply(_status_event("execution-1", WorkflowStatus.CANCELLED, position=0))
+    assert progress.summary()["CANCELLED"] == 1
+
+    controller = _Controller()
+    controller.executions["execution-1"] = (
+        WorkflowExecution(
+            id="execution-1", status=WorkflowStatus.RUNNING,
+            cancellation_requested_at=datetime.now(UTC),
+        ), []
+    )
+    item = WorkflowBatchItem(0, "task-0", "Task 0", "execution-1")
+    persisted = persisted_row(item, controller)  # type: ignore[arg-type]
+    assert persisted.status_label == "CANCELLATION REQUESTED"
+    assert not persisted.can_cancel
+
+
+def test_legacy_human_row_with_cancellation_marker_offers_recovery_cancel() -> None:
+    controller = _Controller()
+    controller.executions["execution-1"] = (
+        WorkflowExecution(
+            id="execution-1",
+            status=WorkflowStatus.NEEDS_HUMAN,
+            cancellation_requested_at=datetime.now(UTC),
+        ), []
+    )
+
+    row = persisted_row(
+        WorkflowBatchItem(0, "task-0", "Task 0", "execution-1"),
+        controller,  # type: ignore[arg-type]
+    )
+
+    assert row.category == "NEEDS_HUMAN"
+    assert row.status_label == "CANCELLATION REQUESTED"
+    assert row.action is None
+    assert row.can_cancel
+
+
+def test_late_finish_event_does_not_reopen_cancelled_row() -> None:
+    progress = LiveBatchProgress(_batch(1))
+    progress.apply(WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.EXECUTION_CREATED,
+        payload={"batch_position": 0},
+    ))
+    progress.apply(_status_event("execution-1", WorkflowStatus.CANCELLED, position=0))
+
+    progress.apply(_status_event(
+        "execution-1", WorkflowStatus.NEEDS_HUMAN, position=0,
+        kind=WorkflowEventKind.WORKFLOW_FINISHED,
+    ))
+
+    assert progress.rows()[0].category == "CANCELLED"
+    assert progress.summary()["CANCELLED"] == 1
 
 
 def test_execution_created_links_the_row_and_resets_its_timeline() -> None:
@@ -379,6 +535,7 @@ def test_persisted_row_for_unlinked_item_is_queued() -> None:
     controller = _Controller()
     item = WorkflowBatchItem(0, "task-1", "Task 1")
     row = persisted_row(item, controller)  # type: ignore[arg-type]
+    assert not row.can_cancel
 
     assert row.category == "QUEUED"
     assert row.status_label == "QUEUED"

@@ -227,13 +227,20 @@ class _Repository:
 
     def respond_to_human_input(self, execution_id: str, response: str) -> HumanInteraction:
         with self._lock:
+            execution = self._execution(execution_id)
+            if execution.status is not WorkflowStatus.NEEDS_HUMAN:
+                raise ValueError(f"Execution {execution_id} is not awaiting human input")
             interaction = next(
                 item
-                for item in reversed(self._execution(execution_id).human_interactions)
+                for item in reversed(execution.human_interactions)
                 if item.response is None
             )
             interaction.response = response.strip()
             interaction.responded_at = datetime.now(UTC)
+            execution.status = WorkflowStatus.PENDING
+            execution.error_message = None
+            execution.finished_at = None
+            self.status_changes[execution_id].append(WorkflowStatus.PENDING)
             return interaction
 
     def resume_execution(self, execution_id: str) -> None:
@@ -918,6 +925,33 @@ def test_a_queued_pending_execution_is_cancelled_without_running_a_stage(
     assert first.result(TIMEOUT).status is WorkflowStatus.APPROVED
 
 
+def test_cancellation_before_dispatch_registration_settles_behind_closed_gate(
+    tmp_path: Path, dispatchers
+) -> None:
+    dispatcher = _dispatcher(dispatchers, 1)
+    gate = _AgentGate()
+    service, repository = _service(
+        tmp_path,
+        gate=gate,
+        dispatcher=dispatcher,
+        coordinator=ProviderConcurrencyCoordinator(),
+    )
+    original_submit = dispatcher.submit
+
+    def cancel_before_register(execution_id: str, run: Any, **kwargs: Any) -> Any:
+        assert service.cancel_execution(execution_id) is True
+        assert dispatcher.queued_count() == 0
+        return original_submit(execution_id, run, **kwargs)
+
+    dispatcher.submit = cancel_before_register  # type: ignore[method-assign]
+    handle = service.submit_execution("card-1", admission_gate=lambda: False)
+
+    assert handle.result(TIMEOUT).status is WorkflowStatus.CANCELLED
+    assert repository.stage_changes[handle.execution_id] == []
+    assert dispatcher.queued_count() == 0
+    assert gate.call_count("planner") == 0
+
+
 def test_an_execution_waiting_for_provider_capacity_is_cancellable(
     tmp_path: Path, dispatchers
 ) -> None:
@@ -1097,6 +1131,35 @@ def test_human_response_resume_uses_the_shared_submission_seam(
         WorkflowStatus.RUNNING,
         WorkflowStatus.APPROVED,
     ]
+
+
+def test_cancel_response_before_dispatch_registration_settles_behind_closed_gate(
+    tmp_path: Path, dispatchers
+) -> None:
+    service, repository, gate, paused = _paused_planner_execution(tmp_path, dispatchers)
+    planner_calls_before = gate.call_count("planner")
+    dispatcher = service._dispatcher
+    original_submit = dispatcher.submit
+
+    def cancel_before_register(execution_id: str, run: Any, **kwargs: Any) -> Any:
+        assert execution_id == paused.id
+        assert repository.get_execution(execution_id).status is WorkflowStatus.PENDING
+        assert service.cancel_execution(execution_id) is True
+        assert dispatcher.queued_count() == 0
+        return original_submit(execution_id, run, **kwargs)
+
+    dispatcher.submit = cancel_before_register  # type: ignore[method-assign]
+    handle = service.submit_response(
+        paused.id, "Use a 30 day retention period.", admission_gate=lambda: False
+    )
+
+    assert handle.result(TIMEOUT).status is WorkflowStatus.CANCELLED
+    assert repository.status_changes[paused.id][-2:] == [
+        WorkflowStatus.PENDING,
+        WorkflowStatus.CANCELLED,
+    ]
+    assert dispatcher.queued_count() == 0
+    assert gate.call_count("planner") == planner_calls_before
 
 
 def test_respond_and_resume_waits_on_the_same_handle(tmp_path: Path, dispatchers) -> None:
