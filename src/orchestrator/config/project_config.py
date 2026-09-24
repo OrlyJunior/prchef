@@ -421,7 +421,7 @@ class GitHubAppSettings(BaseModel):
 
 
 class GitHubIntegrationSettings(CommandIntegrationSettings):
-    """GitHub CLI integration identities.
+    """GitHub integration identities.
 
     ``app`` remains the reviewer identity for backwards compatibility. The
     implementer identity is deliberately separate from review credentials.
@@ -431,6 +431,7 @@ class GitHubIntegrationSettings(CommandIntegrationSettings):
     timeout_seconds: int = 120
     app: GitHubAppSettings = Field(default_factory=GitHubAppSettings)
     implementer_app: GitHubAppSettings = Field(default_factory=GitHubAppSettings)
+    planner_app: GitHubAppSettings = Field(default_factory=GitHubAppSettings)
 
 
 class CodexIntegrationSettings(CommandIntegrationSettings):
@@ -1315,6 +1316,25 @@ class ProjectConfigLoader:
         except ValueError as exc:
             raise ConfigurationError(f"Invalid project configuration: {exc}") from exc
 
+    def has_planner_github_app(self) -> bool:
+        """Check whether any repository could use a Planner App without probing Git."""
+        configuration = _load_yaml(self._config_file, required=True)
+        defaults = configuration.get("defaults", {})
+        repositories = configuration.get("repositories", {})
+        entries = (
+            [defaults, *repositories.values()]
+            if isinstance(repositories, dict)
+            else [defaults]
+        )
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            integrations = entry.get("integrations", {})
+            github = integrations.get("github", {}) if isinstance(integrations, dict) else {}
+            if isinstance(github, dict) and github.get("planner_app"):
+                return True
+        return False
+
     def list_repositories(self) -> list[ConfiguredRepository]:
         """List registered repositories without resolving project settings.
 
@@ -1607,6 +1627,7 @@ class ProjectConfigLoader:
         *,
         implementer_app: GitHubAppSettings,
         reviewer_app: GitHubAppSettings,
+        planner_app: GitHubAppSettings | None = None,
     ) -> Path:
         """Persist App *references* in the resolved global configuration.
 
@@ -1629,7 +1650,13 @@ class ProjectConfigLoader:
         if not isinstance(github, dict):
             raise ConfigurationError("'integrations.github' must be a mapping")
 
-        for key, settings in (("implementer_app", implementer_app), ("app", reviewer_app)):
+        for key, settings in (
+            ("implementer_app", implementer_app),
+            ("app", reviewer_app),
+            ("planner_app", planner_app),
+        ):
+            if settings is None:
+                continue
             if settings.is_configured:
                 github[key] = settings.model_dump(mode="json", exclude_none=True)
             else:

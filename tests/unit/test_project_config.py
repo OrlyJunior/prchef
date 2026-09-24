@@ -697,7 +697,7 @@ def test_github_app_configuration_accepts_exactly_one_private_key_source(tmp_pat
     assert config.integrations.github.app.app_id == 123
 
 
-def test_implementer_and_reviewer_github_apps_are_independent(tmp_path: Path) -> None:
+def test_planner_implementer_and_reviewer_github_apps_are_independent(tmp_path: Path) -> None:
     config = ProjectConfig.model_validate(
         {
             "path": tmp_path,
@@ -714,6 +714,11 @@ def test_implementer_and_reviewer_github_apps_are_independent(tmp_path: Path) ->
                         "installation_id": 987,
                         "private_key_env": "IMPLEMENTER_APP_KEY",
                     },
+                    "planner_app": {
+                        "app_id": 321,
+                        "installation_id": 654,
+                        "private_key_env": "PLANNER_APP_KEY",
+                    },
                 }
             },
         }
@@ -723,12 +728,36 @@ def test_implementer_and_reviewer_github_apps_are_independent(tmp_path: Path) ->
 
     assert config.integrations.github.app.app_id == 123
     assert config.integrations.github.implementer_app.app_id == 789
+    assert config.integrations.github.planner_app.app_id == 321
     assert clients.git._implementer_authenticator is clients.github._implementer_authenticator
     assert (
         ProjectConfig.model_validate({"path": tmp_path})
         .integrations.github.implementer_app.is_configured
         is False
     )
+    assert not (
+        ProjectConfig.model_validate({"path": tmp_path})
+        .integrations.github.planner_app.is_configured
+    )
+
+
+@pytest.mark.parametrize("role", ["planner_app", "implementer_app", "app"])
+def test_each_github_app_identity_validates_its_own_credentials(
+    tmp_path: Path, role: str
+) -> None:
+    with pytest.raises(ValueError, match="requires app_id, installation_id"):
+        ProjectConfig.model_validate({
+            "path": tmp_path,
+            "integrations": {"github": {role: {"app_id": 1}}},
+        })
+    with pytest.raises(ValueError, match="either private_key_path or private_key_env"):
+        ProjectConfig.model_validate({
+            "path": tmp_path,
+            "integrations": {"github": {role: {
+                "app_id": 1, "installation_id": 2,
+                "private_key_path": tmp_path / "key.pem", "private_key_env": "KEY",
+            }}},
+        })
 
 
 def test_tui_configuration_writer_updates_resolved_global_config_and_preserves_other_content(
@@ -763,12 +792,18 @@ repositories:
             private_key_env="IMPLEMENTER_APP_KEY",
         ),
         reviewer_app=GitHubAppSettings(),
+        planner_app=GitHubAppSettings(
+            app_id=321,
+            installation_id=654,
+            private_key_env="PLANNER_APP_KEY",
+        ),
     )
 
     assert saved == config_file
     assert not (repository / ".orchestrator.yml").exists()
     content = saved.read_text(encoding="utf-8")
     assert "implementer_app:" in content
+    assert "planner_app:" in content
     assert "IMPLEMENTER_APP_KEY" in content
     assert "private_key:" not in content
     persisted = yaml.safe_load(content)
@@ -781,6 +816,17 @@ repositories:
         )
     )
     assert resolved.integrations.github.implementer_app.app_id == 789
+    assert resolved.integrations.github.planner_app.app_id == 321
+
+    loader.save_github_app_settings(
+        "example",
+        implementer_app=resolved.integrations.github.implementer_app,
+        reviewer_app=resolved.integrations.github.app,
+        planner_app=GitHubAppSettings(),
+    )
+    cleared = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert "planner_app" not in cleared["repositories"]["example"]["integrations"]["github"]
+    assert cleared["unrelated"] == {"keep": "this value"}
 
 
 def test_repository_crud_round_trips_commands_and_preserves_configuration(

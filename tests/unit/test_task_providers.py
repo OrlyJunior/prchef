@@ -4,11 +4,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from orchestrator.clients.command_client import CommandResult
 from orchestrator.clients.exceptions import GitHubClientError
 from orchestrator.clients.github_issue_client import GitHubIssueClient
+from orchestrator.config.project_config import GitHubAppSettings
 from orchestrator.models import DevelopmentTask
 from orchestrator.services.task_provider import (
     GitHubIssueTaskProvider,
@@ -226,6 +228,126 @@ def test_github_issue_client_lists_complete_paginated_label_catalog(tmp_path: Pa
             ".[].name | tojson",
         ]
     ]
+
+
+def test_planner_app_reads_issues_and_labels_without_gh(tmp_path: Path) -> None:
+    commands = StubCommands(CommandResult([], 1, "", "gh must not run", 0.1))
+    requests: list[httpx.Request] = []
+    issue = {
+        "number": 42, "title": "Plan", "body": "Details", "state": "open",
+        "html_url": "https://github.com/owner/api/issues/42",
+        "user": {"login": "author"}, "milestone": {"title": "V2"},
+        "labels": [{"name": "planned"}],
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.headers["authorization"] == "Bearer planner-token"
+        assert request.url.host == "github.example.test"
+        assert request.url.path.startswith("/api/v3/repos/owner/api/")
+        if request.url.path.endswith("/issues/42"):
+            return httpx.Response(200, json=issue)
+        if request.url.path.endswith("/issues"):
+            assert request.url.params["state"] == "open"
+            if request.url.params["page"] == "1":
+                return httpx.Response(200, json=[{**issue, "pull_request": {}}] * 100)
+            return httpx.Response(200, json=[issue])
+        if request.url.params["page"] == "1":
+            return httpx.Response(200, json=[{"name": f"label-{n}"} for n in range(100)])
+        return httpx.Response(200, json=[{"name": "final"}])
+
+    class Token:
+        def token(self) -> str:
+            return "planner-token"
+
+    client = GitHubIssueClient(
+        commands, cwd=tmp_path,
+        planner_app=GitHubAppSettings(
+            app_id=1, installation_id=2, private_key_env="PLANNER_KEY",
+            api_url="https://github.example.test/api/v3",
+        ),
+        authenticator=Token(),  # type: ignore[arg-type]
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    provider = GitHubIssueTaskProvider(client, "owner/api")
+
+    task = provider.get_task("42")
+    assert task.url == issue["html_url"]
+    assert task.metadata["author"] == "author"
+    assert task.metadata["milestone"] == "V2"
+    assert task.metadata["labels"] == ["planned"]
+    assert [item.id for item in provider.list_tasks(limit=1)] == ["42"]
+    assert len(provider.list_labels()) == 101
+    assert commands.calls == []
+    assert len(requests) == 5
+
+
+@pytest.mark.parametrize("payload", [None, {}, [{"number": "bad"}]])
+def test_planner_app_rejects_invalid_issue_payload(tmp_path: Path, payload: Any) -> None:
+    class Token:
+        def token(self) -> str:
+            return "token"
+
+    client = GitHubIssueClient(
+        StubCommands(CommandResult([], 0, "", "", 0.1)), cwd=tmp_path,
+        planner_app=GitHubAppSettings(app_id=1, installation_id=2, private_key_env="KEY"),
+        authenticator=Token(),  # type: ignore[arg-type]
+        http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=payload)
+        )),
+    )
+    with pytest.raises(GitHubClientError, match="issue response"):
+        client.get_issue("owner/api", "42")
+
+
+def test_planner_app_authentication_and_api_failures_do_not_use_gh(tmp_path: Path) -> None:
+    commands = StubCommands(CommandResult([], 0, "{}", "", 0.1))
+    app = GitHubAppSettings(app_id=1, installation_id=2, private_key_env="KEY")
+
+    class FailedToken:
+        def token(self) -> str:
+            raise GitHubClientError("Could not mint a GitHub App installation token")
+
+    auth_client = GitHubIssueClient(
+        commands, cwd=tmp_path, planner_app=app,
+        authenticator=FailedToken(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(GitHubClientError, match="installation token"):
+        auth_client.get_issue("owner/api", "42")
+
+    class Token:
+        def token(self) -> str:
+            return "token"
+
+    api_client = GitHubIssueClient(
+        commands, cwd=tmp_path, planner_app=app,
+        authenticator=Token(),  # type: ignore[arg-type]
+        http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(403, json={"message": "Forbidden"})
+        )),
+    )
+    with pytest.raises(GitHubClientError, match="403"):
+        api_client.list_labels("owner/api")
+    assert commands.calls == []
+
+
+def test_planner_app_rejects_invalid_list_payloads(tmp_path: Path) -> None:
+    class Token:
+        def token(self) -> str:
+            return "token"
+
+    client = GitHubIssueClient(
+        StubCommands(CommandResult([], 0, "", "", 0.1)), cwd=tmp_path,
+        planner_app=GitHubAppSettings(app_id=1, installation_id=2, private_key_env="KEY"),
+        authenticator=Token(),  # type: ignore[arg-type]
+        http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"name": "not an array"})
+        )),
+    )
+    with pytest.raises(GitHubClientError, match="issue list response"):
+        client.list_issues("owner/api")
+    with pytest.raises(GitHubClientError, match="label list response"):
+        client.list_labels("owner/api")
 
 
 @pytest.mark.parametrize("stdout", ["not json\n", '{"name": "bug"}\n', "null\n"])

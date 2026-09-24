@@ -6,12 +6,16 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from orchestrator.clients.command_client import CommandClient, CommandResult
 from orchestrator.clients.exceptions import GitHubClientError
+from orchestrator.clients.github_client import GitHubAppAuthenticator
+from orchestrator.config.project_config import GitHubAppSettings
 
 
 class GitHubIssueClient:
-    """Read GitHub Issues through the authenticated GitHub CLI."""
+    """Read GitHub Issues with the Planner App or the authenticated GitHub CLI."""
 
     _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
@@ -21,11 +25,20 @@ class GitHubIssueClient:
         command: Sequence[str] = ("gh",),
         timeout_seconds: int = 120,
         cwd: Path | None = None,
+        planner_app: GitHubAppSettings | None = None,
+        authenticator: GitHubAppAuthenticator | None = None,
+        http_client: httpx.Client | None = None,
     ) -> None:
         self._commands = command_client
         self._command = list(command)
         self._timeout_seconds = timeout_seconds
         self._cwd = (cwd or Path.cwd()).resolve()
+        self._planner_app = planner_app if planner_app and planner_app.is_configured else None
+        self._authenticator = None
+        self._http = None
+        if self._planner_app is not None:
+            self._authenticator = authenticator or GitHubAppAuthenticator(self._planner_app)
+            self._http = http_client or httpx.Client(timeout=30.0)
 
     def get_issue(self, repository: str, issue_number: str) -> dict[str, Any]:
         normalized_repository = self._normalize_repository(repository)
@@ -35,6 +48,12 @@ class GitHubIssueClient:
             raise GitHubClientError("GitHub issue number must be a positive integer") from exc
         if normalized_number <= 0:
             raise GitHubClientError("GitHub issue number must be a positive integer")
+
+        if self._planner_app is not None:
+            payload = self._api_get(
+                f"repos/{normalized_repository}/issues/{normalized_number}"
+            )
+            return self._normalize_issue(payload)
 
         result = self._run(
             "issue",
@@ -59,6 +78,27 @@ class GitHubIssueClient:
         normalized_repository = self._normalize_repository(repository)
         if limit <= 0:
             raise GitHubClientError("GitHub issue list limit must be positive")
+        if self._planner_app is not None:
+            issues: list[dict[str, Any]] = []
+            page = 1
+            while len(issues) < limit:
+                payload = self._api_get(
+                    f"repos/{normalized_repository}/issues",
+                    params={"state": "open", "per_page": 100, "page": page},
+                )
+                if not isinstance(payload, list):
+                    raise GitHubClientError("GitHub API issue list response must be a JSON array")
+                for item in payload:
+                    if not isinstance(item, dict):
+                        raise GitHubClientError("GitHub API issue list contains an invalid issue")
+                    if "pull_request" not in item:
+                        issues.append(self._normalize_issue(item))
+                        if len(issues) == limit:
+                            break
+                if len(payload) < 100:
+                    break
+                page += 1
+            return issues
         result = self._run(
             "issue",
             "list",
@@ -83,6 +123,23 @@ class GitHubIssueClient:
         """Return the repository's complete label catalog for interactive task filtering."""
 
         normalized_repository = self._normalize_repository(repository)
+        if self._planner_app is not None:
+            planner_labels: list[dict[str, Any]] = []
+            page = 1
+            while True:
+                payload = self._api_get(
+                    f"repos/{normalized_repository}/labels",
+                    params={"per_page": 100, "page": page},
+                )
+                if not isinstance(payload, list):
+                    raise GitHubClientError("GitHub API label list response must be a JSON array")
+                for item in payload:
+                    if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                        raise GitHubClientError("GitHub API label list contains an invalid label")
+                    planner_labels.append({"name": item["name"]})
+                if len(payload) < 100:
+                    return planner_labels
+                page += 1
         # `gh label list` stops at a fixed --limit, which would silently drop
         # labels from large catalogs. The REST endpoint is paginated to the
         # end instead; jq emits each name as one JSON string per line so the
@@ -106,6 +163,63 @@ class GitHubIssueClient:
                 raise GitHubClientError("GitHub CLI label list entries must be label names")
             labels.append({"name": name})
         return labels
+
+    def _api_get(self, path: str, *, params: dict[str, str | int] | None = None) -> Any:
+        assert self._planner_app is not None
+        assert self._authenticator is not None
+        assert self._http is not None
+        token = self._authenticator.token()
+        try:
+            response = self._http.get(
+                f"{self._planner_app.api_url}/{path}",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {token}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                params=params,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise GitHubClientError(f"GitHub API issue lookup failed: {exc}") from exc
+        try:
+            return response.json()
+        except ValueError as exc:
+            if path.endswith("/labels"):
+                kind = "label list"
+            elif path.endswith("/issues"):
+                kind = "issue list"
+            else:
+                kind = "issue"
+            raise GitHubClientError(f"GitHub API {kind} response is invalid JSON") from exc
+
+    @staticmethod
+    def _normalize_issue(payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict) or "pull_request" in payload:
+            raise GitHubClientError("GitHub API issue response must be an issue JSON object")
+        if (
+            not isinstance(payload.get("number"), int)
+            or not isinstance(payload.get("title"), str)
+            or not isinstance(payload.get("html_url"), str)
+            or not isinstance(payload.get("state"), str)
+        ):
+            raise GitHubClientError("GitHub API issue response is missing required fields")
+        labels = payload.get("labels", [])
+        if not isinstance(labels, list) or not all(
+            isinstance(label, dict) and isinstance(label.get("name"), str)
+            for label in labels
+        ):
+            raise GitHubClientError("GitHub API issue response has invalid labels")
+        return {
+            "number": payload["number"],
+            "title": payload["title"],
+            "body": payload.get("body"),
+            "url": payload.get("html_url"),
+            "labels": labels,
+            "state": payload["state"].upper(),
+            "author": payload.get("user"),
+            "milestone": payload.get("milestone"),
+        }
 
     def _normalize_repository(self, repository: str) -> str:
         normalized_repository = repository.strip()

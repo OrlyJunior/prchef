@@ -82,8 +82,9 @@
   Refresh, loading, empty, and inline-error states remain available, while explicit CLI task
   identifiers remain supported.
 - Label filtering is an optional task-provider capability (`LabelCatalogProvider.list_labels`),
-  implemented only by GitHub issues (the full catalog via `gh api --paginate`, not the capped
-  `gh label list`); Trello deliberately lacks it.
+  implemented only by GitHub issues (the full catalog via the Planner App REST API when
+  configured, otherwise `gh api --paginate`, never the capped `gh label list`); Trello
+  deliberately lacks it.
   `WorkflowController.list_task_labels` returns `None` for unsupported providers, distinct from an
   empty catalog, and failures surface as an explicit inline label error rather than hiding the
   filter. The launcher loads labels with tasks under the same request token, and filters only the
@@ -401,7 +402,10 @@
   request.
 - A GitHub review-publication failure is logged and recorded without changing the structured
   reviewer decision or its terminal status. GitHub App credentials use separate optional reviewer
-  (`integrations.github.app`) and implementer (`integrations.github.implementer_app`) identities.
+  (`integrations.github.app`), implementer (`integrations.github.implementer_app`), and planner
+  (`integrations.github.planner_app`) identities. The planner App uses its installation token for
+  repository-scoped issue and label reads in the TUI and explicit CLI issue lookup. Without it,
+  task discovery retains the existing `gh` path. Planner-agent execution remains read-only.
   The implementer token is scoped to PR CLI operations and HTTPS pushes, while its bot metadata is
   set only for commit subprocesses; SSH pushes retain ambient transport authentication. See
   `docs/github_app.md`.
