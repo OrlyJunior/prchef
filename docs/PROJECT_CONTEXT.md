@@ -103,7 +103,9 @@
   An individual linked batch item in PENDING, WAITING, RUNNING, or NEEDS_HUMAN can be
   cancelled from either batch view. Active work observes a durable request at a safe
   boundary; explicit cancellation of NEEDS_HUMAN transitions it directly to CANCELLED
-  and wakes live batch completion bookkeeping. Answer recording and requeueing are
+  and wakes live batch completion bookkeeping. A request made before dispatch
+  registration is checked again after registration, so a closed admission gate
+  cannot strand a cancelled PENDING item. Answer recording and requeueing are
   one durable transition that cannot revive a concurrently cancelled item. Workflow
   finish writes honor a cancellation request atomically, including one arriving after
   the last safe-boundary check, so an accepted request cannot leave an item at

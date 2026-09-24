@@ -307,9 +307,18 @@ class WorkflowService:
             finally:
                 self._end_runtime(execution_id)
 
-        return self._dispatcher.submit(
+        handle = self._dispatcher.submit(
             execution_id, run_job, on_dropped=drop_job, ready=admission_gate
         )
+        # Cancellation may commit after the execution becomes PENDING but
+        # before this job is registered. In that window cancel_execution has
+        # no queued job to remove. Check again after registration so a closed
+        # admission gate cannot strand the accepted request indefinitely.
+        # If cancellation arrives after this read, cancel_execution sees the
+        # registered job; if a worker already started, it checks the request.
+        if self._repository.cancellation_requested(execution_id):
+            self._dispatcher.cancel(execution_id)
+        return handle
 
     def _start_admitted(self, execution_id: str) -> None:
         """Move admitted work from the queue into a genuinely running state."""
