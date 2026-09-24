@@ -242,6 +242,15 @@ class LiveBatchProgress:
             # A stale event for a position whose item has since been replaced.
             return None
 
+        if (
+            item.status is WorkflowStatus.CANCELLED
+            and event.status is not None
+            and event.status is not WorkflowStatus.CANCELLED
+        ):
+            # Cancellation may settle after the service read its finish result
+            # but before that result's observer event reaches the screen.
+            return position
+
         if event.kind in (WorkflowEventKind.STATUS_CHANGED, WorkflowEventKind.WORKFLOW_FINISHED):
             item.status = event.status
             update_human_blocked_line(event, item.timeline, item.successful_stage_lines)

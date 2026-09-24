@@ -1557,6 +1557,7 @@ class WorkflowService:
                 status = WorkflowStatus.CANCELLED
         self._repository.finish(execution_id, status)
         execution = self._repository.get_execution(execution_id)
+        status = execution.status
         self._emit(
             execution_id,
             WorkflowEventKind.STATUS_CHANGED,

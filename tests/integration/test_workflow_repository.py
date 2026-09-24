@@ -316,6 +316,24 @@ def test_human_blocked_execution_can_be_cancelled_immediately(tmp_path: Path) ->
     assert repository.request_cancellation(execution.id) is False
 
 
+@pytest.mark.parametrize("status", [WorkflowStatus.NEEDS_HUMAN, WorkflowStatus.APPROVED])
+def test_finish_honors_cancellation_requested_after_last_check(
+    tmp_path: Path, status: WorkflowStatus
+) -> None:
+    repository = _migrated_repository(tmp_path, f"cancel-at-finish-{status.value.lower()}.db")
+    execution = repository.create_execution("card-finishing")
+    repository.update_status(execution.id, WorkflowStatus.RUNNING)
+    repository.update_stage(execution.id, WorkflowStage.REVIEW)
+
+    assert repository.request_cancellation(execution.id)
+    repository.finish(execution.id, status)
+
+    persisted = repository.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.CANCELLED
+    assert persisted.current_stage is WorkflowStage.REVIEW
+    assert persisted.finished_at is not None
+
+
 def test_queue_execution_returns_a_resumed_execution_to_pending(tmp_path: Path) -> None:
     repository = _migrated_repository(tmp_path, "requeue.db")
     execution = repository.create_execution("card-resume")

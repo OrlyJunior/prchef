@@ -171,6 +171,23 @@ def test_running_cancellation_request_stays_pending_until_terminal_event() -> No
     assert not persisted.can_cancel
 
 
+def test_late_finish_event_does_not_reopen_cancelled_row() -> None:
+    progress = LiveBatchProgress(_batch(1))
+    progress.apply(WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.EXECUTION_CREATED,
+        payload={"batch_position": 0},
+    ))
+    progress.apply(_status_event("execution-1", WorkflowStatus.CANCELLED, position=0))
+
+    progress.apply(_status_event(
+        "execution-1", WorkflowStatus.NEEDS_HUMAN, position=0,
+        kind=WorkflowEventKind.WORKFLOW_FINISHED,
+    ))
+
+    assert progress.rows()[0].category == "CANCELLED"
+    assert progress.summary()["CANCELLED"] == 1
+
+
 def test_execution_created_links_the_row_and_resets_its_timeline() -> None:
     progress = LiveBatchProgress(_batch(2))
 

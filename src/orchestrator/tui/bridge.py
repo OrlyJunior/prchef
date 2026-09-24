@@ -712,7 +712,10 @@ class WorkflowController:
                 self._execution_batches[event.execution_id] = run.batch_id
             with run.condition:
                 run.positions[event.execution_id] = position
-                if event.status is not None:
+                if (
+                    event.status is not None
+                    and run.statuses.get(position) is not WorkflowStatus.CANCELLED
+                ):
                     run.statuses[position] = event.status
                 payload = event.payload or {}
                 if (
@@ -810,7 +813,6 @@ class WorkflowController:
                     position = run.positions.get(execution_id)
                     if (
                         position is not None
-                        and run.statuses.get(position) is WorkflowStatus.NEEDS_HUMAN
                         and self._repository.get_execution(execution_id).status
                         is WorkflowStatus.CANCELLED
                     ):

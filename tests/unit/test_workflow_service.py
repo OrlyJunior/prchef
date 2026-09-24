@@ -215,6 +215,28 @@ def test_cancellation_stops_later_stages_and_preserves_workspace_artifacts(workf
     assert events[-1].status is WorkflowStatus.CANCELLED
 
 
+def test_cancellation_at_finish_is_emitted_as_cancelled(workflow) -> None:
+    service, repository, _, _ = workflow
+    events = []
+    original_finish = repository.finish
+
+    def cancel_during_finish(execution_id: str, status: WorkflowStatus) -> None:
+        # _finish has already checked the request by the time it calls finish.
+        assert status is WorkflowStatus.APPROVED
+        assert repository.request_cancellation(execution_id)
+        original_finish(execution_id, status)
+
+    repository.finish = cancel_during_finish  # type: ignore[method-assign]
+
+    result = service.run("card-cancel-at-finish", event_listener=events.append)
+
+    assert result.status is WorkflowStatus.CANCELLED
+    assert result.current_stage is not WorkflowStage.COMPLETED
+    assert [event.status for event in events[-2:]] == [
+        WorkflowStatus.CANCELLED, WorkflowStatus.CANCELLED,
+    ]
+
+
 def test_cancellation_is_a_terminal_notification_outcome(tmp_path: Path) -> None:
     service, recorder = _workflow_with_notifications(tmp_path)
     repository = service._repository

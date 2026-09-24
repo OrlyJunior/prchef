@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -478,13 +478,32 @@ class WorkflowRepository:
             return [self._interaction_to_domain(entity) for entity in entities]
 
     def finish(self, execution_id: str, status: WorkflowStatus) -> None:
-        def mutate(entity: WorkflowExecutionEntity) -> None:
-            entity.status = status.value
-            if status in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:
-                entity.current_stage = WorkflowStage.COMPLETED.value
-            entity.finished_at = _utcnow()
-
-        self._mutate(execution_id, mutate)
+        # Decide the terminal status in the same write that finishes the row.
+        # A cancellation can arrive after the service's last safe-boundary
+        # check; an ORM read followed by an unconditional write would lose it.
+        cancelled = WorkflowExecutionEntity.cancellation_requested_at.is_not(None)
+        now = _utcnow()
+        values: dict[str, Any] = {
+            "status": case((cancelled, WorkflowStatus.CANCELLED.value), else_=status.value),
+            "finished_at": now,
+            "updated_at": now,
+        }
+        if status in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:
+            values["current_stage"] = case(
+                (cancelled, WorkflowExecutionEntity.current_stage),
+                else_=WorkflowStage.COMPLETED.value,
+            )
+        with self._sessions() as session, session.begin():
+            result = cast(
+                CursorResult[Any],
+                session.execute(
+                    update(WorkflowExecutionEntity)
+                    .where(WorkflowExecutionEntity.id == execution_id)
+                    .values(**values)
+                ),
+            )
+            if not result.rowcount:
+                raise KeyError(f"Workflow execution not found: {execution_id}")
 
     def start_step(self, execution_id: str, stage: WorkflowStage) -> int:
         entity = WorkflowStepEntity(

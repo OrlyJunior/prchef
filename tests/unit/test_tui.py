@@ -863,12 +863,17 @@ def test_controller_batch_cancellation_is_accepted_between_items(tmp_path: Path)
     assert repository.cancellation_requests == [repository.execution.id]
 
 
-def test_controller_cancelling_last_human_blocked_item_completes_batch(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "bookkeeping_status", [WorkflowStatus.NEEDS_HUMAN, WorkflowStatus.RUNNING]
+)
+def test_controller_cancelling_last_human_blocked_item_completes_batch(
+    tmp_path: Path, bookkeeping_status: WorkflowStatus
+) -> None:
     controller, _, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.NEEDS_HUMAN
     run = _BatchRun("batch-1", 2, frozenset(), None)
     run.submissions_done = True
-    run.statuses = {0: WorkflowStatus.APPROVED, 1: WorkflowStatus.NEEDS_HUMAN}
+    run.statuses = {0: WorkflowStatus.APPROVED, 1: bookkeeping_status}
     run.positions[repository.execution.id] = 1
     controller._active_batches[run.batch_id] = run
     controller._execution_batches[repository.execution.id] = run.batch_id
@@ -878,6 +883,12 @@ def test_controller_cancelling_last_human_blocked_item_completes_batch(tmp_path:
     assert run.statuses == {0: WorkflowStatus.APPROVED, 1: WorkflowStatus.CANCELLED}
     assert run.complete()
     assert repository.cancellation_requests == [repository.execution.id]
+
+    controller._observe_batch_event(run, 1, WorkflowEvent(
+        repository.execution.id, WorkflowEventKind.WORKFLOW_FINISHED,
+        status=WorkflowStatus.NEEDS_HUMAN,
+    ))
+    assert run.statuses[1] is WorkflowStatus.CANCELLED
 
 
 def test_batch_reconciles_human_cancellation_from_another_controller(tmp_path: Path) -> None:

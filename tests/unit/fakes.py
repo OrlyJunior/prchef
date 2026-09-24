@@ -254,6 +254,8 @@ class FakeWorkflowRepository:
 
     def finish(self, execution_id: str, status: WorkflowStatus) -> None:
         execution = self._execution()
+        if execution.cancellation_requested_at is not None:
+            status = WorkflowStatus.CANCELLED
         execution.status = status
         if status in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:
             execution.current_stage = WorkflowStage.COMPLETED
