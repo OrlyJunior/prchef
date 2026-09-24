@@ -3252,6 +3252,178 @@ def test_execution_detail_offers_editable_terminal_continuation(tmp_path: Path) 
     assert service.continuations == [("execution-1", "Edited continuation feedback")]
 
 
+@pytest.mark.parametrize("action", ["continuation", "answer"])
+@pytest.mark.parametrize("live_batch", [False, True])
+def test_execution_detail_refreshes_after_in_place_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    live_batch: bool,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    execution = repository.execution
+    if action == "continuation":
+        execution.status = WorkflowStatus.CHANGES_REQUESTED
+        execution.workspace_path = str(tmp_path / "worktree")
+        execution.working_branch = "workflow/12"
+    else:
+        execution.status = WorkflowStatus.NEEDS_HUMAN
+        execution.current_stage = WorkflowStage.REVIEW
+        execution.human_interactions = [HumanInteraction(
+            id=1,
+            workflow_execution_id=execution.id,
+            requesting_stage=WorkflowStage.REVIEW,
+            prompt="Clarify the change.",
+            requested_at=datetime.now(UTC),
+        )]
+
+    if live_batch:
+        run = _BatchRun("batch-1", 1, frozenset(), None)
+        run.positions[execution.id] = 0
+        run.statuses[0] = execution.status
+        controller._active_batches[run.batch_id] = run
+        controller._execution_batches[execution.id] = run.batch_id
+
+    listeners: list[Callable[[WorkflowEvent], None]] = []
+
+    def submit(
+        execution_id: str,
+        value: str,
+        *,
+        event_listener: Callable[[WorkflowEvent], None] | None = None,
+        admission_gate: Callable[[], bool] | None = None,
+    ) -> _Handle:
+        assert execution_id == execution.id
+        assert value == "Updated input"
+        assert (admission_gate is not None) is live_batch
+        if event_listener is not None:
+            listeners.append(event_listener)
+        execution.status = WorkflowStatus.PENDING if live_batch else WorkflowStatus.APPROVED
+        if event_listener is not None:
+            event_listener(WorkflowEvent(
+                execution.id, WorkflowEventKind.STATUS_CHANGED, status=execution.status
+            ))
+        # The handle result is deliberately stale: the detail must read persisted state.
+        return _Handle(WorkflowExecution(id=execution.id, status=WorkflowStatus.CHANGES_REQUESTED))
+
+    monkeypatch.setattr(
+        service,
+        "submit_continuation" if action == "continuation" else "submit_response",
+        submit,
+    )
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ExecutionDetailScreen)
+            status = screen.query_one("#execution-status", Static)
+            assert str(status.renderable) == (
+                "CHANGES_REQUESTED" if action == "continuation" else "AWAITING HUMAN"
+            )
+            if action == "continuation":
+                feedback = screen.query_one("#execution-continuation-feedback", TextArea)
+                feedback.text = "Updated input"
+                button = screen.query_one("#execution-continue", Button)
+            else:
+                screen.query_one("#execution-human-response", TextArea).text = "Updated input"
+                button = screen.query_one("#execution-resume", Button)
+            await settle_tui(pilot)
+            if action == "answer" and live_batch:
+                def unavailable(_: str) -> list[Any]:
+                    raise RuntimeError("related rows unavailable")
+
+                monkeypatch.setattr(repository, "list_steps", unavailable)
+                monkeypatch.setattr(repository, "list_diagnostics", unavailable)
+            button.press()
+            expected = "QUEUED" if live_batch else "APPROVED"
+            await wait_for_tui(pilot, lambda: str(status.renderable) == expected)
+            assert application.screen is screen
+            if live_batch:
+                assert listeners
+                execution.status = WorkflowStatus.RUNNING
+                await asyncio.to_thread(
+                    listeners[0],
+                    WorkflowEvent(
+                        execution.id, WorkflowEventKind.STATUS_CHANGED,
+                        status=WorkflowStatus.RUNNING,
+                    ),
+                )
+                await wait_for_tui(pilot, lambda: str(status.renderable) == "RUNNING")
+                assert application.screen is screen
+            await pilot.press("escape")
+            await settle_tui(pilot)
+            if live_batch:
+                execution.status = WorkflowStatus.APPROVED
+                await asyncio.to_thread(
+                    listeners[0],
+                    WorkflowEvent(
+                        execution.id, WorkflowEventKind.WORKFLOW_FINISHED,
+                        status=WorkflowStatus.APPROVED,
+                    ),
+                )
+            application.push_screen(ExecutionDetailScreen(execution.id))
+            await settle_tui(pilot)
+            assert str(
+                application.screen.query_one("#execution-status", Static).renderable
+            ) == "APPROVED"
+
+    asyncio.run(drive())
+
+
+def test_execution_detail_submission_refresh_uses_latest_persisted_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    execution = repository.execution
+    execution.status = WorkflowStatus.CHANGES_REQUESTED
+    execution.workspace_path = str(tmp_path / "worktree")
+    execution.working_branch = "workflow/12"
+    run = _BatchRun("batch-1", 1, frozenset(), None)
+    run.positions[execution.id] = 0
+    run.statuses[0] = execution.status
+    controller._active_batches[run.batch_id] = run
+    controller._execution_batches[execution.id] = run.batch_id
+
+    def submit(
+        execution_id: str,
+        feedback: str,
+        *,
+        event_listener: Callable[[WorkflowEvent], None] | None = None,
+        admission_gate: Callable[[], bool] | None = None,
+    ) -> _Handle:
+        assert event_listener is not None
+        execution.status = WorkflowStatus.PENDING
+        event_listener(WorkflowEvent(
+            execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.PENDING
+        ))
+        execution.status = WorkflowStatus.RUNNING
+        event_listener(WorkflowEvent(
+            execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.RUNNING
+        ))
+        return _Handle(WorkflowExecution(id=execution_id, status=WorkflowStatus.PENDING))
+
+    monkeypatch.setattr(service, "submit_continuation", submit)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#execution-continue", Button).press()
+            await wait_for_tui(
+                pilot,
+                lambda: str(screen.query_one("#execution-status", Static).renderable) == "RUNNING",
+            )
+            await settle_tui(pilot)
+            assert str(screen.query_one("#execution-status", Static).renderable) == "RUNNING"
+
+    asyncio.run(drive())
+
+
 def test_execution_detail_reenables_continue_after_continuation_error(tmp_path: Path) -> None:
     controller, service, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.CHANGES_REQUESTED

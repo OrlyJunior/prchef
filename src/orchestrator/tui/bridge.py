@@ -934,6 +934,10 @@ class WorkflowController:
             self._repository.list_steps(execution_id),
         )
 
+    def execution_snapshot(self, execution_id: str) -> WorkflowExecution:
+        """Read status even when related detail rows cannot be loaded."""
+        return self._repository.get_execution(execution_id)
+
     def execution_diagnostics(self, execution_id: str) -> list[ExecutionDiagnostic]:
         method = getattr(self._repository, "list_diagnostics", None)
         return method(execution_id) if callable(method) else []
