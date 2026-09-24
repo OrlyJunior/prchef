@@ -68,6 +68,11 @@ the caller without switching to the personal CLI identity. Without it, these rea
 existing `gh` commands. This identity does not change planner-agent file or Git permissions and
 does not post the planner spec as a comment.
 
+For explicit CLI issue reads, `--repository` identifies a GitHub origin. If multiple configured
+checkouts share that origin and resolve to different Planner App settings, the CLI reports an
+ambiguity instead of choosing either identity. Identical settings across those checkouts are safe
+to use; checkouts without a Planner App continue to use `gh` when the origin is unambiguous.
+
 The Textual TUI exposes all three roles under **GitHub Apps** (or `c`). It writes only App IDs,
 installation IDs, and private-key references to the selected repository's
 `repositories.<key>` entry in the resolved `orchestrator.yml`; it never accepts or writes private

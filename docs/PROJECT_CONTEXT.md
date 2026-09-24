@@ -406,6 +406,9 @@
   (`integrations.github.planner_app`) identities. The planner App uses its installation token for
   repository-scoped issue and label reads in the TUI and explicit CLI issue lookup. Without it,
   task discovery retains the existing `gh` path. Planner-agent execution remains read-only.
+  Explicit CLI issue lookup uses the origin slug to find a configured Planner identity; if
+  multiple registered checkouts share that origin with different resolved Planner settings, it
+  reports an ambiguity instead of selecting one by configuration order.
   The implementer token is scoped to PR CLI operations and HTTPS pushes, while its bot metadata is
   set only for commit subprocesses; SSH pushes retain ambient transport authentication. See
   `docs/github_app.md`.

@@ -82,6 +82,67 @@ repositories:
     assert debug_provider._client._planner_app.app_id == 2
 
 
+@pytest.mark.parametrize("second_identity", ["same", "different", "unconfigured"])
+def test_cli_slug_with_duplicate_origins_uses_only_a_shared_identity(
+    monkeypatch: Any, tmp_path: Path, second_identity: str
+) -> None:
+    for name in ("first", "second"):
+        (tmp_path / name / ".git").mkdir(parents=True)
+    config_file = tmp_path / "orchestrator.yml"
+    second_app = {
+        "same": "        planner_app:\n          app_id: 1\n"
+        "          installation_id: 11\n          private_key_env: FIRST_KEY\n",
+        "different": "        planner_app:\n          app_id: 2\n"
+        "          installation_id: 22\n          private_key_env: SECOND_KEY\n",
+        "unconfigured": "        planner_app: {}\n",
+    }[second_identity]
+    config_file.write_text(
+        "defaults: {}\nrepositories:\n"
+        "  first:\n    path: first\n    integrations:\n      github:\n"
+        "        planner_app:\n          app_id: 1\n"
+        "          installation_id: 11\n          private_key_env: FIRST_KEY\n"
+        "  second:\n    path: second\n    integrations:\n      github:\n"
+        + second_app,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main.GitClient, "github_repository", lambda self: "owner/shared")
+    loader = ProjectConfigLoader(config_file)
+
+    if second_identity != "same":
+        with pytest.raises(main.ConfigurationError, match="different Planner App identities"):
+            main._planner_app_for_slug(loader, "owner/shared")
+        with pytest.raises(main.typer.BadParameter, match="first, second"):
+            main._task_provider(
+                settings=Settings(), config_loader=loader, trello_card=None,
+                github_issue=42, task_id=None, repository="owner/shared",
+            )
+        with pytest.raises(main.ConfigurationError, match="first, second"):
+            main._debug_task_provider(Settings(), "github", "owner/shared", loader)
+    else:
+        planner_app = main._planner_app_for_slug(loader, "owner/shared")
+        assert planner_app is not None
+        assert planner_app.app_id == 1
+
+
+def test_cli_slug_with_duplicate_origins_and_no_planner_app_keeps_gh_fallback(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    for name in ("first", "second"):
+        (tmp_path / name / ".git").mkdir(parents=True)
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        "defaults: {}\nrepositories:\n"
+        "  first:\n    path: first\n"
+        "  second:\n    path: second\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        main.GitClient, "github_repository",
+        lambda self: (_ for _ in ()).throw(AssertionError("must not inspect Git")),
+    )
+    assert main._planner_app_for_slug(ProjectConfigLoader(config_file), "owner/shared") is None
+
+
 def test_cli_version_option() -> None:
     result = runner.invoke(main.app, ["--version"])
 

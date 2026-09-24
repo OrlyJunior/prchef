@@ -229,19 +229,22 @@ def _task_provider(
         raise typer.BadParameter(
             "GitHub Issues require --repository in the form owner/repository"
         )
+    try:
+        planner_app = _planner_app_for_slug(config_loader, repository)
+    except ConfigurationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     return selected_id, GitHubIssueTaskProvider(
-        GitHubIssueClient(
-            CommandClient(), planner_app=_planner_app_for_slug(config_loader, repository)
-        ), repository
+        GitHubIssueClient(CommandClient(), planner_app=planner_app), repository
     )
 
 
 def _planner_app_for_slug(
     config_loader: ProjectConfigLoader, repository_slug: str
 ) -> GitHubAppSettings | None:
-    """Use only credentials belonging to the configured repository with this origin."""
+    """Resolve credentials only when a slug identifies one Planner identity."""
     if not config_loader.has_planner_github_app():
         return None
+    matches: list[tuple[str, GitHubAppSettings | None]] = []
     for entry in config_loader.list_repositories():
         if not entry.path.is_dir():
             continue
@@ -257,8 +260,19 @@ def _planner_app_for_slug(
         )
         project = config_loader.load(selection, entry.key)
         planner_app = project.integrations.github.planner_app
-        return planner_app if planner_app.is_configured else None
-    return None
+        matches.append((entry.key, planner_app if planner_app.is_configured else None))
+    if not matches:
+        return None
+    selected_app = matches[0][1]
+    if any(planner_app != selected_app for _, planner_app in matches[1:]):
+        keys = ", ".join(key for key, _ in matches)
+        raise ConfigurationError(
+            f"GitHub repository {repository_slug} matches multiple configured repositories "
+            f"with different Planner App identities ({keys}); the --repository slug cannot "
+            "select one identity. Use the TUI repository selection or make their Planner "
+            "App settings identical"
+        )
+    return selected_app
 
 
 def _debug_task_provider(
