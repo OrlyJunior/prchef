@@ -49,6 +49,8 @@ SUMMARY_CATEGORIES: tuple[str, ...] = (
     "CANCELLED",
 )
 
+CANCELLABLE_ROW_STATUSES = ACTIVE_WORKFLOW_STATUSES | {WorkflowStatus.NEEDS_HUMAN}
+
 SUMMARY_LABELS: dict[str, str] = {
     "QUEUED": "Queued",
     "WAITING": "Waiting for provider",
@@ -99,6 +101,7 @@ class BatchRowView:
     timeline: tuple[str, ...] = ()
     held_by_provider: str | None = None
     action: str | None = None
+    can_cancel: bool = False
 
 
 def category_for_execution(execution: WorkflowExecution) -> str:
@@ -141,10 +144,10 @@ class _LiveItem:
 def _live_status(item: _LiveItem) -> tuple[str, str]:
     if item.status is None:
         return "QUEUED", "QUEUED"
-    if item.status is WorkflowStatus.NEEDS_HUMAN:
-        return "NEEDS_HUMAN", "AWAITING HUMAN"
     if item.cancellation_requested and item.status in ACTIVE_WORKFLOW_STATUSES:
         return _CATEGORY_FOR_STATUS[item.status], "CANCELLATION REQUESTED"
+    if item.status is WorkflowStatus.NEEDS_HUMAN:
+        return "NEEDS_HUMAN", "AWAITING HUMAN"
     if item.status is WorkflowStatus.PENDING:
         return "QUEUED", "QUEUED"
     if item.status is WorkflowStatus.WAITING:
@@ -211,6 +214,31 @@ class LiveBatchProgress:
         if position is not None:
             self._items[position].cancellation_requested = True
 
+    def reconcile_execution(self, position: int, execution: WorkflowExecution) -> bool:
+        """Bring one live row up to date after another screen changed durable state."""
+
+        if not (0 <= position < len(self._items)):
+            return False
+        item = self._items[position]
+        if item.execution_id not in (None, execution.id):
+            return False
+        if (
+            item.status is WorkflowStatus.CANCELLED
+            and execution.status is not WorkflowStatus.CANCELLED
+        ):
+            return False
+        item.execution_id = execution.id
+        self._by_execution[execution.id] = position
+        item.status = execution.status
+        item.stage = execution.current_stage
+        item.cancellation_requested = (
+            execution.status in ACTIVE_WORKFLOW_STATUSES
+            and execution.cancellation_requested_at is not None
+        )
+        if execution.status is not WorkflowStatus.WAITING:
+            item.provider_wait = None
+        return True
+
     def apply(self, event: WorkflowEvent) -> int | None:
         """Update state for one event; return the affected position, if any."""
 
@@ -238,6 +266,15 @@ class LiveBatchProgress:
         elif event.execution_id != item.execution_id:
             # A stale event for a position whose item has since been replaced.
             return None
+
+        if (
+            item.status is WorkflowStatus.CANCELLED
+            and event.status is not None
+            and event.status is not WorkflowStatus.CANCELLED
+        ):
+            # Cancellation may settle after the service read its finish result
+            # but before that result's observer event reaches the screen.
+            return position
 
         if event.kind in (WorkflowEventKind.STATUS_CHANGED, WorkflowEventKind.WORKFLOW_FINISHED):
             item.status = event.status
@@ -376,6 +413,10 @@ class LiveBatchProgress:
                         or (item.status is WorkflowStatus.FAILED and item.continuation_eligible)
                         else None
                     ),
+                    can_cancel=(
+                        item.status in CANCELLABLE_ROW_STATUSES
+                        and not item.cancellation_requested
+                    ),
                     stage_label=(
                         item.stage.value.replace("_", " ").title() if item.stage else ""
                     ),
@@ -454,10 +495,20 @@ def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> Ba
         stage_label=execution.current_stage.value.replace("_", " ").title(),
         timeline=tuple(timeline),
         action=(
-            "answer" if execution.status is WorkflowStatus.NEEDS_HUMAN else
+            "answer" if (
+                execution.status is WorkflowStatus.NEEDS_HUMAN
+                and execution.cancellation_requested_at is None
+            ) else
             "continue"
             if WorkflowService.continuation_stage(execution, lambda: diagnostics) is not None
             else None
+        ),
+        can_cancel=(
+            execution.status in CANCELLABLE_ROW_STATUSES
+            and (
+                execution.status is WorkflowStatus.NEEDS_HUMAN
+                or execution.cancellation_requested_at is None
+            )
         ),
     )
 

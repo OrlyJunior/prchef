@@ -330,7 +330,9 @@ class WorkflowRunnerScreen(Screen[None]):
             repositories,
             selected_repository=self.controller.selected_repository,
         )
-        if self._batch_progress is None and self._active_execution_id is not None:
+        if self._batch_running and self._batch_progress is not None:
+            self._reconcile_live_batch()
+        elif self._batch_progress is None and self._active_execution_id is not None:
             self._reconcile_active_execution()
         repository = self._selected("#repository")
         provider = self._selected("#task-provider")
@@ -1428,6 +1430,45 @@ class WorkflowRunnerScreen(Screen[None]):
             f"Batch running: {len(rows)} task(s) — {counts['NEEDS_HUMAN']} waiting for you."
         )
 
+    def _reconcile_live_batch(self) -> None:
+        """Refresh the live projection after a detail screen changes an item."""
+
+        progress = self._batch_progress
+        if progress is None:
+            return
+        try:
+            batch = self.controller.batch_detail(progress.batch_id)
+        except Exception as exc:
+            self.notify(f"Could not refresh batch progress: {exc}", severity="error")
+            return
+        for item in batch.items:
+            if item.execution_id is None:
+                continue
+            try:
+                execution, _ = self.controller.execution_detail(item.execution_id)
+            except Exception as exc:
+                self.notify(f"Could not refresh batch task: {exc}", severity="error")
+                continue
+            if progress.reconcile_execution(item.position, execution):
+                eligible = False
+                if execution.status is WorkflowStatus.FAILED:
+                    try:
+                        eligible = self.controller.continuation_stage(execution) is not None
+                    except Exception:
+                        eligible = False
+                progress.set_continuation_eligible(
+                    item.position, eligible,
+                )
+        view = self.query_one("#batch-progress", BatchProgressView)
+        rows = progress.rows()
+        for row in rows:
+            view.update_row(row)
+        counts = summarize(rows)
+        view.update_summary(counts)
+        self.query_one("#workflow-progress", Static).update(
+            f"Batch running: {len(rows)} task(s) — {counts['NEEDS_HUMAN']} waiting for you."
+        )
+
     def on_batch_progress_view_provider_available_requested(
         self, message: BatchProgressView.ProviderAvailableRequested
     ) -> None:
@@ -1454,6 +1495,47 @@ class WorkflowRunnerScreen(Screen[None]):
         self.on_batch_item_row_open_execution_requested(
             BatchItemRow.OpenExecutionRequested(message.position)
         )
+
+    def on_batch_item_row_cancel_requested(self, message: BatchItemRow.CancelRequested) -> None:
+        progress = self._batch_progress
+        if progress is None:
+            self.notify("That batch task has no execution to cancel.", severity="warning")
+            return
+        execution_id = progress.execution_id_for(message.position)
+        if execution_id is None:
+            self.notify("That batch task has no execution to cancel.", severity="warning")
+            return
+        try:
+            accepted = self.controller.cancel_workflow(execution_id)
+            execution, _ = self.controller.execution_detail(execution_id)
+        except Exception as exc:
+            self.notify(f"Could not cancel batch task: {exc}", severity="error")
+            return
+        if (
+            execution.status not in ACTIVE_WORKFLOW_STATUSES
+            and progress.rows()[message.position].category != execution.status.value
+        ):
+            self._render_batch_event(
+                WorkflowEvent(
+                    execution_id=execution_id,
+                    kind=WorkflowEventKind.WORKFLOW_FINISHED,
+                    status=execution.status,
+                    payload={"batch_position": message.position},
+                )
+            )
+        if not accepted:
+            self.notify("This batch task has already finished.", severity="warning")
+            return
+        if execution.status in ACTIVE_WORKFLOW_STATUSES:
+            progress.mark_cancellation_requested(execution_id)
+            view = self.query_one("#batch-progress", BatchProgressView)
+            view.update_row(progress.rows()[message.position])
+        if execution.status is WorkflowStatus.CANCELLED:
+            self.notify("Batch task cancelled.")
+        elif execution.status in ACTIVE_WORKFLOW_STATUSES:
+            self.notify("Batch task cancellation requested.")
+        else:
+            self.notify("Batch task finished before cancellation settled.", severity="warning")
 
     def on_batch_item_row_show_logs_requested(
         self, message: BatchItemRow.ShowLogsRequested

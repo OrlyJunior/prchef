@@ -215,6 +215,28 @@ def test_cancellation_stops_later_stages_and_preserves_workspace_artifacts(workf
     assert events[-1].status is WorkflowStatus.CANCELLED
 
 
+def test_cancellation_at_finish_is_emitted_as_cancelled(workflow) -> None:
+    service, repository, _, _ = workflow
+    events = []
+    original_finish = repository.finish
+
+    def cancel_during_finish(execution_id: str, status: WorkflowStatus) -> None:
+        # _finish has already checked the request by the time it calls finish.
+        assert status is WorkflowStatus.APPROVED
+        assert repository.request_cancellation(execution_id)
+        original_finish(execution_id, status)
+
+    repository.finish = cancel_during_finish  # type: ignore[method-assign]
+
+    result = service.run("card-cancel-at-finish", event_listener=events.append)
+
+    assert result.status is WorkflowStatus.CANCELLED
+    assert result.current_stage is not WorkflowStage.COMPLETED
+    assert [event.status for event in events[-2:]] == [
+        WorkflowStatus.CANCELLED, WorkflowStatus.CANCELLED,
+    ]
+
+
 def test_cancellation_is_a_terminal_notification_outcome(tmp_path: Path) -> None:
     service, recorder = _workflow_with_notifications(tmp_path)
     repository = service._repository
@@ -382,6 +404,27 @@ def test_planner_human_response_resumes_same_execution_without_prior_workspace(
     assert repository.stage_changes.count(WorkflowStage.PREPARE_BRANCH) == 1
     assert resolved_names == ["heuristic", "heuristic"]
     assert context_roles == ["planner", "planner", "reviewer"]
+
+
+def test_human_response_rejects_cancellation_after_initial_status_read(
+    workflow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, repository, _, factory = workflow
+    factory.jules.ambiguous = True
+    paused = service.run("card-cancelled-before-answer")
+    assert paused.status is WorkflowStatus.NEEDS_HUMAN
+    original = repository.respond_to_human_input
+
+    def cancel_before_answer(execution_id: str, response: str):
+        repository.execution.status = WorkflowStatus.CANCELLED
+        return original(execution_id, response)
+
+    monkeypatch.setattr(repository, "respond_to_human_input", cancel_before_answer)
+    with pytest.raises(ValueError, match="not awaiting human input"):
+        service.submit_response(paused.id, "Proceed")
+
+    assert repository.execution.status is WorkflowStatus.CANCELLED
+    assert repository.execution.human_interactions[-1].response is None
 
 
 def test_human_resume_preserves_role_local_claude_effort(workflow) -> None:

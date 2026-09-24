@@ -29,6 +29,8 @@ def execution_status_label(execution: WorkflowExecution) -> str:
     """
 
     if execution.status is WorkflowStatus.NEEDS_HUMAN:
+        if execution.cancellation_requested_at is not None:
+            return "CANCELLATION REQUESTED"
         return "AWAITING HUMAN"
     if (
         execution.status in ACTIVE_WORKFLOW_STATUSES

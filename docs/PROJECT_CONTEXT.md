@@ -100,6 +100,24 @@
   is queued, running, waiting for provider capacity, or awaiting human input; it closes when every
   item is APPROVED, CHANGES_REQUESTED, FAILED, CANCELLED, skipped, or never submitted. Stopping a
   batch cancels all active items and closes it without requiring answers to NEEDS_HUMAN items.
+  An individual linked batch item in PENDING, WAITING, RUNNING, or NEEDS_HUMAN can be
+  cancelled from either batch view. Active work observes a durable request at a safe
+  boundary; explicit cancellation of NEEDS_HUMAN transitions it directly to CANCELLED
+  and wakes live batch completion bookkeeping. A request made before dispatch
+  registration is checked again after registration, so a closed admission gate
+  cannot strand a cancelled PENDING item. Answer recording and requeueing are
+  one durable transition that cannot revive a concurrently cancelled item. Workflow
+  finish writes honor a cancellation request atomically, including one arriving after
+  the last safe-boundary check, so an accepted request cannot leave an item at
+  NEEDS_HUMAN. Late finish events cannot reopen a cancelled batch row. Live batches
+  also reconcile unresolved items from durable status while waiting, so
+  cancellation from another controller can close the original batch. The persisted
+  view reloads after a request; running rows show cancellation requested until they
+  settle. Returning from batch detail refreshes the live projection from durable
+  execution rows, including status and summary counts while other items remain open.
+  A legacy NEEDS_HUMAN row with a recorded cancellation request shows
+  Cancel so the request can be settled; it does not offer Answer, which the
+  repository would reject. Other items are unaffected.
   Stored batches remain browsable after restart. `on_batch_created` fires synchronously after the
   durable batch row commits and before the first submission, exposing its stable identity and order.
 - Batch progress is a read-side TUI projection (`orchestrator.tui.batch_progress`), not a second
