@@ -115,6 +115,39 @@ def test_linked_open_rows_offer_cancel_in_live_and_persisted_views(
     assert persisted.action == live_row.action
 
 
+def test_reconcile_execution_updates_one_live_row_and_preserves_other_work() -> None:
+    progress = LiveBatchProgress(_batch(2))
+    for position, status in enumerate((WorkflowStatus.NEEDS_HUMAN, WorkflowStatus.RUNNING)):
+        execution_id = f"execution-{position}"
+        progress.apply(WorkflowEvent(
+            execution_id=execution_id,
+            kind=WorkflowEventKind.EXECUTION_CREATED,
+            payload={"batch_position": position},
+        ))
+        progress.apply(_status_event(execution_id, status, position=position))
+
+    assert progress.reconcile_execution(
+        0, WorkflowExecution(id="execution-0", status=WorkflowStatus.CANCELLED)
+    )
+    rows = progress.rows()
+    assert rows[0].category == "CANCELLED"
+    assert not rows[0].can_cancel
+    assert rows[1].category == "RUNNING"
+    assert rows[1].can_cancel
+    assert progress.summary()["CANCELLED"] == 1
+    assert progress.summary()["RUNNING"] == 1
+
+    progress.apply(_status_event("execution-0", WorkflowStatus.NEEDS_HUMAN, position=0))
+    assert progress.rows()[0].category == "CANCELLED"
+
+    assert progress.reconcile_execution(1, WorkflowExecution(
+        id="execution-1", status=WorkflowStatus.RUNNING,
+        cancellation_requested_at=datetime.now(UTC),
+    ))
+    assert progress.rows()[1].status_label == "CANCELLATION REQUESTED"
+    assert not progress.rows()[1].can_cancel
+
+
 @pytest.mark.parametrize(
     "status",
     [

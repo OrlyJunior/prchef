@@ -330,7 +330,9 @@ class WorkflowRunnerScreen(Screen[None]):
             repositories,
             selected_repository=self.controller.selected_repository,
         )
-        if self._batch_progress is None and self._active_execution_id is not None:
+        if self._batch_running and self._batch_progress is not None:
+            self._reconcile_live_batch()
+        elif self._batch_progress is None and self._active_execution_id is not None:
             self._reconcile_active_execution()
         repository = self._selected("#repository")
         provider = self._selected("#task-provider")
@@ -1424,6 +1426,45 @@ class WorkflowRunnerScreen(Screen[None]):
                 "Mark it available in the batch progress once its quota resets.",
                 severity="warning",
             )
+        self.query_one("#workflow-progress", Static).update(
+            f"Batch running: {len(rows)} task(s) — {counts['NEEDS_HUMAN']} waiting for you."
+        )
+
+    def _reconcile_live_batch(self) -> None:
+        """Refresh the live projection after a detail screen changes an item."""
+
+        progress = self._batch_progress
+        if progress is None:
+            return
+        try:
+            batch = self.controller.batch_detail(progress.batch_id)
+        except Exception as exc:
+            self.notify(f"Could not refresh batch progress: {exc}", severity="error")
+            return
+        for item in batch.items:
+            if item.execution_id is None:
+                continue
+            try:
+                execution, _ = self.controller.execution_detail(item.execution_id)
+            except Exception as exc:
+                self.notify(f"Could not refresh batch task: {exc}", severity="error")
+                continue
+            if progress.reconcile_execution(item.position, execution):
+                eligible = False
+                if execution.status is WorkflowStatus.FAILED:
+                    try:
+                        eligible = self.controller.continuation_stage(execution) is not None
+                    except Exception:
+                        eligible = False
+                progress.set_continuation_eligible(
+                    item.position, eligible,
+                )
+        view = self.query_one("#batch-progress", BatchProgressView)
+        rows = progress.rows()
+        for row in rows:
+            view.update_row(row)
+        counts = summarize(rows)
+        view.update_summary(counts)
         self.query_one("#workflow-progress", Static).update(
             f"Batch running: {len(rows)} task(s) — {counts['NEEDS_HUMAN']} waiting for you."
         )

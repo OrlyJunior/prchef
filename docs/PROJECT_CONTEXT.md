@@ -113,7 +113,9 @@
   also reconcile unresolved items from durable status while waiting, so
   cancellation from another controller can close the original batch. The persisted
   view reloads after a request; running rows show cancellation requested until they
-  settle. A legacy NEEDS_HUMAN row with a recorded cancellation request shows
+  settle. Returning from batch detail refreshes the live projection from durable
+  execution rows, including status and summary counts while other items remain open.
+  A legacy NEEDS_HUMAN row with a recorded cancellation request shows
   Cancel so the request can be settled; it does not offer Answer, which the
   repository would reject. Other items are unaffected.
   Stored batches remain browsable after restart. `on_batch_created` fires synchronously after the

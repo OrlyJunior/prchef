@@ -214,6 +214,31 @@ class LiveBatchProgress:
         if position is not None:
             self._items[position].cancellation_requested = True
 
+    def reconcile_execution(self, position: int, execution: WorkflowExecution) -> bool:
+        """Bring one live row up to date after another screen changed durable state."""
+
+        if not (0 <= position < len(self._items)):
+            return False
+        item = self._items[position]
+        if item.execution_id not in (None, execution.id):
+            return False
+        if (
+            item.status is WorkflowStatus.CANCELLED
+            and execution.status is not WorkflowStatus.CANCELLED
+        ):
+            return False
+        item.execution_id = execution.id
+        self._by_execution[execution.id] = position
+        item.status = execution.status
+        item.stage = execution.current_stage
+        item.cancellation_requested = (
+            execution.status in ACTIVE_WORKFLOW_STATUSES
+            and execution.cancellation_requested_at is not None
+        )
+        if execution.status is not WorkflowStatus.WAITING:
+            item.provider_wait = None
+        return True
+
     def apply(self, event: WorkflowEvent) -> int | None:
         """Update state for one event; return the affected position, if any."""
 
