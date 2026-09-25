@@ -109,8 +109,8 @@ class OrchestratorApp(App[None]):
     .task-row:focus { background: $accent 40%; }
     .task-row:disabled { color: $text-muted; }
     #task-hint { margin-top: 1; }
-    .github-app-roles { width: 100%; }
-    .github-app-role { width: 1fr; height: auto; margin-right: 1; }
+    .github-app-roles { width: 100%; height: auto; }
+    .github-app-role { width: 100%; height: auto; margin-bottom: 1; }
     .screen-actions { margin-top: 1; height: auto; }
     .screen-actions Button { margin-right: 1; }
     .navigation-actions {

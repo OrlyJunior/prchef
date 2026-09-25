@@ -16,7 +16,9 @@ from typer.testing import CliRunner
 
 import orchestrator
 from orchestrator.cli import main
+from orchestrator.clients.command_client import CommandResult
 from orchestrator.config.database import build_engine
+from orchestrator.config.project_config import ProjectConfigLoader
 from orchestrator.config.settings import Settings
 from orchestrator.models import WorkflowExecution, WorkflowStage, WorkflowStatus
 from orchestrator.services.workspace_cleaner import (
@@ -26,6 +28,169 @@ from orchestrator.services.workspace_cleaner import (
 )
 
 runner = CliRunner()
+
+
+def test_cli_and_tui_select_only_the_matching_planner_app(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    for name in ("first", "second"):
+        (tmp_path / name / ".git").mkdir(parents=True)
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        """defaults: {}
+repositories:
+  first:
+    path: first
+    integrations:
+      github:
+        planner_app:
+          app_id: 1
+          installation_id: 11
+          private_key_env: FIRST_KEY
+  second:
+    path: second
+    integrations:
+      github:
+        planner_app:
+          app_id: 2
+          installation_id: 22
+          private_key_env: SECOND_KEY
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        main.GitClient, "github_repository",
+        lambda self: f"owner/{self._path.name}",
+    )
+    loader = ProjectConfigLoader(config_file)
+    settings = Settings()
+
+    _, cli_provider = main._task_provider(
+        settings=settings, config_loader=loader, trello_card=None,
+        github_issue=42, task_id=None, repository="owner/second",
+    )
+    assert cli_provider._client._planner_app.app_id == 2
+    _, unmatched_provider = main._task_provider(
+        settings=settings, config_loader=loader, trello_card=None,
+        github_issue=42, task_id=None, repository="owner/unregistered",
+    )
+    assert unmatched_provider._client._planner_app is None
+    tui_provider = main._tui_task_provider(settings, loader, "github", "first")
+    assert tui_provider._client._planner_app.app_id == 1
+    debug_provider = main._debug_task_provider(
+        settings, "github", "owner/second", loader
+    )
+    assert debug_provider._client._planner_app.app_id == 2
+
+
+@pytest.mark.parametrize("second_identity", ["same", "different", "unconfigured"])
+def test_cli_slug_with_duplicate_origins_uses_only_a_shared_identity(
+    monkeypatch: Any, tmp_path: Path, second_identity: str
+) -> None:
+    for name in ("first", "second"):
+        (tmp_path / name / ".git").mkdir(parents=True)
+    config_file = tmp_path / "orchestrator.yml"
+    second_app = {
+        "same": "        planner_app:\n          app_id: 1\n"
+        "          installation_id: 11\n          private_key_env: FIRST_KEY\n",
+        "different": "        planner_app:\n          app_id: 2\n"
+        "          installation_id: 22\n          private_key_env: SECOND_KEY\n",
+        "unconfigured": "        planner_app: {}\n",
+    }[second_identity]
+    config_file.write_text(
+        "defaults: {}\nrepositories:\n"
+        "  first:\n    path: first\n    integrations:\n      github:\n"
+        "        planner_app:\n          app_id: 1\n"
+        "          installation_id: 11\n          private_key_env: FIRST_KEY\n"
+        "  second:\n    path: second\n    integrations:\n      github:\n"
+        + second_app,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main.GitClient, "github_repository", lambda self: "owner/shared")
+    loader = ProjectConfigLoader(config_file)
+
+    if second_identity != "same":
+        with pytest.raises(main.ConfigurationError, match="different Planner App identities"):
+            main._planner_app_for_slug(loader, "owner/shared")
+        with pytest.raises(main.typer.BadParameter, match="first, second"):
+            main._task_provider(
+                settings=Settings(), config_loader=loader, trello_card=None,
+                github_issue=42, task_id=None, repository="owner/shared",
+            )
+        with pytest.raises(main.ConfigurationError, match="first, second"):
+            main._debug_task_provider(Settings(), "github", "owner/shared", loader)
+    else:
+        planner_app = main._planner_app_for_slug(loader, "owner/shared")
+        assert planner_app is not None
+        assert planner_app.app_id == 1
+
+
+def test_cli_slug_with_duplicate_origins_and_no_planner_app_keeps_gh_fallback(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    for name in ("first", "second"):
+        (tmp_path / name / ".git").mkdir(parents=True)
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        "defaults: {}\nrepositories:\n"
+        "  first:\n    path: first\n"
+        "  second:\n    path: second\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        main.GitClient, "github_repository",
+        lambda self: (_ for _ in ()).throw(AssertionError("must not inspect Git")),
+    )
+    assert main._planner_app_for_slug(ProjectConfigLoader(config_file), "owner/shared") is None
+
+
+@pytest.mark.parametrize("explicit_config", [False, True])
+def test_debug_task_loading_without_global_config_uses_gh(
+    monkeypatch: Any, tmp_path: Path, explicit_config: bool
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("ORCHESTRATOR_CONFIG", raising=False)
+    monkeypatch.delenv("ORCHESTRATOR_CONFIG_PATH", raising=False)
+    calls: list[list[str]] = []
+
+    def run(self: Any, command: list[str], **kwargs: Any) -> CommandResult:
+        calls.append(command)
+        return CommandResult(
+            command=command,
+            exit_code=0,
+            stdout=json.dumps({
+                "number": 42, "title": "Issue title", "body": "Issue body",
+                "url": "https://github.com/owner/repo/issues/42", "labels": [],
+                "state": "OPEN", "author": {"login": "octocat"},
+                "milestone": None,
+            }),
+            stderr="",
+            duration_seconds=0.0,
+        )
+
+    monkeypatch.setattr(main.CommandClient, "run", run)
+    arguments = [
+        "debug", "--stage", "task-loading", "--github-issue", "42",
+        "--repository", "owner/repo",
+    ]
+    if explicit_config:
+        arguments.extend(["--config", str(tmp_path / "missing.yml")])
+    result = runner.invoke(main.app, arguments)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["result"]["task"]["title"] == "Issue title"
+    assert calls == [[
+        "gh", "issue", "view", "42", "--repo", "owner/repo", "--json",
+        "number,title,body,url,labels,state,author,milestone",
+    ]]
+
+
+def test_invalid_existing_config_still_reports_error_for_planner_lookup(tmp_path: Path) -> None:
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text("defaults: [", encoding="utf-8")
+    loader = ProjectConfigLoader(config_file)
+    with pytest.raises(main.ConfigurationError):
+        main._planner_app_for_slug(loader, "owner/repo")
 
 
 def test_cli_version_option() -> None:
@@ -220,6 +385,8 @@ def _stub_runtime(monkeypatch: Any) -> None:
             # process-scoped limiter and worker pool.
             load_defaults=lambda: SimpleNamespace(providers={}),
             default_task_provider=lambda: "github",
+            list_repositories=lambda: [],
+            has_planner_github_app=lambda: False,
         ),
     )
     monkeypatch.setattr(main, "ClientFactory", lambda api_key: object())

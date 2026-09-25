@@ -1,13 +1,13 @@
-# GitHub Apps for implementation and review
+# GitHub Apps for planning, implementation, and review
 
-The orchestrator can use separate GitHub App installations for implementation and review. It signs
+The orchestrator can use separate GitHub App installations for task discovery, implementation, and review. It signs
 a short-lived JWT and exchanges it for an installation token kept only in memory. Tokens, JWTs,
 and private key contents are never written to YAML, persistence, or logs.
 
 ## Create and install the Apps
 
 1. Create a **GitHub App** for the account or organization that owns the repository.
-2. Grant the implementer App **Contents: Read and write** and **Pull requests: Read and write**.
+2. Grant the planner App **Issues: Read-only**. Grant the implementer App **Contents: Read and write** and **Pull requests: Read and write**.
    Add **Workflows: Read and write** only if the intended repository changes require it. Grant the
    reviewer App only **Pull requests: Read and write**.
 3. Generate an App private key and store the PEM outside the repository.
@@ -39,10 +39,15 @@ integrations:
       app_id: 654321
       installation_id: 456789
       private_key_env: IMPLEMENTER_GITHUB_APP_PRIVATE_KEY
+    # Planner identity for GitHub issue and label reads.
+    planner_app:
+      app_id: 112233
+      installation_id: 445566
+      private_key_env: PLANNER_GITHUB_APP_PRIVATE_KEY
 ```
 
-When either App is configured, `app_id`, `installation_id`, and exactly one private-key source are
-required. `app` is the reviewer identity; `implementer_app` is independent. Never commit the PEM
+When an App is configured, `app_id`, `installation_id`, and exactly one private-key source are
+required. `app` is the reviewer identity; `implementer_app` and `planner_app` are independent. Never commit the PEM
 or place it in versioned YAML or `.env.example`. Optionally configure `bot_name` and `bot_user_id`
 together for known commit attribution; otherwise the orchestrator resolves the App bot identity.
 
@@ -57,10 +62,22 @@ successful workflow. HTTPS pushes receive a process-local `http.extraHeader`; SS
 transports safely retain ambient push authentication. Reviewer publication independently uses the
 reviewer `app` token and never assigns that identity to a PR.
 
-The Textual TUI exposes the two roles under **GitHub Apps** (or `c`). It writes only App IDs,
+With `planner_app`, issue lookup, open-issue browsing, and the complete label catalog use its
+installation token through the configured `api_url`. API and authentication failures surface to
+the caller without switching to the personal CLI identity. Without it, these reads retain their
+existing `gh` commands. This identity does not change planner-agent file or Git permissions and
+does not post the planner spec as a comment.
+
+For explicit CLI issue reads, `--repository` identifies a GitHub origin. If multiple configured
+checkouts share that origin and resolve to different Planner App settings, the CLI reports an
+ambiguity instead of choosing either identity. Identical settings across those checkouts are safe
+to use; checkouts without a Planner App continue to use `gh` when the origin is unambiguous.
+
+The Textual TUI exposes all three roles under **GitHub Apps** (or `c`). It writes only App IDs,
 installation IDs, and private-key references to the selected repository's
 `repositories.<key>` entry in the resolved `orchestrator.yml`; it never accepts or writes private
-key contents or tokens.
+key contents or tokens. Clearing an identity inherited from `defaults` writes an explicit `null`
+for that repository, so the identity remains disabled there while other repositories keep the default.
 
 ## Review behavior
 

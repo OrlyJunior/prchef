@@ -36,8 +36,8 @@ class GitHubAppSettingsScreen(Screen[None]):
             )
             with Vertical(classes="workflow-form"):
                 yield RepositorySelect(id="github-app-repository")
-                with Horizontal(classes="github-app-roles"):
-                    for role in ("implementer", "reviewer"):
+                with Vertical(classes="github-app-roles"):
+                    for role in ("planner", "implementer", "reviewer"):
                         with Vertical(classes="github-app-role"):
                             yield Static(role.title(), classes="field-label")
                             yield Input(placeholder="App ID", id=f"{role}-app-id")
@@ -95,10 +95,11 @@ class GitHubAppSettingsScreen(Screen[None]):
         if event.select.id == "github-app-repository" and isinstance(event.value, str):
             self.controller.select_repository(event.value)
             try:
-                implementer, reviewer = self.controller.github_app_settings(event.value)
+                planner, implementer, reviewer = self.controller.github_app_settings(event.value)
             except Exception as exc:
                 self._status(f"Cannot load GitHub App configuration: {exc}")
                 return
+            self._populate("planner", planner)
             self._populate("implementer", implementer)
             self._populate("reviewer", reviewer)
             self._status("Edit App references, then save to orchestrator.yml.")
@@ -115,6 +116,7 @@ class GitHubAppSettingsScreen(Screen[None]):
                 repository,
                 implementer_app=self._settings("implementer"),
                 reviewer_app=self._settings("reviewer"),
+                planner_app=self._settings("planner"),
             )
         except Exception as exc:
             self._status(f"Cannot save GitHub App configuration: {exc}")
