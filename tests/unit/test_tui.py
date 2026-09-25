@@ -209,7 +209,10 @@ class _Repository:
             WorkflowStatus.RUNNING,
         }:
             return False
+        if self.execution.cancellation_requested_at is not None:
+            return True
         self.cancellation_requests.append(execution_id)
+        self.execution.cancellation_requested_at = datetime.now(UTC)
         return True
 
     def record_submission_repository(self, execution_id: str, repository: str) -> None:
@@ -3139,6 +3142,209 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
     asyncio.run(drive())
 
 
+@pytest.mark.parametrize("status", list(WorkflowStatus))
+@pytest.mark.parametrize("requested", [False, True])
+def test_execution_detail_cancel_visibility(
+    tmp_path: Path, status: WorkflowStatus, requested: bool
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = status
+    if requested:
+        repository.execution.cancellation_requested_at = datetime.now(UTC)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            cancel = application.screen.query_one("#execution-cancel", Button)
+            assert cancel.display is (
+                status is WorkflowStatus.NEEDS_HUMAN
+                or (
+                    status in {
+                        WorkflowStatus.PENDING, WorkflowStatus.WAITING, WorkflowStatus.RUNNING
+                    }
+                    and not requested
+                )
+            )
+            if requested and status is WorkflowStatus.NEEDS_HUMAN:
+                assert application.screen.query_one("#execution-status", Static).has_class(
+                    "cancelled"
+                )
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
+    ("initial_status", "requested", "expected_status"),
+    [
+        (WorkflowStatus.NEEDS_HUMAN, False, "CANCELLED"),
+        (WorkflowStatus.NEEDS_HUMAN, True, "CANCELLED"),
+        (WorkflowStatus.PENDING, False, "CANCELLATION REQUESTED"),
+        (WorkflowStatus.WAITING, False, "CANCELLATION REQUESTED"),
+        (WorkflowStatus.RUNNING, False, "CANCELLATION REQUESTED"),
+    ],
+)
+def test_execution_detail_confirms_durable_cancellation_and_refreshes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initial_status: WorkflowStatus,
+    requested: bool,
+    expected_status: str,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = initial_status
+    if requested:
+        repository.execution.cancellation_requested_at = datetime.now(UTC)
+    calls: list[str] = []
+    original_cancel = controller.cancel_workflow
+
+    def cancel(execution_id: str) -> bool:
+        calls.append(execution_id)
+        return original_cancel(execution_id)
+
+    monkeypatch.setattr(controller, "cancel_workflow", cancel)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#execution-cancel", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, StopWorkflowConfirmation)
+            assert calls == []
+            application.screen.query_one("#dismiss-stop-workflow", Button).press()
+            await settle_tui(pilot)
+            assert application.screen is screen
+            assert calls == []
+            assert screen.query_one("#execution-cancel", Button).display
+
+            screen.query_one("#execution-cancel", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, StopWorkflowConfirmation)
+            application.screen.query_one("#confirm-stop-workflow", Button).press()
+            await settle_tui(pilot)
+            assert application.screen is screen
+            assert calls == [repository.execution.id]
+            assert repository.cancellation_requests == calls
+            assert str(screen.query_one("#execution-status", Static).renderable) == expected_status
+            assert screen.query_one("#execution-cancel", Button).display is False
+            if expected_status == "CANCELLATION REQUESTED":
+                repository.execution.status = WorkflowStatus.CANCELLED
+                screen._poll_cancellation()
+                assert str(screen.query_one("#execution-status", Static).renderable) == "CANCELLED"
+                assert screen._cancellation_timer is None
+
+    asyncio.run(drive())
+
+
+def test_execution_detail_observes_requested_cancellation_settling(
+    tmp_path: Path,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.RUNNING
+    repository.execution.cancellation_requested_at = datetime.now(UTC)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ExecutionDetailScreen)
+            assert screen._cancellation_timer is not None
+            assert str(screen.query_one("#execution-status", Static).renderable) == (
+                "CANCELLATION REQUESTED"
+            )
+
+            repository.execution.status = WorkflowStatus.CANCELLED
+            screen._poll_cancellation()
+            assert str(screen.query_one("#execution-status", Static).renderable) == "CANCELLED"
+            assert screen._cancellation_timer is None
+            assert not screen.query_one("#execution-cancel", Button).display
+
+    asyncio.run(drive())
+
+
+def test_execution_detail_cancel_error_keeps_active_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.RUNNING
+    notifications: list[str] = []
+
+    def fail(_: str) -> bool:
+        raise RuntimeError("storage unavailable")
+
+    def notify(_screen: ExecutionDetailScreen, message: str, **kwargs: Any) -> None:
+        notifications.append(message)
+
+    monkeypatch.setattr(controller, "cancel_workflow", fail)
+    monkeypatch.setattr(ExecutionDetailScreen, "notify", notify)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#execution-cancel", Button).press()
+            await settle_tui(pilot)
+            application.screen.query_one("#confirm-stop-workflow", Button).press()
+            await settle_tui(pilot)
+            assert str(screen.query_one("#execution-status", Static).renderable) == "RUNNING"
+            cancel = screen.query_one("#execution-cancel", Button)
+            assert cancel.display and not cancel.disabled
+            assert any("storage unavailable" in message for message in notifications)
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize("failure", ["rejected", "error"])
+def test_execution_detail_cancel_race_refreshes_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.RUNNING
+    notifications: list[str] = []
+
+    def cancel(_: str) -> bool:
+        repository.execution.status = WorkflowStatus.APPROVED
+        if failure == "error":
+            raise RuntimeError("storage unavailable")
+        return False
+
+    def notify(_screen: ExecutionDetailScreen, message: str, **kwargs: Any) -> None:
+        notifications.append(message)
+
+    monkeypatch.setattr(controller, "cancel_workflow", cancel)
+    monkeypatch.setattr(ExecutionDetailScreen, "notify", notify)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#execution-cancel", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, StopWorkflowConfirmation)
+            application.screen.query_one("#confirm-stop-workflow", Button).press()
+            await settle_tui(pilot)
+            assert application.screen is screen
+            assert str(screen.query_one("#execution-status", Static).renderable) == "APPROVED"
+            assert screen.query_one("#execution-cancel", Button).display is False
+            assert any(
+                "already finished" in message if failure == "rejected"
+                else "storage unavailable" in message
+                for message in notifications
+            )
+
+    asyncio.run(drive())
+
+
 @pytest.mark.parametrize(
     ("status", "workspace_path", "working_branch", "expected"),
     [
@@ -4374,6 +4580,49 @@ def test_batch_detail_cancel_reconciles_human_blocked_row(
             assert "CANCELLED" in str(screen.query_one("#batch-row-0-header", Button).label)
             assert "Cancelled: 1" in str(
                 screen.query_one("#batch-progress-summary", Static).renderable
+            )
+
+    asyncio.run(drive())
+
+
+def test_batch_detail_refreshes_after_cancellation_from_execution_detail(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.NEEDS_HUMAN
+    batch = repository.create_batch(
+        "example", "github",
+        [DevelopmentTask("12", "github", "First task", "", "https://example/12")],
+    )
+    repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(BatchDetailScreen(batch.id))
+            await settle_tui(pilot)
+            batch_screen = application.screen
+            assert "Needs human: 1" in str(
+                batch_screen.query_one("#batch-progress-summary", Static).renderable
+            )
+            batch_screen.query_one("#batch-row-0-header", Button).press()
+            await settle_tui(pilot)
+            batch_screen.query_one("#batch-row-0-open-execution", Button).press()
+            await settle_tui(pilot)
+            detail = application.screen
+            assert isinstance(detail, ExecutionDetailScreen)
+            detail.query_one("#execution-cancel", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, StopWorkflowConfirmation)
+            application.screen.query_one("#confirm-stop-workflow", Button).press()
+            await settle_tui(pilot)
+            assert str(detail.query_one("#execution-status", Static).renderable) == "CANCELLED"
+            await pilot.press("escape")
+            await settle_tui(pilot)
+            assert application.screen is batch_screen
+            assert "CANCELLED" in str(
+                batch_screen.query_one("#batch-row-0-header", Button).label
+            )
+            assert "Cancelled: 1" in str(
+                batch_screen.query_one("#batch-progress-summary", Static).renderable
             )
 
     asyncio.run(drive())

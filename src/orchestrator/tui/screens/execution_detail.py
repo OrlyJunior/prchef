@@ -12,6 +12,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.events import DescendantFocus
 from textual.screen import Screen
+from textual.timer import Timer
 from textual.widgets import Button, Static, TextArea
 
 from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
@@ -43,11 +44,14 @@ class ExecutionDetailScreen(Screen[None]):
         self._links: dict[str, str] = {}
         self._diagnostics: list[ExecutionDiagnostic] = []
         self._last_steps: list[WorkflowStep] = []
+        self._cancellation_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="execution-detail"):
             yield Static("Execution detail", classes="screen-title")
-            yield Static("", id="execution-status")
+            with Horizontal(classes="screen-actions"):
+                yield Static("", id="execution-status")
+                yield Button("Cancel", variant="error", id="execution-cancel")
             with Horizontal(classes="screen-actions"):
                 yield Button("Open task", id="open-task")
                 yield Button("Open PR", id="open-pr")
@@ -84,6 +88,11 @@ class ExecutionDetailScreen(Screen[None]):
     def on_mount(self) -> None:
         self._refresh_execution()
 
+    def on_unmount(self) -> None:
+        if self._cancellation_timer is not None:
+            self._cancellation_timer.stop()
+            self._cancellation_timer = None
+
     def _refresh_execution(self) -> None:
         # Read on the Textual thread when a callback is handled, rather than
         # rendering a snapshot captured before a later workflow transition.
@@ -116,12 +125,29 @@ class ExecutionDetailScreen(Screen[None]):
         ):
             self.app.call_from_thread(self._refresh_execution)
 
+    def _poll_cancellation(self) -> None:
+        if self.app.screen is not self:
+            return
+        try:
+            execution = self.controller.execution_snapshot(self.execution_id)
+        except Exception:
+            return  # Retry on the next tick if durable storage is temporarily unavailable.
+        if execution_status_label(execution) != str(
+            self.query_one("#execution-status", Static).renderable
+        ):
+            self._refresh_execution()
+
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         self.query_one("#execution-detail", VerticalScroll).scroll_to_widget(
             event.widget, animate=False
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "execution-cancel":
+            from orchestrator.tui.screens.workflow_runner import StopWorkflowConfirmation
+
+            self.app.push_screen(StopWorkflowConfirmation(), self._confirm_cancellation)
+            return
         if event.button.id == "execution-resume":
             response = self.query_one("#execution-human-response", TextArea).text.strip()
             if response:
@@ -143,6 +169,22 @@ class ExecutionDetailScreen(Screen[None]):
             return
         webbrowser.open(url)
         self.notify("Opened related resource in the default browser.")
+
+    def _confirm_cancellation(self, confirmed: bool | None) -> None:
+        if not confirmed:
+            self._refresh_execution()
+            return
+        cancel = self.query_one("#execution-cancel", Button)
+        cancel.disabled = True
+        try:
+            accepted = self.controller.cancel_workflow(self.execution_id)
+        except Exception as exc:
+            self.notify(f"Could not request cancellation: {exc}", severity="error")
+        else:
+            if not accepted:
+                self.notify("This workflow has already finished.", severity="warning")
+        finally:
+            self._refresh_execution()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id == "execution-human-response":
@@ -210,12 +252,23 @@ class ExecutionDetailScreen(Screen[None]):
         status = self.query_one("#execution-status", Static)
         cancellation_pending = (
             execution.status in ACTIVE_WORKFLOW_STATUSES
-            and execution.cancellation_requested_at is not None
-        )
+            or execution.status is WorkflowStatus.NEEDS_HUMAN
+        ) and execution.cancellation_requested_at is not None
         status.update(execution_status_label(execution))
         status.set_class(
             cancellation_pending or execution.status is WorkflowStatus.CANCELLED, "cancelled"
         )
+        if cancellation_pending and self._cancellation_timer is None:
+            self._cancellation_timer = self.set_interval(1.0, self._poll_cancellation)
+        elif not cancellation_pending and self._cancellation_timer is not None:
+            self._cancellation_timer.stop()
+            self._cancellation_timer = None
+        cancel = self.query_one("#execution-cancel", Button)
+        cancel.display = (
+            execution.status is WorkflowStatus.NEEDS_HUMAN
+            or (execution.status in ACTIVE_WORKFLOW_STATUSES and not cancellation_pending)
+        )
+        cancel.disabled = False
         self._links = {
             "open-task": execution.task_url,
             "open-pr": execution.pr_url or "",
