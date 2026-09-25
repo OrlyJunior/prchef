@@ -429,7 +429,9 @@ class LiveBatchProgress:
         return summarize(self.rows())
 
 
-def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> BatchRowView:
+def persisted_row(
+    item: WorkflowBatchItem, controller: WorkflowController, *, raise_on_error: bool = False
+) -> BatchRowView:
     """Build one row from durable storage: for history, restart, and refresh.
 
     An unlinked item is QUEUED. Provider capacity is transient and
@@ -456,6 +458,8 @@ def persisted_row(item: WorkflowBatchItem, controller: WorkflowController) -> Ba
     try:
         execution, steps = controller.execution_detail(item.execution_id)
     except Exception as exc:
+        if raise_on_error:
+            raise
         return BatchRowView(
             position=item.position,
             task_id=item.task_id,
