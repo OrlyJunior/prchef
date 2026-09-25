@@ -434,6 +434,9 @@ class FakeGitClient:
         self.commit_calls = 0
         self.push_calls = 0
         self.diff_calls = 0
+        self.merge_base_calls: list[str] = []
+        self.merge_base_error: Exception | None = None
+        self.merge_base_errors: list[Exception | None] = []
         self.discard_calls = 0
         self.changed_files_results: list[list[str]] = []
 
@@ -482,6 +485,17 @@ class FakeGitClient:
     def github_repository(self) -> str:
         return "example/api"
 
+    def ensure_merge_base(self, base_branch: str) -> None:
+        self.merge_base_calls.append(base_branch)
+        self.operation_paths.append(self.workspace_path)
+        error = (
+            self.merge_base_errors.pop(0)
+            if self.merge_base_errors
+            else self.merge_base_error
+        )
+        if error is not None:
+            raise error
+
     def commit_all(self, message: str, working_branch: str, protected_branches: list[str]) -> str:
         self.commit_calls += 1
         self.operation_paths.append(self.workspace_path)
@@ -494,6 +508,7 @@ class FakeGitClient:
             raise self.push_error
 
     def diff(self, base_branch: str) -> str:
+        self.ensure_merge_base(base_branch)
         self.diff_calls += 1
         self.operation_paths.append(self.workspace_path)
         return "diff --git a/src/audit.py b/src/audit.py"
