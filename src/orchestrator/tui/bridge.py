@@ -266,9 +266,9 @@ class WorkflowController:
 
     def github_app_settings(
         self, repository: str
-    ) -> tuple[GitHubAppSettings, GitHubAppSettings]:
+    ) -> tuple[GitHubAppSettings, GitHubAppSettings, GitHubAppSettings]:
         github = self.project_config(repository).integrations.github
-        return github.implementer_app, github.app
+        return github.planner_app, github.implementer_app, github.app
 
     def agent_instructions(self, repository: str) -> tuple[str | None, str | None, str | None]:
         """Load role-specific local guidance from a configured repository root."""
@@ -448,11 +448,13 @@ class WorkflowController:
         *,
         implementer_app: GitHubAppSettings,
         reviewer_app: GitHubAppSettings,
+        planner_app: GitHubAppSettings,
     ) -> Path:
         return self._config_loader.save_github_app_settings(
             repository,
             implementer_app=implementer_app,
             reviewer_app=reviewer_app,
+            planner_app=planner_app,
         )
 
     def list_tasks(

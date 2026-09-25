@@ -985,7 +985,7 @@ class WorkflowRunnerScreen(Screen[None]):
 
     def _load_github_app_summary(self, repository: str) -> None:
         try:
-            implementer, reviewer = self.controller.github_app_settings(repository)
+            planner, implementer, reviewer = self.controller.github_app_settings(repository)
         except Exception as exc:
             self.query_one("#github-app-summary", Static).update(
                 f"GitHub Apps: could not inspect configured defaults ({exc})"
@@ -993,16 +993,20 @@ class WorkflowRunnerScreen(Screen[None]):
             return
 
         self.query_one("#github-app-summary", Static).update(
-            self.github_app_summary(implementer, reviewer)
+            self.github_app_summary(planner, implementer, reviewer)
         )
 
     @staticmethod
-    def github_app_summary(implementer: Any, reviewer: Any) -> str:
+    def github_app_summary(planner: Any, implementer: Any, reviewer: Any) -> str:
         """Return a launcher-safe summary without exposing App identifiers."""
 
+        planner_status = "✓" if planner.is_configured else "—"
         implementer_status = "✓" if implementer.is_configured else "—"
         reviewer_status = "✓" if reviewer.is_configured else "—"
-        return f"GitHub Apps: Implementer {implementer_status} · Reviewer {reviewer_status}"
+        return (
+            f"GitHub Apps: Planner {planner_status} · Implementer {implementer_status}"
+            f" · Reviewer {reviewer_status}"
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "refresh-tasks":

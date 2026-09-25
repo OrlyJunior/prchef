@@ -14,12 +14,17 @@ from sqlalchemy.exc import OperationalError
 
 import orchestrator
 from orchestrator.clients.command_client import CommandClient
+from orchestrator.clients.exceptions import GitClientError
 from orchestrator.clients.factory import ClientFactory
 from orchestrator.clients.git_client import GitClient
 from orchestrator.clients.github_issue_client import GitHubIssueClient
 from orchestrator.clients.trello_client import TrelloClient
 from orchestrator.config.database import build_engine, build_session_factory, resolve_database_url
-from orchestrator.config.project_config import ConfigurationError, ProjectConfigLoader
+from orchestrator.config.project_config import (
+    ConfigurationError,
+    GitHubAppSettings,
+    ProjectConfigLoader,
+)
 from orchestrator.config.settings import Settings
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.pull_request import PullRequest
@@ -224,13 +229,55 @@ def _task_provider(
         raise typer.BadParameter(
             "GitHub Issues require --repository in the form owner/repository"
         )
+    try:
+        planner_app = _planner_app_for_slug(config_loader, repository)
+    except ConfigurationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     return selected_id, GitHubIssueTaskProvider(
-        GitHubIssueClient(CommandClient()), repository
+        GitHubIssueClient(CommandClient(), planner_app=planner_app), repository
     )
 
 
+def _planner_app_for_slug(
+    config_loader: ProjectConfigLoader, repository_slug: str
+) -> GitHubAppSettings | None:
+    """Resolve credentials only when a slug identifies one Planner identity."""
+    if not config_loader.has_planner_github_app():
+        return None
+    matches: list[tuple[str, GitHubAppSettings | None]] = []
+    for entry in config_loader.list_repositories():
+        if not entry.path.is_dir():
+            continue
+        try:
+            configured_slug = GitClient(CommandClient(), entry.path).github_repository()
+        except GitClientError:
+            continue
+        if configured_slug.casefold() != repository_slug.strip().casefold():
+            continue
+        selection = DevelopmentTask(
+            id="issue-selection", source="github", title="", description="",
+            url="", repository=entry.key,
+        )
+        project = config_loader.load(selection, entry.key)
+        planner_app = project.integrations.github.planner_app
+        matches.append((entry.key, planner_app if planner_app.is_configured else None))
+    if not matches:
+        return None
+    selected_app = matches[0][1]
+    if any(planner_app != selected_app for _, planner_app in matches[1:]):
+        keys = ", ".join(key for key, _ in matches)
+        raise ConfigurationError(
+            f"GitHub repository {repository_slug} matches multiple configured repositories "
+            f"with different Planner App identities ({keys}); the --repository slug cannot "
+            "select one identity. Use the TUI repository selection or make their Planner "
+            "App settings identical"
+        )
+    return selected_app
+
+
 def _debug_task_provider(
-    settings: Settings, source: str, repository: str | None
+    settings: Settings, source: str, repository: str | None,
+    config_loader: ProjectConfigLoader | None = None,
 ) -> TaskProvider:
     source = source.casefold()
     if source == "trello":
@@ -241,7 +288,11 @@ def _debug_task_provider(
                 "GitHub task input requires --repository owner/repository"
             )
         return GitHubIssueTaskProvider(
-            GitHubIssueClient(CommandClient()), repository.strip()
+            GitHubIssueClient(
+                CommandClient(),
+                planner_app=_planner_app_for_slug(config_loader, repository)
+                if config_loader is not None else None,
+            ), repository.strip()
         )
     raise ConfigurationError(f"Unsupported task provider: {source}")
 
@@ -274,7 +325,11 @@ def _tui_task_provider(
     )
     project_config = config_loader.load(selection, repository)
     repository_slug = GitClient(CommandClient(), project_config.path).github_repository()
-    return GitHubIssueTaskProvider(GitHubIssueClient(CommandClient()), repository_slug)
+    return GitHubIssueTaskProvider(
+        GitHubIssueClient(
+            CommandClient(), planner_app=project_config.integrations.github.planner_app
+        ), repository_slug
+    )
 
 
 def _orchestrator_app_type() -> type[Any]:
@@ -535,7 +590,9 @@ def respond(
         )
         repository_slug = GitClient(CommandClient(), project_config.path).github_repository()
         provider = GitHubIssueTaskProvider(
-            GitHubIssueClient(CommandClient()), repository_slug
+            GitHubIssueClient(
+                CommandClient(), planner_app=project_config.integrations.github.planner_app
+            ), repository_slug
         )
     else:
         raise typer.BadParameter(
@@ -729,7 +786,9 @@ def debug(
     service = DebugService(
         config_loader=_config_loader(settings.config_file),
         client_factory=ClientFactory(settings.jules_api_key),
-        task_provider_factory=lambda source, repo: _debug_task_provider(settings, source, repo),
+        task_provider_factory=lambda source, repo: _debug_task_provider(
+            settings, source, repo, _config_loader(settings.config_file)
+        ),
         repository_index_clients=index_clients,
     )
     try:

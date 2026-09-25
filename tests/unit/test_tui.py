@@ -266,7 +266,9 @@ class _Repository:
 class _ConfigLoader:
     def __init__(self, path: Path) -> None:
         self._path = path
-        self.saved_github_apps: tuple[str, GitHubAppSettings, GitHubAppSettings] | None = None
+        self.saved_github_apps: tuple[
+            str, GitHubAppSettings, GitHubAppSettings, GitHubAppSettings
+        ] | None = None
         self.repository_entries = {
             "example": RepositoryConfiguration(
                 key="example",
@@ -310,6 +312,11 @@ class _ConfigLoader:
                             "app_id": 56,
                             "installation_id": 78,
                             "private_key_env": "IMPLEMENTER_APP_KEY",
+                        },
+                        "planner_app": {
+                            "app_id": 90,
+                            "installation_id": 91,
+                            "private_key_env": "PLANNER_APP_KEY",
                         },
                     }
                 },
@@ -374,9 +381,10 @@ class _ConfigLoader:
         *,
         implementer_app: GitHubAppSettings,
         reviewer_app: GitHubAppSettings,
+        planner_app: GitHubAppSettings,
     ) -> Path:
         assert repository_key == "example"
-        self.saved_github_apps = (repository_key, implementer_app, reviewer_app)
+        self.saved_github_apps = (repository_key, planner_app, implementer_app, reviewer_app)
         return self._path / "orchestrator.yml"
 
     def save_agent_preset(
@@ -1782,13 +1790,15 @@ def test_github_app_compact_summary_hides_identifiers() -> None:
     )
     unconfigured = GitHubAppSettings()
 
-    assert WorkflowRunnerScreen.github_app_summary(configured, configured) == (
-        "GitHub Apps: Implementer ✓ · Reviewer ✓"
+    assert WorkflowRunnerScreen.github_app_summary(configured, configured, configured) == (
+        "GitHub Apps: Planner ✓ · Implementer ✓ · Reviewer ✓"
     )
-    assert WorkflowRunnerScreen.github_app_summary(configured, unconfigured) == (
-        "GitHub Apps: Implementer ✓ · Reviewer —"
+    assert WorkflowRunnerScreen.github_app_summary(unconfigured, configured, unconfigured) == (
+        "GitHub Apps: Planner — · Implementer ✓ · Reviewer —"
     )
-    assert "12" not in WorkflowRunnerScreen.github_app_summary(configured, unconfigured)
+    assert "12" not in WorkflowRunnerScreen.github_app_summary(
+        configured, configured, unconfigured
+    )
 
 
 def test_format_diagnostics_for_export_keeps_sections_metadata_and_redaction() -> None:
@@ -2977,23 +2987,29 @@ def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
-        async with application.run_test() as pilot:
+        async with application.run_test(size=(80, 20)) as pilot:
             await pilot.press("c")
             assert isinstance(application.screen, GitHubAppSettingsScreen)
             repository = application.screen.query_one("#github-app-repository")
             repository.value = "example"
             await settle_tui(pilot)
+            assert application.screen.query_one("#planner-app-id").value == "90"
             assert application.screen.query_one("#implementer-app-id").value == "56"
             assert application.screen.query_one("#reviewer-app-id").value == "12"
             application.screen.query_one("#implementer-app-id").value = "123"
             application.screen.query_one("#implementer-installation-id").value = "456"
             application.screen.query_one("#implementer-key-env").value = "IMPLEMENTER_KEY"
+            application.screen.query_one("#planner-app-id").value = ""
+            application.screen.query_one("#planner-installation-id").value = ""
+            application.screen.query_one("#planner-key-env").value = ""
             application.screen.query_one("#save-github-apps", Button).focus()
             await settle_tui(pilot)
             await pilot.press("enter")
             assert "Saved App references" in str(
                 application.screen.query_one("#github-app-status").renderable
             )
+            assert controller._config_loader.saved_github_apps is not None
+            assert not controller._config_loader.saved_github_apps[1].is_configured
 
     asyncio.run(drive())
 
