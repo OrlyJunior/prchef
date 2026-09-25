@@ -433,6 +433,16 @@ class GitHubIntegrationSettings(CommandIntegrationSettings):
     implementer_app: GitHubAppSettings = Field(default_factory=GitHubAppSettings)
     planner_app: GitHubAppSettings = Field(default_factory=GitHubAppSettings)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_disabled_apps(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            value = dict(value)
+            for key in ("app", "implementer_app", "planner_app"):
+                if key in value and value[key] is None:
+                    value[key] = {}
+        return value
+
 
 class CodexIntegrationSettings(CommandIntegrationSettings):
     """Codex-specific controls layered over the generic command settings."""
@@ -1650,6 +1660,16 @@ class ProjectConfigLoader:
         if not isinstance(github, dict):
             raise ConfigurationError("'integrations.github' must be a mapping")
 
+        defaults = configuration.get("defaults", {})
+        default_integrations = (
+            defaults.get("integrations", {}) if isinstance(defaults, dict) else {}
+        )
+        default_github = (
+            default_integrations.get("github", {})
+            if isinstance(default_integrations, dict)
+            else {}
+        )
+
         for key, settings in (
             ("implementer_app", implementer_app),
             ("app", reviewer_app),
@@ -1659,6 +1679,9 @@ class ProjectConfigLoader:
                 continue
             if settings.is_configured:
                 github[key] = settings.model_dump(mode="json", exclude_none=True)
+            elif isinstance(default_github, dict) and key in default_github:
+                # An explicit null masks an inherited identity after the defaults merge.
+                github[key] = None
             else:
                 github.pop(key, None)
 

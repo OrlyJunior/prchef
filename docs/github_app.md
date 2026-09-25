@@ -76,7 +76,8 @@ to use; checkouts without a Planner App continue to use `gh` when the origin is 
 The Textual TUI exposes all three roles under **GitHub Apps** (or `c`). It writes only App IDs,
 installation IDs, and private-key references to the selected repository's
 `repositories.<key>` entry in the resolved `orchestrator.yml`; it never accepts or writes private
-key contents or tokens.
+key contents or tokens. Clearing an identity inherited from `defaults` writes an explicit `null`
+for that repository, so the identity remains disabled there while other repositories keep the default.
 
 ## Review behavior
 

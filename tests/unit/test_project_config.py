@@ -829,6 +829,54 @@ repositories:
     assert cleared["unrelated"] == {"keep": "this value"}
 
 
+def test_clearing_inherited_planner_app_disables_it_only_for_selected_repository(
+    tmp_path: Path,
+) -> None:
+    for name in ("example", "other"):
+        repository = tmp_path / name
+        repository.mkdir()
+        (repository / ".git").mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        """unrelated: keep
+defaults:
+  integrations:
+    github:
+      planner_app:
+        app_id: 321
+        installation_id: 654
+        private_key_env: PLANNER_APP_KEY
+repositories:
+  example:
+    path: example
+  other:
+    path: other
+""",
+        encoding="utf-8",
+    )
+    loader = ProjectConfigLoader(config_file)
+
+    def resolved(name: str) -> ProjectConfig:
+        return loader.load(
+            DevelopmentTask("1", "trello", "Task", "", "https://example.test/1", repository=name)
+        )
+
+    assert resolved("example").integrations.github.planner_app.is_configured
+    loader.save_github_app_settings(
+        "example",
+        implementer_app=GitHubAppSettings(),
+        reviewer_app=GitHubAppSettings(),
+        planner_app=GitHubAppSettings(),
+    )
+
+    persisted = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert persisted["repositories"]["example"]["integrations"]["github"]["planner_app"] is None
+    assert persisted["repositories"]["other"] == {"path": "other"}
+    assert persisted["unrelated"] == "keep"
+    assert not resolved("example").integrations.github.planner_app.is_configured
+    assert resolved("other").integrations.github.planner_app.app_id == 321
+
+
 def test_repository_crud_round_trips_commands_and_preserves_configuration(
     tmp_path: Path,
 ) -> None:

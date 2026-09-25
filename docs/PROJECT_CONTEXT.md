@@ -405,7 +405,9 @@
   (`integrations.github.app`), implementer (`integrations.github.implementer_app`), and planner
   (`integrations.github.planner_app`) identities. The planner App uses its installation token for
   repository-scoped issue and label reads in the TUI and explicit CLI issue lookup. Without it,
-  task discovery retains the existing `gh` path. Planner-agent execution remains read-only.
+  task discovery retains the existing `gh` path. Clearing an inherited App in the GitHub Apps
+  screen stores a repository-level `null` override, which resolves to an unconfigured identity
+  without changing the global default. Planner-agent execution remains read-only.
   Explicit CLI issue lookup uses the origin slug to find a configured Planner identity; if
   multiple registered checkouts share that origin with different resolved Planner settings, it
   reports an ambiguity instead of selecting one by configuration order.
