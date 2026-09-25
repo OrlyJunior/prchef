@@ -274,7 +274,10 @@
   normal validation/review correction limits but have no manual retry ceiling. A persisted PR must
   still be open before each resumed push; pushing its retained branch updates the PR, while a
   missing PR is created after push. A closed or unavailable persisted PR blocks continuation and is
-  never recreated automatically.
+  never recreated automatically. The open execution detail view reloads persisted status after an
+  answer or continuation. For live batch submissions it keeps refreshing from workflow status
+  events as the item moves through queued, waiting, running, and terminal states; other submissions
+  refresh after their blocking operation completes.
 - Provider startup references during spec/review are persisted immediately in legacy-named
   `spec_jules_session_*` / `review_jules_session_*` fields. Preserve those fields for later human
   inspection; no automatic session/workflow resume exists.

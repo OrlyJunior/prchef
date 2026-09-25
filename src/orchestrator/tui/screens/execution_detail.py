@@ -15,6 +15,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Static, TextArea
 
 from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
+from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
     ACTIVE_WORKFLOW_STATUSES,
@@ -41,6 +42,7 @@ class ExecutionDetailScreen(Screen[None]):
         self.execution_id = execution_id
         self._links: dict[str, str] = {}
         self._diagnostics: list[ExecutionDiagnostic] = []
+        self._last_steps: list[WorkflowStep] = []
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="execution-detail"):
@@ -80,15 +82,39 @@ class ExecutionDetailScreen(Screen[None]):
         return cast("OrchestratorApp", self.app).controller
 
     def on_mount(self) -> None:
+        self._refresh_execution()
+
+    def _refresh_execution(self) -> None:
+        # Read on the Textual thread when a callback is handled, rather than
+        # rendering a snapshot captured before a later workflow transition.
+        if self.app.screen is not self:
+            return
         try:
             execution, steps = self.controller.execution_detail(self.execution_id)
-            diagnostics = self.controller.execution_diagnostics(self.execution_id)
         except Exception as exc:
-            self.query_one("#execution-content", Static).update(
-                f"Could not load execution {self.execution_id}: {exc}"
-            )
-            return
+            try:
+                execution = self.controller.execution_snapshot(self.execution_id)
+            except Exception:
+                self.query_one("#execution-content", Static).update(
+                    f"Could not load execution {self.execution_id}: {exc}"
+                )
+                return
+            steps = self._last_steps
+        try:
+            diagnostics = self.controller.execution_diagnostics(self.execution_id)
+        except Exception:
+            diagnostics = self._diagnostics
         self._render_execution(execution, steps, diagnostics)
+
+    def _observe_status(self, event: WorkflowEvent) -> None:
+        if (
+            event.execution_id == self.execution_id
+            and event.kind in {
+                WorkflowEventKind.STATUS_CHANGED,
+                WorkflowEventKind.WORKFLOW_FINISHED,
+            }
+        ):
+            self.app.call_from_thread(self._refresh_execution)
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         self.query_one("#execution-detail", VerticalScroll).scroll_to_widget(
@@ -131,18 +157,17 @@ class ExecutionDetailScreen(Screen[None]):
         try:
             in_batch = self.controller.execution_in_live_batch(self.execution_id)
             if in_batch:
-                self.controller.submit_response(self.execution_id, response)
-                execution, _ = self.controller.execution_detail(self.execution_id)
+                self.controller.submit_response(
+                    self.execution_id, response, event_listener=self._observe_status
+                )
             else:
-                execution = self.controller.respond_and_resume(self.execution_id, response)
-            _, steps = self.controller.execution_detail(self.execution_id)
-            diagnostics = self.controller.execution_diagnostics(self.execution_id)
+                self.controller.respond_and_resume(self.execution_id, response)
         except Exception as exc:
             self.app.call_from_thread(
                 self.notify, f"Could not resume workflow: {exc}", severity="error"
             )
             return
-        self.app.call_from_thread(self._render_execution, execution, steps, diagnostics)
+        self.app.call_from_thread(self._refresh_execution)
         if in_batch:
             self.app.call_from_thread(
                 self.notify, "Response submitted; the task rejoined the batch queue."
@@ -153,19 +178,18 @@ class ExecutionDetailScreen(Screen[None]):
         try:
             in_batch = self.controller.execution_in_live_batch(self.execution_id)
             if in_batch:
-                self.controller.submit_continuation(self.execution_id, feedback)
-                execution, _ = self.controller.execution_detail(self.execution_id)
+                self.controller.submit_continuation(
+                    self.execution_id, feedback, event_listener=self._observe_status
+                )
             else:
-                execution = self.controller.continue_execution(self.execution_id, feedback)
-            _, steps = self.controller.execution_detail(self.execution_id)
-            diagnostics = self.controller.execution_diagnostics(self.execution_id)
+                self.controller.continue_execution(self.execution_id, feedback)
         except Exception as exc:
             self.app.call_from_thread(
                 self.notify, f"Could not continue execution: {exc}", severity="error"
             )
             self.app.call_from_thread(self._reenable_continue_button)
             return
-        self.app.call_from_thread(self._render_execution, execution, steps, diagnostics)
+        self.app.call_from_thread(self._refresh_execution)
         if in_batch:
             self.app.call_from_thread(
                 self.notify, "Continuation submitted; the task rejoined the batch queue."
@@ -180,6 +204,7 @@ class ExecutionDetailScreen(Screen[None]):
         steps: list[WorkflowStep],
         diagnostics: list[ExecutionDiagnostic],
     ) -> None:
+        self._last_steps = steps
         self._diagnostics = diagnostics
         self.query_one("#copy-detailed-logs-button", Button).disabled = not diagnostics
         status = self.query_one("#execution-status", Static)
