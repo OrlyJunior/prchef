@@ -1328,7 +1328,14 @@ class ProjectConfigLoader:
 
     def has_planner_github_app(self) -> bool:
         """Check whether any repository could use a Planner App without probing Git."""
-        configuration = _load_yaml(self._config_file, required=True)
+        try:
+            config_file = self._config_file
+        except ConfigurationError:
+            # Explicit GitHub issue reads worked without a global config,
+            # even when the selected config path did not exist. A missing
+            # file cannot contain a Planner identity.
+            return False
+        configuration = _load_yaml(config_file, required=True)
         defaults = configuration.get("defaults", {})
         repositories = configuration.get("repositories", {})
         entries = (
