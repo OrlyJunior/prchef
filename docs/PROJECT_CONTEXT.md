@@ -132,6 +132,10 @@
   batch item (no execution yet) renders as queued rather than disappearing. Each row is independently
   expandable in the owning screen's existing main scroll region (no nested scroll viewport), showing
   a concise timeline plus its own show/copy detailed-log and open-execution controls.
+  While visible, `BatchDetailScreen` reconciles linked rows from durable execution state at a
+  bounded interval and immediately on return from execution detail. Changed rows and summary
+  counts update in place, including after a closed batch item's continuation or answer; this
+  does not reopen the batch or resume its live listener.
 - Only a normalized `quota` failure attributed to a named provider makes that provider unavailable
   for the current batch. Queued items whose selected role or fallback presets use it remain PENDING;
   other queued items proceed. The live batch view labels held rows, counts them, and lets the user
