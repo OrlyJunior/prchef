@@ -4284,6 +4284,115 @@ def test_workflow_runner_batch_row_expands_and_reveals_detailed_logs(
     assert "secret-token" not in copied[0]
 
 
+@pytest.mark.parametrize("persisted", [False, True], ids=["live", "persisted"])
+def test_batch_rows_fit_content_and_last_row_remains_scrollable(
+    tmp_path: Path, persisted: bool
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    items = tuple(
+        WorkflowBatchItem(position, str(position + 1), f"Task {position + 1}")
+        for position in range(4)
+    )
+    if persisted:
+        batch = repository.create_batch(
+            "example",
+            "github",
+            [
+                DevelopmentTask(item.task_id, "github", item.task_title, "", "")
+                for item in items
+            ],
+        )
+    else:
+        batch = WorkflowBatch(
+            id="batch-1", repository="example", task_source="github", items=items
+        )
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 18)) as pilot:
+            if persisted:
+                application.push_screen(BatchDetailScreen(batch.id))
+            else:
+                application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            view = screen.query_one("#batch-progress", BatchProgressView)
+            if not persisted:
+                screen._batch_running = True
+                screen._set_single_task_controls_visible(False)
+                screen._batch_created(batch, _batch_launch("1", "2", "3", "4"))
+                await settle_tui(pilot)
+            view.set_rows([
+                BatchRowView(
+                    position=position,
+                    task_id=item.task_id,
+                    task_title=item.task_title,
+                    execution_id=f"execution-{position}",
+                    category="RUNNING",
+                    status_label="RUNNING",
+                    stage_label="",
+                    timeline=tuple(f"Timeline line {line}" for line in range(11))
+                    if position == 0 else ("One line",),
+                    action="answer",
+                    can_cancel=True,
+                )
+                for position, item in enumerate(items)
+            ])
+            await settle_tui(pilot)
+            scroll = screen.query_one(
+                "#batch-detail" if persisted else "#workflow-runner", VerticalScroll
+            )
+            first = view.row(0)
+            last = view.row(3)
+            assert first is not None and last is not None
+            compact_height = first.region.height
+
+            first.query_one("#batch-row-0-header", Button).press()
+            await settle_tui(pilot)
+            expanded_height = first.region.height
+            actions = first.query_one(".batch-item-actions", Horizontal)
+            action = first.query_one("#batch-row-0-action", Button)
+            assert actions.region.height == action.region.height
+            assert first.region.bottom - actions.region.bottom <= 2
+            assert expanded_height > compact_height
+            expanded_scroll_extent = scroll.max_scroll_y
+
+            scroll.scroll_end(animate=False)
+            await settle_tui(pilot)
+            assert screen.can_view_entire(last)
+
+            first.query_one("#batch-row-0-toggle-logs", Button).press()
+            await settle_tui(pilot)
+            first.set_detailed_logs("\n".join(f"Detailed line {line}" for line in range(25)))
+            await settle_tui(pilot)
+            detailed = first.query_one("#batch-row-0-detailed", Static)
+            assert first.region.bottom - detailed.region.bottom <= 2
+            assert first.region.height > expanded_height
+            assert scroll.max_scroll_y > expanded_scroll_extent
+
+            second = view.row(1)
+            assert second is not None
+            second.query_one("#batch-row-1-header", Button).press()
+            await settle_tui(pilot)
+            scroll.scroll_end(animate=False)
+            await settle_tui(pilot)
+            assert screen.can_view_entire(last)
+
+            first.query_one("#batch-row-0-toggle-logs", Button).press()
+            second.query_one("#batch-row-1-header", Button).press()
+            await settle_tui(pilot)
+            assert first.region.height == expanded_height
+            first.query_one("#batch-row-0-header", Button).press()
+            await settle_tui(pilot)
+            assert first.region.height == compact_height
+            assert scroll.max_scroll_y < expanded_scroll_extent
+            scroll.scroll_end(animate=False)
+            await settle_tui(pilot)
+            assert screen.can_view_entire(last)
+
+    asyncio.run(drive())
+
+
 def test_workflow_runner_batch_finished_keeps_final_rows_and_summary_visible(
     tmp_path: Path,
 ) -> None:

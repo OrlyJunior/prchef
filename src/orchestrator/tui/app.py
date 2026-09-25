@@ -177,6 +177,7 @@ class OrchestratorApp(App[None]):
     .batch-item-body Static { color: $text-muted; }
     .batch-item-log-actions { height: auto; margin-top: 1; }
     .batch-item-log-actions Button { width: auto; margin-right: 1; }
+    .batch-item-actions { height: auto; }
     .batch-item-body > Button { width: auto; max-width: 100%; margin-top: 1; }
     .workflow-log-actions { height: auto; margin-top: 1; }
     .workflow-log-actions Button { width: auto; }
