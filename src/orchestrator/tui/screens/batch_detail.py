@@ -53,6 +53,9 @@ class BatchDetailScreen(Screen[None]):
     def on_mount(self) -> None:
         self.load_batch()
 
+    def on_screen_resume(self) -> None:
+        self.load_batch()
+
     def action_refresh(self) -> None:
         self.load_batch()
 

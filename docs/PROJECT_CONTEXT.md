@@ -119,6 +119,11 @@
   A legacy NEEDS_HUMAN row with a recorded cancellation request shows
   Cancel so the request can be settled; it does not offer Answer, which the
   repository would reject. Other items are unaffected.
+  Individual execution detail also offers confirmed cancellation for active
+  executions, including those opened from history or a batch. It uses the
+  controller's durable cancellation path, refreshes the execution after the
+  request, and shows a pending request until active work settles. Returning
+  to persisted batch detail reloads its rows and summary from durable state.
   Stored batches remain browsable after restart. `on_batch_created` fires synchronously after the
   durable batch row commits and before the first submission, exposing its stable identity and order.
 - Batch progress is a read-side TUI projection (`orchestrator.tui.batch_progress`), not a second
