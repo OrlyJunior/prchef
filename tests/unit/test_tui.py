@@ -4163,6 +4163,185 @@ def test_batch_detail_screen_renders_mixed_batch_and_supports_refresh(
     asyncio.run(drive())
 
 
+@pytest.mark.parametrize("action", ["continue", "answer"])
+def test_closed_batch_detail_reconciles_after_execution_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    execution = repository.execution
+    execution.status = (
+        WorkflowStatus.CHANGES_REQUESTED if action == "continue" else WorkflowStatus.NEEDS_HUMAN
+    )
+    if action == "continue":
+        execution.workspace_path = str(tmp_path / "worktree")
+        execution.working_branch = "workflow/12"
+    else:
+        execution.current_stage = WorkflowStage.REVIEW
+        execution.human_interactions = [HumanInteraction(
+            id=1, workflow_execution_id=execution.id,
+            requesting_stage=WorkflowStage.REVIEW, prompt="Clarify the change.",
+            requested_at=datetime.now(UTC),
+        )]
+    other = WorkflowExecution(id="execution-2", status=WorkflowStatus.APPROVED)
+    repository.executions.append(other)
+    batch = repository.create_batch("example", "github", [
+        DevelopmentTask("12", "github", "First task", "", "https://example/12"),
+        DevelopmentTask("7", "github", "Second task", "", "https://example/7"),
+    ])
+    repository.record_batch_item_execution(batch.id, 0, execution.id)
+    repository.record_batch_item_execution(batch.id, 1, other.id)
+
+    def submit(execution_id: str, value: str, *, event_listener: Any = None) -> _Handle:
+        assert execution_id == execution.id and value == "Updated input"
+        assert not controller.execution_in_live_batch(execution_id)
+        execution.status = WorkflowStatus.RUNNING
+        execution.current_stage = WorkflowStage.IMPLEMENT
+        return _Handle(WorkflowExecution(id=execution_id, status=WorkflowStatus.APPROVED))
+
+    monkeypatch.setattr(
+        service, "submit_continuation" if action == "continue" else "submit_response", submit
+    )
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(BatchDetailScreen(batch.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, BatchDetailScreen)
+            assert not controller.execution_in_live_batch(execution.id)
+            screen.query_one("#batch-row-0-header", Button).press()
+            await settle_tui(pilot)
+            unchanged = screen.query_one("#batch-row-1", BatchItemRow)
+            screen.query_one("#batch-row-0-action", Button).press()
+            await settle_tui(pilot)
+            detail = application.screen
+            assert isinstance(detail, ExecutionDetailScreen)
+            def hidden_read(_: str) -> WorkflowExecution:
+                raise AssertionError("hidden batch screen must not read executions")
+
+            with monkeypatch.context() as hidden_patch:
+                hidden_patch.setattr(controller, "execution_snapshot", hidden_read)
+                screen._reconcile_rows()
+            if action == "continue":
+                detail.query_one(
+                    "#execution-continuation-feedback", TextArea
+                ).text = "Updated input"
+                button = detail.query_one("#execution-continue", Button)
+            else:
+                detail.query_one("#execution-human-response", TextArea).text = "Updated input"
+                button = detail.query_one("#execution-resume", Button)
+            await settle_tui(pilot)
+            button.press()
+            await wait_for_tui(
+                pilot,
+                lambda: str(detail.query_one("#execution-status", Static).renderable) == "RUNNING",
+            )
+            await pilot.press("escape")
+            await settle_tui(pilot)
+            assert application.screen is screen
+            assert "RUNNING" in str(screen.query_one("#batch-row-0-header", Button).label)
+            assert "Implement" in str(screen.query_one("#batch-row-0-header", Button).label)
+            assert not screen.query_one("#batch-row-0-action", Button).display
+            assert screen.query_one("#batch-row-1", BatchItemRow) is unchanged
+            assert "APPROVED" in str(screen.query_one("#batch-row-1-header", Button).label)
+            assert "Running: 1" in str(
+                screen.query_one("#batch-progress-summary", Static).renderable
+            )
+            assert "Approved: 1" in str(
+                screen.query_one("#batch-progress-summary", Static).renderable
+            )
+            assert not controller.execution_in_live_batch(execution.id)
+
+    asyncio.run(drive())
+
+
+def test_closed_batch_detail_reconciles_visible_row_without_remounting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.CHANGES_REQUESTED
+    repository.execution.workspace_path = str(tmp_path / "worktree")
+    repository.execution.working_branch = "workflow/12"
+    other = WorkflowExecution(id="execution-2", status=WorkflowStatus.FAILED)
+    repository.executions.append(other)
+    batch = repository.create_batch("example", "github", [
+        DevelopmentTask("12", "github", "First task", "", "https://example/12"),
+        DevelopmentTask("7", "github", "Second task", "", "https://example/7"),
+    ])
+    repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
+    repository.record_batch_item_execution(batch.id, 1, other.id)
+
+    def submit(execution_id: str, feedback: str, *, event_listener: Any = None) -> _Handle:
+        assert execution_id == repository.execution.id and feedback == "Continue"
+        assert not controller.execution_in_live_batch(execution_id)
+        repository.execution.status = WorkflowStatus.RUNNING
+        repository.execution.current_stage = WorkflowStage.IMPLEMENT
+        return _Handle(repository.execution)
+
+    monkeypatch.setattr(service, "submit_continuation", submit)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(BatchDetailScreen(batch.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, BatchDetailScreen)
+            screen.query_one("#batch-row-0-header", Button).press()
+            screen.query_one("#batch-row-1-header", Button).press()
+            await settle_tui(pilot)
+            changed = screen.query_one("#batch-row-0", BatchItemRow)
+            unchanged = screen.query_one("#batch-row-1", BatchItemRow)
+            unchanged.query_one("#batch-row-1-header", Button).focus()
+            scroll = screen.query_one("#batch-detail", VerticalScroll)
+            await settle_tui(pilot)
+            # Focus may start a scroll animation; finish it before measuring.
+            await scroll.stop_animation("scroll_y")
+            scroll.scroll_to(y=0, animate=False, immediate=True)
+            await settle_tui(pilot)
+            old_scroll_y = scroll.scroll_y
+            screen._diagnostics_cache[0] = []
+            controller.submit_continuation(repository.execution.id, "Continue")
+            assert screen._reconcile_timer is not None
+            screen._reconcile_rows()  # The foreground timer's callback, without clock sleeps.
+            await settle_tui(pilot)
+            assert screen.query_one("#batch-row-0", BatchItemRow) is changed
+            assert screen.query_one("#batch-row-1", BatchItemRow) is unchanged
+            assert changed._expanded and unchanged._expanded
+            assert application.focused is unchanged.query_one("#batch-row-1-header", Button)
+            assert scroll.scroll_y == old_scroll_y
+            assert 0 not in screen._diagnostics_cache
+            assert "RUNNING" in str(screen.query_one("#batch-row-0-header", Button).label)
+            assert "FAILED" in str(screen.query_one("#batch-row-1-header", Button).label)
+            assert "Running: 1" in str(
+                screen.query_one("#batch-progress-summary", Static).renderable
+            )
+            assert not controller.execution_in_live_batch(repository.execution.id)
+
+            original_detail = controller.execution_detail
+
+            def fail_detail(execution_id: str) -> Any:
+                if execution_id == repository.execution.id:
+                    raise RuntimeError("temporary read failure")
+                return original_detail(execution_id)
+
+            repository.execution.status = WorkflowStatus.APPROVED
+            monkeypatch.setattr(controller, "execution_detail", fail_detail)
+            screen._reconcile_rows()
+            assert "RUNNING" in str(screen.query_one("#batch-row-0-header", Button).label)
+            assert "FAILED" in str(screen.query_one("#batch-row-1-header", Button).label)
+            screen.query_one("#refresh-batch", Button).press()
+            await settle_tui(pilot)
+            assert "RUNNING" in str(screen.query_one("#batch-row-0-header", Button).label)
+            monkeypatch.setattr(controller, "execution_detail", original_detail)
+            screen.query_one("#refresh-batch", Button).press()
+            await settle_tui(pilot)
+            assert "APPROVED" in str(screen.query_one("#batch-row-0-header", Button).label)
+
+    asyncio.run(drive())
+
+
 @pytest.mark.parametrize("legacy_cancel_marker", [False, True])
 def test_batch_detail_cancel_reconciles_human_blocked_row(
     tmp_path: Path, legacy_cancel_marker: bool
