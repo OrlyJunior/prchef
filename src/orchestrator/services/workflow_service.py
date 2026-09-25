@@ -423,6 +423,9 @@ class WorkflowService:
                     config.repository.protected_branches,
                 )
                 self._repository.record_branch(execution.id, working_branch)
+                clients.git.at_path(workspace_path).ensure_merge_base(
+                    config.repository.base_branch
+                )
             execution_clients = clients.at_path(workspace_path)
 
             implementation_service = ImplementationService(
@@ -458,6 +461,7 @@ class WorkflowService:
             )
 
             with self._step(execution.id, WorkflowStage.COMMIT):
+                execution_clients.git.ensure_merge_base(config.repository.base_branch)
                 commit_sha = execution_clients.git.commit_all(
                     self._commit_message(task),
                     working_branch,
@@ -591,6 +595,7 @@ class WorkflowService:
                 )
 
                 with self._step(execution.id, WorkflowStage.COMMIT):
+                    execution_clients.git.ensure_merge_base(config.repository.base_branch)
                     commit_sha = execution_clients.git.commit_all(
                         self._commit_message(task),
                         working_branch,
@@ -1052,6 +1057,9 @@ class WorkflowService:
                 config.repository.protected_branches,
             )
             self._repository.record_branch(execution.id, working_branch)
+            clients.git.at_path(workspace_path).ensure_merge_base(
+                config.repository.base_branch
+            )
         return self._implement_and_review(
             execution.id,
             task,
@@ -1219,6 +1227,7 @@ class WorkflowService:
                 config=config,
             )
             with self._step(execution_id, WorkflowStage.COMMIT):
+                execution_clients.git.ensure_merge_base(config.repository.base_branch)
                 commit_sha = execution_clients.git.commit_all(
                     self._commit_message(task),
                     working_branch,
@@ -1353,6 +1362,7 @@ class WorkflowService:
                         config=config,
                     )
                     with self._step(execution_id, WorkflowStage.COMMIT):
+                        execution_clients.git.ensure_merge_base(config.repository.base_branch)
                         commit_sha = execution_clients.git.commit_all(
                             self._commit_message(task),
                             working_branch,
@@ -2139,6 +2149,7 @@ class WorkflowService:
             return PolishOutcome.SKIPPED, None
 
         with self._step(execution_id, WorkflowStage.COMMIT):
+            execution_clients.git.ensure_merge_base(config.repository.base_branch)
             commit_sha = execution_clients.git.commit_all(
                 self._commit_message(task),
                 working_branch,

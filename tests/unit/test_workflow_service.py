@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator.services.workflow_service as workflow_service_module
-from orchestrator.clients.exceptions import GitHubClientError
+from orchestrator.clients.exceptions import GitClientError, GitHubClientError
 from orchestrator.config.project_config import AgentProviderSettings, GitHubAppSettings
 from orchestrator.models import (
     AgentRole,
@@ -612,7 +612,7 @@ def test_mutable_workflow_stages_use_the_execution_workspace(workflow) -> None:
     assert factory.codex.workspace_path == workspace
     assert factory.commands.working_directories == [workspace]
     assert factory.git.workspace_path == workspace
-    assert factory.git.operation_paths == [workspace, workspace, workspace, workspace]
+    assert factory.git.operation_paths == [workspace] * 7
     assert result.repository != str(workspace)
     assert repository.execution is not None
 
@@ -785,6 +785,157 @@ def test_branch_creation_failure_is_terminal(workflow) -> None:
     assert result.error_message == "cannot create branch"
     failed = next(step for step in repository.steps.values() if step["status"] is StepStatus.FAILED)
     assert failed["stage"] is WorkflowStage.PREPARE_BRANCH
+
+
+def test_disconnected_history_fails_preparation_before_implementation(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.git.merge_base_error = GitClientError(
+        "Worktree HEAD has disconnected history from local base branch develop"
+    )
+
+    result = service.run("card-disconnected-prepare")
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.working_branch is not None
+    assert result.workspace_path is not None
+    assert Path(result.workspace_path).is_dir()
+    assert "disconnected history" in (result.error_message or "")
+    failed = next(step for step in repository.steps.values() if step["status"] is StepStatus.FAILED)
+    assert failed["stage"] is WorkflowStage.PREPARE_BRANCH
+    assert factory.git.merge_base_calls == ["develop"]
+    assert not factory.codex.requests
+    assert not factory.commands.commands
+    assert factory.git.commit_calls == factory.git.push_calls == factory.git.diff_calls == 0
+    assert factory.github.create_calls == 0
+    assert not factory.github.review_calls
+
+
+def test_disconnected_history_after_implementation_stops_before_commit(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.git.merge_base_errors = [
+        None,
+        GitClientError("Worktree HEAD has disconnected history from develop"),
+    ]
+
+    result = service.run("card-disconnected-commit")
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.current_stage is WorkflowStage.COMMIT
+    assert result.error_message and "disconnected history" in result.error_message
+    assert len(factory.codex.requests) == 1
+    assert factory.git.commit_calls == factory.git.push_calls == 0
+    assert factory.github.create_calls == 0
+    assert any(
+        step["stage"] is WorkflowStage.COMMIT and step["status"] is StepStatus.FAILED
+        for step in repository.steps.values()
+    )
+
+
+def test_disconnected_history_before_review_skips_diff_and_reviewer(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.git.merge_base_errors = [
+        None,
+        None,
+        GitClientError("Worktree HEAD has disconnected history from develop"),
+    ]
+
+    result = service.run("card-disconnected-review")
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.current_stage is WorkflowStage.REVIEW
+    assert result.error_message and "disconnected history" in result.error_message
+    assert factory.git.diff_calls == 0
+    assert factory.jules.review_calls == 0
+
+
+def test_disconnected_history_on_review_correction_stops_before_second_commit(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.review_decisions = ["CHANGES_REQUESTED"]
+    factory.git.merge_base_errors = [
+        None,
+        None,
+        None,
+        GitClientError("Worktree HEAD has disconnected history from develop"),
+    ]
+
+    result = service.run("card-disconnected-correction")
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.current_stage is WorkflowStage.COMMIT
+    assert factory.git.commit_calls == 1
+    assert factory.git.push_calls == 1
+    assert factory.github.create_calls == 1
+    assert factory.git.diff_calls == 1
+
+
+def test_disconnected_history_on_polish_stops_before_second_commit(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.git.merge_base_errors = [
+        None,
+        None,
+        None,
+        GitClientError("Worktree HEAD has disconnected history from develop"),
+    ]
+
+    result = service.run("card-disconnected-polish")
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.current_stage is WorkflowStage.COMMIT
+    assert factory.git.commit_calls == 1
+    assert factory.git.push_calls == 1
+    assert factory.github.create_calls == 1
+
+
+def test_disconnected_history_on_planner_resume_fails_preparation(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.ambiguous = True
+    paused = service.run("card-disconnected-planner-resume")
+    factory.jules.ambiguous = False
+    factory.git.merge_base_error = GitClientError("disconnected history from develop")
+
+    result = service.respond_and_resume(paused.id, "Use a configurable retention period.")
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.current_stage is WorkflowStage.PREPARE_BRANCH
+    assert not factory.codex.requests
+    assert factory.git.commit_calls == factory.git.push_calls == 0
+
+
+def test_disconnected_history_on_review_resume_skips_diff(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.malformed_review = True
+    paused = service.run("card-disconnected-review-resume")
+    assert paused.status is WorkflowStatus.NEEDS_HUMAN
+    diff_calls = factory.git.diff_calls
+    review_calls = factory.jules.review_calls
+    factory.jules.malformed_review = False
+    factory.git.merge_base_error = GitClientError("disconnected history from develop")
+
+    result = service.respond_and_resume(paused.id, "The implementation is intentional.")
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.current_stage is WorkflowStage.REVIEW
+    assert result.error_message and "disconnected history" in result.error_message
+    assert factory.git.diff_calls == diff_calls
+    assert factory.jules.review_calls == review_calls
+
+
+def test_disconnected_history_on_manual_continuation_stops_before_commit(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.jules.changes_requested = True
+    paused = service.run("card-disconnected-continuation")
+    factory.jules.changes_requested = False
+    commits = factory.git.commit_calls
+    pushes = factory.git.push_calls
+    factory.git.merge_base_error = GitClientError("disconnected history from develop")
+
+    result = service.continue_execution(paused.id, "Address the review.")
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.current_stage is WorkflowStage.COMMIT
+    assert factory.git.commit_calls == commits
+    assert factory.git.push_calls == pushes
 
 
 def test_push_failure_persists_error_and_does_not_create_pr(workflow) -> None:

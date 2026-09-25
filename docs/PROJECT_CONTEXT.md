@@ -324,6 +324,12 @@
 - Commit/push refuse protected branches and refuse if the current checkout is not the workflow
   branch. Commit stages **all** worktree changes and fails if nothing is staged. Push is only
   `git push --set-upstream origin <working-branch>`.
+- The worktree's HEAD must share a merge base with the configured **local** base branch used by
+  the review diff, even if that branch has advanced since the worktree was created from
+  `origin/<base_branch>`. This is checked during branch preparation, before every commit
+  (including continuation, correction, and polish), and again before each review diff. A
+  disconnected history fails at that stage with a specific error. Rewriting the base branch
+  with filter-repo, filter-branch, or rebase --root while a worktree is in flight can cause it.
 - PR creation occurs only after a successful push. `gh pr create` must yield a URL, then `gh pr
   view` supplies the persisted PR fields. When an implementer App is configured, its resolved bot
   identity is assigned to the created PR; assignment failures are logged but do not fail the

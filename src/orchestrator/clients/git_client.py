@@ -176,7 +176,22 @@ class GitClient:
         logger.info("[git] Push completed: %s", working_branch)
 
     def diff(self, base_branch: str) -> str:
+        self.ensure_merge_base(base_branch)
         return self._git("diff", "--no-ext-diff", f"{base_branch}...HEAD").stdout
+
+    def ensure_merge_base(self, base_branch: str) -> None:
+        """Require ancestry shared with the local ref used by the review diff."""
+        result = self._git("merge-base", base_branch, "HEAD", check=False)
+        if result.exit_code == 1:
+            raise GitClientError(
+                f"Worktree HEAD has disconnected history from local base branch "
+                f"{base_branch}: no merge base. Rewriting {base_branch} history with "
+                "filter-repo, filter-branch, or rebase --root while this worktree "
+                "was in flight can cause this."
+            )
+        if not result.success:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise GitClientError(f"git merge-base {base_branch} HEAD failed: {detail}")
 
     @staticmethod
     def _assert_safe_working_branch(branch: str, protected_branches: list[str]) -> None:
