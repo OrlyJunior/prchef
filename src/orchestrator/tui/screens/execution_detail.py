@@ -12,6 +12,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.events import DescendantFocus
 from textual.screen import Screen
+from textual.timer import Timer
 from textual.widgets import Button, Static, TextArea
 
 from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
@@ -43,6 +44,7 @@ class ExecutionDetailScreen(Screen[None]):
         self._links: dict[str, str] = {}
         self._diagnostics: list[ExecutionDiagnostic] = []
         self._last_steps: list[WorkflowStep] = []
+        self._cancellation_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="execution-detail"):
@@ -86,6 +88,11 @@ class ExecutionDetailScreen(Screen[None]):
     def on_mount(self) -> None:
         self._refresh_execution()
 
+    def on_unmount(self) -> None:
+        if self._cancellation_timer is not None:
+            self._cancellation_timer.stop()
+            self._cancellation_timer = None
+
     def _refresh_execution(self) -> None:
         # Read on the Textual thread when a callback is handled, rather than
         # rendering a snapshot captured before a later workflow transition.
@@ -117,6 +124,18 @@ class ExecutionDetailScreen(Screen[None]):
             }
         ):
             self.app.call_from_thread(self._refresh_execution)
+
+    def _poll_cancellation(self) -> None:
+        if self.app.screen is not self:
+            return
+        try:
+            execution = self.controller.execution_snapshot(self.execution_id)
+        except Exception:
+            return  # Retry on the next tick if durable storage is temporarily unavailable.
+        if execution_status_label(execution) != str(
+            self.query_one("#execution-status", Static).renderable
+        ):
+            self._refresh_execution()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         self.query_one("#execution-detail", VerticalScroll).scroll_to_widget(
@@ -239,6 +258,11 @@ class ExecutionDetailScreen(Screen[None]):
         status.set_class(
             cancellation_pending or execution.status is WorkflowStatus.CANCELLED, "cancelled"
         )
+        if cancellation_pending and self._cancellation_timer is None:
+            self._cancellation_timer = self.set_interval(1.0, self._poll_cancellation)
+        elif not cancellation_pending and self._cancellation_timer is not None:
+            self._cancellation_timer.stop()
+            self._cancellation_timer = None
         cancel = self.query_one("#execution-cancel", Button)
         cancel.display = (
             execution.status is WorkflowStatus.NEEDS_HUMAN

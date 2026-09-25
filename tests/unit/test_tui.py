@@ -3231,6 +3231,39 @@ def test_execution_detail_confirms_durable_cancellation_and_refreshes(
             assert repository.cancellation_requests == calls
             assert str(screen.query_one("#execution-status", Static).renderable) == expected_status
             assert screen.query_one("#execution-cancel", Button).display is False
+            if expected_status == "CANCELLATION REQUESTED":
+                repository.execution.status = WorkflowStatus.CANCELLED
+                screen._poll_cancellation()
+                assert str(screen.query_one("#execution-status", Static).renderable) == "CANCELLED"
+                assert screen._cancellation_timer is None
+
+    asyncio.run(drive())
+
+
+def test_execution_detail_observes_requested_cancellation_settling(
+    tmp_path: Path,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.RUNNING
+    repository.execution.cancellation_requested_at = datetime.now(UTC)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ExecutionDetailScreen)
+            assert screen._cancellation_timer is not None
+            assert str(screen.query_one("#execution-status", Static).renderable) == (
+                "CANCELLATION REQUESTED"
+            )
+
+            repository.execution.status = WorkflowStatus.CANCELLED
+            screen._poll_cancellation()
+            assert str(screen.query_one("#execution-status", Static).renderable) == "CANCELLED"
+            assert screen._cancellation_timer is None
+            assert not screen.query_one("#execution-cancel", Button).display
 
     asyncio.run(drive())
 
