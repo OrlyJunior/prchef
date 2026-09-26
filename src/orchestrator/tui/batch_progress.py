@@ -478,7 +478,10 @@ def persisted_row(
         except Exception:
             diagnostics = []
         for diagnostic in diagnostics:
-            if diagnostic.payload.get("kind") == "PROVIDER_QUOTA_EXHAUSTED":
+            if diagnostic.payload.get("kind") in {
+                "PROVIDER_QUOTA_EXHAUSTED",
+                "PROJECT_CONTEXT_TRUNCATED",
+            }:
                 message = timeline_message(
                     WorkflowEvent(
                         execution_id=item.execution_id,

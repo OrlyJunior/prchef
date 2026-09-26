@@ -25,12 +25,21 @@ def load_project_context(repository_path: Path) -> str | None:
     return content or None
 
 
-def project_context_prompt(repository_path: Path) -> str:
+def project_context_prompt(
+    repository_path: Path,
+    on_truncated: Callable[[Path, int, int], None] | None = None,
+) -> str:
     """Render repository context without allowing it to dominate an agent prompt."""
     content = load_project_context(repository_path)
     if content is None:
         return ""
     if len(content) > MAX_PROJECT_CONTEXT_CHARS:
+        if on_truncated is not None:
+            on_truncated(
+                repository_path / PROJECT_CONTEXT_FILE,
+                len(content),
+                MAX_PROJECT_CONTEXT_CHARS,
+            )
         content = (
             f"{content[:MAX_PROJECT_CONTEXT_CHARS]}\n\n"
             "[docs/PROJECT_CONTEXT.md truncated; inspect the repository file for the full context.]"

@@ -144,6 +144,11 @@ def timeline_message(
         return f"↳ {event.message or 'Agent fallback activated'}"
     if event.kind == WorkflowEventKind.DIAGNOSTIC:
         payload = event.payload or {}
+        if payload.get("kind") == "PROJECT_CONTEXT_TRUNCATED":
+            return (
+                "! docs/PROJECT_CONTEXT.md exceeds prompt cap: "
+                f"{payload.get('actual_chars')} / {payload.get('cap_chars')} characters"
+            )
         if payload.get("kind") == "PROVIDER_QUOTA_EXHAUSTED":
             return (
                 f"Provider {payload.get('provider', 'unknown')} quota exhausted — "

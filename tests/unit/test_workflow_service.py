@@ -1,4 +1,5 @@
 import logging
+import shutil
 from pathlib import Path
 
 import pytest
@@ -18,9 +19,12 @@ from orchestrator.models import (
     WorkflowStage,
     WorkflowStatus,
 )
+from orchestrator.models.execution_diagnostic import DiagnosticCategory
+from orchestrator.models.workflow_event import WorkflowEventKind
 from orchestrator.providers.agent_provider import AgentNeedsHumanError
 from orchestrator.runtime_logging import log_review_summary, log_spec_summary
 from orchestrator.services.notifications import NotificationService
+from orchestrator.services.project_context import MAX_PROJECT_CONTEXT_CHARS
 from orchestrator.services.repository_context import RepositoryContextRequest
 from orchestrator.services.task_provider import GitHubIssueTaskProvider, TrelloTaskProvider
 from orchestrator.services.workflow_service import WorkflowService
@@ -72,6 +76,65 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
         }
     ]
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
+
+
+def test_oversized_context_warns_in_fresh_and_resumed_role_prompts(
+    workflow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, repository, _, factory = workflow
+    context_file = tmp_path / "docs" / "PROJECT_CONTEXT.md"
+    context_file.parent.mkdir()
+    context_file.write_text("x" * (MAX_PROJECT_CONTEXT_CHARS + 1), encoding="utf-8")
+    original_create = factory.git.create_worktree
+
+    def create_with_context(*args: object) -> None:
+        original_create(*args)
+        workspace = args[0]
+        assert isinstance(workspace, Path)
+        (workspace / "docs").mkdir()
+        shutil.copyfile(context_file, workspace / "docs" / "PROJECT_CONTEXT.md")
+
+    monkeypatch.setattr(factory.git, "create_worktree", create_with_context)
+    service._stage_events._verbose = True
+    factory.jules.ambiguous = True
+    events = []
+    with caplog.at_level(logging.DEBUG, logger="orchestrator.services.workflow_service"):
+        paused = service.run("card-context-cap", event_listener=events.append)
+        factory.jules.ambiguous = False
+        resumed = service.respond_and_resume(
+            paused.id, "Use the stated behavior.", event_listener=events.append
+        )
+
+    assert resumed.status is WorkflowStatus.APPROVED
+    warnings = [
+        diagnostic for diagnostic in repository.diagnostics
+        if diagnostic.category is DiagnosticCategory.WORKFLOW_EVENT
+        and diagnostic.payload.get("kind") == "PROJECT_CONTEXT_TRUNCATED"
+    ]
+    assert [item.stage for item in warnings] == [
+        WorkflowStage.GENERATE_SPEC,
+        WorkflowStage.GENERATE_SPEC,
+        WorkflowStage.IMPLEMENT,
+        WorkflowStage.REVIEW,
+    ]
+    assert warnings[0].payload == {
+        "kind": "PROJECT_CONTEXT_TRUNCATED",
+        "severity": "warning",
+        "path": str(context_file),
+        "actual_chars": 12_001,
+        "cap_chars": 12_000,
+    }
+    assert warnings[2].payload["path"] == str(
+        Path(resumed.workspace_path) / "docs" / "PROJECT_CONTEXT.md"
+    )
+    warning_events = [
+        event for event in events
+        if event.kind is WorkflowEventKind.DIAGNOSTIC
+        and (event.payload or {}).get("kind") == "PROJECT_CONTEXT_TRUNCATED"
+    ]
+    assert len(warning_events) == 4
+    assert "PROJECT_CONTEXT_TRUNCATED" in caplog.text
+    assert "12001" in caplog.text
 
 
 def test_workflow_resolves_once_and_reuses_strategy_during_review_loop(

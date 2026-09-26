@@ -488,6 +488,21 @@ def test_every_workflow_implementer_path_uses_the_shared_request_builder(
     assert request.title == "Orchestrator implementation"
     assert request.workspace_path == tmp_path
     assert prompt_marker in request.instructions
+    assert "within its 12,000-character prompt cap" in request.instructions
+    assert "condensing existing content instead of only appending" in request.instructions
+
+
+def test_explicit_implementer_prompt_includes_context_size_instruction(tmp_path: Path) -> None:
+    provider = RecordingProvider(AgentResult(output="implemented"))
+    service = ImplementationService(provider, ChangedFilesGit())  # type: ignore[arg-type]
+
+    service.implement_prompt("Make the requested change.", tmp_path)
+
+    assert "within its 12,000-character prompt cap" in provider.requests[0].instructions
+    assert (
+        "condensing existing content instead of only appending"
+        in provider.requests[0].instructions
+    )
 
 
 def test_validation_failures_render_timeouts_alongside_completed_failures() -> None:

@@ -13,6 +13,7 @@ from orchestrator.config.project_config import (
 )
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.execution_diagnostic import DiagnosticCategory
 from orchestrator.models.human_interaction import HumanInteraction
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
@@ -90,6 +91,26 @@ class StageSequencer:
             client_manager=self._repository_index_clients,
         )
 
+    def _context_truncation_callback(
+        self, execution_id: str
+    ) -> Callable[[Path, int, int], None]:
+        def record(path: Path, actual_chars: int, cap_chars: int) -> None:
+            runtime = self._events._runtimes.peek(execution_id)
+            self._events._record_diagnostic(
+                execution_id,
+                DiagnosticCategory.WORKFLOW_EVENT,
+                {
+                    "kind": "PROJECT_CONTEXT_TRUNCATED",
+                    "severity": "warning",
+                    "path": str(path),
+                    "actual_chars": actual_chars,
+                    "cap_chars": cap_chars,
+                },
+                stage=runtime.active_stage if runtime else None,
+            )
+
+        return record
+
     def _execute_workflow(
         self,
         execution: WorkflowExecution,
@@ -154,6 +175,7 @@ class StageSequencer:
                         execution.id,
                     ),
                     repository_context_strategy,
+                    self._context_truncation_callback(execution.id),
                 ).generate(
                     task,
                     config.path,
@@ -203,6 +225,7 @@ class StageSequencer:
                     execution.id,
                 ),
                 execution_clients.git,
+                self._context_truncation_callback(execution.id),
             )
             with self._events._step(execution.id, WorkflowStage.IMPLEMENT):
                 implementation = implementation_service.implement(
@@ -264,6 +287,7 @@ class StageSequencer:
                             execution.id,
                         ),
                         repository_context_strategy,
+                        self._context_truncation_callback(execution.id),
                     ).review(
                         task=task,
                         spec=spec,
@@ -399,6 +423,7 @@ class StageSequencer:
                     clients.agent(AgentRole.PLANNER), config, AgentRole.PLANNER, execution.id
                 ),
                 repository_context_strategy,
+                self._context_truncation_callback(execution.id),
             ).generate(
                 task,
                 config.path,
@@ -474,6 +499,7 @@ class StageSequencer:
                 execution.id,
             ),
             execution_clients.git,
+            self._context_truncation_callback(execution.id),
         )
         polish_attempted = execution.polish_outcome is not None
         while True:
@@ -483,6 +509,7 @@ class StageSequencer:
                         clients.agent(AgentRole.REVIEWER), config, AgentRole.REVIEWER, execution.id
                     ),
                     repository_context_strategy,
+                    self._context_truncation_callback(execution.id),
                 ).review(
                     task=task,
                     spec=spec,
@@ -567,6 +594,7 @@ class StageSequencer:
                 execution_id,
             ),
             execution_clients.git,
+            self._context_truncation_callback(execution_id),
         )
         try:
             with self._events._step(execution_id, WorkflowStage.IMPLEMENT):
@@ -643,6 +671,7 @@ class StageSequencer:
                             execution_id,
                         ),
                         repository_context_strategy,
+                        self._context_truncation_callback(execution_id),
                     ).review(
                         task=task,
                         spec=spec,

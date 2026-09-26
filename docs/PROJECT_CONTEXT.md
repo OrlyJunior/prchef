@@ -101,6 +101,8 @@ and repository retrieval cover those.
 - Credentials never go in YAML or tracked files; API keys are environment-variable references.
 - Diagnostics are redacted before persistence and before observer delivery. Observer events are
   emitted only after persisted transitions and can never change workflow semantics.
+- Rendering durable context above its prompt cap records a warning diagnostic with the stripped
+  character count; the prompt still uses the capped content.
 - GitHub App identities (planner, implementer, reviewer) are optional and separate; without them,
   ambient `gh` authentication is used. Publication failures never change a review decision.
 - Notifications are opt-in and best-effort; delivery failure never affects workflow state.

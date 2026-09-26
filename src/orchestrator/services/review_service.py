@@ -97,10 +97,14 @@ def format_pull_request_review(review: CodeReview) -> str:
 
 class ReviewService:
     def __init__(
-        self, provider: AgentProvider, repository_context_strategy: RepositoryContextStrategy
+        self,
+        provider: AgentProvider,
+        repository_context_strategy: RepositoryContextStrategy,
+        on_context_truncated: Callable[[Path, int, int], None] | None = None,
     ) -> None:
         self._provider = provider
         self._repository_context_strategy = repository_context_strategy
+        self._on_context_truncated = on_context_truncated
 
     def review(
         self,
@@ -173,7 +177,7 @@ ORIGINAL TASK:
 REPOSITORY SPEC:
 {spec.as_prompt_context()}
 
-{project_context_prompt(repository_path)}{instructions}
+{project_context_prompt(repository_path, self._on_context_truncated)}{instructions}
 PULL REQUEST:
 {json.dumps(asdict(pull_request), ensure_ascii=False, indent=2)}
 
