@@ -8,8 +8,9 @@ import httpx
 import pytest
 
 from orchestrator.clients.command_client import CommandResult
-from orchestrator.clients.exceptions import GitHubClientError
+from orchestrator.clients.exceptions import GitHubClientError, TrelloClientError
 from orchestrator.clients.github_issue_client import GitHubIssueClient
+from orchestrator.clients.trello_client import TrelloClient
 from orchestrator.config.project_config import GitHubAppSettings
 from orchestrator.models import DevelopmentTask
 from orchestrator.services.task_provider import (
@@ -31,6 +32,10 @@ class StubCommands:
 
 
 class StubIssueClient:
+    def get_comments(self, repository: str, issue_number: str) -> list[str]:
+        assert (repository, issue_number) == ("owner/api", "42")
+        return ["Human note", "Automated finding"]
+
     def get_issue(self, repository: str, issue_number: str) -> dict[str, Any]:
         return {
             "number": int(issue_number),
@@ -86,6 +91,7 @@ def test_github_issue_is_mapped_to_common_task_with_labels() -> None:
             "state": "OPEN",
             "author": "octocat",
             "milestone": "V2",
+            "comments": ["Human note", "Automated finding"],
         },
     )
 
@@ -97,6 +103,7 @@ def test_github_issues_can_be_browsed_as_common_tasks() -> None:
 
     assert [task.id for task in tasks] == ["42"]
     assert tasks[0].title == "Add audit log"
+    assert "comments" not in tasks[0].metadata
 
 
 def test_github_provider_supplies_exact_label_catalog_names() -> None:
@@ -167,6 +174,40 @@ def test_github_issue_client_returns_structured_issue(tmp_path: Path) -> None:
 
     assert issue["number"] == 42
     assert issue["labels"] == [{"name": "backend"}]
+
+
+def test_github_cli_loads_all_comment_pages_and_rejects_bad_responses(tmp_path: Path) -> None:
+    pages = [
+        [{"body": "Human note", "user": {"login": "human"}}],
+        [{"body": "Automated finding", "user": {"login": "bot[bot]"}}],
+    ]
+    commands = StubCommands(CommandResult([], 0, json.dumps(pages), "", 0.1))
+    client = GitHubIssueClient(commands, cwd=tmp_path)  # type: ignore[arg-type]
+
+    assert client.get_comments("owner/api", "42") == ["Human note", "Automated finding"]
+    assert commands.calls == [[
+        "gh", "api", "--paginate", "--slurp",
+        "repos/owner/api/issues/42/comments?per_page=100",
+    ]]
+    commands.result = CommandResult([], 0, "[[]]", "", 0.1)
+    assert client.get_comments("owner/api", "42") == []
+    for malformed in ("{", "{}", "[[{}]]", '[[{"body": null}]]'):
+        commands.result = CommandResult([], 0, malformed, "", 0.1)
+        with pytest.raises(GitHubClientError, match="comments"):
+            client.get_comments("owner/api", "42")
+    commands.result = CommandResult([], 1, "", "Forbidden", 0.1)
+    with pytest.raises(GitHubClientError, match="Forbidden"):
+        client.get_comments("owner/api", "42")
+
+
+def test_github_provider_surfaces_comment_retrieval_failure() -> None:
+    class FailedComments(StubIssueClient):
+        def get_comments(self, repository: str, issue_number: str) -> list[str]:
+            raise GitHubClientError("Comment retrieval failed")
+
+    provider = GitHubIssueTaskProvider(FailedComments(), "owner/api")  # type: ignore[arg-type]
+    with pytest.raises(GitHubClientError, match="Comment retrieval failed"):
+        provider.get_task("42")
 
 
 def test_github_issue_client_lists_open_issues_for_task_browser(tmp_path: Path) -> None:
@@ -247,6 +288,14 @@ def test_planner_app_reads_issues_and_labels_without_gh(tmp_path: Path) -> None:
         assert request.url.path.startswith("/api/v3/repos/owner/api/")
         if request.url.path.endswith("/issues/42"):
             return httpx.Response(200, json=issue)
+        if request.url.path.endswith("/issues/42/comments"):
+            if request.url.params["page"] == "1":
+                return httpx.Response(200, json=[
+                    {"body": "Human note", "user": {"login": "human"}}
+                ] * 100)
+            return httpx.Response(200, json=[
+                {"body": "Automated finding", "user": {"login": "bot[bot]"}}
+            ])
         if request.url.path.endswith("/issues"):
             assert request.url.params["state"] == "open"
             if request.url.params["page"] == "1":
@@ -276,10 +325,114 @@ def test_planner_app_reads_issues_and_labels_without_gh(tmp_path: Path) -> None:
     assert task.metadata["author"] == "author"
     assert task.metadata["milestone"] == "V2"
     assert task.metadata["labels"] == ["planned"]
+    assert task.metadata["comments"] == ["Human note"] * 100 + ["Automated finding"]
     assert [item.id for item in provider.list_tasks(limit=1)] == ["42"]
     assert len(provider.list_labels()) == 101
     assert commands.calls == []
-    assert len(requests) == 5
+    assert len(requests) == 7
+
+
+@pytest.mark.parametrize("payload", [[], {}, [{"body": None}]])
+def test_planner_app_comment_responses(tmp_path: Path, payload: Any) -> None:
+    class Token:
+        def token(self) -> str:
+            return "token"
+
+    client = GitHubIssueClient(
+        StubCommands(CommandResult([], 1, "", "gh must not run", 0.1)), cwd=tmp_path,
+        planner_app=GitHubAppSettings(app_id=1, installation_id=2, private_key_env="KEY"),
+        authenticator=Token(),  # type: ignore[arg-type]
+        http_client=httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=payload)
+        )),
+    )
+    if payload == []:
+        assert client.get_comments("owner/api", "42") == []
+    else:
+        with pytest.raises(GitHubClientError, match="comments"):
+            client.get_comments("owner/api", "42")
+
+
+def test_trello_card_loads_paginated_comments_in_chronological_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    newest = [{"id": f"id-{index}", "type": "commentCard", "data": {"text": "Recent"},
+               "memberCreator": {"username": "bot"}}
+              for index in range(1000, 0, -1)]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/1/cards/card-1":
+            return httpx.Response(200, json={
+                "id": "card-1", "name": "Plan", "desc": "Details", "idBoard": "board-1",
+            }, request=request)
+        if request.url.path == "/1/boards/board-1/customFields":
+            return httpx.Response(200, json=[], request=request)
+        assert request.url.path == "/1/cards/card-1/actions"
+        assert request.url.params["filter"] == "commentCard"
+        if "before" not in request.url.params:
+            return httpx.Response(200, json=newest, request=request)
+        assert request.url.params["before"] == "id-1"
+        return httpx.Response(200, json=[
+            {"id": "id-0", "type": "commentCard", "data": {"text": "Old human note"},
+             "memberCreator": {"username": "human"}},
+        ], request=request)
+
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda url, **kwargs: respond(httpx.Request("GET", url, params=kwargs["params"])),
+    )
+    task = TrelloClient("key", "token").get_card("card-1")
+
+    assert task.metadata["comments"][0] == "Old human note"
+    assert task.metadata["comments"][-1] == "Recent"
+    assert len(task.metadata["comments"]) == 1001
+    assert len(requests) == 4
+
+
+@pytest.mark.parametrize("actions", [[], {}, [{"id": "1", "type": "commentCard", "data": {}}]])
+def test_trello_card_comment_responses(
+    monkeypatch: pytest.MonkeyPatch, actions: Any
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/1/cards/card-1":
+            return httpx.Response(
+                200, json={"id": "card-1", "idBoard": "board-1"}, request=request
+            )
+        if request.url.path == "/1/boards/board-1/customFields":
+            return httpx.Response(200, json=[], request=request)
+        return httpx.Response(200, json=actions, request=request)
+
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda url, **kwargs: respond(httpx.Request("GET", url, params=kwargs["params"])),
+    )
+    if actions == []:
+        assert TrelloClient("key", "token").get_card("card-1").metadata["comments"] == []
+    else:
+        with pytest.raises(TrelloClientError, match="comments"):
+            TrelloClient("key", "token").get_card("card-1")
+
+
+def test_trello_comment_request_failure_stops_task_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/1/cards/card-1":
+            return httpx.Response(
+                200, json={"id": "card-1", "idBoard": "board-1"}, request=request
+            )
+        if request.url.path == "/1/boards/board-1/customFields":
+            return httpx.Response(200, json=[], request=request)
+        return httpx.Response(403, json={"message": "Forbidden"}, request=request)
+
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda url, **kwargs: respond(httpx.Request("GET", url, params=kwargs["params"])),
+    )
+    with pytest.raises(TrelloClientError, match="/cards/card-1/actions"):
+        TrelloClient("key", "token").get_card("card-1")
 
 
 @pytest.mark.parametrize("payload", [None, {}, [{"number": "bad"}]])

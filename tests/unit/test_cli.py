@@ -155,15 +155,19 @@ def test_debug_task_loading_without_global_config_uses_gh(
 
     def run(self: Any, command: list[str], **kwargs: Any) -> CommandResult:
         calls.append(command)
-        return CommandResult(
-            command=command,
-            exit_code=0,
-            stdout=json.dumps({
+        if command[1] == "api":
+            stdout = "[[]]"
+        else:
+            stdout = json.dumps({
                 "number": 42, "title": "Issue title", "body": "Issue body",
                 "url": "https://github.com/owner/repo/issues/42", "labels": [],
                 "state": "OPEN", "author": {"login": "octocat"},
                 "milestone": None,
-            }),
+            })
+        return CommandResult(
+            command=command,
+            exit_code=0,
+            stdout=stdout,
             stderr="",
             duration_seconds=0.0,
         )
@@ -182,6 +186,9 @@ def test_debug_task_loading_without_global_config_uses_gh(
     assert calls == [[
         "gh", "issue", "view", "42", "--repo", "owner/repo", "--json",
         "number,title,body,url,labels,state,author,milestone",
+    ], [
+        "gh", "api", "--paginate", "--slurp",
+        "repos/owner/repo/issues/42/comments?per_page=100",
     ]]
 
 

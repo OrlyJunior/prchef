@@ -11,6 +11,7 @@ from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.services.exceptions import StructuredOutputError
 from orchestrator.services.project_context import (
+    MAX_PROJECT_CONTEXT_CHARS,
     planner_instructions_prompt,
     project_context_prompt,
 )
@@ -141,7 +142,7 @@ STRICT SAFETY RULES:
 ORIGINAL TASK (preserve as authoritative):
 {task.as_original_prompt()}
 
-{project_context_prompt(repository_path)}
+{self._comments_prompt(task)}{project_context_prompt(repository_path)}
 {repository_context}
 {planner_instructions_prompt(repository_path)}
 USER-FACING PLANNING:
@@ -183,3 +184,22 @@ OUTPUT CONTRACT:
   note; include it directly in the final agent message.
 Set safe_to_implement to false if an ambiguity prevents safe implementation.
 """
+
+    @staticmethod
+    def _comments_prompt(task: DevelopmentTask) -> str:
+        comments = task.metadata.get("comments", [])
+        if not comments:
+            return ""
+        content = "\n\n".join(comments)
+        truncated = len(content) > MAX_PROJECT_CONTEXT_CHARS
+        if truncated:
+            content = content[-MAX_PROJECT_CONTEXT_CHARS:]
+        notice = (
+            "[Earlier task comments truncated; showing the most recent content.]\n"
+            if truncated else ""
+        )
+        return (
+            "TASK COMMENTS (supporting context; the original task remains authoritative; "
+            "oldest to newest):\n"
+            f"{notice}{content}\n\n"
+        )

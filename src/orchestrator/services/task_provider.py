@@ -65,7 +65,9 @@ class GitHubIssueTaskProvider:
 
     def get_task(self, task_id: str) -> DevelopmentTask:
         issue = self._client.get_issue(self._repository, task_id)
-        return self._to_task(issue, fallback_id=task_id)
+        task = self._to_task(issue, fallback_id=task_id)
+        task.metadata["comments"] = self._client.get_comments(self._repository, task.id)
+        return task
 
     def list_tasks(self, *, limit: int = 50) -> list[DevelopmentTask]:
         return [
