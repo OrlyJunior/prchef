@@ -1,11 +1,17 @@
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
+from unittest.mock import Mock, call
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect, text
+from sqlalchemy import event, inspect, text
 
+import orchestrator.repositories.workflow_repository as workflow_repository_module
 from orchestrator.config.database import build_engine, build_session_factory
+from orchestrator.config.project_config import ProjectConfigLoader, WorkspaceSettings
 from orchestrator.models import (
     DevelopmentTask,
     DiagnosticCategory,
@@ -15,7 +21,12 @@ from orchestrator.models import (
     WorkflowStage,
     WorkflowStatus,
 )
-from orchestrator.repositories.workflow_repository import WorkflowRepository
+from orchestrator.repositories.workflow_repository import (
+    WorkflowRepository,
+    _lock_fresh_run_admission,
+)
+from orchestrator.services.workflow_service import WorkflowService
+from orchestrator.workspace.manager import WorkspaceManager
 
 
 def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
@@ -464,6 +475,452 @@ def test_executions_for_tasks_returns_latest_in_the_selected_repository(
     matches = repository.executions_for_tasks("github", ["12"], "example")
 
     assert matches["12"].id == newer.id
+
+
+@pytest.mark.parametrize(
+    ("status", "allowed"),
+    [
+        (WorkflowStatus.FAILED, True),
+        (WorkflowStatus.CANCELLED, True),
+        (WorkflowStatus.NEEDS_HUMAN, True),
+        (WorkflowStatus.CHANGES_REQUESTED, True),
+        (WorkflowStatus.PENDING, False),
+        (WorkflowStatus.WAITING, False),
+        (WorkflowStatus.RUNNING, False),
+        (WorkflowStatus.APPROVED, False),
+    ],
+)
+def test_fresh_execution_admission_uses_latest_repository_scoped_status(
+    tmp_path: Path, status: WorkflowStatus, allowed: bool
+) -> None:
+    repository = _migrated_repository(tmp_path, f"fresh-{status.value}.db")
+    older = repository.create_execution("12", "github", repository_ref="example")
+    repository.update_status(older.id, status)
+
+    if allowed:
+        fresh = repository.create_execution("12", "github", repository_ref="example")
+        assert fresh.id != older.id
+        assert repository.get_execution(older.id).status == status
+        assert repository.executions_for_tasks("github", ["12"], "example")["12"].id == fresh.id
+        with pytest.raises(ValueError, match="PENDING"):
+            repository.create_execution("12", "github", repository_ref="example")
+    else:
+        with pytest.raises(ValueError, match=status.value):
+            repository.create_execution("12", "github", repository_ref="example")
+        assert repository.get_execution(older.id).status == status
+
+    # Neither another repository nor another source shares this admission gate.
+    repository.create_execution("12", "github", repository_ref="other")
+    repository.create_execution("12", "trello", repository_ref="example")
+
+
+def test_fresh_execution_redacts_repository_reference_without_losing_admission(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "redacted-repository-ref.db")
+    reference = "example?token=ghp_examplecredential"
+    redacted = "example?token=[REDACTED]"
+
+    previous = repository.create_execution("12", "github", repository_ref=reference)
+    assert repository.get_execution(previous.id).repository_ref == redacted
+    assert repository.executions_for_tasks("github", ["12"], reference)["12"].id == previous.id
+
+    with pytest.raises(ValueError, match="PENDING") as error:
+        repository.create_execution("12", "github", repository_ref=reference)
+    assert "ghp_examplecredential" not in str(error.value)
+
+    repository.update_status(previous.id, WorkflowStatus.FAILED)
+    fresh = repository.create_execution("12", "github", repository_ref=reference)
+    assert fresh.id != previous.id
+    assert repository.get_execution(fresh.id).repository_ref == redacted
+
+    repository.update_project(fresh.id, "/repos/example", "develop", reference)
+    assert repository.get_execution(fresh.id).repository_ref == redacted
+
+
+def test_repository_key_and_path_share_fresh_run_admission(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "repository-aliases.db")
+    project = tmp_path / "project"
+    project.mkdir()
+    config = tmp_path / "orchestrator.yml"
+    config.write_text(f"repositories:\n  example:\n    path: {project.as_posix()}\n")
+    aliases = ProjectConfigLoader(config).repository_identity_aliases("example")
+    path = str(project.resolve())
+
+    # A path-only CLI row has no resolved repository until LOAD_CONFIG.
+    active = repository.create_execution("12", "github", repository_ref=path)
+    assert repository.executions_for_tasks(
+        "github", ["12"], "example", repository_aliases=aliases
+    )["12"].id == active.id
+    with pytest.raises(ValueError, match="PENDING"):
+        repository.create_execution(
+            "12", "github", repository_ref="example", repository_aliases=aliases
+        )
+
+    class Provider:
+        source = "github"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            return DevelopmentTask(
+                task_id, "github", "Current task", "Description", "https://example/12",
+                repository="example",
+            )
+
+    service = WorkflowService(
+        repository, Provider(), ProjectConfigLoader(config), object(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("12", "example")
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("12")
+
+    repository.update_status(active.id, WorkflowStatus.FAILED)
+    fresh = repository.create_execution(
+        "12", "github", repository_ref="example", repository_aliases=aliases
+    )
+    assert fresh.id != active.id
+    assert repository.executions_for_tasks(
+        "github", ["12"], path, repository_aliases=aliases
+    )["12"].id == fresh.id
+    with pytest.raises(ValueError, match="PENDING"):
+        repository.create_execution(
+            "12", "github", repository_ref=path, repository_aliases=aliases
+        )
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("12", path)
+
+
+def test_concurrent_fresh_run_admission_serializes_sqlite_read_and_insert(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "concurrent-fresh.db")
+    prior = repository.create_execution("12", "github", repository_ref="example")
+    repository.update_status(prior.id, WorkflowStatus.FAILED)
+    first_read = Event()
+    second_write_lock_attempt = Event()
+    engine = repository._sessions().get_bind()
+    assert engine is not None
+
+    def before_cursor_execute(
+        _connection: object, _cursor: object, statement: str,
+        _parameters: object, _context: object, _executemany: bool,
+    ) -> None:
+        if statement.startswith("SELECT") and "workflow_executions" in statement:
+            if not first_read.is_set():
+                first_read.set()
+                assert second_write_lock_attempt.wait(5)
+        elif statement == "BEGIN IMMEDIATE" and first_read.is_set():
+            second_write_lock_attempt.set()
+
+    event.listen(engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        def submit() -> str:
+            try:
+                return repository.create_execution(
+                    "12", "github", repository_ref="example"
+                ).id
+            except ValueError as exc:
+                return str(exc)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(submit)
+            assert first_read.wait(5)
+            second = pool.submit(submit)
+            results = [first.result(timeout=10), second.result(timeout=10)]
+    finally:
+        event.remove(engine, "before_cursor_execute", before_cursor_execute)
+
+    assert sum("PENDING" in result for result in results) == 1
+    assert repository.executions_for_tasks("github", ["12"], "example")["12"].id in results
+
+
+def test_fresh_run_remains_latest_when_clock_moves_backward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _migrated_repository(tmp_path, "fresh-clock-order.db")
+    prior = repository.create_execution("12", "github", repository_ref="example")
+    repository.update_status(prior.id, WorkflowStatus.FAILED)
+
+    monkeypatch.setattr(
+        workflow_repository_module, "_utcnow", lambda: datetime(2020, 1, 1, tzinfo=UTC)
+    )
+    fresh = repository.create_execution("12", "github", repository_ref="example")
+
+    assert fresh.created_at > prior.created_at
+    assert repository.executions_for_tasks("github", ["12"], "example")["12"].id == fresh.id
+    with pytest.raises(ValueError, match="PENDING"):
+        repository.create_execution("12", "github", repository_ref="example")
+    assert repository.get_execution(prior.id).status == WorkflowStatus.FAILED
+
+
+def test_postgresql_fresh_run_admission_locks_provider_task_before_status_read() -> None:
+    session = Mock()
+    session.get_bind.return_value.dialect.name = "postgresql"
+    calls = Mock()
+    calls.attach_mock(session.connection.return_value.exec_driver_sql, "driver")
+    calls.attach_mock(session.execute, "execute")
+
+    _lock_fresh_run_admission(session, "github", "12")
+
+    assert calls.mock_calls[0] == call.driver("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+    assert str(calls.mock_calls[1].args[0]) == "SELECT pg_advisory_xact_lock(:key)"
+    first_key = calls.mock_calls[1].args[1]["key"]
+    assert -(2**63) <= first_key < 2**63
+    _lock_fresh_run_admission(session, "github", "12")
+    assert calls.mock_calls[3].args[1]["key"] == first_key
+    _lock_fresh_run_admission(session, "trello", "12")
+    assert calls.mock_calls[5].args[1]["key"] != first_key
+
+
+def test_service_fresh_run_reloads_edited_task_and_keeps_earlier_execution(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "service-fresh.db")
+    description = ["original description"]
+
+    class Provider:
+        source = "github"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            if task_id == "14":
+                raise RuntimeError("provider unavailable")
+            return DevelopmentTask(
+                task_id, "github", "Current task", description[0], "https://example/12",
+                repository="example",
+            )
+
+    class FailingConfig:
+        def load(self, task: DevelopmentTask, repository_override: str | None):
+            raise RuntimeError("stop after loading the current task")
+
+    service = WorkflowService(
+        repository, Provider(), FailingConfig(), object(),  # type: ignore[arg-type]
+    )
+    first = service.run("12", "example")
+    assert first.status == WorkflowStatus.FAILED
+    description[0] = "edited description"
+
+    second = service.run("12", "example")
+
+    assert second.status == WorkflowStatus.FAILED
+    assert second.id != first.id
+    assert second.task_snapshot is not None
+    assert second.task_snapshot["description"] == "edited description"
+    assert repository.get_execution(first.id).task_snapshot["description"] == "original description"
+    assert repository.executions_for_tasks("github", ["12"], "example")["12"].id == second.id
+    pending = repository.create_execution("13", "github", repository_ref="example")
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("13")
+    assert repository.get_execution(pending.id).status == WorkflowStatus.PENDING
+    unavailable_pending = repository.create_execution("14", "github", repository_ref="example")
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("14")
+    assert repository.get_execution(unavailable_pending.id).status == WorkflowStatus.PENDING
+
+
+@pytest.mark.parametrize(
+    "latest_status",
+    [WorkflowStatus.PENDING, WorkflowStatus.RUNNING, WorkflowStatus.APPROVED],
+)
+def test_empty_repository_override_checks_trello_task_repository_before_submission(
+    tmp_path: Path, latest_status: WorkflowStatus,
+) -> None:
+    repository = _migrated_repository(tmp_path, f"empty-override-{latest_status.value}.db")
+    prior = repository.create_execution("card-12", "trello", repository_ref="example")
+    repository.update_status(prior.id, latest_status)
+
+    class Provider:
+        source = "trello"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            return DevelopmentTask(
+                task_id, "trello", "Task", "Description", "https://example/card-12",
+                metadata={"custom_fields": {"Repository": "example"}},
+            )
+
+    service = WorkflowService(
+        repository, Provider(), ProjectConfigLoader(tmp_path / "missing.yml"), object(),
+    )  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=latest_status.value):
+        service.submit_execution("card-12", "")
+
+    assert repository.get_execution(prior.id).status == latest_status
+    assert [execution.id for execution in repository.list_executions()] == [prior.id]
+
+
+def test_empty_repository_override_allows_eligible_trello_fresh_run(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "empty-override-eligible.db")
+    prior = repository.create_execution("card-12", "trello", repository_ref="example")
+    repository.update_status(prior.id, WorkflowStatus.FAILED)
+
+    class Provider:
+        source = "trello"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            return DevelopmentTask(
+                task_id, "trello", "Task", "Edited description", "https://example/card-12",
+                metadata={"custom_fields": {"Repository": "example"}},
+            )
+
+    service = WorkflowService(
+        repository, Provider(), ProjectConfigLoader(tmp_path / "missing.yml"), object(),
+    )  # type: ignore[arg-type]
+    fresh = service.run("card-12", "")
+
+    assert fresh.id != prior.id
+    assert fresh.repository_ref == "example"
+    assert fresh.task_snapshot is not None
+    assert fresh.task_snapshot["description"] == "Edited description"
+    assert repository.get_execution(prior.id).status == WorkflowStatus.FAILED
+
+
+def test_repository_rejects_explicit_empty_admission_reference(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "empty-repository-reference.db")
+    with pytest.raises(ValueError, match="non-empty"):
+        repository.create_execution("card-12", "trello", repository_ref="")
+    assert repository.list_executions() == []
+
+
+def test_repository_inferred_at_submission_uses_the_admitted_task_snapshot(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "admission-snapshot.db")
+    other = repository.create_execution("12", "github", repository_ref="other")
+    current_repository = ["original"]
+    provider_reads: list[str] = []
+    ready = Event()
+
+    class Provider:
+        source = "github"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            provider_reads.append(current_repository[0])
+            return DevelopmentTask(
+                task_id, "github", "Task", "Description", "https://example/12",
+                repository=current_repository[0],
+            )
+
+    class FailingConfig:
+        def load(self, task: DevelopmentTask, repository_override: str | None):
+            assert task.repository == "original"
+            raise RuntimeError("stop after loading the admitted task")
+
+    service = WorkflowService(
+        repository, Provider(), FailingConfig(), object(),  # type: ignore[arg-type]
+    )
+    handle = service.submit_execution("12", admission_gate=ready.is_set)
+    current_repository[0] = "other"
+    ready.set()
+    service._dispatcher.reevaluate()
+    result = handle.result(timeout=5)
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.repository_ref == "original"
+    assert result.task_snapshot is not None
+    assert result.task_snapshot["repository"] == "original"
+    assert provider_reads == ["original"]
+    assert repository.get_execution(other.id).status == WorkflowStatus.PENDING
+
+
+def test_failed_admission_read_is_recorded_without_refetching_task(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "admission-read-failed.db")
+    provider_reads = 0
+
+    class Provider:
+        source = "github"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            nonlocal provider_reads
+            provider_reads += 1
+            if provider_reads == 1:
+                raise RuntimeError("provider unavailable")
+            return DevelopmentTask(
+                task_id, "github", "Task", "Description", "https://example/12",
+                repository="other",
+            )
+
+    service = WorkflowService(
+        repository, Provider(), object(), object(),  # type: ignore[arg-type]
+    )
+    result = service.run("12")
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.current_stage == WorkflowStage.LOAD_TASK
+    assert result.task_snapshot is None
+    assert "provider unavailable" in (result.error_message or "")
+    assert provider_reads == 1
+
+
+def test_failed_provider_read_infers_one_repository_from_key_and_path_history(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "inferred-repository-aliases.db")
+    project = tmp_path / "project"
+    project.mkdir()
+    config = tmp_path / "orchestrator.yml"
+    config.write_text(f"repositories:\n  example:\n    path: {project.as_posix()}\n")
+
+    by_key = repository.create_execution("12", "github", repository_ref="example")
+    repository.update_status(by_key.id, WorkflowStatus.FAILED)
+    by_path = repository.create_execution("12", "github", repository_ref=str(project.resolve()))
+    provider_reads = 0
+
+    class Provider:
+        source = "github"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            nonlocal provider_reads
+            provider_reads += 1
+            raise RuntimeError("provider unavailable")
+
+    service = WorkflowService(
+        repository, Provider(), ProjectConfigLoader(config), object(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("12")
+    assert repository.get_execution(by_path.id).status == WorkflowStatus.PENDING
+
+    repository.update_status(by_path.id, WorkflowStatus.FAILED)
+    result = service.run("12")
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.current_stage == WorkflowStage.LOAD_TASK
+    assert "provider unavailable" in (result.error_message or "")
+    assert result.id not in {by_key.id, by_path.id}
+    assert provider_reads == 2
+    assert repository.get_execution(by_key.id).status == WorkflowStatus.FAILED
+    assert repository.get_execution(by_path.id).status == WorkflowStatus.FAILED
+    aliases = ProjectConfigLoader(config).repository_identity_aliases("example")
+    assert repository.executions_for_tasks(
+        "github", ["12"], "example", repository_aliases=aliases
+    )["12"].id == result.id
+
+
+def test_fresh_runs_keep_separate_branch_and_worktree_records(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "fresh-workspaces.db")
+    manager = WorkspaceManager(
+        object(), tmp_path / "control", WorkspaceSettings(root=tmp_path / "worktrees")
+    )  # type: ignore[arg-type]
+    first = repository.create_execution("12", "github", repository_ref="example")
+    first_branch = WorkflowService._branch_name("orchestrator", "12", "Fix task", first.id)
+    first_path = manager.workspace_path(first.id)
+    repository.record_branch(first.id, first_branch)
+    repository.record_workspace(first.id, str(first_path))
+    repository.update_status(first.id, WorkflowStatus.FAILED)
+
+    second = repository.create_execution("12", "github", repository_ref="example")
+    second_branch = WorkflowService._branch_name("orchestrator", "12", "Fix task", second.id)
+    second_path = manager.workspace_path(second.id)
+    repository.record_branch(second.id, second_branch)
+    repository.record_workspace(second.id, str(second_path))
+
+    assert first_branch != second_branch
+    assert first_path != second_path
+    assert repository.get_execution(first.id).working_branch == first_branch
+    assert repository.get_execution(first.id).workspace_path == str(first_path)
+    assert repository.get_execution(first.id).status == WorkflowStatus.FAILED
+    assert repository.get_execution(second.id).working_branch == second_branch
+    assert repository.executions_for_tasks("github", ["12"], "example")["12"].id == second.id
 
 
 def test_workflow_batch_migration_downgrades_to_0008(tmp_path: Path) -> None:

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any, cast
 
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import case, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,7 @@ from orchestrator.models.workflow_status import (
     StepStatus,
     WorkflowStage,
     WorkflowStatus,
+    can_start_fresh_run,
 )
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.repositories.orm_models import (
@@ -49,6 +51,12 @@ def _dump(value: Any) -> str:
     return json.dumps(redact_payload(asdict(value)), ensure_ascii=False, default=str)
 
 
+def _repository_references(repository: str, aliases: Sequence[str]) -> tuple[str, ...]:
+    # Include raw values for rows written before repository refs were redacted.
+    references = (repository, *aliases)
+    return tuple(dict.fromkeys((*references, *(redact_text(ref) for ref in references))))
+
+
 def _load(value: str | None) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -62,29 +70,92 @@ def _load(value: str | None) -> dict[str, Any] | None:
 _ACTIVE_STATUS_VALUES = frozenset(status.value for status in ACTIVE_WORKFLOW_STATUSES)
 
 
+def _lock_fresh_run_admission(session: Session, task_source: str, task_id: str) -> None:
+    """Serialize the latest-status read and insert for a provider task.
+
+    Locking by source and ID (across repositories) also covers submissions
+    using different aliases for the same configured repository.
+    """
+
+    bind = session.get_bind()
+    if bind.dialect.name == "sqlite":
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    elif bind.dialect.name == "postgresql":
+        # READ COMMITTED gives the status query a new snapshot after a
+        # competing transaction releases its advisory lock and commits.
+        session.connection().exec_driver_sql("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        lock_key = int.from_bytes(
+            sha256(f"{task_source}\0{task_id}".encode()).digest()[:8], "big", signed=True
+        )
+        session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+    else:
+        raise RuntimeError(
+            f"Fresh-run admission requires a database lock for {bind.dialect.name}"
+        )
+
+
 class WorkflowRepository:
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._sessions = session_factory
 
-    def create_execution(self, task_id: str, task_source: str = "trello") -> WorkflowExecution:
-        now = _utcnow()
-        legacy_trello_id = task_id if task_source == "trello" else ""
-        entity = WorkflowExecutionEntity(
-            id=str(uuid.uuid4()),
-            task_source=task_source,
-            task_id=task_id,
-            task_url="",
-            trello_card_id=legacy_trello_id,
-            trello_card_url="",
-            repository="",
-            repository_ref="",
-            base_branch="",
-            current_stage=WorkflowStage.LOAD_TASK.value,
-            status=WorkflowStatus.PENDING.value,
-            created_at=now,
-            updated_at=now,
-        )
+    def create_execution(
+        self, task_id: str, task_source: str = "trello", *,
+        repository_ref: str | None = None,
+        repository_aliases: Sequence[str] = (),
+    ) -> WorkflowExecution:
+        if repository_ref == "":
+            raise ValueError("Repository reference must be non-empty when provided")
         with self._sessions() as session, session.begin():
+            latest = None
+            if repository_ref:
+                _lock_fresh_run_admission(session, task_source, task_id)
+                references = _repository_references(repository_ref, repository_aliases)
+                latest = session.scalars(
+                    select(WorkflowExecutionEntity)
+                    .where(
+                        WorkflowExecutionEntity.task_source == task_source,
+                        WorkflowExecutionEntity.task_id == task_id,
+                        or_(
+                            WorkflowExecutionEntity.repository_ref.in_(references),
+                            WorkflowExecutionEntity.repository.in_(references),
+                        ),
+                    )
+                    .order_by(
+                        WorkflowExecutionEntity.created_at.desc(),
+                        WorkflowExecutionEntity.id.desc(),
+                    )
+                    .limit(1)
+                ).first()
+                if latest is not None and not can_start_fresh_run(WorkflowStatus(latest.status)):
+                    raise ValueError(
+                        f"Task {task_id} already has a {latest.status} execution "
+                        f"in repository {redact_text(repository_ref)}"
+                    )
+            # Assign the ordering timestamp inside the admission transaction, after
+            # the locked latest-run read. A queued caller must not insert a new
+            # PENDING row with a timestamp older than a run it just observed.
+            now = _utcnow()
+            if latest is not None:
+                previous = latest.created_at
+                if previous.tzinfo is None:
+                    previous = previous.replace(tzinfo=UTC)
+                now = max(now, previous + timedelta(microseconds=1))
+            legacy_trello_id = task_id if task_source == "trello" else ""
+            entity = WorkflowExecutionEntity(
+                id=str(uuid.uuid4()),
+                task_source=task_source,
+                task_id=task_id,
+                task_url="",
+                trello_card_id=legacy_trello_id,
+                trello_card_url="",
+                repository="",
+                repository_ref=redact_text(repository_ref) if repository_ref else "",
+                base_branch="",
+                current_stage=WorkflowStage.LOAD_TASK.value,
+                status=WorkflowStatus.PENDING.value,
+                created_at=now,
+                updated_at=now,
+            )
             session.add(entity)
             # Build the detached domain object while the session is still
             # available.  The execution's interactions relationship is lazy
@@ -161,11 +232,13 @@ class WorkflowRepository:
         task_source: str,
         task_ids: list[str],
         repository: str,
+        repository_aliases: Sequence[str] = (),
     ) -> dict[str, WorkflowExecution]:
         """Return the newest execution for each repository-scoped task identity."""
 
         if not task_ids:
             return {}
+        references = _repository_references(repository, repository_aliases)
         with self._sessions() as session:
             entities = session.scalars(
                 select(WorkflowExecutionEntity)
@@ -173,8 +246,8 @@ class WorkflowRepository:
                     WorkflowExecutionEntity.task_source == task_source,
                     WorkflowExecutionEntity.task_id.in_(task_ids),
                     or_(
-                        WorkflowExecutionEntity.repository_ref == repository,
-                        WorkflowExecutionEntity.repository == repository,
+                        WorkflowExecutionEntity.repository_ref.in_(references),
+                        WorkflowExecutionEntity.repository.in_(references),
                     ),
                 )
                 .order_by(
@@ -186,6 +259,41 @@ class WorkflowRepository:
             for entity in entities:
                 latest.setdefault(entity.task_id, self._to_domain(entity))
             return latest
+
+    def inferred_repository_for_task(
+        self,
+        task_source: str,
+        task_id: str,
+        identity_aliases: Callable[[str], Sequence[str]] | None = None,
+    ) -> str | None:
+        """Recover an unambiguous prior repository if task loading is unavailable."""
+
+        with self._sessions() as session:
+            rows = session.execute(
+                select(
+                    WorkflowExecutionEntity.repository_ref,
+                    WorkflowExecutionEntity.repository,
+                ).where(
+                    WorkflowExecutionEntity.task_source == task_source,
+                    WorkflowExecutionEntity.task_id == task_id,
+                )
+            ).all()
+        references = sorted({
+            reference or repository for reference, repository in rows
+            if reference or repository
+        })
+        identities = [
+            set(identity_aliases(reference)) | {reference} if identity_aliases else {reference}
+            for reference in references
+        ]
+        if identities and any(
+            not identities[0].intersection(identity) for identity in identities[1:]
+        ):
+            raise ValueError(
+                f"Cannot resolve repository for {task_source} task {task_id} while "
+                "the task provider is unavailable; specify the repository"
+            )
+        return references[0] if references else None
 
     def update_task(self, execution_id: str, task: DevelopmentTask) -> None:
         def mutate(entity: WorkflowExecutionEntity) -> None:
@@ -209,7 +317,7 @@ class WorkflowRepository:
         def mutate(entity: WorkflowExecutionEntity) -> None:
             entity.repository = repository
             entity.base_branch = base_branch
-            entity.repository_ref = repository_ref
+            entity.repository_ref = redact_text(repository_ref)
 
         self._mutate(execution_id, mutate)
 

@@ -7,6 +7,7 @@ import threading
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -245,9 +246,56 @@ class WorkflowService:
         listener are isolated from workflow execution.
         """
 
-        execution = self._repository.create_execution(
-            task_id, task_source=self._task_provider.source
-        )
+        # ProjectConfigLoader treats an empty override as absent. Resolve the
+        # same repository for admission before creating the execution row.
+        repository_override = repository_override or None
+        repository_ref = repository_override
+        admission_task: DevelopmentTask | None = None
+        admission_error: Exception | None = None
+        if isinstance(self._repository, WorkflowRepository) and repository_ref is None:
+            # An explicit CLI task may derive its repository from the provider.
+            # Preserve a LOAD_TASK failure record if this preliminary lookup fails.
+            try:
+                admission_task = deepcopy(self._task_provider.get_task(task_id))
+            except Exception as error:
+                admission_error = error
+            if admission_task is not None:
+                repository_ref = (
+                    self._config_loader.repository_reference_for_task(admission_task)
+                    if isinstance(self._config_loader, ProjectConfigLoader)
+                    else admission_task.repository
+                )
+            if not repository_ref:
+                def historical_aliases(reference: str) -> tuple[str, ...]:
+                    if not isinstance(self._config_loader, ProjectConfigLoader):
+                        return (reference,)
+                    try:
+                        return self._config_loader.repository_identity_aliases(reference)
+                    except (ConfigurationError, OSError):
+                        # LOAD_CONFIG can report a broken configuration after
+                        # the provider's LOAD_TASK error is recorded.
+                        return (reference,)
+
+                repository_ref = self._repository.inferred_repository_for_task(
+                    self._task_provider.source, task_id, historical_aliases
+                )
+        if isinstance(self._repository, WorkflowRepository):
+            aliases: tuple[str, ...] = ()
+            if repository_ref and isinstance(self._config_loader, ProjectConfigLoader):
+                try:
+                    aliases = self._config_loader.repository_identity_aliases(repository_ref)
+                except (ConfigurationError, OSError):
+                    # The normal LOAD_CONFIG stage records a configuration error.
+                    pass
+            execution = self._repository.create_execution(
+                task_id, task_source=self._task_provider.source,
+                repository_ref=repository_ref,
+                repository_aliases=aliases,
+            )
+        else:
+            execution = self._repository.create_execution(
+                task_id, task_source=self._task_provider.source
+            )
         self._begin_runtime(execution.id, event_listener)
         self._emit(
             execution.id,
@@ -265,7 +313,8 @@ class WorkflowService:
         return self._submit(
             execution.id,
             lambda: self._execute_workflow(
-                execution, task_id, repository_override, provider_overrides, runtime_overrides
+                execution, task_id, repository_override, provider_overrides, runtime_overrides,
+                admission_task, admission_error,
             ),
             admission_gate=admission_gate,
         )
@@ -334,6 +383,8 @@ class WorkflowService:
         repository_override: str | None,
         provider_overrides: Mapping[str, str],
         runtime_overrides: Mapping[str, Mapping[str, object]],
+        admission_task: DevelopmentTask | None = None,
+        admission_error: Exception | None = None,
     ) -> WorkflowExecution:
         """Run a workflow using the same persisted transitions used by the CLI."""
 
@@ -348,7 +399,13 @@ class WorkflowService:
                 "[workflow] Loading %s task %s", self._task_provider.source, task_id
             )
             with self._step(execution.id, WorkflowStage.LOAD_TASK):
-                task = self._task_provider.get_task(task_id)
+                # A CLI submission without an explicit repository reads the task
+                # to establish its admission identity. Use that same snapshot or
+                # error after dispatch, so a later provider edit cannot change
+                # the repository being executed.
+                if admission_error is not None:
+                    raise admission_error
+                task = admission_task or self._task_provider.get_task(task_id)
                 self._repository.update_task(execution.id, task)
 
             with self._step(execution.id, WorkflowStage.LOAD_CONFIG):

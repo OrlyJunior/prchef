@@ -84,6 +84,86 @@ class StopWorkflowConfirmation(ModalScreen[bool]):
         self.dismiss(event.button.id == "confirm-stop-workflow")
 
 
+class FreshRunConfirmation(ModalScreen[tuple[str, ...] | None]):
+    """Choose which previously run tasks get separate executions."""
+
+    CSS = """
+    FreshRunConfirmation { align: center middle; }
+    #fresh-run-confirmation {
+        width: 100%; max-width: 78; height: 80%;
+        padding: 1 1; border: round $warning;
+    }
+    #fresh-run-content { width: 100%; height: 1fr; overflow-y: auto; }
+    #fresh-run-actions { width: 100%; height: auto; }
+    #fresh-run-actions Button { width: 100%; }
+    """
+
+    def __init__(
+        self,
+        previous: tuple[tuple[DevelopmentTask, WorkflowExecution], ...],
+        new_count: int,
+    ) -> None:
+        super().__init__()
+        self.previous = previous
+        self.new_count = new_count
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="fresh-run-confirmation"):
+            with VerticalScroll(id="fresh-run-content"):
+                yield Static("Start fresh runs?", classes="screen-title")
+                yield Static(
+                    "Each checked task starts a new, separate execution. Earlier runs remain "
+                    "in Execution history."
+                )
+                if any(
+                    execution.status == WorkflowStatus.NEEDS_HUMAN
+                    for _, execution in self.previous
+                ):
+                    yield Static(
+                        "An earlier execution still has a pending question and remains open "
+                        "for an answer. Continuing it could lead to a second PR."
+                    )
+                if any(
+                    execution.status == WorkflowStatus.CHANGES_REQUESTED
+                    and (execution.pr_url or execution.pull_request_snapshot)
+                    for _, execution in self.previous
+                ):
+                    yield Static(
+                        "An earlier changes-requested PR may still be open. Continuing it "
+                        "could lead to a second PR."
+                    )
+                for index, (task, execution) in enumerate(self.previous):
+                    yield Checkbox(
+                        f"{task.id} [{execution.status.value}]: {task.title or '(untitled)'}",
+                        value=True,
+                        id=f"fresh-run-{index}",
+                    )
+                if self.new_count:
+                    yield Static(
+                        f"{self.new_count} task(s) with no earlier execution will also start."
+                    )
+            with Vertical(id="fresh-run-actions"):
+                yield Button("Launch selected", variant="primary", id="confirm-fresh-run")
+                yield Button("Back", id="dismiss-fresh-run")
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        self.query_one("#confirm-fresh-run", Button).disabled = not (
+            self.new_count or any(
+                self.query_one(f"#fresh-run-{index}", Checkbox).value
+                for index in range(len(self.previous))
+            )
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "dismiss-fresh-run":
+            self.dismiss(None)
+        elif event.button.id == "confirm-fresh-run":
+            self.dismiss(tuple(
+                task.id for index, (task, _) in enumerate(self.previous)
+                if self.query_one(f"#fresh-run-{index}", Checkbox).value
+            ))
+
+
 class WorkflowRunnerScreen(Screen[None]):
     """Collect compact launch selections and observe the workflow service."""
 
@@ -1174,7 +1254,9 @@ class WorkflowRunnerScreen(Screen[None]):
             self._task_context = None
             self.query_one("#task-selector", TaskSelector).set_error(message)
 
-    def _start_selected_workflow(self) -> None:
+    def _start_selected_workflow(
+        self, confirmed_previous_ids: set[str] | None = None
+    ) -> None:
         repository = self._selected("#repository")
         task_provider = self._selected("#task-provider")
         task_selector = self.query_one("#task-selector", TaskSelector)
@@ -1200,6 +1282,27 @@ class WorkflowRunnerScreen(Screen[None]):
             role: self._runtime_options_for_role(role, prefix)
             for role, prefix in self._role_fields()
         }
+        previous = task_selector.selected_previous_executions
+        if confirmed_previous_ids is None and previous:
+            self.app.push_screen(
+                FreshRunConfirmation(
+                    tuple(
+                        (task, previous[task.id])
+                        for task in task_selector.selected_tasks if task.id in previous
+                    ),
+                    len(task_ids) - len(previous),
+                ),
+                lambda selected: self._start_selected_workflow(set(selected))
+                if selected is not None else None,
+            )
+            return
+        if confirmed_previous_ids is not None:
+            task_ids = tuple(
+                task_id for task_id in task_ids
+                if task_id not in previous or task_id in confirmed_previous_ids
+            )
+            if not task_ids:
+                return
         self.query_one("#start-workflow", Button).disabled = True
         self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.query_one("#workflow-progress", Static).update("Starting workflow…")
@@ -1232,7 +1335,9 @@ class WorkflowRunnerScreen(Screen[None]):
             self._run_workflow(launch)
             return
         self._batch_running = True
-        self._batch_tasks = task_selector.selected_tasks
+        self._batch_tasks = tuple(
+            task for task in task_selector.selected_tasks if task.id in task_ids
+        )
         self._set_single_task_controls_visible(False)
         self.query_one("#workflow-progress", Static).update(
             f"Starting batch of {len(task_ids)} tasks…"
