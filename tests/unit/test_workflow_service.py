@@ -489,10 +489,12 @@ def test_planner_human_response_resumes_same_execution_without_prior_workspace(
     service, repository, _, factory = workflow
     resolved_names: list[str] = []
     context_roles: list[str] = []
+    context_temporary: list[bool] = []
 
     class Strategy:
         def render(self, request: RepositoryContextRequest) -> str:
             context_roles.append(request.role)
+            context_temporary.append(request.temporary_source)
             return "RESUME CONTEXT\n\n"
 
     def resolve(name: str, **_: object) -> Strategy:
@@ -516,6 +518,7 @@ def test_planner_human_response_resumes_same_execution_without_prior_workspace(
     assert repository.stage_changes.count(WorkflowStage.PREPARE_BRANCH) == 1
     assert resolved_names == ["heuristic", "heuristic"]
     assert context_roles == ["planner", "planner", "reviewer"]
+    assert context_temporary == [True, True, False]
 
 
 def test_planning_and_resume_use_comments_from_task_snapshot(workflow) -> None:

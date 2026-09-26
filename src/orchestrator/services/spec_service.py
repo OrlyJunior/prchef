@@ -71,9 +71,15 @@ class SpecService:
         base_branch: str,
         on_execution_started: Callable[[AgentExecutionReference], None],
         instructions_repository_path: Path | None = None,
+        temporary_repository_context: bool = False,
     ) -> RepositorySpec:
         prompt = self._build_prompt(
-            task, repository_path, repository_slug, base_branch, instructions_repository_path
+            task,
+            repository_path,
+            repository_slug,
+            base_branch,
+            instructions_repository_path,
+            temporary_repository_context,
         )
         result = self._provider.execute(
             AgentRequest(
@@ -129,6 +135,7 @@ class SpecService:
         repository_slug: str,
         base_branch: str,
         instructions_repository_path: Path | None = None,
+        temporary_repository_context: bool = False,
     ) -> str:
         repository_context = self._repository_context_strategy.render(
             RepositoryContextRequest(
@@ -137,6 +144,7 @@ class SpecService:
                 task=task,
                 repository_slug=repository_slug,
                 base_branch=base_branch,
+                temporary_source=temporary_repository_context,
             )
         )
         return f"""You are the read-only technical specification role.

@@ -236,6 +236,7 @@ class StageSequencer:
                             execution.id, reference.external_id, reference.url
                         ),
                         instructions_repository_path=config.path,
+                        temporary_repository_context=True,
                     )
                 self._repository.record_spec(execution.id, spec)
                 if self._verbose:
@@ -488,6 +489,7 @@ class StageSequencer:
                         execution.id, reference.external_id, reference.url
                     ),
                     instructions_repository_path=config.path,
+                    temporary_repository_context=True,
                 )
             self._repository.record_spec(execution.id, spec)
         if spec.has_blocking_ambiguity:
