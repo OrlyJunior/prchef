@@ -261,7 +261,7 @@ def test_registry_resolves_gemini_vertex_and_reuses_it_for_multiple_roles(tmp_pa
         }
     )
 
-    clients = ClientFactory(None).create(config)
+    clients = ClientFactory().create(config)
 
     assert isinstance(clients.agent(AgentRole.PLANNER), GeminiVertexAgentProvider)
     assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.REVIEWER)

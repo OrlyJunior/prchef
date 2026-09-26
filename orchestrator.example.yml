@@ -170,13 +170,6 @@ defaults:
       # A hosted account has its own finite quota pool, independent of the
       # Codex ceiling above: the two admit concurrently.
       max_concurrency: 3
-    # Legacy/deprecated: Jules remains configurable only for existing setups.
-    # It uses a remote-session API and does not meet current interactive worktree expectations.
-    # jules:
-    #   type: jules
-    #   # source: sources/github-owner-repository
-    #   poll_interval_seconds: 15
-    #   timeout_seconds: 1800
   integrations:
     github:
       command: [gh]

@@ -11,6 +11,7 @@ from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.services.exceptions import StructuredOutputError
 from orchestrator.services.project_context import (
+    MAX_PROJECT_CONTEXT_CHARS,
     planner_instructions_prompt,
     project_context_prompt,
 )
@@ -145,7 +146,7 @@ STRICT SAFETY RULES:
 ORIGINAL TASK (preserve as authoritative):
 {task.as_original_prompt()}
 
-{project_context_prompt(repository_path, self._on_context_truncated)}
+{self._comments_prompt(task)}{project_context_prompt(repository_path, self._on_context_truncated)}
 {repository_context}
 {planner_instructions_prompt(repository_path)}
 USER-FACING PLANNING:
@@ -161,12 +162,11 @@ USER-FACING PLANNING:
 - Capture relevant UX decisions and interaction constraints in implementation_proposal and
   acceptance_criteria.
 - Do not invent UX requirements for backend-only changes.
-When writing implementation_proposal, explicitly direct
-the implementation agent to keep
-docs/PROJECT_CONTEXT.md accurate when the change affects durable project knowledge
-(architecture, workflows, domain behavior, invariants, configuration, persistence,
-integrations, or design decisions). Direct the agent to keep it within the 12,000-character
-prompt cap by condensing existing content instead of only appending.
+When writing implementation_proposal, direct the implementation agent to update the configured
+durable project context file only if the change alters project purpose, operating model, layering,
+an invariant, or a design decision. Do not request feature behavior, UI details, or per-change notes
+in that file. Direct the agent to keep it within the 12,000-character prompt cap by condensing or
+replacing existing content instead of only appending.
 
 Return exactly one JSON object with this shape:
 {{
@@ -188,3 +188,22 @@ OUTPUT CONTRACT:
   note; include it directly in the final agent message.
 Set safe_to_implement to false if an ambiguity prevents safe implementation.
 """
+
+    @staticmethod
+    def _comments_prompt(task: DevelopmentTask) -> str:
+        comments = task.metadata.get("comments", [])
+        if not comments:
+            return ""
+        content = "\n\n".join(comments)
+        truncated = len(content) > MAX_PROJECT_CONTEXT_CHARS
+        if truncated:
+            content = content[-MAX_PROJECT_CONTEXT_CHARS:]
+        notice = (
+            "[Earlier task comments truncated; showing the most recent content.]\n"
+            if truncated else ""
+        )
+        return (
+            "TASK COMMENTS (supporting context; the original task remains authoritative; "
+            "oldest to newest):\n"
+            f"{notice}{content}\n\n"
+        )

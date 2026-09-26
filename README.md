@@ -102,10 +102,8 @@ Qualquer mudanca entre eles deve ser uma decisao explicita do usuario ou adminis
 orquestrador nao faz esse fallback automaticamente. Consulte a documentacao do sandbox Windows do
 [Codex](https://learn.chatgpt.com/docs/windows/windows-sandbox).
 
-Jules permanece somente como integracao legada/depreciada para configuracoes existentes. Seu ciclo
-de sessões remotas não oferece execução interativa no worktree, portanto não acompanha as
-expectativas atuais do workflow. Ao carregar ou instanciar um provider Jules, o orquestrador emite
-um aviso de deprecação; prefira LiteLLM para chamadas de modelo e Codex CLI para implementação local.
+Uma configuracao com provider do tipo `jules` ou `integrations.jules` agora falha ao carregar.
+Substitua por um provider suportado, como `codex-cli`, e configure explicitamente os papeis.
 
 ## Instalacao
 
@@ -183,9 +181,7 @@ extra `litellm` para instalar.
 Edite o `orchestrator.yml` global. Para Trello, o card deve possuir um custom field chamado
 `Repository` (ou `Repo`) cujo valor corresponda a uma chave em `repositories`; `--repository`
 continua podendo sobrescrevê-lo. Para GitHub Issues, informe `--repository owner/repo` e use essa
-mesma chave no registro `repositories` para associá-la ao checkout local. Antes da primeira
-execucao, conecte o repositorio ao Jules. Sem `providers.<nome-jules>.source`, o cliente usa o
-remote `origin` para localizar a source correspondente na API.
+mesma chave no registro `repositories` para associá-la ao checkout local.
 
 ## Contexto duravel do projeto
 
@@ -274,7 +270,8 @@ Use `orchestrator --version` para exibir a versao atual do pacote.
 `orchestrator tui` abre uma interface Textual para selecionar repositorios configurados, provider
 de task, issues GitHub (ou um ID de card Trello), providers dos papeis planner/implementer/reviewer,
 e iniciar o mesmo workflow usado por `run`. Ela mostra as transicoes persistidas ao vivo e permite
-filtrar execucoes anteriores, inspecionar snapshots/steps e abrir links de task, PR e sessoes Jules.
+filtrar execucoes anteriores, inspecionar snapshots/steps e abrir links de task, PR e referencias
+de execucao historicas.
 As selecoes de providers valem apenas para a execucao iniciada e nunca alteram o YAML. Os comandos
 CLI nao interativos continuam disponiveis para automacao.
 
@@ -314,7 +311,7 @@ defaults de configuracao):
 - `task-loading`: `--trello-card` ou `--github-issue`/`--task-id`, mais `--repository` quando
   necessario pelo provider. Sem esses argumentos, use `--from-execution`.
 - `spec-generation`: os mesmos inputs de task-loading para obter a task normalizada, mais
-  `--repository`/configuracao e autenticacao Jules. Cria uma sessao remota read-only sem persistir
+  `--repository`/configuracao. Executa apenas o planner selecionado sem persistir
   o resultado na execucao original.
 - `implementation`: `--repository` e `--prompt`/`--prompt-file`, ou task via provider e spec via
   `--spec-file`/`--from-execution`. Usa o workspace configurado/atual;
@@ -324,9 +321,9 @@ defaults de configuracao):
   sem `--dry-run` e nenhuma persistencia de workflow e alterada.
 - `review`: task via provider ou historico, `--spec-file`, `--validation-file`,
   `--pull-request-file`, `--feature-branch` e opcionalmente `--diff-file`; `--from-execution` pode
-  preencher esses dados. A operacao Jules permanece read-only e nao publica alteracoes.
+  preencher esses dados. A revisao permanece read-only e nao publica alteracoes.
 
-`--dry-run` valida os inputs sem chamar providers, Jules, Codex ou comandos locais. O resultado do
+`--dry-run` valida os inputs sem chamar providers ou comandos locais. O resultado do
 debug e JSON em `stdout`, e o progresso continua em `stderr`. Nenhuma etapa seguinte e iniciada
 automaticamente. `debug` e diagnostico isolado; uma futura funcionalidade `resume` sera responsavel
 por continuar o workflow original usando seu estado Git persistido e nao faz parte deste comando.
@@ -339,15 +336,13 @@ repositório, o PR registra apenas `owner/repo#numero`, sem solicitar fechamento
 Cada etapa e persistida em `workflow_executions` e `workflow_steps`. A saida final do comando e
 JSON e inclui `task_source`, `task_id`, `task_url`, repositorio, branch, commit, PR, validacoes,
 review e status final. As colunas Trello antigas são mantidas para leitura de execuções existentes.
-As sessoes Jules de spec e review tambem ficam registradas com ID e URL para inspecao futura.
-O orquestrador ainda nao retoma sessoes apos reinicio, mas esses identificadores permitem localizar
-uma sessao interrompida sem criar outra.
+As referencias de execucao dos providers ficam registradas com ID e URL para inspecao futura.
 
 ## Observabilidade da CLI
 
 O progresso do workflow e escrito em `stderr`, mantendo o JSON da execucao exclusivamente em
 `stdout` para que possa ser consumido por scripts. Os logs mostram entrada e conclusao de cada
-etapa, transicoes de estado e heartbeats do Jules, execucao das validacoes, branch/commit/push,
+etapa, transicoes de estado, execucao das validacoes, branch/commit/push,
 criação do PR e um resumo final mesmo quando o resultado e `FAILED` ou `NEEDS_HUMAN`.
 
 Use `--verbose` para incluir detalhes adicionais de subprocessos e retentativas de polling:
@@ -356,30 +351,13 @@ Use `--verbose` para incluir detalhes adicionais de subprocessos e retentativas 
 orchestrator run --github-issue 42 --repository owner/repository --verbose
 ```
 
-Prompts, respostas completas do Codex/Jules e credenciais nao sao incluidos nos logs. O intervalo
-de polling e o timeout do Jules continuam configuraveis no provider Jules (15 s e 1800 s
-por padrao); `--verbose` nao altera o comportamento do workflow.
-
-## Lifecycle legado do Jules (depreciado)
-
-Para cada spec ou review, o client cria uma unica sessao, persiste imediatamente `session_id` e
-URL e consulta seu estado ate uma decisão. Os estados de processamento (`QUEUED`, `PLANNING` e
-`IN_PROGRESS`) continuam em polling; `COMPLETED` recupera a ultima `agentMessage` das activities.
-Estados que aguardam interação humana e os estados de falha encerram a operação sem criar outra
-sessão.
-
-O intervalo, timeout global e retentativas de consulta ficam no provider Jules. O default é
-15 s, 1800 s e 3 retentativas, respectivamente. Apenas consultas transitórias (rede, 408, 429 e
-5xx) recebem retry, com backoff exponencial simples; criar sessão nunca é repetido automaticamente.
-`QUEUED`, `PLANNING` e `IN_PROGRESS` continuam em polling. `AWAITING_USER_FEEDBACK`, `PAUSED` e
-`AWAITING_PLAN_APPROVAL` encerram imediatamente em `NEEDS_HUMAN`, preservando o ID/URL da sessão
-e uma mensagem que explica a intervenção necessária. `FAILED` e `CANCELLED` encerram em `FAILED`.
+Prompts, respostas completas dos agentes e credenciais nao sao incluidos nos logs.
 
 ## Review e Pull Request
 
-Depois do push e da criação do PR pelo `gh` autenticado, o Jules recebe uma nova sessão de review
-com a feature branch como `startingBranch`, a task, a spec, o repositório, as branches base/feature,
-o PR, o diff e os resultados das validações. O resultado deve ser um JSON com `decision`
+Depois do push e da criacao do PR pelo `gh` autenticado, o reviewer selecionado recebe a task,
+a spec, o repositorio, as branches base/feature, o PR, o diff e as validacoes. O resultado deve ser
+um JSON com `decision`
 (`APPROVED`, `CHANGES_REQUESTED` ou `NEEDS_HUMAN`), `summary`, `findings`, `blocking_findings` e
 `suggestions`. Resposta malformada ou contraditória vira `NEEDS_HUMAN`; o orquestrador nunca infere
 aprovação de texto livre. `CHANGES_REQUESTED` não inicia uma nova rodada do Codex nesta V1.
@@ -444,7 +422,7 @@ Task providers suportados:
 - `github`: executa `gh issue view` com a autenticação já ativa no GitHub CLI.
 
 Agent providers sao instancias nomeadas em `providers`, dos tipos `litellm`, `codex-cli`,
-`gemini-vertex` e `jules`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
+`claude-code` e `gemini-vertex`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
 do workflow a essas instancias. Mais de um papel pode reutilizar a mesma instancia, ou cada papel
 pode apontar para uma configuracao diferente do mesmo tipo. Opcoes de runtime/modelo permanecem
 dentro da instancia do provider.
@@ -454,7 +432,6 @@ dentro da instancia do provider.
 | `litellm` | primeira classe | APIs de modelos cloud, locais e self-hosted compatíveis; instalado normalmente. |
 | `codex-cli` | primeira classe | agente especializado de implementação no worktree local. |
 | `gemini-vertex` | opcional | integração especializada com Vertex AI/ADC. |
-| `jules` | legado/depreciado | apenas compatibilidade; a API de sessões remotas não oferece o fluxo interativo de worktree atual. |
 | outros tipos | não suportados | rejeitados com erro de configuração. |
 
 No `codex-cli`, `model` e `reasoning_effort` sao opcionais somente para compatibilidade com
@@ -492,11 +469,11 @@ na configuracao do provider. Como uma API de modelo simples nao fornece automati
 edicao de arquivos, um provider LiteLLM pode planejar ou revisar, mas nao substitui as ferramentas
 de coding agent do `codex-cli` para implementacao local.
 
-Configuracoes legadas com `roles.spec|implementation|review` e
-`integrations.jules|codex` continuam aceitas sem reescrita automatica e sao normalizadas para os
-providers `jules` e `codex`. Como Jules está depreciado, esse caminho emite um aviso claro na carga
-da configuracao e na instanciacao. Nomes de provider ou tipos desconhecidos produzem um erro de
-configuracao com os nomes disponiveis/suportados.
+Configuracoes legadas com `roles.spec|implementation|review` e `integrations.codex`
+continuam aceitas quando spec e review apontam explicitamente para `codex`.
+`integrations.jules`, roles sem provider resolvivel e providers do tipo `jules` sao rejeitados
+na carga com orientacao para configurar um tipo suportado, como `codex-cli`.
+Nomes ou tipos desconhecidos produzem um erro com os nomes disponiveis/suportados.
 
 `allow_direct_merge: true` e rejeitado nesta V1. Credenciais ficam exclusivamente em variaveis
 de ambiente e `.env` nao e versionado.
@@ -574,5 +551,5 @@ pelo Git. Isso evita a dependência de `%LOCALAPPDATA%\\Temp\\pytest-of-...` no 
 Veja [docs/architecture.md](docs/architecture.md). Em resumo, models nao conhecem HTTP,
 subprocessos ou SQLAlchemy; services coordenam regras; clients encapsulam integracoes externas;
 e repositories sao a unica porta de persistencia. Os services de planner, implementacao e review
-dependem apenas de `AgentProvider.execute(AgentRequest) -> AgentResult`; adaptadores acima de
-`JulesClient` e `CodexClient` encapsulam REST/polling e subprocessos, respectivamente.
+dependem apenas de `AgentProvider.execute(AgentRequest) -> AgentResult`; `CodexClient` encapsula
+a execucao por subprocesso.

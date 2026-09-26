@@ -99,7 +99,7 @@ def test_authenticated_claude_code_executes_the_planner_role(tmp_path: Path) -> 
             },
         }
     )
-    provider = ClientFactory(None).create(config).agent(AgentRole.PLANNER)
+    provider = ClientFactory().create(config).agent(AgentRole.PLANNER)
     service = SpecService(provider, _EmptyRepositoryContext())  # type: ignore[arg-type]
     task = DevelopmentTask(
         id="claude-live-planner",

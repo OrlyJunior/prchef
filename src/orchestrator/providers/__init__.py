@@ -6,7 +6,6 @@ from orchestrator.providers.agent_provider import (
 from orchestrator.providers.claude_code_provider import ClaudeCodeAgentProvider
 from orchestrator.providers.codex_provider import CodexAgentProvider
 from orchestrator.providers.gemini_vertex_provider import GeminiVertexAgentProvider
-from orchestrator.providers.jules_provider import JulesAgentProvider
 from orchestrator.providers.registry import AgentProviderRegistry
 
 __all__ = [
@@ -17,5 +16,4 @@ __all__ = [
     "ClaudeCodeAgentProvider",
     "CodexAgentProvider",
     "GeminiVertexAgentProvider",
-    "JulesAgentProvider",
 ]

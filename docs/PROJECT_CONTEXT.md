@@ -15,6 +15,9 @@ and repository retrieval cover those.
   tool-agnostic; nothing in core may assume this repository's structure, tools, or issue numbers.
 - Human-blocked executions resume from persisted workflow state. This is not a provider-session
   resume system.
+- Planning uses the task's own comment thread as supporting context, bounded to 12,000 characters
+  with the newest content retained. Resumed planning uses the persisted task snapshot; other roles
+  do not receive a separate comment section.
 - `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` are optional, local, Git-ignored-by-default
   role guidance; each role receives only its own file. This file is shared by all roles. All of
   them are supplementary: the task, repository state, and core invariants win. Role files load
@@ -118,6 +121,8 @@ and repository retrieval cover those.
 - Fallback is explicit and one hop, only for normalized quota, rate-limit, or capacity failures.
   The primary permit is released before acquiring fallback capacity. Authentication, policy,
   configuration, and schema failures do not trigger fallback. There is never a silent fallback.
+- Planner and reviewer require explicit provider selection. Legacy roles normalize only when they
+  resolve to a supported configured provider; unsupported definitions fail during config load.
 - Planner and reviewer are read-only and return structured output validated locally. Ambiguous or
   malformed output is rejected, never guessed. Review separates blocking findings from optional
   suggestions; approval may trigger one bounded polish pass but cannot be revoked by it.
@@ -126,6 +131,8 @@ and repository retrieval cover those.
   filesystem access.
 - Behaviors that trade quota against throughput are configurable, not hardcoded to one user's
   limits.
+- Legacy-named planner/reviewer session-reference fields remain in persisted executions and
+  history reads. Provider removal does not rename them or require a data migration.
 
 ## Safety and diagnostics
 

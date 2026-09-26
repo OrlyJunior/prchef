@@ -302,7 +302,7 @@ def test_execution_created_links_the_row_and_resets_its_timeline() -> None:
 
 
 def test_waiting_event_does_not_hold_queued_rows() -> None:
-    progress = LiveBatchProgress(_batch(3), required_providers=frozenset({"jules"}))
+    progress = LiveBatchProgress(_batch(3), required_providers=frozenset({"planner"}))
     progress.apply(
         WorkflowEvent(
             execution_id="execution-1",
@@ -311,19 +311,19 @@ def test_waiting_event_does_not_hold_queued_rows() -> None:
         )
     )
     progress.apply(
-        _status_event("execution-1", WorkflowStatus.WAITING, position=0, provider="jules")
+        _status_event("execution-1", WorkflowStatus.WAITING, position=0, provider="planner")
     )
 
     rows = progress.rows()
     assert rows[0].category == "WAITING"
-    assert rows[0].status_label == "WAITING FOR AGENT (jules)"
+    assert rows[0].status_label == "WAITING FOR AGENT (planner)"
     assert rows[1].held_by_provider is None
     assert rows[1].status_label == "QUEUED"
     assert rows[2].held_by_provider is None
 
 
 def test_quota_hold_clears_when_provider_is_available() -> None:
-    progress = LiveBatchProgress(_batch(2), required_providers=frozenset({"jules"}))
+    progress = LiveBatchProgress(_batch(2), required_providers=frozenset({"planner"}))
     progress.apply(
         WorkflowEvent(
             execution_id="execution-1",
@@ -332,13 +332,13 @@ def test_quota_hold_clears_when_provider_is_available() -> None:
         )
     )
     progress.apply(
-        _status_event("execution-1", WorkflowStatus.WAITING, position=0, provider="jules")
+        _status_event("execution-1", WorkflowStatus.WAITING, position=0, provider="planner")
     )
-    progress.set_unavailable_providers({"jules"})
+    progress.set_unavailable_providers({"planner"})
 
     rows = progress.rows()
     assert rows[0].category == "WAITING"
-    assert rows[1].held_by_provider == "jules"
+    assert rows[1].held_by_provider == "planner"
     progress.set_unavailable_providers(set())
     rows = progress.rows()
     assert rows[1].held_by_provider is None
@@ -346,7 +346,7 @@ def test_quota_hold_clears_when_provider_is_available() -> None:
 
 
 def test_quota_hold_survives_other_item_terminal_status() -> None:
-    progress = LiveBatchProgress(_batch(2), required_providers=frozenset({"jules"}))
+    progress = LiveBatchProgress(_batch(2), required_providers=frozenset({"planner"}))
     progress.apply(
         WorkflowEvent(
             execution_id="execution-1",
@@ -355,9 +355,9 @@ def test_quota_hold_survives_other_item_terminal_status() -> None:
         )
     )
     progress.apply(
-        _status_event("execution-1", WorkflowStatus.WAITING, position=0, provider="jules")
+        _status_event("execution-1", WorkflowStatus.WAITING, position=0, provider="planner")
     )
-    progress.set_unavailable_providers({"jules"})
+    progress.set_unavailable_providers({"planner"})
     progress.apply(
         _status_event(
             "execution-1",
@@ -367,11 +367,11 @@ def test_quota_hold_survives_other_item_terminal_status() -> None:
         )
     )
 
-    assert progress.rows()[1].held_by_provider == "jules"
+    assert progress.rows()[1].held_by_provider == "planner"
 
 
 def test_quota_timeline_and_batch_actions_survive_resume() -> None:
-    progress = LiveBatchProgress(_batch(2), required_providers=frozenset({"jules"}))
+    progress = LiveBatchProgress(_batch(2), required_providers=frozenset({"planner"}))
     progress.apply(
         WorkflowEvent(
             execution_id="execution-1",
@@ -386,7 +386,7 @@ def test_quota_timeline_and_batch_actions_survive_resume() -> None:
             payload={
                 "batch_position": 0,
                 "kind": "PROVIDER_QUOTA_EXHAUSTED",
-                "provider": "jules",
+                "provider": "planner",
             },
         )
     )
@@ -394,7 +394,7 @@ def test_quota_timeline_and_batch_actions_survive_resume() -> None:
     assert progress.rows()[0].action == "answer"
     progress.apply(_status_event("execution-1", WorkflowStatus.PENDING, position=0))
     assert progress.rows()[0].action is None
-    assert "Provider jules quota exhausted" in progress.rows()[0].timeline[0]
+    assert "Provider planner quota exhausted" in progress.rows()[0].timeline[0]
     progress.set_continuation_eligible(0, True)
     progress.apply(_status_event("execution-1", WorkflowStatus.FAILED, position=0))
     assert progress.rows()[0].action == "continue"
@@ -631,7 +631,7 @@ def test_persisted_row_offers_continue_after_planning_quota_failure() -> None:
         ExecutionDiagnostic(
             execution_id=execution.id,
             category=DiagnosticCategory.WORKFLOW_EVENT,
-            payload={"kind": "PROVIDER_QUOTA_EXHAUSTED", "provider": "jules"},
+            payload={"kind": "PROVIDER_QUOTA_EXHAUSTED", "provider": "planner"},
         )
     ]
 

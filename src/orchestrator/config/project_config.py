@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import warnings
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -39,22 +38,14 @@ class ProviderSupportTier(StrEnum):
 
     FIRST_CLASS = "first-class"
     OPTIONAL = "optional"
-    DEPRECATED = "deprecated/legacy"
     UNSUPPORTED = "unsupported"
 
-
-JULES_DEPRECATION_MESSAGE = (
-    "The Jules provider is deprecated because its legacy remote-session API does not "
-    "provide the interactive worktree execution expected by current workflows. "
-    "Use LiteLLM for API-model requests or Codex CLI for local implementation."
-)
 
 _PROVIDER_SUPPORT_TIERS: dict[str, ProviderSupportTier] = {
     "litellm": ProviderSupportTier.FIRST_CLASS,
     "codex-cli": ProviderSupportTier.FIRST_CLASS,
     "claude-code": ProviderSupportTier.FIRST_CLASS,
     "gemini-vertex": ProviderSupportTier.OPTIONAL,
-    "jules": ProviderSupportTier.DEPRECATED,
 }
 
 
@@ -68,8 +59,6 @@ def provider_option_label(name: str, provider_type: str) -> str:
     """Render a configured provider for selection while preserving its name as the value."""
 
     tier = provider_support_tier(provider_type)
-    if tier is ProviderSupportTier.DEPRECATED:
-        return f"{name} (deprecated)"
     if tier is ProviderSupportTier.UNSUPPORTED:
         return f"{name} (unsupported)"
     return name
@@ -227,9 +216,9 @@ class TaskSettings(BaseModel):
 
 
 class RolesSettings(BaseModel):
-    spec: str = "jules"
+    spec: str | None = None
     implementation: str = "codex"
-    review: str = "jules"
+    review: str | None = None
 
 
 class AgentRoleSettings(BaseModel):
@@ -299,15 +288,9 @@ class AgentPresetConfig(BaseModel):
 
 
 class AgentsSettings(BaseModel):
-    planner: AgentRoleSettings = Field(
-        default_factory=lambda: AgentRoleSettings(provider="jules")
-    )
-    implementer: AgentRoleSettings = Field(
-        default_factory=lambda: AgentRoleSettings(provider="codex")
-    )
-    reviewer: AgentRoleSettings = Field(
-        default_factory=lambda: AgentRoleSettings(provider="jules")
-    )
+    planner: AgentRoleSettings
+    implementer: AgentRoleSettings
+    reviewer: AgentRoleSettings
 
 
 class SafetySettings(BaseModel):
@@ -563,14 +546,6 @@ def _has_command_reasoning_effort(command: list[str]) -> bool:
     return False
 
 
-class JulesIntegrationSettings(BaseModel):
-    source: str | None = None
-    poll_interval_seconds: float = Field(default=15.0, gt=0)
-    timeout_seconds: int = Field(default=1800, gt=0)
-    poll_retry_attempts: int = Field(default=3, ge=0)
-    poll_retry_backoff_seconds: float = Field(default=2.0, gt=0)
-
-
 def _max_concurrency_field() -> Any:
     """Declare the shared, provider-scoped concurrency ceiling.
 
@@ -603,20 +578,6 @@ class ProviderRuntimeCapabilities:
     supports_reasoning_effort: bool = False
     supports_permission_mode: bool = False
     supports_generation: bool = False
-
-
-class JulesProviderSettings(JulesIntegrationSettings):
-    """Deprecated compatibility settings for the legacy remote Jules adapter."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: Literal["jules"] = "jules"
-    max_concurrency: StrictInt = _max_concurrency_field()
-
-    @model_validator(mode="after")
-    def warn_deprecated(self) -> JulesProviderSettings:
-        warnings.warn(JULES_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=2)
-        return self
 
 
 class CodexCliProviderSettings(CodexIntegrationSettings):
@@ -766,8 +727,7 @@ class LiteLLMProviderSettings(BaseModel):
 def _validate_provider_settings(
     values: Mapping[str, Any], provider_name: str
 ) -> (
-    JulesProviderSettings
-    | CodexCliProviderSettings
+    CodexCliProviderSettings
     | ClaudeCodeProviderSettings
     | GeminiVertexProviderSettings
     | LiteLLMProviderSettings
@@ -776,8 +736,6 @@ def _validate_provider_settings(
 
     provider_type = values.get("type")
     try:
-        if provider_type == "jules":
-            return JulesProviderSettings.model_validate(values)
         if provider_type == "codex-cli":
             return CodexCliProviderSettings.model_validate(values)
         if provider_type == "claude-code":
@@ -796,7 +754,6 @@ def _validate_provider_settings(
 
 
 class IntegrationsSettings(BaseModel):
-    jules: JulesIntegrationSettings = Field(default_factory=JulesIntegrationSettings)
     codex: CodexIntegrationSettings = Field(
         default_factory=lambda: CodexIntegrationSettings(
             command=[
@@ -825,7 +782,7 @@ class ProjectConfig(BaseModel):
         default_factory=RepositoryContextSettings
     )
     roles: RolesSettings = Field(default_factory=RolesSettings)
-    agents: AgentsSettings = Field(default_factory=AgentsSettings)
+    agents: AgentsSettings
     agent_presets: dict[str, dict[str, AgentPresetConfig]] = Field(default_factory=dict)
     providers: dict[str, AgentProviderSettings] = Field(default_factory=dict)
     # Synthetic role-local provider name -> the configured provider it was
@@ -846,6 +803,24 @@ class ProjectConfig(BaseModel):
         if not isinstance(data, dict):
             return data
         values = deepcopy(data)
+        integrations = values.get("integrations", {})
+        if isinstance(integrations, dict) and "jules" in integrations:
+            raise ValueError(
+                "integrations.jules is no longer supported; remove it and configure "
+                "agents with a supported provider type such as 'codex-cli'"
+            )
+        raw_providers = values.get("providers", {})
+        if isinstance(raw_providers, dict):
+            rejected = sorted(
+                name for name, settings in raw_providers.items()
+                if isinstance(settings, dict) and settings.get("type") == "jules"
+            )
+            if rejected:
+                raise ValueError(
+                    "Jules provider type is no longer supported for provider(s) "
+                    f"{', '.join(repr(name) for name in rejected)}; "
+                    "choose a supported type such as 'codex-cli'"
+                )
         has_agents = "agents" in values
         has_providers = "providers" in values
         if has_agents != has_providers:
@@ -865,17 +840,21 @@ class ProjectConfig(BaseModel):
         else:
             raw_roles = values.get("roles", {})
             roles = raw_roles if isinstance(raw_roles, dict) else {}
+            missing_legacy_roles = [role for role in ("spec", "review") if not roles.get(role)]
+            if missing_legacy_roles:
+                raise ValueError(
+                    "Legacy configuration requires explicit supported roles for "
+                    f"{', '.join(missing_legacy_roles)}; set roles.spec and roles.review "
+                    "to configured providers, or define agents and providers with a "
+                    "supported type such as 'codex-cli'"
+                )
             values["agents"] = {
-                "planner": {"provider": roles.get("spec", "jules")},
+                "planner": {"provider": roles["spec"]},
                 "implementer": {"provider": roles.get("implementation", "codex")},
-                "reviewer": {"provider": roles.get("review", "jules")},
+                "reviewer": {"provider": roles["review"]},
             }
         if not has_providers:
-            raw_integrations = values.get("integrations", {})
-            integrations = raw_integrations if isinstance(raw_integrations, dict) else {}
-            jules = JulesIntegrationSettings.model_validate(
-                integrations.get("jules", {})
-            ).model_dump()
+            integrations = integrations if isinstance(integrations, dict) else {}
             codex = CodexIntegrationSettings.model_validate(
                 integrations.get(
                     "codex",
@@ -894,9 +873,16 @@ class ProjectConfig(BaseModel):
                 )
             ).model_dump()
             values["providers"] = {
-                "jules": {"type": "jules", **jules},
                 "codex": {"type": "codex-cli", **codex},
             }
+            for role in ("planner", "implementer", "reviewer"):
+                provider_name = values["agents"][role]["provider"]
+                if provider_name != "codex":
+                    raise ValueError(
+                        f"Legacy role {role} references provider {provider_name!r}, "
+                        "which cannot be resolved; define agents and providers with a "
+                        "supported type such as 'codex-cli'"
+                    )
         return values
 
     @model_validator(mode="after")
@@ -935,21 +921,10 @@ class ProjectConfig(BaseModel):
                 self.with_agent_preset(role, fallback_preset)
             except ConfigurationError as exc:
                 raise ValueError(str(exc)) from exc
-        deprecated = sorted(
-            name for name, settings in self.providers.items() if settings.type == "jules"
-        )
-        if deprecated:
-            rendered = ", ".join(repr(name) for name in deprecated)
-            message = (
-                f"Configured deprecated Jules provider(s): {rendered}. "
-                f"{JULES_DEPRECATION_MESSAGE}"
-            )
-            warnings.warn(message, DeprecationWarning, stacklevel=2)
-            logger.warning(message)
         return self
 
     def provider_options(self) -> list[tuple[str, str]]:
-        """Return UI labels and stable provider names, with legacy entries last."""
+        """Return UI labels and stable provider names."""
 
         configured = sorted(
             self.providers.items(),
@@ -957,8 +932,7 @@ class ProjectConfig(BaseModel):
                 {
                     ProviderSupportTier.FIRST_CLASS: 0,
                     ProviderSupportTier.OPTIONAL: 1,
-                    ProviderSupportTier.DEPRECATED: 2,
-                    ProviderSupportTier.UNSUPPORTED: 3,
+                    ProviderSupportTier.UNSUPPORTED: 2,
                 }[provider_support_tier(item[1].type)],
                 item[0],
             ),

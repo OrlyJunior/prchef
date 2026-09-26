@@ -186,6 +186,39 @@ def test_debug_agent_stages_warn_when_project_context_is_truncated(
     assert f"cap: {MAX_PROJECT_CONTEXT_CHARS}" in caplog.text
 
 
+def test_spec_debug_uses_snapshot_or_direct_task_comments(tmp_path: Path) -> None:
+    execution = _execution(tmp_path)
+    execution.task_snapshot["metadata"]["comments"] = ["Snapshot note"]
+    factory = RecordingFactory()
+    prompts: list[str] = []
+    original_execute = factory.planner.execute
+
+    def record_planner(request, *, on_started=None):
+        if request.structured_output and request.structured_output.name == "repository-spec":
+            prompts.append(request.instructions)
+        return original_execute(request, on_started=on_started)
+
+    factory.planner.execute = record_planner
+
+    class Provider:
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            task = _task()
+            task.metadata["comments"] = ["Direct note"]
+            return task
+
+    service, _ = _service(
+        tmp_path, factory=factory, task_provider_factory=lambda source, repository: Provider()
+    )
+    service.execute(execution, DebugStage.SPEC_GENERATION)
+    service.execute(None, DebugStage.SPEC_GENERATION, inputs=DebugInputs(
+        task_source="trello", task_id="card-debug", repository="example",
+    ))
+
+    assert "Snapshot note" in prompts[0]
+    assert "Direct note" not in prompts[0]
+    assert "Direct note" in prompts[1]
+
+
 def test_spec_debug_uses_configured_repository_context_strategy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -367,4 +400,4 @@ def test_review_debug_explicit_inputs_override_historical_defaults(tmp_path: Pat
     )
 
     assert result["result"]["review"]["result"] == "APPROVED"
-    assert factory.jules.review_starting_branch == "debug/explicit"
+    assert factory.planner.review_starting_branch == "debug/explicit"

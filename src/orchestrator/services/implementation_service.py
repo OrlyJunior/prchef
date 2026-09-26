@@ -22,6 +22,14 @@ from orchestrator.services.project_context import (
 from orchestrator.services.structured_output import parse_json_object
 
 _CORRECTION_OUTPUT_LIMIT = 4_000
+_DURABLE_CONTEXT_INSTRUCTIONS = """Update the configured durable project context file only when
+the change alters project purpose, operating model, layering, an invariant, or a design decision.
+Never add feature behavior, UI details, or per-change notes to that file. Keep it within its
+configured prompt cap by condensing or replacing existing lines instead of appending. Treat any
+necessary update as part of the normal diff. The current repository is authoritative if it
+conflicts with the durable context.
+
+"""
 _TRUNCATED_OUTPUT_MARKER = "[... earlier output truncated ...]\n"
 _PYTEST_FAILURES_HEADER = re.compile(r"^={2,} FAILURES ={2,}\r?$", re.MULTILINE)
 # A traceback frame separator contains only underscores and spaces, even when it ends in "_".
@@ -301,15 +309,7 @@ class ImplementationService:
 REPOSITORY SPEC:
 {spec.as_prompt_context()}
 
-{context}Keep docs/PROJECT_CONTEXT.md accurate when this task meaningfully
-changes durable project knowledge:
-architecture, workflows, domain behavior, invariants, configuration, persistence, integrations,
-or important design decisions. Treat any necessary docs/PROJECT_CONTEXT.md update as part of
-the normal diff.
-Do not update it for trivial implementation details. The current repository is authoritative if it
-conflicts with docs/PROJECT_CONTEXT.md.
-
-Implement the original task.
+{context}Implement the original task.
 Use the repository spec only as supporting technical context.
 Do not invent requirements.
 Preserve the conventions of the target repository.
@@ -326,11 +326,8 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
 
 STRICT SAFETY RULES:
 Implement only the requested input in the configured workspace.
-{context}Keep docs/PROJECT_CONTEXT.md accurate when the requested change
-meaningfully changes durable project knowledge; include any needed update in the normal diff. Do
-not update it for trivial details, and treat the repository as authoritative if it conflicts with
-docs/PROJECT_CONTEXT.md.
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+{context}Do not commit, push, create a pull request, or merge;
+the orchestrator owns those operations.
 """
             prompt = safe_prompt
         elif path is _ImplementerPath.VALIDATION:
@@ -346,11 +343,7 @@ REPOSITORY SPEC:
 VALIDATION FAILURES FROM THE CURRENT IMPLEMENTATION:
 {failures}
 
-{context}Keep docs/PROJECT_CONTEXT.md accurate if correcting these failures also
-changes durable project knowledge.
-Do not update it for trivial details; current repository behavior is authoritative.
-
-Correct the existing implementation in this workspace to address the validation failures.
+{context}Correct the existing implementation in this workspace to address the validation failures.
 Do not start over or revert unrelated existing changes.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
@@ -367,11 +360,8 @@ REPOSITORY SPEC:
 REVIEWER CHANGE REQUESTS FOR THE CURRENT IMPLEMENTATION:
 {feedback}
 
-{context}Keep docs/PROJECT_CONTEXT.md accurate if addressing these findings also
-changes durable project knowledge.
-Do not update it for trivial details; current repository behavior is authoritative.
-
-Correct the existing implementation in this workspace to address every blocking review finding.
+{context}Correct the existing implementation in this workspace to address every blocking
+review finding.
 Use the findings, blocking findings, and suggestions above as review feedback; do not start over
 or revert unrelated existing changes.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
@@ -393,7 +383,6 @@ OPERATOR FEEDBACK FOR CONTINUING THE CURRENT IMPLEMENTATION:
 {context}Continue the existing implementation in this workspace. Address the operator feedback
 without starting over or reverting unrelated existing changes. The workspace may contain retained
 changes from the prior terminal attempt; inspect its current state using your tools.
-Keep docs/PROJECT_CONTEXT.md accurate if this correction changes durable project knowledge.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
         elif path is _ImplementerPath.POLISH:
@@ -442,8 +431,6 @@ comment, so include concise final-facing reasons only. Do not include private re
 commands, credentials, provider metadata, or raw tool output. If no concise reason is available,
 return an empty `skip_reasons` list.
 
-Keep docs/PROJECT_CONTEXT.md accurate only if an applied change meaningfully changes durable
-project knowledge.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
         else:
@@ -483,8 +470,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
                 instructions_repository_path or repository_path,
                 repository_path,
             )
-            + "Keep docs/PROJECT_CONTEXT.md within its 12,000-character prompt cap by "
-            "condensing existing content instead of only appending.\n\n"
+            + _DURABLE_CONTEXT_INSTRUCTIONS
         )
 
     @staticmethod
