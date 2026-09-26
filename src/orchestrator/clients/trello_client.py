@@ -36,6 +36,7 @@ class TrelloClient:
         custom_fields = self._map_custom_fields(
             card.get("customFieldItems", []), definitions if isinstance(definitions, list) else []
         )
+        comments = self._get_comments(card_id, params)
         metadata = {
             "board_id": card.get("idBoard"),
             "list_id": card.get("idList"),
@@ -43,6 +44,7 @@ class TrelloClient:
             "labels": card.get("labels", []),
             "short_url": card.get("shortUrl"),
             "custom_fields": custom_fields,
+            "comments": comments,
         }
         repository = self._repository_from_custom_fields(custom_fields)
         return DevelopmentTask(
@@ -54,6 +56,43 @@ class TrelloClient:
             repository=repository,
             metadata=metadata,
         )
+
+    def _get_comments(self, card_id: str, params: dict[str, str]) -> list[str]:
+        """Page through comment actions, then restore chronological order."""
+        comments: list[str] = []
+        before: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            query = {
+                "key": params["key"],
+                "token": params["token"],
+                "filter": "commentCard",
+                "limit": "1000",
+            }
+            if before is not None:
+                query["before"] = before
+            actions = self._get_json(f"/cards/{card_id}/actions", query)
+            if not isinstance(actions, list):
+                raise TrelloClientError("Trello card comments response must be a JSON array")
+            for action in actions:
+                if (
+                    not isinstance(action, dict)
+                    or not isinstance(action.get("id"), str)
+                    or action.get("type") != "commentCard"
+                    or not isinstance(action.get("data"), dict)
+                    or not isinstance(action["data"].get("text"), str)
+                ):
+                    raise TrelloClientError(
+                        "Trello card comments response contains invalid actions"
+                    )
+                comments.append(action["data"]["text"])
+            if len(actions) < 1000:
+                return list(reversed(comments))
+            next_before = actions[-1]["id"]
+            if next_before in seen_cursors:
+                raise TrelloClientError("Trello card comments pagination did not advance")
+            seen_cursors.add(next_before)
+            before = next_before
 
     def _get_json(self, path: str, params: dict[str, str]) -> Any:
         try:

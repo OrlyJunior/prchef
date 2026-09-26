@@ -15,6 +15,9 @@ and repository retrieval cover those.
   tool-agnostic; nothing in core may assume this repository's structure, tools, or issue numbers.
 - Human-blocked executions resume from persisted workflow state. This is not a provider-session
   resume system.
+- Planning uses the task's own comment thread as supporting context, bounded to 12,000 characters
+  with the newest content retained. Resumed planning uses the persisted task snapshot; other roles
+  do not receive a separate comment section.
 - `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` are optional, local, Git-ignored-by-default
   role guidance; each role receives only its own file. This file is shared by all roles. All of
   them are supplementary: the task, repository state, and core invariants win.

@@ -1616,7 +1616,11 @@ def test_repository_settings_actions_remain_scrollable_on_small_terminal(
             assert content.max_scroll_y > 0
 
             application.screen.query_one("#save-repository", Button).focus()
-            await settle_tui(pilot)
+            await wait_for_tui(
+                pilot,
+                lambda: content.scroll_y > 0,
+                description="focused Save repository button in the scrollable viewport",
+            )
             assert content.scroll_y > 0
 
     asyncio.run(drive())
