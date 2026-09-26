@@ -59,9 +59,9 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
     assert result.task_id == "card-1"
     assert result.task_url == "https://trello.example/card-1"
     assert result.spec_jules_session_id == "spec-123"
-    assert result.review_jules_session_url == "https://jules.example/review-123"
-    assert factory.jules.spec_starting_branch == "develop"
-    assert factory.jules.review_starting_branch == result.working_branch
+    assert result.review_jules_session_url == "https://provider.example/review-123"
+    assert factory.planner.spec_starting_branch == "develop"
+    assert factory.planner.review_starting_branch == result.working_branch
     assert factory.github.review_calls == [
         {
             "repository": "example/api",
@@ -93,7 +93,7 @@ def test_workflow_resolves_once_and_reuses_strategy_during_review_loop(
         return strategy
 
     monkeypatch.setattr(workflow_service_module, "resolve_repository_context_strategy", resolve)
-    factory.jules.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
+    factory.planner.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
 
     result = service.run("card-context-strategy")
 
@@ -313,9 +313,9 @@ def _workflow_with_notifications(tmp_path: Path):
     [
         (lambda factory: None, WorkflowStatus.APPROVED),
         (lambda factory: setattr(factory.codex, "fail", True), WorkflowStatus.FAILED),
-        (lambda factory: setattr(factory.jules, "ambiguous", True), WorkflowStatus.NEEDS_HUMAN),
+        (lambda factory: setattr(factory.planner, "ambiguous", True), WorkflowStatus.NEEDS_HUMAN),
         (
-            lambda factory: setattr(factory.jules, "changes_requested", True),
+            lambda factory: setattr(factory.planner, "changes_requested", True),
             WorkflowStatus.CHANGES_REQUESTED,
         ),
     ],
@@ -338,7 +338,7 @@ def test_recoverable_validation_and_review_retries_do_not_emit_notifications(
     service, recorder = _workflow_with_notifications(tmp_path)
     factory = service._client_factory
     factory.commands.failures_remaining = 1
-    factory.jules.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
+    factory.planner.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
 
     result = service.run("card-retry-notifications")
 
@@ -358,9 +358,9 @@ def test_trello_failure_is_persisted_as_failed(workflow) -> None:
     assert repository.steps[1]["status"] is StepStatus.FAILED
 
 
-def test_blocking_jules_ambiguity_stops_for_human_before_branch(workflow) -> None:
+def test_blocking_planner_ambiguity_stops_for_human_before_branch(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.ambiguous = True
+    factory.planner.ambiguous = True
 
     result = service.run("card-3")
 
@@ -388,18 +388,18 @@ def test_planner_human_response_resumes_same_execution_without_prior_workspace(
         return Strategy()
 
     monkeypatch.setattr(workflow_service_module, "resolve_repository_context_strategy", resolve)
-    factory.jules.ambiguous = True
+    factory.planner.ambiguous = True
 
     paused = service.run("card-planner-resume")
     assert paused.workspace_path is None
-    factory.jules.ambiguous = False
+    factory.planner.ambiguous = False
 
     resumed = service.respond_and_resume(paused.id, "Use a configurable retention period.")
 
     assert resumed.id == paused.id
     assert resumed.status is WorkflowStatus.APPROVED
     assert resumed.human_interactions[-1].response == "Use a configurable retention period."
-    assert factory.jules.spec_calls == 2
+    assert factory.planner.spec_calls == 2
     assert resumed.working_branch is not None
     assert repository.stage_changes.count(WorkflowStage.PREPARE_BRANCH) == 1
     assert resolved_names == ["heuristic", "heuristic"]
@@ -410,7 +410,7 @@ def test_human_response_rejects_cancellation_after_initial_status_read(
     workflow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, repository, _, factory = workflow
-    factory.jules.ambiguous = True
+    factory.planner.ambiguous = True
     paused = service.run("card-cancelled-before-answer")
     assert paused.status is WorkflowStatus.NEEDS_HUMAN
     original = repository.respond_to_human_input
@@ -434,7 +434,7 @@ def test_human_resume_preserves_role_local_claude_effort(workflow) -> None:
         {"type": "claude-code", "effort": "medium"}
     )
     loader.config.agents.planner.provider = "claude"
-    factory.jules.ambiguous = True
+    factory.planner.ambiguous = True
 
     paused = service.run(
         "card-claude-effort-resume",
@@ -449,7 +449,7 @@ def test_human_resume_preserves_role_local_claude_effort(workflow) -> None:
     first_provider = first_config.providers[first_config.agents.planner.provider]
     assert first_provider.effort == "xhigh"
 
-    factory.jules.ambiguous = False
+    factory.planner.ambiguous = False
     resumed = service.respond_and_resume(paused.id, "Use a configurable retention period.")
 
     assert resumed.status is WorkflowStatus.APPROVED
@@ -500,7 +500,7 @@ def test_manual_continuation_preserves_role_local_runtime_overrides(workflow) ->
         {"type": "claude-code", "effort": "medium"}
     )
     loader.config.agents.planner.provider = "claude"
-    factory.jules.changes_requested = True
+    factory.planner.changes_requested = True
 
     paused = service.run(
         "card-claude-effort-continuation",
@@ -510,7 +510,7 @@ def test_manual_continuation_preserves_role_local_runtime_overrides(workflow) ->
         },
     )
     assert paused.status is WorkflowStatus.CHANGES_REQUESTED
-    factory.jules.changes_requested = False
+    factory.planner.changes_requested = False
 
     resumed = service.continue_execution(paused.id, "Also cover the boundary case.")
 
@@ -538,14 +538,14 @@ def test_reviewer_human_response_reuses_existing_workspace_branch_and_pr(
         return Strategy()
 
     monkeypatch.setattr(workflow_service_module, "resolve_repository_context_strategy", resolve)
-    factory.jules.malformed_review = True
+    factory.planner.malformed_review = True
 
     paused = service.run("card-review-resume")
     workspace = paused.workspace_path
     branch = paused.working_branch
     assert paused.status is WorkflowStatus.NEEDS_HUMAN
     assert paused.human_interactions[-1].requesting_stage is WorkflowStage.REVIEW
-    factory.jules.malformed_review = False
+    factory.planner.malformed_review = False
 
     resumed = service.respond_and_resume(paused.id, "The expected behavior is intentional.")
 
@@ -560,13 +560,13 @@ def test_reviewer_human_response_reuses_existing_workspace_branch_and_pr(
 
 def test_execution_can_pause_for_multiple_human_input_cycles(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.ambiguous = True
+    factory.planner.ambiguous = True
 
     first_pause = service.run("card-multiple-human")
     second_pause = service.respond_and_resume(first_pause.id, "First clarification.")
     assert second_pause.status is WorkflowStatus.NEEDS_HUMAN
 
-    factory.jules.ambiguous = False
+    factory.planner.ambiguous = False
     completed = service.respond_and_resume(second_pause.id, "Second clarification.")
 
     assert completed.status is WorkflowStatus.APPROVED
@@ -668,7 +668,7 @@ def test_multiple_validation_corrections_are_supported(workflow) -> None:
     assert len(factory.codex.requests) == 3
     assert repository.stage_changes.count(WorkflowStage.VALIDATE) == 3
     assert repository.stage_changes.count(WorkflowStage.IMPLEMENT) == 3
-    assert factory.jules.spec_calls == 1
+    assert factory.planner.spec_calls == 1
 
 
 def test_validation_retry_limit_fails_and_preserves_workspace(workflow) -> None:
@@ -738,7 +738,7 @@ def test_repeated_validation_timeouts_exhaust_the_normal_retry_cap(workflow) -> 
 
 def test_optional_polish_timeout_is_discarded_without_correction(workflow) -> None:
     service, repository, _, factory = workflow
-    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.planner.review_suggestions = [["Add a focused regression test"]]
     factory.commands.timeout_sequence = [False, True]
 
     result = service.run("card-polish-timeout")
@@ -845,12 +845,12 @@ def test_disconnected_history_before_review_skips_diff_and_reviewer(workflow) ->
     assert result.current_stage is WorkflowStage.REVIEW
     assert result.error_message and "disconnected history" in result.error_message
     assert factory.git.diff_calls == 0
-    assert factory.jules.review_calls == 0
+    assert factory.planner.review_calls == 0
 
 
 def test_disconnected_history_on_review_correction_stops_before_second_commit(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.review_decisions = ["CHANGES_REQUESTED"]
+    factory.planner.review_decisions = ["CHANGES_REQUESTED"]
     factory.git.merge_base_errors = [
         None,
         None,
@@ -870,7 +870,7 @@ def test_disconnected_history_on_review_correction_stops_before_second_commit(wo
 
 def test_disconnected_history_on_polish_stops_before_second_commit(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.planner.review_suggestions = [["Add a focused regression test"]]
     factory.git.merge_base_errors = [
         None,
         None,
@@ -889,9 +889,9 @@ def test_disconnected_history_on_polish_stops_before_second_commit(workflow) -> 
 
 def test_disconnected_history_on_planner_resume_fails_preparation(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.ambiguous = True
+    factory.planner.ambiguous = True
     paused = service.run("card-disconnected-planner-resume")
-    factory.jules.ambiguous = False
+    factory.planner.ambiguous = False
     factory.git.merge_base_error = GitClientError("disconnected history from develop")
 
     result = service.respond_and_resume(paused.id, "Use a configurable retention period.")
@@ -904,12 +904,12 @@ def test_disconnected_history_on_planner_resume_fails_preparation(workflow) -> N
 
 def test_disconnected_history_on_review_resume_skips_diff(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.malformed_review = True
+    factory.planner.malformed_review = True
     paused = service.run("card-disconnected-review-resume")
     assert paused.status is WorkflowStatus.NEEDS_HUMAN
     diff_calls = factory.git.diff_calls
-    review_calls = factory.jules.review_calls
-    factory.jules.malformed_review = False
+    review_calls = factory.planner.review_calls
+    factory.planner.malformed_review = False
     factory.git.merge_base_error = GitClientError("disconnected history from develop")
 
     result = service.respond_and_resume(paused.id, "The implementation is intentional.")
@@ -918,14 +918,14 @@ def test_disconnected_history_on_review_resume_skips_diff(workflow) -> None:
     assert result.current_stage is WorkflowStage.REVIEW
     assert result.error_message and "disconnected history" in result.error_message
     assert factory.git.diff_calls == diff_calls
-    assert factory.jules.review_calls == review_calls
+    assert factory.planner.review_calls == review_calls
 
 
 def test_disconnected_history_on_manual_continuation_stops_before_commit(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.changes_requested = True
+    factory.planner.changes_requested = True
     paused = service.run("card-disconnected-continuation")
-    factory.jules.changes_requested = False
+    factory.planner.changes_requested = False
     commits = factory.git.commit_calls
     pushes = factory.git.push_calls
     factory.git.merge_base_error = GitClientError("disconnected history from develop")
@@ -963,7 +963,7 @@ def test_pull_request_failure_is_terminal(workflow) -> None:
 
 def test_review_correction_revalidates_updates_existing_pr_and_can_be_approved(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
+    factory.planner.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
 
     result = service.run("card-9")
 
@@ -987,14 +987,14 @@ def test_review_correction_revalidates_updates_existing_pr_and_can_be_approved(w
 
 def test_approved_review_suggestions_can_be_declined_without_changing_approval(workflow) -> None:
     service, repository, _, factory = workflow
-    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.planner.review_suggestions = [["Add a focused regression test"]]
     factory.git.changed_files_results = [["src/audit.py"], []]
 
     result = service.run("card-polish-declined")
 
     assert result.status is WorkflowStatus.APPROVED
     assert repository.stage_changes.count(WorkflowStage.POLISH) == 1
-    assert factory.jules.review_calls == 1
+    assert factory.planner.review_calls == 1
     assert factory.git.commit_calls == 1
     assert factory.git.push_calls == 1
     assert len(factory.codex.requests) == 2
@@ -1011,8 +1011,8 @@ def test_approved_review_suggestions_can_be_declined_without_changing_approval(w
 
 def test_applied_polish_is_validated_pushed_to_existing_pr_and_re_reviewed(workflow) -> None:
     service, repository, _, factory = workflow
-    factory.jules.review_decisions = ["APPROVED", "APPROVED"]
-    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.planner.review_decisions = ["APPROVED", "APPROVED"]
+    factory.planner.review_suggestions = [["Add a focused regression test"]]
 
     result = service.run("card-polish-applied")
 
@@ -1024,14 +1024,14 @@ def test_applied_polish_is_validated_pushed_to_existing_pr_and_re_reviewed(workf
     assert factory.git.push_calls == 2
     assert factory.git.diff_calls == 2
     assert factory.github.create_calls == 1
-    assert factory.jules.review_calls == 2
+    assert factory.planner.review_calls == 2
     assert factory.github.comment_calls == []
 
 
 def test_fresh_approved_review_does_not_trigger_a_second_polish_pass(workflow) -> None:
     service, repository, _, factory = workflow
-    factory.jules.review_decisions = ["APPROVED", "APPROVED"]
-    factory.jules.review_suggestions = [
+    factory.planner.review_decisions = ["APPROVED", "APPROVED"]
+    factory.planner.review_suggestions = [
         ["Add a focused regression test"],
         ["Consider clearer naming"],
     ]
@@ -1040,13 +1040,13 @@ def test_fresh_approved_review_does_not_trigger_a_second_polish_pass(workflow) -
 
     assert result.status is WorkflowStatus.APPROVED
     assert repository.stage_changes.count(WorkflowStage.POLISH) == 1
-    assert factory.jules.review_calls == 2
+    assert factory.planner.review_calls == 2
     assert len(factory.codex.requests) == 2
 
 
 def test_invalid_optional_polish_is_discarded_without_downgrading_approval(workflow) -> None:
     service, repository, _, factory = workflow
-    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.planner.review_suggestions = [["Add a focused regression test"]]
     factory.commands.failure_sequence = [False, True]
 
     result = service.run("card-polish-invalid")
@@ -1057,15 +1057,15 @@ def test_invalid_optional_polish_is_discarded_without_downgrading_approval(workf
     assert factory.git.discard_calls == 1
     assert factory.git.commit_calls == 1
     assert factory.git.push_calls == 1
-    assert factory.jules.review_calls == 1
+    assert factory.planner.review_calls == 1
     assert len(factory.github.comment_calls) == 1
     assert "did not pass validation" in factory.github.comment_calls[0]["body"]
 
 
 def test_changes_requested_after_polish_uses_mandatory_correction_loop(workflow) -> None:
     service, repository, _, factory = workflow
-    factory.jules.review_decisions = ["APPROVED", "CHANGES_REQUESTED", "APPROVED"]
-    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.planner.review_decisions = ["APPROVED", "CHANGES_REQUESTED", "APPROVED"]
+    factory.planner.review_suggestions = [["Add a focused regression test"]]
 
     result = service.run("card-polish-changes-requested")
 
@@ -1090,7 +1090,7 @@ def test_approved_review_without_suggestions_does_not_enter_polish_stage(workflo
 
 def test_polish_skip_comment_publication_failure_preserves_approval(workflow, caplog) -> None:
     service, _, _, factory = workflow
-    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.planner.review_suggestions = [["Add a focused regression test"]]
     factory.git.changed_files_results = [["src/audit.py"], []]
     factory.github.comment_error = RuntimeError("GitHub unavailable")
 
@@ -1106,12 +1106,12 @@ def test_polish_skip_comment_publication_failure_preserves_approval(workflow, ca
 
 def test_resumed_approved_review_with_suggestions_runs_polish_before_completion(workflow) -> None:
     service, repository, _, factory = workflow
-    factory.jules.malformed_review = True
+    factory.planner.malformed_review = True
 
     paused = service.run("card-resumed-polish")
 
-    factory.jules.malformed_review = False
-    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.planner.malformed_review = False
+    factory.planner.review_suggestions = [["Add a focused regression test"]]
     # The initial implementation was committed before the review paused.  On
     # resume, this is the polish pass's post-agent worktree state, so an empty
     # result models the implementer declining the optional suggestion.
@@ -1125,7 +1125,7 @@ def test_resumed_approved_review_with_suggestions_runs_polish_before_completion(
 
 def test_persisted_polish_comment_attempt_prevents_duplicate_comment_on_retry(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.review_suggestions = [["Add a focused regression test"]]
+    factory.planner.review_suggestions = [["Add a focused regression test"]]
     factory.git.changed_files_results = [["src/audit.py"], []]
 
     result = service.run("card-polish-comment-retry")
@@ -1158,14 +1158,14 @@ def test_review_publication_failure_preserves_reviewer_decision(workflow) -> Non
 
 def test_review_correction_limit_finishes_changes_requested(workflow) -> None:
     service, repository, _, factory = workflow
-    factory.jules.changes_requested = True
+    factory.planner.changes_requested = True
 
     result = service.run("card-review-exhausted")
 
     assert result.status is WorkflowStatus.CHANGES_REQUESTED
     assert result.review_snapshot is not None
     assert result.review_snapshot["result"] == "CHANGES_REQUESTED"
-    assert factory.jules.review_calls == 2
+    assert factory.planner.review_calls == 2
     assert len(factory.codex.requests) == 2
     assert repository.stage_changes.count(WorkflowStage.REVIEW) == 2
     assert factory.github.create_calls == 1
@@ -1173,11 +1173,11 @@ def test_review_correction_limit_finishes_changes_requested(workflow) -> None:
 
 def test_manual_continuation_reuses_open_pr_and_records_feedback(workflow) -> None:
     service, repository, _, factory = workflow
-    factory.jules.changes_requested = True
+    factory.planner.changes_requested = True
 
     paused = service.run("card-manual-continuation")
     assert paused.status is WorkflowStatus.CHANGES_REQUESTED
-    factory.jules.changes_requested = False
+    factory.planner.changes_requested = False
 
     resumed = service.continue_execution(paused.id, "Also cover the boundary case.")
 
@@ -1197,7 +1197,7 @@ def test_manual_continuation_reuses_open_pr_and_records_feedback(workflow) -> No
 
 def test_manual_continuation_stops_before_implementer_when_workspace_is_missing(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.changes_requested = True
+    factory.planner.changes_requested = True
     paused = service.run("card-missing-continuation-worktree")
     assert paused.workspace_path is not None
     Path(paused.workspace_path).rmdir()
@@ -1211,9 +1211,9 @@ def test_manual_continuation_stops_before_implementer_when_workspace_is_missing(
 
 def test_manual_continuation_blocks_a_closed_persisted_pull_request(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.changes_requested = True
+    factory.planner.changes_requested = True
     paused = service.run("card-closed-continuation-pr")
-    factory.jules.changes_requested = False
+    factory.planner.changes_requested = False
     factory.github.pr_open = False
     pushes_before = factory.git.push_calls
 
@@ -1242,7 +1242,7 @@ def test_manual_continuation_creates_pr_when_original_failure_had_none(workflow)
 
 def test_review_correction_uses_validation_retry_handling(workflow) -> None:
     service, repository, _, factory = workflow
-    factory.jules.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
+    factory.planner.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
     factory.commands.failure_sequence = [False, True, False]
 
     result = service.run("card-review-validation-retry")
@@ -1254,9 +1254,9 @@ def test_review_correction_uses_validation_retry_handling(workflow) -> None:
     assert factory.github.create_calls == 1
 
 
-def test_malformed_jules_review_requires_human_instead_of_assuming_approval(workflow) -> None:
+def test_malformed_review_requires_human_instead_of_assuming_approval(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.malformed_review = True
+    factory.planner.malformed_review = True
 
     result = service.run("card-malformed-review")
 
@@ -1268,10 +1268,10 @@ def test_malformed_jules_review_requires_human_instead_of_assuming_approval(work
     assert factory.github.review_calls[0]["event"] == "COMMENT"
 
 
-def test_jules_human_intervention_stops_workflow_and_keeps_session_reference(workflow) -> None:
+def test_agent_human_intervention_stops_workflow_and_keeps_session_reference(workflow) -> None:
     service, _, _, factory = workflow
-    factory.jules.spec_error = AgentNeedsHumanError(
-        "Jules session is awaiting user feedback and requires human intervention", "spec-123"
+    factory.planner.spec_error = AgentNeedsHumanError(
+        "Agent is awaiting user feedback and requires human intervention", "spec-123"
     )
 
     result = service.run("card-needs-human")

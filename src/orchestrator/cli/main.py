@@ -458,7 +458,7 @@ def tui(
     controller = WorkflowController(
         workflow_repository=workflow_repository,
         config_loader=config_loader,
-        client_factory=ClientFactory(settings.jules_api_key),
+        client_factory=ClientFactory(),
         task_provider_factory=lambda source, repository: _tui_task_provider(
             settings, config_loader, source, repository
         ),
@@ -526,7 +526,7 @@ def run(
         workflow_repository=workflow_repository,
         task_provider=provider,
         config_loader=config_loader,
-        client_factory=ClientFactory(settings.jules_api_key),
+        client_factory=ClientFactory(),
         verbose=verbose,
         dispatcher=dispatcher,
         provider_coordinator=coordinator,
@@ -608,7 +608,7 @@ def respond(
         workflow_repository=workflow_repository,
         task_provider=provider,
         config_loader=config_loader,
-        client_factory=ClientFactory(settings.jules_api_key),
+        client_factory=ClientFactory(),
         verbose=verbose,
         dispatcher=dispatcher,
         provider_coordinator=coordinator,
@@ -788,7 +788,7 @@ def debug(
     index_clients = QdrantClientManager()
     service = DebugService(
         config_loader=_config_loader(settings.config_file),
-        client_factory=ClientFactory(settings.jules_api_key),
+        client_factory=ClientFactory(),
         task_provider_factory=lambda source, repo: _debug_task_provider(
             settings, source, repo, _config_loader(settings.config_file)
         ),

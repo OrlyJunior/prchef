@@ -37,8 +37,8 @@ class WorkflowClients:
 
 
 class ClientFactory:
-    def __init__(self, jules_api_key: str | None) -> None:
-        self._agent_providers = AgentProviderRegistry(jules_api_key)
+    def __init__(self) -> None:
+        self._agent_providers = AgentProviderRegistry()
 
     def create(
         self,

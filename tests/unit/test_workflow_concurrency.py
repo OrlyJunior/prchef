@@ -42,20 +42,20 @@ from orchestrator.services.execution_dispatcher import ExecutionDispatcher
 from orchestrator.services.task_provider import TrelloTaskProvider
 from orchestrator.services.workflow_service import WorkflowService
 from tests.unit.fakes import (
+    FakeAgentProvider,
     FakeCodexClient,
     FakeCommandClient,
     FakeConfigLoader,
     FakeGitClient,
     FakeGitHubClient,
-    FakeJulesClient,
     FakeTrelloClient,
 )
 
 TIMEOUT = 15.0
 
-# The default legacy configuration routes planner/reviewer to "jules" and the
+# The shared fake configuration routes planner/reviewer to "planner" and the
 # implementer to "codex", each with the conservative ceiling of one.
-PLANNER_PROVIDER = "jules"
+PLANNER_PROVIDER = "planner"
 IMPLEMENTER_PROVIDER = "codex"
 
 
@@ -359,12 +359,12 @@ class _ClientFactory:
         del agent_roles
         if self._shared and self._cached is not None:
             return self._cached
-        jules = FakeJulesClient()
+        planner = FakeAgentProvider()
         codex = FakeCodexClient()
         git = FakeGitClient()
         github = FakeGitHubClient()
         commands = FakeCommandClient()
-        provider_by_name = {"jules": jules, "codex": codex}
+        provider_by_name = {"planner": planner, "codex": codex}
         role_names = {
             AgentRole.PLANNER: config.agents.planner.provider,
             AgentRole.IMPLEMENTER: config.agents.implementer.provider,
@@ -379,7 +379,7 @@ class _ClientFactory:
             git=git,
             github=github,
             commands=commands,
-            jules=jules,
+            planner=planner,
             codex=codex,
         )
         clients.at_path = lambda path: SimpleNamespace(
@@ -1093,7 +1093,7 @@ def _paused_planner_execution(
 
     def ambiguous_create(config: Any, *, agent_roles: Any = None) -> Any:
         clients = plain_create(config, agent_roles=agent_roles)
-        clients.jules.ambiguous = True
+        clients.planner.ambiguous = True
         return clients
 
     factory.create = ambiguous_create  # type: ignore[method-assign]
@@ -1220,14 +1220,14 @@ def test_manual_continuation_uses_the_shared_submission_seam(
 
     def changes_requested_create(config: Any, *, agent_roles: Any = None) -> Any:
         clients = plain_create(config, agent_roles=agent_roles)
-        clients.jules.changes_requested = True
+        clients.planner.changes_requested = True
         return clients
 
     factory.create = changes_requested_create  # type: ignore[method-assign]
     terminal = service.run("card-1")
     assert terminal.status is WorkflowStatus.CHANGES_REQUESTED
     factory.create = plain_create  # type: ignore[method-assign]
-    service._client_factory.created[0].jules.changes_requested = False
+    service._client_factory.created[0].planner.changes_requested = False
 
     ready = False
     handle = service.submit_continuation(

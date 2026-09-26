@@ -124,7 +124,7 @@ def test_registry_resolves_litellm_without_loading_the_sdk_until_execution(tmp_p
         }
     )
 
-    clients = ClientFactory(None).create(config)
+    clients = ClientFactory().create(config)
 
     assert isinstance(clients.agent(AgentRole.PLANNER), LiteLLMAgentProvider)
     assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.REVIEWER)
@@ -148,7 +148,7 @@ def test_missing_or_empty_model_is_a_configuration_error(model: str, tmp_path: P
     )
 
     with pytest.raises(ConfigurationError, match="model"):
-        ClientFactory(None).create(config, agent_roles={AgentRole.PLANNER})
+        ClientFactory().create(config, agent_roles={AgentRole.PLANNER})
 
 
 def test_missing_model_is_a_configuration_error(tmp_path: Path) -> None:
@@ -168,7 +168,7 @@ def test_missing_model_is_a_configuration_error(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ConfigurationError, match="model"):
-        ClientFactory(None).create(config, agent_roles={AgentRole.PLANNER})
+        ClientFactory().create(config, agent_roles={AgentRole.PLANNER})
 
 
 def test_missing_configured_api_key_environment_variable_is_clear_and_secret_safe() -> None:

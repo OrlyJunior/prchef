@@ -88,6 +88,8 @@ and repository retrieval cover those.
   Runtime overrides and presets are charged to the provider they derive from.
 - Fallback is explicit and one hop, only for normalized quota, rate-limit, or capacity failures.
   There is never a silent provider fallback.
+- Planner and reviewer require explicit provider selection. Legacy roles normalize only when they
+  resolve to a supported configured provider; unsupported definitions fail during config load.
 - Planner and reviewer are read-only and return structured output validated locally. Ambiguous or
   malformed output is rejected, never guessed.
 - Codex CLI and Claude Code are the first-class local-worktree backends; Claude Code runs in
@@ -95,6 +97,8 @@ and repository retrieval cover those.
   filesystem access.
 - Behaviors that trade quota against throughput are configurable, not hardcoded to one user's
   limits.
+- Legacy-named planner/reviewer session-reference fields remain in persisted executions and
+  history reads. Provider removal does not rename them or require a data migration.
 
 ## Safety and diagnostics
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 
 from pydantic import ValidationError
@@ -8,35 +7,28 @@ from pydantic import ValidationError
 from orchestrator.clients.claude_code_client import ClaudeCodeClient
 from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.command_client import CommandClient
-from orchestrator.clients.jules_client import JulesClient
 from orchestrator.config.project_config import (
-    JULES_DEPRECATION_MESSAGE,
     AgentProviderSettings,
     ClaudeCodeProviderSettings,
     CodexCliProviderSettings,
     ConfigurationError,
     GeminiVertexProviderSettings,
-    JulesProviderSettings,
     LiteLLMProviderSettings,
 )
 from orchestrator.providers.agent_provider import AgentProvider
 from orchestrator.providers.claude_code_provider import ClaudeCodeAgentProvider
 from orchestrator.providers.codex_provider import CodexAgentProvider
 from orchestrator.providers.gemini_vertex_provider import GeminiVertexAgentProvider
-from orchestrator.providers.jules_provider import JulesAgentProvider
 from orchestrator.providers.litellm_provider import LiteLLMAgentProvider
 
 ProviderBuilder = Callable[[str, AgentProviderSettings, CommandClient], AgentProvider]
-logger = logging.getLogger("orchestrator")
 
 
 class AgentProviderRegistry:
     """Explicit provider-type registry; transport details stay in each builder."""
 
-    def __init__(self, jules_api_key: str | None) -> None:
-        self._jules_api_key = jules_api_key
+    def __init__(self) -> None:
         self._builders: dict[str, ProviderBuilder] = {
-            "jules": self._build_jules,
             "codex-cli": self._build_codex,
             "claude-code": self._build_claude_code,
             "gemini-vertex": self._build_gemini_vertex,
@@ -68,18 +60,6 @@ class AgentProviderRegistry:
             raise ConfigurationError(
                 f"Invalid configuration for agent provider {name!r}: {exc}"
             ) from exc
-
-    def _build_jules(
-        self, name: str, settings: AgentProviderSettings, commands: CommandClient
-    ) -> AgentProvider:
-        del commands
-        logger.warning(
-            "Agent provider %r uses deprecated backend 'jules'. %s",
-            name,
-            JULES_DEPRECATION_MESSAGE,
-        )
-        options = JulesProviderSettings.model_validate(settings.model_dump())
-        return JulesAgentProvider(name, JulesClient(self._jules_api_key, options))
 
     @staticmethod
     def _build_codex(
