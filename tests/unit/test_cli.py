@@ -783,8 +783,9 @@ def test_cli_uses_default_provider_from_configuration(
     assert StubWorkflowService.calls == [("github", "42", "owner/api")]
 
 
+@pytest.mark.parametrize("context_strategy", ["heuristic", "qdrant"])
 def test_cli_cleanup_workspaces_reports_dry_run_candidates(
-    monkeypatch: Any, tmp_path: Path
+    monkeypatch: Any, tmp_path: Path, context_strategy: str
 ) -> None:
     control = tmp_path / "control"
     control.mkdir()
@@ -798,13 +799,25 @@ def test_cli_cleanup_workspaces_reports_dry_run_candidates(
             return SimpleNamespace(
                 path=control,
                 workspace=SimpleNamespace(root=tmp_path / "workspaces"),
+                repository_context=SimpleNamespace(strategy=context_strategy),
+                configured_repository_key="example",
             )
+
+    class IndexStrategy:
+        created: list[tuple[Any, str, Path]] = []
+
+        def __init__(self, settings: Any, key: str, root: Path) -> None:
+            self.created.append((settings, key, root))
+
+        def delete_worktree_points(self, path: Path) -> None:
+            raise AssertionError(f"Dry run deleted points for {path}")
 
     class CleanupService:
         calls: list[tuple[bool, bool]] = []
+        delete_callback: Any = None
 
-        def __init__(self, *_: Any) -> None:
-            pass
+        def __init__(self, *_: Any, **kwargs: Any) -> None:
+            type(self).delete_callback = kwargs["delete_index_points"]
 
         def cleanup(self, *, dry_run: bool, include_failed: bool) -> WorkspaceCleanupReport:
             self.calls.append((dry_run, include_failed))
@@ -823,6 +836,7 @@ def test_cli_cleanup_workspaces_reports_dry_run_candidates(
             )
 
     monkeypatch.setattr(main, "ProjectConfigLoader", ConfigLoader)
+    monkeypatch.setattr(main, "QdrantRepositoryContextStrategy", IndexStrategy)
     monkeypatch.setattr(main, "WorkspaceCleanupService", CleanupService)
     monkeypatch.setattr(main, "_migrated_repository", lambda settings: object())
 
@@ -834,3 +848,5 @@ def test_cli_cleanup_workspaces_reports_dry_run_candidates(
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["workspaces"][0]["retention"] == "CLEANABLE"
     assert CleanupService.calls == [(True, False)]
+    assert bool(IndexStrategy.created) == (context_strategy == "qdrant")
+    assert (CleanupService.delete_callback is not None) == (context_strategy == "qdrant")
