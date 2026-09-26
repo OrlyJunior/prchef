@@ -22,6 +22,7 @@ from orchestrator.services import project_context
 from orchestrator.services.implementation_service import ImplementationService, _ImplementerPath
 from orchestrator.services.project_context import (
     MAX_AGENT_INSTRUCTIONS_CHARS,
+    MAX_PROJECT_CONTEXT_CHARS,
     load_implementer_instructions,
     load_planner_instructions,
     load_reviewer_instructions,
@@ -360,6 +361,61 @@ def test_planner_uses_injected_repository_context_strategy(tmp_path: Path) -> No
 
     assert "CUSTOM PLANNER REPOSITORY CONTEXT" in provider.requests[0].instructions
     assert strategy.requests[0].role == "planner"
+
+
+def test_planner_comments_are_bounded_supporting_context_only(tmp_path: Path) -> None:
+    service = SpecService(
+        RecordingProvider(AgentResult(output="unused")), MarkerRepositoryContextStrategy()
+    )
+    task = _task()
+    original = service._build_prompt(task, tmp_path, "owner/repo", "develop")
+    task.metadata["comments"] = []
+    assert service._build_prompt(task, tmp_path, "owner/repo", "develop") == original
+
+    task.metadata["comments"] = ["Old note", "Newest note"]
+    prompt = service._build_prompt(task, tmp_path, "owner/repo", "develop")
+    assert "TITLE:\nProvider contracts\n\nDESCRIPTION:\nDecouple roles" in prompt
+    assert "TASK COMMENTS (supporting context; the original task remains authoritative" in prompt
+    assert "Old note\n\nNewest note" in prompt
+    assert "truncated" not in prompt
+    assert task.as_original_prompt() == (
+        "TITLE:\nProvider contracts\n\nDESCRIPTION:\nDecouple roles from providers"
+    )
+
+    task.metadata["comments"] = ["A" * MAX_PROJECT_CONTEXT_CHARS, "Newest note"]
+    truncated = service._build_prompt(task, tmp_path, "owner/repo", "develop")
+    assert "[Earlier task comments truncated; showing the most recent content.]" in truncated
+    assert "Newest note" in truncated
+    assert "A" * MAX_PROJECT_CONTEXT_CHARS not in truncated
+    assert service._build_prompt(task, tmp_path, "owner/repo", "develop") == truncated
+    section = SpecService._comments_prompt(task).split(
+        "[Earlier task comments truncated; showing the most recent content.]\n", 1
+    )[1].removesuffix("\n\n")
+    assert len(section) == MAX_PROJECT_CONTEXT_CHARS
+    assert section.endswith("Newest note")
+
+    implementer = RecordingProvider(AgentResult(output="implemented"))
+    ImplementationService(implementer, ChangedFilesGit()).implement(  # type: ignore[arg-type]
+        task, _spec(), tmp_path
+    )
+    assert "TASK COMMENTS" not in implementer.requests[0].instructions
+    assert "Newest note" not in implementer.requests[0].instructions
+
+    reviewer = RecordingProvider(AgentResult(output=json.dumps({
+        "decision": "APPROVED", "summary": "Clean", "findings": [],
+        "blocking_findings": [], "suggestions": [],
+    })))
+    ReviewService(reviewer, MarkerRepositoryContextStrategy()).review(
+        task=task, spec=_spec(),
+        pull_request=PullRequest(
+            5, "https://github.example/pull/5", "Task", "develop", "feature/task"
+        ),
+        diff="diff", validation=ValidationResult(success=True), repository_path=tmp_path,
+        repository_slug="owner/repo", base_branch="develop", feature_branch="feature/task",
+        on_execution_started=lambda reference: None,
+    )
+    assert "TASK COMMENTS" not in reviewer.requests[0].instructions
+    assert "Newest note" not in reviewer.requests[0].instructions
 
 
 def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:

@@ -72,6 +72,48 @@ class GitHubIssueClient:
             raise GitHubClientError("GitHub CLI issue response must be a JSON object")
         return payload
 
+    def get_comments(self, repository: str, issue_number: str) -> list[str]:
+        """Return every comment body on one issue, oldest first."""
+        normalized_repository = self._normalize_repository(repository)
+        try:
+            normalized_number = int(issue_number)
+        except ValueError as exc:
+            raise GitHubClientError("GitHub issue number must be a positive integer") from exc
+        if normalized_number <= 0:
+            raise GitHubClientError("GitHub issue number must be a positive integer")
+
+        path = f"repos/{normalized_repository}/issues/{normalized_number}/comments"
+        if self._planner_app is not None:
+            comments: list[str] = []
+            page = 1
+            while True:
+                payload = self._api_get(path, params={"per_page": 100, "page": page})
+                comments.extend(self._comment_bodies(payload))
+                if len(payload) < 100:
+                    return comments
+                page += 1
+
+        result = self._run("api", "--paginate", "--slurp", f"{path}?per_page=100")
+        try:
+            pages = json.loads(result.stdout)
+        except (ValueError, TypeError) as exc:
+            raise GitHubClientError("GitHub CLI returned invalid issue comments JSON") from exc
+        if not isinstance(pages, list):
+            raise GitHubClientError("GitHub CLI issue comments response must be a JSON array")
+        comments = []
+        for page in pages:
+            comments.extend(self._comment_bodies(page))
+        return comments
+
+    @staticmethod
+    def _comment_bodies(payload: Any) -> list[str]:
+        if not isinstance(payload, list) or not all(
+            isinstance(item, dict) and isinstance(item.get("body"), str)
+            for item in payload
+        ):
+            raise GitHubClientError("GitHub issue comments response contains invalid comments")
+        return [item["body"] for item in payload]
+
     def list_issues(self, repository: str, *, limit: int = 50) -> list[dict[str, Any]]:
         """Return open issues from a repository for interactive task selection."""
 

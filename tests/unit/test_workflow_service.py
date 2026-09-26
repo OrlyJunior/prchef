@@ -406,6 +406,38 @@ def test_planner_human_response_resumes_same_execution_without_prior_workspace(
     assert context_roles == ["planner", "planner", "reviewer"]
 
 
+def test_planning_and_resume_use_comments_from_task_snapshot(workflow) -> None:
+    service, _, trello, factory = workflow
+    original_get_card = trello.get_card
+
+    def get_card_with_comments(card_id: str) -> DevelopmentTask:
+        task = original_get_card(card_id)
+        task.metadata["comments"] = ["Human clarification", "Automated finding"]
+        return task
+
+    trello.get_card = get_card_with_comments
+    prompts: list[str] = []
+    original_execute = factory.jules.execute
+
+    def record_planner(request, *, on_started=None):
+        if request.structured_output and request.structured_output.name == "repository-spec":
+            prompts.append(request.instructions)
+        return original_execute(request, on_started=on_started)
+
+    factory.jules.execute = record_planner
+    factory.jules.ambiguous = True
+    paused = service.run("card-comments-resume")
+    assert paused.task_snapshot["metadata"]["comments"] == [
+        "Human clarification", "Automated finding",
+    ]
+    factory.jules.ambiguous = False
+    trello.get_card = lambda card_id: (_ for _ in ()).throw(AssertionError("must use snapshot"))
+    service.respond_and_resume(paused.id, "Proceed with the proposal.")
+
+    assert len(prompts) == 2
+    assert all("Human clarification\n\nAutomated finding" in prompt for prompt in prompts)
+
+
 def test_human_response_rejects_cancellation_after_initial_status_read(
     workflow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
