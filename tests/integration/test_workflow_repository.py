@@ -514,6 +514,30 @@ def test_fresh_execution_admission_uses_latest_repository_scoped_status(
     repository.create_execution("12", "trello", repository_ref="example")
 
 
+def test_fresh_execution_redacts_repository_reference_without_losing_admission(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "redacted-repository-ref.db")
+    reference = "example?token=ghp_examplecredential"
+    redacted = "example?token=[REDACTED]"
+
+    previous = repository.create_execution("12", "github", repository_ref=reference)
+    assert repository.get_execution(previous.id).repository_ref == redacted
+    assert repository.executions_for_tasks("github", ["12"], reference)["12"].id == previous.id
+
+    with pytest.raises(ValueError, match="PENDING") as error:
+        repository.create_execution("12", "github", repository_ref=reference)
+    assert "ghp_examplecredential" not in str(error.value)
+
+    repository.update_status(previous.id, WorkflowStatus.FAILED)
+    fresh = repository.create_execution("12", "github", repository_ref=reference)
+    assert fresh.id != previous.id
+    assert repository.get_execution(fresh.id).repository_ref == redacted
+
+    repository.update_project(fresh.id, "/repos/example", "develop", reference)
+    assert repository.get_execution(fresh.id).repository_ref == redacted
+
+
 def test_repository_key_and_path_share_fresh_run_admission(tmp_path: Path) -> None:
     repository = _migrated_repository(tmp_path, "repository-aliases.db")
     project = tmp_path / "project"

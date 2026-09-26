@@ -51,6 +51,12 @@ def _dump(value: Any) -> str:
     return json.dumps(redact_payload(asdict(value)), ensure_ascii=False, default=str)
 
 
+def _repository_references(repository: str, aliases: Sequence[str]) -> tuple[str, ...]:
+    # Include raw values for rows written before repository refs were redacted.
+    references = (repository, *aliases)
+    return tuple(dict.fromkeys((*references, *(redact_text(ref) for ref in references))))
+
+
 def _load(value: str | None) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -103,7 +109,7 @@ class WorkflowRepository:
             latest = None
             if repository_ref:
                 _lock_fresh_run_admission(session, task_source, task_id)
-                references = tuple(dict.fromkeys((repository_ref, *repository_aliases)))
+                references = _repository_references(repository_ref, repository_aliases)
                 latest = session.scalars(
                     select(WorkflowExecutionEntity)
                     .where(
@@ -123,7 +129,7 @@ class WorkflowRepository:
                 if latest is not None and not can_start_fresh_run(WorkflowStatus(latest.status)):
                     raise ValueError(
                         f"Task {task_id} already has a {latest.status} execution "
-                        f"in repository {repository_ref}"
+                        f"in repository {redact_text(repository_ref)}"
                     )
             # Assign the ordering timestamp inside the admission transaction, after
             # the locked latest-run read. A queued caller must not insert a new
@@ -143,7 +149,7 @@ class WorkflowRepository:
                 trello_card_id=legacy_trello_id,
                 trello_card_url="",
                 repository="",
-                repository_ref=repository_ref or "",
+                repository_ref=redact_text(repository_ref) if repository_ref else "",
                 base_branch="",
                 current_stage=WorkflowStage.LOAD_TASK.value,
                 status=WorkflowStatus.PENDING.value,
@@ -232,7 +238,7 @@ class WorkflowRepository:
 
         if not task_ids:
             return {}
-        references = tuple(dict.fromkeys((repository, *repository_aliases)))
+        references = _repository_references(repository, repository_aliases)
         with self._sessions() as session:
             entities = session.scalars(
                 select(WorkflowExecutionEntity)
@@ -311,7 +317,7 @@ class WorkflowRepository:
         def mutate(entity: WorkflowExecutionEntity) -> None:
             entity.repository = repository
             entity.base_branch = base_branch
-            entity.repository_ref = repository_ref
+            entity.repository_ref = redact_text(repository_ref)
 
         self._mutate(execution_id, mutate)
 
