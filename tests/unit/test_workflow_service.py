@@ -1,6 +1,7 @@
 import logging
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +29,7 @@ from orchestrator.services.project_context import MAX_PROJECT_CONTEXT_CHARS
 from orchestrator.services.repository_context import RepositoryContextRequest
 from orchestrator.services.task_provider import GitHubIssueTaskProvider, TrelloTaskProvider
 from orchestrator.services.workflow_service import WorkflowService
+from orchestrator.services.workflow_stage_sequencer import _DiagnosedRepositoryContext
 from tests.unit.fakes import (
     FakeClientFactory,
     FakeConfigLoader,
@@ -63,6 +65,8 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
     assert result.task_id == "card-1"
     assert result.task_url == "https://trello.example/card-1"
     assert result.spec_jules_session_id == "spec-123"
+    assert result.base_commit == "b" * 40
+    assert factory.git.fetch_calls == 1
     assert result.review_jules_session_url == "https://provider.example/review-123"
     assert factory.planner.spec_starting_branch == "develop"
     assert factory.planner.review_starting_branch == result.working_branch
@@ -76,6 +80,54 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
         }
     ]
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
+
+
+def test_index_mismatch_is_reported_before_retrieval_changes_metadata() -> None:
+    calls: list[object] = []
+
+    class Strategy:
+        def inspect_index(self) -> SimpleNamespace:
+            calls.append("inspect")
+            return SimpleNamespace(last_indexed_commit="a" * 40)
+
+        def render(self, request: object) -> str:
+            calls.append("render")
+            return "context"
+
+    strategy = _DiagnosedRepositoryContext(
+        Strategy(), lambda commit: calls.append(("mismatch", commit)), "b" * 40
+    )
+    assert strategy.render(SimpleNamespace(role="planner")) == "context"  # type: ignore[arg-type]
+    assert calls == ["inspect", ("mismatch", "a" * 40), "render"]
+    calls.clear()
+    assert strategy.render(SimpleNamespace(role="reviewer")) == "context"  # type: ignore[arg-type]
+    assert calls == ["render"]
+
+
+def test_index_mismatch_is_persisted_on_workflow_diagnostics(workflow) -> None:
+    service, repository, _, _ = workflow
+    execution = service.run("card-index-provenance")
+
+    class Strategy:
+        def inspect_index(self) -> SimpleNamespace:
+            return SimpleNamespace(last_indexed_commit="a" * 40)
+
+        def render(self, request: object) -> str:
+            return "context"
+
+    service._sequencer._context_resolver = lambda *args, **kwargs: Strategy()
+    config = SimpleNamespace(
+        path=Path("repo"),
+        configured_repository_key="repo",
+        repository_context=SimpleNamespace(strategy="qdrant"),
+    )
+    strategy = service._sequencer._repository_context_strategy(config, execution.id)
+    strategy.render(SimpleNamespace(role="planner"))  # type: ignore[arg-type]
+
+    mismatch = repository.diagnostics[-1]
+    assert mismatch.payload["kind"] == "REPOSITORY_INDEX_BASE_MISMATCH"
+    assert mismatch.payload["base_commit"] == execution.base_commit
+    assert mismatch.payload["indexed_commit"] == "a" * 40
 
 
 def test_oversized_context_warns_in_fresh_and_resumed_role_prompts(
@@ -440,10 +492,12 @@ def test_planner_human_response_resumes_same_execution_without_prior_workspace(
     service, repository, _, factory = workflow
     resolved_names: list[str] = []
     context_roles: list[str] = []
+    context_temporary: list[bool] = []
 
     class Strategy:
         def render(self, request: RepositoryContextRequest) -> str:
             context_roles.append(request.role)
+            context_temporary.append(request.temporary_source)
             return "RESUME CONTEXT\n\n"
 
     def resolve(name: str, **_: object) -> Strategy:
@@ -467,6 +521,7 @@ def test_planner_human_response_resumes_same_execution_without_prior_workspace(
     assert repository.stage_changes.count(WorkflowStage.PREPARE_BRANCH) == 1
     assert resolved_names == ["heuristic", "heuristic"]
     assert context_roles == ["planner", "planner", "reviewer"]
+    assert context_temporary == [True, True, False]
 
 
 def test_planning_and_resume_use_comments_from_task_snapshot(workflow) -> None:
@@ -897,7 +952,7 @@ def test_disconnected_history_fails_preparation_before_implementation(workflow) 
     assert "disconnected history" in (result.error_message or "")
     failed = next(step for step in repository.steps.values() if step["status"] is StepStatus.FAILED)
     assert failed["stage"] is WorkflowStage.PREPARE_BRANCH
-    assert factory.git.merge_base_calls == ["develop"]
+    assert factory.git.merge_base_calls == ["b" * 40]
     assert not factory.codex.requests
     assert not factory.commands.commands
     assert factory.git.commit_calls == factory.git.push_calls == factory.git.diff_calls == 0
@@ -992,6 +1047,8 @@ def test_disconnected_history_on_planner_resume_fails_preparation(workflow) -> N
     result = service.respond_and_resume(paused.id, "Use a configurable retention period.")
 
     assert result.status is WorkflowStatus.FAILED
+    assert factory.git.fetch_calls == 1
+    assert factory.git.merge_base_calls[-1] == paused.base_commit
     assert result.current_stage is WorkflowStage.PREPARE_BRANCH
     assert not factory.codex.requests
     assert factory.git.commit_calls == factory.git.push_calls == 0
@@ -1010,6 +1067,8 @@ def test_disconnected_history_on_review_resume_skips_diff(workflow) -> None:
     result = service.respond_and_resume(paused.id, "The implementation is intentional.")
 
     assert result.status is WorkflowStatus.FAILED
+    assert factory.git.fetch_calls == 1
+    assert factory.git.merge_base_calls[-1] == paused.base_commit
     assert result.current_stage is WorkflowStage.REVIEW
     assert result.error_message and "disconnected history" in result.error_message
     assert factory.git.diff_calls == diff_calls
@@ -1072,6 +1131,8 @@ def test_review_correction_revalidates_updates_existing_pr_and_can_be_approved(w
     assert factory.git.commit_calls == 2
     assert factory.git.push_calls == 2
     assert factory.git.diff_calls == 2
+    assert factory.git.fetch_calls == 1
+    assert set(factory.git.merge_base_calls) == {result.base_commit}
     assert factory.github.create_calls == 1
     assert [call["event"] for call in factory.github.review_calls] == [
         "REQUEST_CHANGES",

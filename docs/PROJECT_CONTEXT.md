@@ -57,7 +57,8 @@ and repository retrieval cover those.
   default, Qdrant optional). Workflow services never import retrieval backends. Role files and
   this file are never indexed. The TUI Repositories screen owns manual index build, refresh, and
   clear controls; workflow launch does not manage indexes. Qdrant collections are isolated per
-  registered repository.
+  registered repository. Planning snapshot retrieval removes its points without updating collection
+  index provenance.
 - Every execution, response, and continuation enters through one submission seam. Scheduling
   features must use it rather than adding their own concurrency.
 - The TUI may launch one task or an ordered persisted batch. Batch policy, cancellation, and
@@ -76,8 +77,9 @@ and repository retrieval cover those.
   listeners can never change workflow outcomes. A `WORKFLOW_FINISHED` event ends live TUI controls
   for every terminal status, including `CHANGES_REQUESTED`.
 - A blocking planning ambiguity ends as `NEEDS_HUMAN` before any branch or worktree exists.
-- Each execution works in its own linked worktree created from freshly fetched
-  `origin/<base_branch>`. The control checkout is never switched, cleaned, stashed, or reset.
+- A fresh execution records one fetched base commit before planning. Planning reads a temporary
+  snapshot of that commit; its linked worktree starts there. The control checkout is never
+  switched, cleaned, stashed, or reset.
   Worktrees are retained on every outcome; removal happens only through the explicit cleanup
   command.
 - Cleanup removes only managed, terminal worktrees in the configured root. Failed, cancelled,
@@ -85,7 +87,9 @@ and repository retrieval cover those.
 - Agents never commit, push, create PRs, or merge; the orchestrator owns Git and GitHub. A
   reported successful implementation with no changes is a failure.
 - Commit and push refuse protected branches; push is only `--set-upstream origin <branch>`. The
-  worktree must share a merge base with the local base branch before every commit and review.
+  worktree must share a merge base with the recorded base commit before every commit and review;
+  review diffs compare that commit to HEAD. Legacy rows without a recorded commit retain the
+  local base-branch comparison without fetching or recreating their worktree.
 - All selected validation commands run. A timeout is a failed check only once the whole process
   tree is confirmed stopped; otherwise the workflow fails without correction.
 - Validation starts with configured commands and conservatively detected commands. Required tests

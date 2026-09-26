@@ -70,8 +70,17 @@ class SpecService:
         repository_slug: str,
         base_branch: str,
         on_execution_started: Callable[[AgentExecutionReference], None],
+        instructions_repository_path: Path | None = None,
+        temporary_repository_context: bool = False,
     ) -> RepositorySpec:
-        prompt = self._build_prompt(task, repository_path, repository_slug, base_branch)
+        prompt = self._build_prompt(
+            task,
+            repository_path,
+            repository_slug,
+            base_branch,
+            instructions_repository_path,
+            temporary_repository_context,
+        )
         result = self._provider.execute(
             AgentRequest(
                 instructions=prompt,
@@ -125,6 +134,8 @@ class SpecService:
         repository_path: Path,
         repository_slug: str,
         base_branch: str,
+        instructions_repository_path: Path | None = None,
+        temporary_repository_context: bool = False,
     ) -> str:
         repository_context = self._repository_context_strategy.render(
             RepositoryContextRequest(
@@ -133,6 +144,7 @@ class SpecService:
                 task=task,
                 repository_slug=repository_slug,
                 base_branch=base_branch,
+                temporary_source=temporary_repository_context,
             )
         )
         return f"""You are the read-only technical specification role.
@@ -148,7 +160,7 @@ ORIGINAL TASK (preserve as authoritative):
 
 {self._comments_prompt(task)}{project_context_prompt(repository_path, self._on_context_truncated)}
 {repository_context}
-{planner_instructions_prompt(repository_path)}
+{planner_instructions_prompt(instructions_repository_path or repository_path)}
 USER-FACING PLANNING:
 - Apply the following only when the task or repository evidence affects a TUI, CLI, GUI, other
   user-facing interface, or user-facing messaging. Treat the TUI as a first-class product

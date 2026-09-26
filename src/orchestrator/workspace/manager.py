@@ -26,6 +26,7 @@ class WorkspaceManager:
         base_branch: str,
         working_branch: str,
         protected_branches: list[str],
+        base_commit: str | None = None,
     ) -> Path:
         workspace = self.workspace_path(execution_id)
         workspace.parent.mkdir(parents=True, exist_ok=True)
@@ -34,6 +35,7 @@ class WorkspaceManager:
             base_branch,
             working_branch,
             protected_branches,
+            base_commit,
         )
         return workspace
 

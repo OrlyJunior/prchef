@@ -211,16 +211,28 @@ class QdrantRepositoryContextStrategy:
 
     def render(self, request: RepositoryContextRequest) -> str:
         source_root = self._validate_request_root(Path(request.repository_path))
+        if request.temporary_source and source_root == self._configured_root:
+            raise ValueError("Temporary repository context requires a linked worktree")
         source_root_id = canonical_path_identifier(source_root)
         try:
-            sources = RepositorySourcePipeline(self._repository_key, source_root).discover()
-            self._synchronize(sources, source_root_id, source_root)
-            results = self._query(
-                f"{request.task.title}\n\n{request.task.description}", source_root_id
-            )
-            return self._render_results(request, results)
+            try:
+                sources = RepositorySourcePipeline(self._repository_key, source_root).discover()
+                self._synchronize(
+                    sources,
+                    source_root_id,
+                    source_root,
+                    record_success=not request.temporary_source,
+                )
+                results = self._query(
+                    f"{request.task.title}\n\n{request.task.description}", source_root_id
+                )
+                return self._render_results(request, results)
+            finally:
+                if request.temporary_source:
+                    self._delete_source_points(source_root_id)
         except Exception as exc:
-            self._record_failure(exc)
+            if not request.temporary_source:
+                self._record_failure(exc)
             if self._settings.fallback_to_heuristic:
                 from orchestrator.services.repository_context import (
                     HeuristicRepositoryContextStrategy,
@@ -366,6 +378,7 @@ class QdrantRepositoryContextStrategy:
         source_root: Path,
         *,
         rebuild: bool = False,
+        record_success: bool = True,
     ) -> None:
         with self._session() as client:
             models = _qdrant_models()
@@ -446,7 +459,23 @@ class QdrantRepositoryContextStrategy:
                     points_selector=models.FilterSelector(filter=delete_filter),
                     wait=True,
                 )
-            self._record_success(client, models, source_root)
+            if record_success:
+                self._record_success(client, models, source_root)
+
+    def _delete_source_points(self, source_root_id: str) -> None:
+        """Discard points indexed from a disposable planning worktree."""
+
+        with self._session() as client:
+            if not client.collection_exists(self._collection_name):
+                return
+            models = _qdrant_models()
+            client.delete(
+                collection_name=self._collection_name,
+                points_selector=models.FilterSelector(
+                    filter=self._scope_filter(models, source_root_id)
+                ),
+                wait=True,
+            )
 
     def _query(self, text: str, source_root_id: str) -> list[RetrievedRepositoryChunk]:
         vector = self._embedding.embed_query(text)
