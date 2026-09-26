@@ -650,6 +650,76 @@ def test_service_fresh_run_reloads_edited_task_and_keeps_earlier_execution(
     assert repository.get_execution(unavailable_pending.id).status == WorkflowStatus.PENDING
 
 
+def test_repository_inferred_at_submission_uses_the_admitted_task_snapshot(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "admission-snapshot.db")
+    other = repository.create_execution("12", "github", repository_ref="other")
+    current_repository = ["original"]
+    provider_reads: list[str] = []
+    ready = Event()
+
+    class Provider:
+        source = "github"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            provider_reads.append(current_repository[0])
+            return DevelopmentTask(
+                task_id, "github", "Task", "Description", "https://example/12",
+                repository=current_repository[0],
+            )
+
+    class FailingConfig:
+        def load(self, task: DevelopmentTask, repository_override: str | None):
+            assert task.repository == "original"
+            raise RuntimeError("stop after loading the admitted task")
+
+    service = WorkflowService(
+        repository, Provider(), FailingConfig(), object(),  # type: ignore[arg-type]
+    )
+    handle = service.submit_execution("12", admission_gate=ready.is_set)
+    current_repository[0] = "other"
+    ready.set()
+    service._dispatcher.reevaluate()
+    result = handle.result(timeout=5)
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.repository_ref == "original"
+    assert result.task_snapshot is not None
+    assert result.task_snapshot["repository"] == "original"
+    assert provider_reads == ["original"]
+    assert repository.get_execution(other.id).status == WorkflowStatus.PENDING
+
+
+def test_failed_admission_read_is_recorded_without_refetching_task(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "admission-read-failed.db")
+    provider_reads = 0
+
+    class Provider:
+        source = "github"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            nonlocal provider_reads
+            provider_reads += 1
+            if provider_reads == 1:
+                raise RuntimeError("provider unavailable")
+            return DevelopmentTask(
+                task_id, "github", "Task", "Description", "https://example/12",
+                repository="other",
+            )
+
+    service = WorkflowService(
+        repository, Provider(), object(), object(),  # type: ignore[arg-type]
+    )
+    result = service.run("12")
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.current_stage == WorkflowStage.LOAD_TASK
+    assert result.task_snapshot is None
+    assert "provider unavailable" in (result.error_message or "")
+    assert provider_reads == 1
+
+
 def test_fresh_runs_keep_separate_branch_and_worktree_records(tmp_path: Path) -> None:
     repository = _migrated_repository(tmp_path, "fresh-workspaces.db")
     manager = WorkspaceManager(

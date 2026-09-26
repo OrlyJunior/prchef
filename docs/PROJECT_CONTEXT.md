@@ -88,7 +88,11 @@
   paths identify the same repository for launcher lookups and admission; SQLite admission locks
   before reading the latest run and inserting a new row so concurrent launchers serialize.
   A CLI run without a repository resolves
-  it from the task; if task loading fails, a unique prior repository can supply that identity.
+  it from a task snapshot at submission and uses that same snapshot after dispatcher admission,
+  so a queued provider edit cannot change the repository being executed. If task loading fails,
+  a unique prior repository can supply that identity; the original provider error is recorded
+  at LOAD_TASK without a second provider read. The fresh-run confirmation fits the
+  terminal width, scrolls its task details, and keeps its actions visible below them.
   Refresh, loading, empty, and inline-error states remain available, while explicit CLI task
   identifiers remain supported.
 - Label filtering is an optional task-provider capability (`LabelCatalogProvider.list_labels`),

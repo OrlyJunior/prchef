@@ -89,8 +89,13 @@ class FreshRunConfirmation(ModalScreen[tuple[str, ...] | None]):
 
     CSS = """
     FreshRunConfirmation { align: center middle; }
-    #fresh-run-confirmation { width: 78; max-height: 80%; padding: 1 2; border: round $warning; }
-    #fresh-run-list { height: auto; max-height: 16; overflow-y: auto; }
+    #fresh-run-confirmation {
+        width: 100%; max-width: 78; height: 80%;
+        padding: 1 1; border: round $warning;
+    }
+    #fresh-run-content { width: 100%; height: 1fr; overflow-y: auto; }
+    #fresh-run-actions { width: 100%; height: auto; }
+    #fresh-run-actions Button { width: 100%; }
     """
 
     def __init__(
@@ -104,40 +109,42 @@ class FreshRunConfirmation(ModalScreen[tuple[str, ...] | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="fresh-run-confirmation"):
-            yield Static("Start fresh runs?", classes="screen-title")
-            yield Static(
-                "Each checked task starts a new, separate execution. Earlier runs remain "
-                "in Execution history."
-            )
-            if any(
-                execution.status == WorkflowStatus.NEEDS_HUMAN
-                for _, execution in self.previous
-            ):
+            with VerticalScroll(id="fresh-run-content"):
+                yield Static("Start fresh runs?", classes="screen-title")
                 yield Static(
-                    "An earlier execution still has a pending question and remains open "
-                    "for an answer. Continuing it could lead to a second PR."
+                    "Each checked task starts a new, separate execution. Earlier runs remain "
+                    "in Execution history."
                 )
-            if any(
-                execution.status == WorkflowStatus.CHANGES_REQUESTED
-                and (execution.pr_url or execution.pull_request_snapshot)
-                for _, execution in self.previous
-            ):
-                yield Static(
-                    "An earlier changes-requested PR may still be open. Continuing it "
-                    "could lead to a second PR."
-                )
-            with VerticalScroll(id="fresh-run-list"):
+                if any(
+                    execution.status == WorkflowStatus.NEEDS_HUMAN
+                    for _, execution in self.previous
+                ):
+                    yield Static(
+                        "An earlier execution still has a pending question and remains open "
+                        "for an answer. Continuing it could lead to a second PR."
+                    )
+                if any(
+                    execution.status == WorkflowStatus.CHANGES_REQUESTED
+                    and (execution.pr_url or execution.pull_request_snapshot)
+                    for _, execution in self.previous
+                ):
+                    yield Static(
+                        "An earlier changes-requested PR may still be open. Continuing it "
+                        "could lead to a second PR."
+                    )
                 for index, (task, execution) in enumerate(self.previous):
                     yield Checkbox(
-                        f"{task.id}: {task.title or '(untitled)'} — {execution.status.value}",
+                        f"{task.id} [{execution.status.value}]: {task.title or '(untitled)'}",
                         value=True,
                         id=f"fresh-run-{index}",
                     )
-            if self.new_count:
-                yield Static(f"{self.new_count} task(s) with no earlier execution will also start.")
-            with Horizontal(classes="screen-actions"):
+                if self.new_count:
+                    yield Static(
+                        f"{self.new_count} task(s) with no earlier execution will also start."
+                    )
+            with Vertical(id="fresh-run-actions"):
                 yield Button("Launch selected", variant="primary", id="confirm-fresh-run")
-                yield Button("Back to launcher", id="dismiss-fresh-run")
+                yield Button("Back", id="dismiss-fresh-run")
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         self.query_one("#confirm-fresh-run", Button).disabled = not (

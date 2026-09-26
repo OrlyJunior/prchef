@@ -4192,6 +4192,42 @@ def test_fresh_run_confirmation_omits_unchecked_prior_run_but_launches_new_task(
     asyncio.run(drive())
 
 
+@pytest.mark.parametrize("size", [(40, 20), (30, 16)])
+def test_fresh_run_confirmation_fits_narrow_terminal_and_keeps_actions_visible(
+    size: tuple[int, int],
+) -> None:
+    task = DevelopmentTask("12", "github", "A task with a long title", "", "https://example/12")
+    execution = WorkflowExecution("earlier", status=WorkflowStatus.NEEDS_HUMAN)
+
+    class ConfirmationApp(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(FreshRunConfirmation(((task, execution),), 0))
+
+    async def drive() -> None:
+        application = ConfirmationApp()
+        async with application.run_test(size=size) as pilot:
+            await settle_tui(pilot)
+            modal = application.screen
+            dialog = modal.query_one("#fresh-run-confirmation", Vertical)
+            launch = modal.query_one("#confirm-fresh-run", Button)
+            back = modal.query_one("#dismiss-fresh-run", Button)
+            assert str(modal.query_one("#fresh-run-0", Checkbox).label).startswith(
+                "12 [NEEDS_HUMAN]"
+            )
+            assert dialog.region.x >= 0
+            assert dialog.region.x + dialog.region.width <= size[0]
+            assert dialog.region.y >= 0
+            assert dialog.region.y + dialog.region.height <= size[1]
+            for button in (launch, back):
+                assert button.region.x >= 0
+                assert button.region.x + button.region.width <= size[0]
+                assert button.region.y >= 0
+                assert button.region.y + button.region.height <= size[1]
+            assert launch.disabled is False
+
+    asyncio.run(drive())
+
+
 def _batch_launch(*task_ids: str) -> WorkflowBatchLaunch:
     return WorkflowBatchLaunch(
         repository="example",

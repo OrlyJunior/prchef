@@ -7,6 +7,7 @@ import threading
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -246,13 +247,15 @@ class WorkflowService:
         """
 
         repository_ref = repository_override
+        admission_task: DevelopmentTask | None = None
+        admission_error: Exception | None = None
         if isinstance(self._repository, WorkflowRepository) and repository_ref is None:
             # An explicit CLI task may derive its repository from the provider.
             # Preserve a LOAD_TASK failure record if this preliminary lookup fails.
             try:
-                admission_task = self._task_provider.get_task(task_id)
-            except Exception:
-                admission_task = None
+                admission_task = deepcopy(self._task_provider.get_task(task_id))
+            except Exception as error:
+                admission_error = error
             if admission_task is not None:
                 repository_ref = (
                     self._config_loader.repository_reference_for_task(admission_task)
@@ -297,7 +300,8 @@ class WorkflowService:
         return self._submit(
             execution.id,
             lambda: self._execute_workflow(
-                execution, task_id, repository_override, provider_overrides, runtime_overrides
+                execution, task_id, repository_override, provider_overrides, runtime_overrides,
+                admission_task, admission_error,
             ),
             admission_gate=admission_gate,
         )
@@ -366,6 +370,8 @@ class WorkflowService:
         repository_override: str | None,
         provider_overrides: Mapping[str, str],
         runtime_overrides: Mapping[str, Mapping[str, object]],
+        admission_task: DevelopmentTask | None = None,
+        admission_error: Exception | None = None,
     ) -> WorkflowExecution:
         """Run a workflow using the same persisted transitions used by the CLI."""
 
@@ -380,7 +386,13 @@ class WorkflowService:
                 "[workflow] Loading %s task %s", self._task_provider.source, task_id
             )
             with self._step(execution.id, WorkflowStage.LOAD_TASK):
-                task = self._task_provider.get_task(task_id)
+                # A CLI submission without an explicit repository reads the task
+                # to establish its admission identity. Use that same snapshot or
+                # error after dispatch, so a later provider edit cannot change
+                # the repository being executed.
+                if admission_error is not None:
+                    raise admission_error
+                task = admission_task or self._task_provider.get_task(task_id)
                 self._repository.update_task(execution.id, task)
 
             with self._step(execution.id, WorkflowStage.LOAD_CONFIG):
