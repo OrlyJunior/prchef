@@ -54,10 +54,14 @@ _SPEC_OUTPUT = StructuredOutputExpectation(
 
 class SpecService:
     def __init__(
-        self, provider: AgentProvider, repository_context_strategy: RepositoryContextStrategy
+        self,
+        provider: AgentProvider,
+        repository_context_strategy: RepositoryContextStrategy,
+        on_context_truncated: Callable[[Path, int, int], None] | None = None,
     ) -> None:
         self._provider = provider
         self._repository_context_strategy = repository_context_strategy
+        self._on_context_truncated = on_context_truncated
 
     def generate(
         self,
@@ -142,7 +146,7 @@ STRICT SAFETY RULES:
 ORIGINAL TASK (preserve as authoritative):
 {task.as_original_prompt()}
 
-{self._comments_prompt(task)}{project_context_prompt(repository_path)}
+{self._comments_prompt(task)}{project_context_prompt(repository_path, self._on_context_truncated)}
 {repository_context}
 {planner_instructions_prompt(repository_path)}
 USER-FACING PLANNING:
@@ -161,7 +165,8 @@ USER-FACING PLANNING:
 When writing implementation_proposal, direct the implementation agent to update the configured
 durable project context file only if the change alters project purpose, operating model, layering,
 an invariant, or a design decision. Do not request feature behavior, UI details, or per-change notes
-in that file.
+in that file. Direct the agent to keep it within the 12,000-character prompt cap by condensing or
+replacing existing content instead of only appending.
 
 Return exactly one JSON object with this shape:
 {{
