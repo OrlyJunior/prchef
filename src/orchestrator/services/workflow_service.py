@@ -245,9 +245,34 @@ class WorkflowService:
         listener are isolated from workflow execution.
         """
 
-        execution = self._repository.create_execution(
-            task_id, task_source=self._task_provider.source
-        )
+        repository_ref = repository_override
+        if isinstance(self._repository, WorkflowRepository) and repository_ref is None:
+            # An explicit CLI task may derive its repository from the provider.
+            # Preserve a LOAD_TASK failure record if this preliminary lookup fails.
+            try:
+                admission_task = self._task_provider.get_task(task_id)
+            except Exception:
+                admission_task = None
+                repository_ref = self._repository.inferred_repository_for_task(
+                    self._task_provider.source, task_id
+                )
+            if admission_task is not None:
+                repository_ref = admission_task.repository
+                try:
+                    admission_config = self._config_loader.load(admission_task, None)
+                except Exception:
+                    pass  # The normal execution records a LOAD_CONFIG failure.
+                else:
+                    repository_ref = repository_ref or str(admission_config.path)
+        if isinstance(self._repository, WorkflowRepository):
+            execution = self._repository.create_execution(
+                task_id, task_source=self._task_provider.source,
+                repository_ref=repository_ref,
+            )
+        else:
+            execution = self._repository.create_execution(
+                task_id, task_source=self._task_provider.source
+            )
         self._begin_runtime(execution.id, event_listener)
         self._emit(
             execution.id,

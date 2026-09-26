@@ -38,6 +38,7 @@ from orchestrator.models.workflow_status import (
     ACTIVE_WORKFLOW_STATUSES,
     WorkflowStage,
     WorkflowStatus,
+    can_start_fresh_run,
 )
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.providers.concurrency import ProviderConcurrencyCoordinator
@@ -588,9 +589,13 @@ class WorkflowController:
         existing = self._repository.executions_for_tasks(
             launch.task_provider, list(task_ids), launch.repository
         )
-        if existing:
+        blocked = {
+            task_id: execution for task_id, execution in existing.items()
+            if not can_start_fresh_run(execution.status)
+        }
+        if blocked:
             raise ValueError(
-                "Tasks already have executions: " + ", ".join(existing)
+                "Tasks already have executions: " + ", ".join(blocked)
             )
 
         ordered_tasks = [tasks_by_id[task_id] for task_id in task_ids]
@@ -617,9 +622,10 @@ class WorkflowController:
                     break
                 # Close the list/start race as far as the repository boundary
                 # permits. A task that gained an execution is skipped.
-                if self._repository.executions_for_tasks(
+                latest = self._repository.executions_for_tasks(
                     launch.task_provider, [task.id], launch.repository
-                ):
+                ).get(task.id)
+                if latest is not None and not can_start_fresh_run(latest.status):
                     with run.condition:
                         run.skipped.add(position)
                         run.condition.notify_all()

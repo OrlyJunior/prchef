@@ -6,6 +6,7 @@ from alembic.config import Config
 from sqlalchemy import inspect, text
 
 from orchestrator.config.database import build_engine, build_session_factory
+from orchestrator.config.project_config import WorkspaceSettings
 from orchestrator.models import (
     DevelopmentTask,
     DiagnosticCategory,
@@ -16,6 +17,8 @@ from orchestrator.models import (
     WorkflowStatus,
 )
 from orchestrator.repositories.workflow_repository import WorkflowRepository
+from orchestrator.services.workflow_service import WorkflowService
+from orchestrator.workspace.manager import WorkspaceManager
 
 
 def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
@@ -464,6 +467,116 @@ def test_executions_for_tasks_returns_latest_in_the_selected_repository(
     matches = repository.executions_for_tasks("github", ["12"], "example")
 
     assert matches["12"].id == newer.id
+
+
+@pytest.mark.parametrize(
+    ("status", "allowed"),
+    [
+        (WorkflowStatus.FAILED, True),
+        (WorkflowStatus.CANCELLED, True),
+        (WorkflowStatus.NEEDS_HUMAN, True),
+        (WorkflowStatus.CHANGES_REQUESTED, True),
+        (WorkflowStatus.PENDING, False),
+        (WorkflowStatus.WAITING, False),
+        (WorkflowStatus.RUNNING, False),
+        (WorkflowStatus.APPROVED, False),
+    ],
+)
+def test_fresh_execution_admission_uses_latest_repository_scoped_status(
+    tmp_path: Path, status: WorkflowStatus, allowed: bool
+) -> None:
+    repository = _migrated_repository(tmp_path, f"fresh-{status.value}.db")
+    older = repository.create_execution("12", "github", repository_ref="example")
+    repository.update_status(older.id, status)
+
+    if allowed:
+        fresh = repository.create_execution("12", "github", repository_ref="example")
+        assert fresh.id != older.id
+        assert repository.get_execution(older.id).status == status
+        assert repository.executions_for_tasks("github", ["12"], "example")["12"].id == fresh.id
+        with pytest.raises(ValueError, match="PENDING"):
+            repository.create_execution("12", "github", repository_ref="example")
+    else:
+        with pytest.raises(ValueError, match=status.value):
+            repository.create_execution("12", "github", repository_ref="example")
+        assert repository.get_execution(older.id).status == status
+
+    # Neither another repository nor another source shares this admission gate.
+    repository.create_execution("12", "github", repository_ref="other")
+    repository.create_execution("12", "trello", repository_ref="example")
+
+
+def test_service_fresh_run_reloads_edited_task_and_keeps_earlier_execution(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "service-fresh.db")
+    description = ["original description"]
+
+    class Provider:
+        source = "github"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            if task_id == "14":
+                raise RuntimeError("provider unavailable")
+            return DevelopmentTask(
+                task_id, "github", "Current task", description[0], "https://example/12",
+                repository="example",
+            )
+
+    class FailingConfig:
+        def load(self, task: DevelopmentTask, repository_override: str | None):
+            raise RuntimeError("stop after loading the current task")
+
+    service = WorkflowService(
+        repository, Provider(), FailingConfig(), object(),  # type: ignore[arg-type]
+    )
+    first = service.run("12", "example")
+    assert first.status == WorkflowStatus.FAILED
+    description[0] = "edited description"
+
+    second = service.run("12", "example")
+
+    assert second.status == WorkflowStatus.FAILED
+    assert second.id != first.id
+    assert second.task_snapshot is not None
+    assert second.task_snapshot["description"] == "edited description"
+    assert repository.get_execution(first.id).task_snapshot["description"] == "original description"
+    assert repository.executions_for_tasks("github", ["12"], "example")["12"].id == second.id
+    pending = repository.create_execution("13", "github", repository_ref="example")
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("13")
+    assert repository.get_execution(pending.id).status == WorkflowStatus.PENDING
+    unavailable_pending = repository.create_execution("14", "github", repository_ref="example")
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("14")
+    assert repository.get_execution(unavailable_pending.id).status == WorkflowStatus.PENDING
+
+
+def test_fresh_runs_keep_separate_branch_and_worktree_records(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "fresh-workspaces.db")
+    manager = WorkspaceManager(
+        object(), tmp_path / "control", WorkspaceSettings(root=tmp_path / "worktrees")
+    )  # type: ignore[arg-type]
+    first = repository.create_execution("12", "github", repository_ref="example")
+    first_branch = WorkflowService._branch_name("orchestrator", "12", "Fix task", first.id)
+    first_path = manager.workspace_path(first.id)
+    repository.record_branch(first.id, first_branch)
+    repository.record_workspace(first.id, str(first_path))
+    repository.update_status(first.id, WorkflowStatus.FAILED)
+
+    second = repository.create_execution("12", "github", repository_ref="example")
+    second_branch = WorkflowService._branch_name("orchestrator", "12", "Fix task", second.id)
+    second_path = manager.workspace_path(second.id)
+    repository.record_branch(second.id, second_branch)
+    repository.record_workspace(second.id, str(second_path))
+
+    assert first_branch != second_branch
+    assert first_path != second_path
+    assert repository.get_execution(first.id).working_branch == first_branch
+    assert repository.get_execution(first.id).workspace_path == str(first_path)
+    assert repository.get_execution(first.id).status == WorkflowStatus.FAILED
+    assert repository.get_execution(second.id).working_branch == second_branch
+    assert repository.executions_for_tasks("github", ["12"], "example")["12"].id == second.id
 
 
 def test_workflow_batch_migration_downgrades_to_0008(tmp_path: Path) -> None:

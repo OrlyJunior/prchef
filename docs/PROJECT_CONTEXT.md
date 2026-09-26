@@ -77,8 +77,15 @@
 - The TUI launcher automatically browses tasks for its selected repository and task provider.
   Rows show titles, labels, and checkboxes; users may launch one task through the unchanged
   single-workflow path or select an ordered batch whose shared role presets/runtime overrides are
-  applied to every item. Tasks with any existing execution in the same repository and task source
-  show that status and remain unselectable, with inspection/resume delegated to execution history.
+  applied to every item. Rows show the latest execution in the same repository and task source.
+  A latest FAILED, CANCELLED, NEEDS_HUMAN, or CHANGES_REQUESTED execution permits an individually
+  selected fresh run; PENDING, WAITING, RUNNING, and APPROVED do not. Select all includes only
+  tasks without an earlier execution. A selection containing earlier runs requires confirmation
+  and can omit individual reruns while preserving earlier executions in history. Fresh runs use
+  the normal submission path and reload the current task without changing earlier branches,
+  worktrees, PRs, or human actions. The service checks the latest repository-scoped execution
+  when creating each new row, including CLI submissions. A CLI run without a repository resolves
+  it from the task; if task loading fails, a unique prior repository can supply that identity.
   Refresh, loading, empty, and inline-error states remain available, while explicit CLI task
   identifiers remain supported.
 - Label filtering is an optional task-provider capability (`LabelCatalogProvider.list_labels`),

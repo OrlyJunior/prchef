@@ -534,6 +534,9 @@ def run(
     )
     try:
         execution = service.run(selected_id, repository)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
     except OperationalError as exc:
         typer.echo(f"Database access failed after migrations: {exc}", err=True)
         raise typer.Exit(code=2) from exc

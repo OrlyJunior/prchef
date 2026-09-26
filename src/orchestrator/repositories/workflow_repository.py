@@ -28,6 +28,7 @@ from orchestrator.models.workflow_status import (
     StepStatus,
     WorkflowStage,
     WorkflowStatus,
+    can_start_fresh_run,
 )
 from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.repositories.orm_models import (
@@ -66,7 +67,9 @@ class WorkflowRepository:
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._sessions = session_factory
 
-    def create_execution(self, task_id: str, task_source: str = "trello") -> WorkflowExecution:
+    def create_execution(
+        self, task_id: str, task_source: str = "trello", *, repository_ref: str | None = None
+    ) -> WorkflowExecution:
         now = _utcnow()
         legacy_trello_id = task_id if task_source == "trello" else ""
         entity = WorkflowExecutionEntity(
@@ -77,7 +80,7 @@ class WorkflowRepository:
             trello_card_id=legacy_trello_id,
             trello_card_url="",
             repository="",
-            repository_ref="",
+            repository_ref=repository_ref or "",
             base_branch="",
             current_stage=WorkflowStage.LOAD_TASK.value,
             status=WorkflowStatus.PENDING.value,
@@ -85,6 +88,28 @@ class WorkflowRepository:
             updated_at=now,
         )
         with self._sessions() as session, session.begin():
+            if repository_ref:
+                latest = session.scalars(
+                    select(WorkflowExecutionEntity)
+                    .where(
+                        WorkflowExecutionEntity.task_source == task_source,
+                        WorkflowExecutionEntity.task_id == task_id,
+                        or_(
+                            WorkflowExecutionEntity.repository_ref == repository_ref,
+                            WorkflowExecutionEntity.repository == repository_ref,
+                        ),
+                    )
+                    .order_by(
+                        WorkflowExecutionEntity.created_at.desc(),
+                        WorkflowExecutionEntity.id.desc(),
+                    )
+                    .limit(1)
+                ).first()
+                if latest is not None and not can_start_fresh_run(WorkflowStatus(latest.status)):
+                    raise ValueError(
+                        f"Task {task_id} already has a {latest.status} execution "
+                        f"in repository {repository_ref}"
+                    )
             session.add(entity)
             # Build the detached domain object while the session is still
             # available.  The execution's interactions relationship is lazy
@@ -186,6 +211,30 @@ class WorkflowRepository:
             for entity in entities:
                 latest.setdefault(entity.task_id, self._to_domain(entity))
             return latest
+
+    def inferred_repository_for_task(self, task_source: str, task_id: str) -> str | None:
+        """Recover an unambiguous prior repository if task loading is unavailable."""
+
+        with self._sessions() as session:
+            rows = session.execute(
+                select(
+                    WorkflowExecutionEntity.repository_ref,
+                    WorkflowExecutionEntity.repository,
+                ).where(
+                    WorkflowExecutionEntity.task_source == task_source,
+                    WorkflowExecutionEntity.task_id == task_id,
+                )
+            ).all()
+        references = {
+            reference or repository for reference, repository in rows
+            if reference or repository
+        }
+        if len(references) > 1:
+            raise ValueError(
+                f"Cannot resolve repository for {task_source} task {task_id} while "
+                "the task provider is unavailable; specify the repository"
+            )
+        return next(iter(references)) if references else None
 
     def update_task(self, execution_id: str, task: DevelopmentTask) -> None:
         def mutate(entity: WorkflowExecutionEntity) -> None:

@@ -68,9 +68,6 @@ class BatchDetailScreen(Screen[None]):
             self._reconcile_timer.stop()
 
     def on_screen_resume(self) -> None:
-        self._reconcile_rows()
-
-    def on_screen_resume(self) -> None:
         self.load_batch()
 
     def action_refresh(self) -> None:
