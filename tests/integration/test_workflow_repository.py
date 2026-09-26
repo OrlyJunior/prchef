@@ -694,6 +694,69 @@ def test_service_fresh_run_reloads_edited_task_and_keeps_earlier_execution(
     assert repository.get_execution(unavailable_pending.id).status == WorkflowStatus.PENDING
 
 
+@pytest.mark.parametrize(
+    "latest_status",
+    [WorkflowStatus.PENDING, WorkflowStatus.RUNNING, WorkflowStatus.APPROVED],
+)
+def test_empty_repository_override_checks_trello_task_repository_before_submission(
+    tmp_path: Path, latest_status: WorkflowStatus,
+) -> None:
+    repository = _migrated_repository(tmp_path, f"empty-override-{latest_status.value}.db")
+    prior = repository.create_execution("card-12", "trello", repository_ref="example")
+    repository.update_status(prior.id, latest_status)
+
+    class Provider:
+        source = "trello"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            return DevelopmentTask(
+                task_id, "trello", "Task", "Description", "https://example/card-12",
+                metadata={"custom_fields": {"Repository": "example"}},
+            )
+
+    service = WorkflowService(
+        repository, Provider(), ProjectConfigLoader(tmp_path / "missing.yml"), object(),
+    )  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=latest_status.value):
+        service.submit_execution("card-12", "")
+
+    assert repository.get_execution(prior.id).status == latest_status
+    assert [execution.id for execution in repository.list_executions()] == [prior.id]
+
+
+def test_empty_repository_override_allows_eligible_trello_fresh_run(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "empty-override-eligible.db")
+    prior = repository.create_execution("card-12", "trello", repository_ref="example")
+    repository.update_status(prior.id, WorkflowStatus.FAILED)
+
+    class Provider:
+        source = "trello"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            return DevelopmentTask(
+                task_id, "trello", "Task", "Edited description", "https://example/card-12",
+                metadata={"custom_fields": {"Repository": "example"}},
+            )
+
+    service = WorkflowService(
+        repository, Provider(), ProjectConfigLoader(tmp_path / "missing.yml"), object(),
+    )  # type: ignore[arg-type]
+    fresh = service.run("card-12", "")
+
+    assert fresh.id != prior.id
+    assert fresh.repository_ref == "example"
+    assert fresh.task_snapshot is not None
+    assert fresh.task_snapshot["description"] == "Edited description"
+    assert repository.get_execution(prior.id).status == WorkflowStatus.FAILED
+
+
+def test_repository_rejects_explicit_empty_admission_reference(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "empty-repository-reference.db")
+    with pytest.raises(ValueError, match="non-empty"):
+        repository.create_execution("card-12", "trello", repository_ref="")
+    assert repository.list_executions() == []
+
+
 def test_repository_inferred_at_submission_uses_the_admitted_task_snapshot(
     tmp_path: Path,
 ) -> None:

@@ -84,21 +84,14 @@
   and can omit individual reruns while preserving earlier executions in history. Fresh runs use
   the normal submission path and reload the current task without changing earlier branches,
   worktrees, PRs, or human actions. The service checks the latest repository-scoped execution
-  when creating each new row, including CLI submissions. Configured repository keys and resolved
-  paths identify the same repository for launcher lookups and admission; SQLite reserves its
-  writer slot and PostgreSQL takes a transaction advisory lock by task source and ID before
-  reading the latest run and inserting a new row, so concurrent launchers serialize. The new
-  row receives its ordering timestamp inside that lock, after the status read, and later than
-  the prior matching row even if the system clock moves backward. When a provider read fails,
-  repository inference groups configured keys and resolved path aliases
-  before deciding whether prior history is ambiguous. A CLI run without a repository resolves
-  it from a task snapshot at submission and uses that same snapshot after dispatcher admission,
-  so a queued provider edit cannot change the repository being executed. If task loading fails,
-  a unique prior repository can supply that identity; the original provider error is recorded
-  at LOAD_TASK without a second provider read. The fresh-run confirmation fits the
-  terminal width, scrolls its task details, and keeps its actions visible below them.
-  Refresh, loading, empty, and inline-error states remain available, while explicit CLI task
-  identifiers remain supported.
+  when creating each row, including CLI submissions. Configured keys and resolved paths share
+  an identity; SQLite and PostgreSQL lock the latest-status read and insert so concurrent
+  launchers serialize. The new row is timestamped after the prior matching row. Missing or
+  empty CLI repository overrides use one task snapshot for admission and execution, so queued
+  edits cannot switch repositories. If task loading fails, aliased history may provide an
+  unambiguous repository; the provider error is recorded at LOAD_TASK without refetching.
+  Confirmation scrolls within terminal width and keeps its actions visible. Refresh, loading,
+  empty, and inline-error states remain available, as do explicit CLI task identifiers.
 - Label filtering is an optional task-provider capability (`LabelCatalogProvider.list_labels`),
   implemented only by GitHub issues (the full catalog via the Planner App REST API when
   configured, otherwise `gh api --paginate`, never the capped `gh label list`); Trello

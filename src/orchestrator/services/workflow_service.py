@@ -246,6 +246,9 @@ class WorkflowService:
         listener are isolated from workflow execution.
         """
 
+        # ProjectConfigLoader treats an empty override as absent. Resolve the
+        # same repository for admission before creating the execution row.
+        repository_override = repository_override or None
         repository_ref = repository_override
         admission_task: DevelopmentTask | None = None
         admission_error: Exception | None = None

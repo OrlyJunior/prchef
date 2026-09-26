@@ -97,6 +97,8 @@ class WorkflowRepository:
         repository_ref: str | None = None,
         repository_aliases: Sequence[str] = (),
     ) -> WorkflowExecution:
+        if repository_ref == "":
+            raise ValueError("Repository reference must be non-empty when provided")
         with self._sessions() as session, session.begin():
             latest = None
             if repository_ref:
