@@ -4,7 +4,7 @@ import json
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any, cast
 
@@ -97,24 +97,8 @@ class WorkflowRepository:
         repository_ref: str | None = None,
         repository_aliases: Sequence[str] = (),
     ) -> WorkflowExecution:
-        now = _utcnow()
-        legacy_trello_id = task_id if task_source == "trello" else ""
-        entity = WorkflowExecutionEntity(
-            id=str(uuid.uuid4()),
-            task_source=task_source,
-            task_id=task_id,
-            task_url="",
-            trello_card_id=legacy_trello_id,
-            trello_card_url="",
-            repository="",
-            repository_ref=repository_ref or "",
-            base_branch="",
-            current_stage=WorkflowStage.LOAD_TASK.value,
-            status=WorkflowStatus.PENDING.value,
-            created_at=now,
-            updated_at=now,
-        )
         with self._sessions() as session, session.begin():
+            latest = None
             if repository_ref:
                 _lock_fresh_run_admission(session, task_source, task_id)
                 references = tuple(dict.fromkeys((repository_ref, *repository_aliases)))
@@ -139,6 +123,31 @@ class WorkflowRepository:
                         f"Task {task_id} already has a {latest.status} execution "
                         f"in repository {repository_ref}"
                     )
+            # Assign the ordering timestamp inside the admission transaction, after
+            # the locked latest-run read. A queued caller must not insert a new
+            # PENDING row with a timestamp older than a run it just observed.
+            now = _utcnow()
+            if latest is not None:
+                previous = latest.created_at
+                if previous.tzinfo is None:
+                    previous = previous.replace(tzinfo=UTC)
+                now = max(now, previous + timedelta(microseconds=1))
+            legacy_trello_id = task_id if task_source == "trello" else ""
+            entity = WorkflowExecutionEntity(
+                id=str(uuid.uuid4()),
+                task_source=task_source,
+                task_id=task_id,
+                task_url="",
+                trello_card_id=legacy_trello_id,
+                trello_card_url="",
+                repository="",
+                repository_ref=repository_ref or "",
+                base_branch="",
+                current_stage=WorkflowStage.LOAD_TASK.value,
+                status=WorkflowStatus.PENDING.value,
+                created_at=now,
+                updated_at=now,
+            )
             session.add(entity)
             # Build the detached domain object while the session is still
             # available.  The execution's interactions relationship is lazy

@@ -286,7 +286,7 @@ class TaskSelector(Vertical):
             yield Static("", id="task-label-status")
         with Vertical(id="task-table"):
             yield _GlyphCheckbox(
-                "Select all available tasks",
+                "Select all tasks without earlier runs",
                 id="select-all-tasks",
                 disabled=True,
                 classes="task-select-all",
@@ -514,7 +514,8 @@ class TaskSelector(Vertical):
             summary.update("Label filter: off. Select labels to narrow the task list.")
         self.query_one("#clear-task-label-filter", Button).disabled = not self._label_filter
         self.query_one("#select-all-tasks", Checkbox).label = (
-            "Select all shown tasks" if self._label_filter else "Select all available tasks"
+            "Select all shown tasks without earlier runs"
+            if self._label_filter else "Select all tasks without earlier runs"
         )
 
     def clear_tasks(self) -> None:
@@ -629,7 +630,7 @@ class TaskSelector(Vertical):
         blocked = f" {blocked_count} have active or approved executions." if blocked_count else ""
         selected = (
             f"Selected {len(self._selected)} of {selectable_count} available "
-            f"{self._provider} tasks."
+            f"{self._provider} tasks. Select all includes only tasks without earlier runs."
         )
         if not self._label_filter:
             self.query_one("#task-hint", Static).update(f"{selected}{blocked}")

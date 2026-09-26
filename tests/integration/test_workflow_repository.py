@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
 from unittest.mock import Mock, call
@@ -8,6 +9,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import event, inspect, text
 
+import orchestrator.repositories.workflow_repository as workflow_repository_module
 from orchestrator.config.database import build_engine, build_session_factory
 from orchestrator.config.project_config import ProjectConfigLoader, WorkspaceSettings
 from orchestrator.models import (
@@ -606,6 +608,25 @@ def test_concurrent_fresh_run_admission_serializes_sqlite_read_and_insert(
 
     assert sum("PENDING" in result for result in results) == 1
     assert repository.executions_for_tasks("github", ["12"], "example")["12"].id in results
+
+
+def test_fresh_run_remains_latest_when_clock_moves_backward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _migrated_repository(tmp_path, "fresh-clock-order.db")
+    prior = repository.create_execution("12", "github", repository_ref="example")
+    repository.update_status(prior.id, WorkflowStatus.FAILED)
+
+    monkeypatch.setattr(
+        workflow_repository_module, "_utcnow", lambda: datetime(2020, 1, 1, tzinfo=UTC)
+    )
+    fresh = repository.create_execution("12", "github", repository_ref="example")
+
+    assert fresh.created_at > prior.created_at
+    assert repository.executions_for_tasks("github", ["12"], "example")["12"].id == fresh.id
+    with pytest.raises(ValueError, match="PENDING"):
+        repository.create_execution("12", "github", repository_ref="example")
+    assert repository.get_execution(prior.id).status == WorkflowStatus.FAILED
 
 
 def test_postgresql_fresh_run_admission_locks_provider_task_before_status_read() -> None:

@@ -5649,7 +5649,7 @@ def test_select_all_applies_only_to_shown_available_tasks(tmp_path: Path) -> Non
                 description="bug label filter",
             )
             assert header.value is False
-            assert str(header.label) == "Select all shown tasks"
+            assert str(header.label) == "Select all shown tasks without earlier runs"
 
             header.value = True
             await wait_for_tui(
@@ -5660,6 +5660,9 @@ def test_select_all_applies_only_to_shown_available_tasks(tmp_path: Path) -> Non
             # Task 7 has an execution; task 3 stays selected while hidden.
             assert screen.query_one("#task-checkbox-4", TaskRow).value is False
             assert header.value is True
+            assert "Select all includes only tasks without earlier runs." in str(
+                screen.query_one("#task-hint", Static).renderable
+            )
             assert "1 selected task(s) hidden by the filter will also start." in str(
                 screen.query_one("#task-hint", Static).renderable
             )
@@ -5683,7 +5686,7 @@ def test_select_all_applies_only_to_shown_available_tasks(tmp_path: Path) -> Non
             )
             assert selector.selected_task_ids == ("3",)
             assert header.value is False
-            assert str(header.label) == "Select all available tasks"
+            assert str(header.label) == "Select all tasks without earlier runs"
 
             screen.query_one("#start-workflow", Button).press()
             await wait_for_tui(

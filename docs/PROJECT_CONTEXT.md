@@ -87,8 +87,10 @@
   when creating each new row, including CLI submissions. Configured repository keys and resolved
   paths identify the same repository for launcher lookups and admission; SQLite reserves its
   writer slot and PostgreSQL takes a transaction advisory lock by task source and ID before
-  reading the latest run and inserting a new row, so concurrent launchers serialize. When a
-  provider read fails, repository inference groups configured keys and resolved path aliases
+  reading the latest run and inserting a new row, so concurrent launchers serialize. The new
+  row receives its ordering timestamp inside that lock, after the status read, and later than
+  the prior matching row even if the system clock moves backward. When a provider read fails,
+  repository inference groups configured keys and resolved path aliases
   before deciding whether prior history is ambiguous. A CLI run without a repository resolves
   it from a task snapshot at submission and uses that same snapshot after dispatcher admission,
   so a queued provider edit cannot change the repository being executed. If task loading fails,
