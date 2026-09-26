@@ -7,9 +7,10 @@ import webbrowser
 from dataclasses import asdict
 from typing import TYPE_CHECKING, cast
 
+from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, HorizontalScroll, VerticalScroll
 from textual.events import DescendantFocus
 from textual.screen import Screen
 from textual.timer import Timer
@@ -79,7 +80,8 @@ class ExecutionDetailScreen(Screen[None]):
                     id="execution-resume",
                     disabled=True,
                 )
-            yield Static("Loading execution…", id="execution-content", markup=False)
+            with HorizontalScroll(id="execution-content-scroll"):
+                yield Static("Loading execution…", id="execution-content", markup=False)
 
     @property
     def controller(self) -> WorkflowController:
@@ -340,7 +342,11 @@ class ExecutionDetailScreen(Screen[None]):
             },
         }
         rendered = json.dumps(redact_payload(details), ensure_ascii=False, indent=2, default=str)
-        self.query_one("#execution-content", Static).update(rendered)
+        # Rich's default word wrapping is extremely slow on large diagnostic JSON strings.
+        # Keep long lines intact so the surrounding HorizontalScroll can expose all text.
+        self.query_one("#execution-content", Static).update(
+            Text(rendered, no_wrap=True, overflow="ignore")
+        )
         # The content Static has its natural height; refresh the owning page
         # so persisted diagnostics extend the main scroll range immediately.
         self.query_one("#execution-detail", VerticalScroll).refresh(layout=True)
