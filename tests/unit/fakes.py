@@ -306,6 +306,15 @@ class FakeConfigLoader:
                     "protected_branches": ["main", "master", "develop"],
                 },
                 "validation": {"auto_detect": False, "commands": [["pytest"]]},
+                "agents": {
+                    "planner": {"provider": "planner"},
+                    "implementer": {"provider": "codex"},
+                    "reviewer": {"provider": "planner"},
+                },
+                "providers": {
+                    "planner": {"type": "litellm", "model": "test/model"},
+                    "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+                },
             }
         )
 
@@ -313,7 +322,7 @@ class FakeConfigLoader:
         return self.config
 
 
-class FakeJulesClient:
+class FakeAgentProvider:
     def __init__(self) -> None:
         self.ambiguous = False
         self.changes_requested = False
@@ -336,9 +345,9 @@ class FakeJulesClient:
         )
         external_id = "spec-123" if is_spec else "review-123"
         reference = AgentExecutionReference(
-            provider="jules",
+            provider="planner",
             external_id=external_id,
-            url=f"https://jules.example/{external_id}",
+            url=f"https://provider.example/{external_id}",
             metadata={"state": "QUEUED", "resource_name": None},
         )
         if on_started is not None:
@@ -620,7 +629,7 @@ class FakeCommandClient:
 
 class FakeClientFactory:
     def __init__(self) -> None:
-        self.jules = FakeJulesClient()
+        self.planner = FakeAgentProvider()
         self.codex = FakeCodexClient()
         self.git = FakeGitClient()
         self.github = FakeGitHubClient()
@@ -641,7 +650,7 @@ class FakeClientFactory:
             else None
         )
         selected = agent_roles if agent_roles is not None else set(AgentRole)
-        provider_by_name = {"jules": self.jules, "codex": self.codex}
+        provider_by_name = {"planner": self.planner, "codex": self.codex}
         role_names = {
             AgentRole.PLANNER: config.agents.planner.provider,
             AgentRole.IMPLEMENTER: config.agents.implementer.provider,
@@ -649,7 +658,7 @@ class FakeClientFactory:
         }
         agents = {
             role: (
-                self.jules
+                self.planner
                 if role_names[role].startswith("__tui_runtime_")
                 else provider_by_name[role_names[role]]
             )

@@ -138,8 +138,8 @@ def test_workflow_wrapper_persists_and_streams_sanitized_fallback_event(tmp_path
         {
             "path": tmp_path,
             "providers": {
-                "primary": {"type": "jules"},
-                "backup": {"type": "jules"},
+                "primary": {"type": "litellm", "model": "test/model"},
+                "backup": {"type": "litellm", "model": "test/model"},
             },
             "agents": {
                 "planner": {"provider": "primary", "fallback_preset": "backup-preset"},

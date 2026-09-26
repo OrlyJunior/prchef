@@ -289,12 +289,12 @@ class _ConfigLoader:
             {
                 "path": path,
                 "providers": {
-                    "planner": {"type": "jules"},
+                    "planner": {"type": "litellm", "model": "test/model"},
                     "implementer": {
                         "type": "codex-cli",
                         "command": ["codex", "exec"],
                     },
-                    "reviewer": {"type": "jules"},
+                    "reviewer": {"type": "litellm", "model": "test/model"},
                     "vertex": {
                         "type": "gemini-vertex",
                         "project": "example-project",
@@ -1243,7 +1243,7 @@ def test_controller_rejects_runtime_options_not_supported_by_selected_provider(
                     AgentRole.IMPLEMENTER: "implementer",
                     AgentRole.REVIEWER: "reviewer",
                 },
-                agent_runtime_options={AgentRole.PLANNER: {"model": "not-supported"}},
+                agent_runtime_options={AgentRole.PLANNER: {"permission_mode": "auto"}},
             )
         )
 
@@ -2079,7 +2079,8 @@ def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -
                 screen.query_one("#planner-summary").renderable
             )
             assert screen.query_one("#planner-provider").value == "planner"
-            assert screen.query_one("#planner-model").display is False
+            assert screen.query_one("#planner-model").display is True
+            assert screen.query_one("#planner-reasoning").display is False
             assert screen.query_one("#implementer-model").display is True
             assert screen.query_one("#implementer-reasoning").display is True
             assert screen.query_one("#implementer-model").value == ""
@@ -2332,7 +2333,7 @@ def test_workflow_runner_applies_and_resets_reviewer_preset_independently(tmp_pa
             reviewer_preset.value = reviewer_preset._options[0][1]
             await settle_tui(pilot)
             assert screen.query_one("#reviewer-provider", Select).value == "reviewer"
-            assert screen.query_one("#reviewer-model", Input).value == ""
+            assert screen.query_one("#reviewer-model", Input).value == "test/model"
             assert screen.query_one("#reviewer-temperature", Input).value == ""
             assert "Provider/YAML default (manual)" in str(
                 screen.query_one("#reviewer-preset-source", Static).renderable
@@ -2540,25 +2541,23 @@ def test_agent_presets_screen_omits_hidden_fields_when_switching_provider(
                 {"planner": saved.provider}, {"planner": saved.runtime_options()}
             )
 
-            # Switch to a provider that supports none of these fields; the
-            # saved preset must contain no runtime options at all.
+            # Switch to another API provider; reasoning and permission remain hidden.
             screen.query_one("#agent-preset-provider", Select).value = "planner"
             await settle_tui(pilot)
-            assert model.display is False
+            assert model.display is True
             assert reasoning.display is False
             assert permission.display is False
-            assert temperature.display is False
-            assert max_tokens.display is False
+            assert temperature.display is True
+            assert max_tokens.display is True
 
             screen.query_one("#update-agent-preset", Button).press()
             await settle_tui(pilot)
             saved = config.agent_presets["planner"]["mixed"]
             assert saved.provider == "planner"
-            assert saved.model is None
+            assert saved.model == "claude-model"
             assert saved.reasoning_effort is None
             assert saved.permission_mode is None
-            assert saved.generation == {}
-            assert saved.runtime_options() == {}
+            assert saved.generation == {"temperature": "0.5", "max_output_tokens": "300"}
             config.with_agent_runtime_overrides(
                 {"planner": saved.provider}, {"planner": saved.runtime_options()}
             )
@@ -2966,7 +2965,7 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
     asyncio.run(drive())
 
 
-def test_workflow_runner_labels_deprecated_jules_provider_choices(tmp_path: Path) -> None:
+def test_workflow_runner_lists_supported_provider_choices(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     application = OrchestratorApp(controller)
 
@@ -2978,9 +2977,9 @@ def test_workflow_runner_labels_deprecated_jules_provider_choices(tmp_path: Path
 
             assert selector._options == [
                 ("implementer", "implementer"),
+                ("planner", "planner"),
+                ("reviewer", "reviewer"),
                 ("vertex", "vertex"),
-                ("planner (deprecated)", "planner"),
-                ("reviewer (deprecated)", "reviewer"),
             ]
 
     asyncio.run(drive())
@@ -4293,7 +4292,7 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
 ) -> None:
     controller, _, _ = _controller(tmp_path)
     unavailable: set[str] = set()
-    controller.batch_required_providers = lambda batch_id: frozenset({"jules"})  # type: ignore[method-assign]
+    controller.batch_required_providers = lambda batch_id: frozenset({"planner"})  # type: ignore[method-assign]
     controller.batch_unavailable_providers = lambda batch_id: tuple(unavailable)  # type: ignore[method-assign]
     def mark_available(batch_id: str, provider: str) -> None:
         unavailable.discard(provider)
@@ -4339,12 +4338,12 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
                     execution_id="execution-1",
                     kind=WorkflowEventKind.STATUS_CHANGED,
                     status=WorkflowStatus.WAITING,
-                    payload={"batch_position": 0, "batch_size": 3, "provider": "jules"},
+                    payload={"batch_position": 0, "batch_size": 3, "provider": "planner"},
                 )
             )
             await settle_tui(pilot)
 
-            assert "WAITING FOR AGENT (jules)" in str(
+            assert "WAITING FOR AGENT (planner)" in str(
                 screen.query_one("#batch-row-0-header", Button).label
             )
             assert "QUEUED" in str(
@@ -4357,7 +4356,7 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
             assert "Waiting for provider: 1" in summary
             assert "Queued: 2" in summary
 
-            unavailable.add("jules")
+            unavailable.add("planner")
             screen._render_workflow_event(
                 WorkflowEvent(
                     execution_id="execution-1",
@@ -4365,12 +4364,12 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
                     payload={
                         "batch_position": 0,
                         "kind": "PROVIDER_QUOTA_EXHAUSTED",
-                        "provider": "jules",
+                        "provider": "planner",
                     },
                 )
             )
             await settle_tui(pilot)
-            assert "jules unavailable (quota)" in str(
+            assert "planner unavailable (quota)" in str(
                 screen.query_one("#batch-row-1-header", Button).label
             )
             assert "2 queued task(s) held" in str(
@@ -4379,7 +4378,7 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
                 .renderable
             )
             assert [severity for _, severity in notifications] == ["warning"]
-            assert "Provider jules quota exhausted" in notifications[0][0]
+            assert "Provider planner quota exhausted" in notifications[0][0]
             available = screen.query_one("#batch-provider-available-0", Button)
 
             screen._render_workflow_event(

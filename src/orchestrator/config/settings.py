@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,10 +16,6 @@ class Settings(BaseSettings):
 
     trello_api_key: str | None = None
     trello_token: str | None = None
-    jules_api_key: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("ORCHESTRATOR_JULES_API_KEY", "JULES_API_KEY"),
-    )
     # Resolution lives in config.database so the runtime and Alembic use the
     # same stable, cwd-independent location.
     database_url: str | None = None

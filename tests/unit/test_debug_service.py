@@ -376,4 +376,4 @@ def test_review_debug_explicit_inputs_override_historical_defaults(tmp_path: Pat
     )
 
     assert result["result"]["review"]["result"] == "APPROVED"
-    assert factory.jules.review_starting_branch == "debug/explicit"
+    assert factory.planner.review_starting_branch == "debug/explicit"
