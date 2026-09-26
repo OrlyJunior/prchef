@@ -97,8 +97,11 @@ def test_index_mismatch_is_reported_before_retrieval_changes_metadata() -> None:
     strategy = _DiagnosedRepositoryContext(
         Strategy(), lambda commit: calls.append(("mismatch", commit)), "b" * 40
     )
-    assert strategy.render(SimpleNamespace()) == "context"  # type: ignore[arg-type]
+    assert strategy.render(SimpleNamespace(role="planner")) == "context"  # type: ignore[arg-type]
     assert calls == ["inspect", ("mismatch", "a" * 40), "render"]
+    calls.clear()
+    assert strategy.render(SimpleNamespace(role="reviewer")) == "context"  # type: ignore[arg-type]
+    assert calls == ["render"]
 
 
 def test_index_mismatch_is_persisted_on_workflow_diagnostics(workflow) -> None:
@@ -119,7 +122,7 @@ def test_index_mismatch_is_persisted_on_workflow_diagnostics(workflow) -> None:
         repository_context=SimpleNamespace(strategy="qdrant"),
     )
     strategy = service._sequencer._repository_context_strategy(config, execution.id)
-    strategy.render(SimpleNamespace())  # type: ignore[arg-type]
+    strategy.render(SimpleNamespace(role="planner"))  # type: ignore[arg-type]
 
     mismatch = repository.diagnostics[-1]
     assert mismatch.payload["kind"] == "REPOSITORY_INDEX_BASE_MISMATCH"

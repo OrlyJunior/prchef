@@ -49,7 +49,11 @@ logger = logging.getLogger("orchestrator.services.workflow_service")
 
 
 class _DiagnosedRepositoryContext:
-    """Report index provenance before a retrieval can synchronize its metadata."""
+    """Report stale planning provenance before retrieval can synchronize metadata.
+
+    Review indexes the feature worktree, whose commit is expected to differ from
+    the fetched base.
+    """
 
     def __init__(
         self,
@@ -62,11 +66,12 @@ class _DiagnosedRepositoryContext:
         self._base_commit = base_commit
 
     def render(self, request: RepositoryContextRequest) -> str:
-        inspect = getattr(self._strategy, "inspect_index", None)
-        if callable(inspect):
-            indexed_commit = inspect().last_indexed_commit
-            if indexed_commit and indexed_commit != self._base_commit:
-                self._on_mismatch(indexed_commit)
+        if request.role == "planner":
+            inspect = getattr(self._strategy, "inspect_index", None)
+            if callable(inspect):
+                indexed_commit = inspect().last_indexed_commit
+                if indexed_commit and indexed_commit != self._base_commit:
+                    self._on_mismatch(indexed_commit)
         return self._strategy.render(request)
 
 

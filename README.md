@@ -209,6 +209,9 @@ payload. O orquestrador descobre, filtra, calcula hashes e divide os arquivos; a
 nao sao re-embeddados, enquanto chunks alterados/removidos sao sincronizados sob demanda. Arquivos
 ignorados pelo Git, binarios, symlinks, artefatos gerados conhecidos, `PLANNER.md`,
 `IMPLEMENTER.md`, `REVIEWER.md` e `docs/PROJECT_CONTEXT.md` nao entram no indice.
+No planejamento, cada snapshot temporario recebe um identificador proprio: seus arquivos elegiveis
+sao embeddados novamente e os pontos sao removidos ao fim da consulta. Em repositorios grandes,
+isso pode aumentar o tempo e o custo de cada execucao.
 
 Exemplo local persistente (o caminho deve ficar fora de todo checkout):
 
