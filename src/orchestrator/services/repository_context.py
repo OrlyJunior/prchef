@@ -247,6 +247,7 @@ class RepositoryContextRequest:
     repository_slug: str
     base_branch: str
     feature_branch: str | None = None
+    temporary_source: bool = False
 
 
 class RepositoryContextStrategy(Protocol):

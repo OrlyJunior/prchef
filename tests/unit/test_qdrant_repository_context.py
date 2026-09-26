@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -235,6 +236,113 @@ def test_linked_worktree_points_are_isolated_within_one_collection(tmp_path: Pat
     assert "beta linked worktree" in worktree_result
     assert "alpha control checkout" not in worktree_result
     assert "alpha control checkout" in control_again
+
+
+def test_temporary_planning_worktrees_leave_index_unchanged_on_query_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    index = tmp_path / "index"
+    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+    source = root / "source.py"
+    source.write_text("alpha committed content", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "source.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(index), "repo", root, embedding_provider=FakeEmbeddingProvider()
+    )
+    baseline = strategy.build_index()
+    with pytest.raises(ValueError, match="requires a linked worktree"):
+        strategy.render(replace(_request(root), temporary_source=True))
+    source.write_text("beta fetched base content", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "source.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-m",
+            "remote base",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    fetched_commit = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert baseline.last_indexed_commit != fetched_commit
+    source.write_text("gamma dirty control content", encoding="utf-8")
+
+    for index_number in range(2):
+        snapshot = tmp_path / f"planning-{index_number}"
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "add", "--detach", str(snapshot), "HEAD"],
+            check=True,
+            capture_output=True,
+        )
+        try:
+            request = replace(_request(snapshot, "beta"), temporary_source=True)
+            if index_number == 1:
+                def fail_query(*_: object) -> None:
+                    raise RuntimeError("simulated query failure")
+
+                monkeypatch.setattr(strategy, "_query", fail_query)
+            before = strategy.inspect_index()
+            result = strategy.render(request)
+            if index_number == 0:
+                assert "beta fetched base content" in result
+                assert "gamma dirty control content" not in result
+            else:
+                assert "REPOSITORY CONTEXT DIAGNOSTIC" in result
+            assert source.read_text(encoding="utf-8") == "gamma dirty control content"
+            status = strategy.inspect_index()
+            assert status.state is before.state is IndexLifecycleState.STALE
+            assert status.error_message == before.error_message is None
+            assert status.last_indexed_commit == baseline.last_indexed_commit
+            assert status.point_count == baseline.point_count
+            with strategy._session() as client:
+                assert strategy._scroll_source_points(
+                    client,
+                    models,
+                    canonical_path_identifier(snapshot),
+                ) == []
+        finally:
+            subprocess.run(
+                ["git", "-C", str(root), "worktree", "remove", "--force", str(snapshot)],
+                check=True,
+                capture_output=True,
+            )
+
+    failed = strategy.render(_request(root, "alpha"))
+    assert "REPOSITORY CONTEXT DIAGNOSTIC" in failed
+    status = strategy.inspect_index()
+    assert status.state is IndexLifecycleState.FAILED
+    assert status.error_message == "Semantic index operation failed (RuntimeError)."
 
 
 def test_embedding_version_change_recreates_and_reindexes_collection(tmp_path: Path) -> None:

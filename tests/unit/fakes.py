@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -131,6 +132,9 @@ class FakeWorkflowRepository:
         execution.repository = repository
         execution.base_branch = base_branch
         execution.repository_ref = repository_ref
+
+    def record_base_commit(self, execution_id: str, base_commit: str) -> None:
+        self._execution().base_commit = base_commit
 
     def record_workspace(self, execution_id: str, workspace_path: str) -> None:
         self._execution().workspace_path = workspace_path
@@ -448,6 +452,16 @@ class FakeGitClient:
         self.merge_base_errors: list[Exception | None] = []
         self.discard_calls = 0
         self.changed_files_results: list[list[str]] = []
+        self.fetch_calls = 0
+
+    def fetch_base(self, base_branch: str) -> str:
+        self.fetch_calls += 1
+        return "b" * 40
+
+    @contextmanager
+    def planning_snapshot(self, base_commit: str):
+        # The fake repository is already the planned content.
+        yield self.control_path or Path(".")
 
     def create_branch(
         self, base_branch: str, working_branch: str, protected_branches: list[str]
@@ -462,6 +476,7 @@ class FakeGitClient:
         base_branch: str,
         working_branch: str,
         protected_branches: list[str],
+        base_commit: str | None = None,
     ) -> None:
         del base_branch, protected_branches
         if self.branch_error:
@@ -643,6 +658,7 @@ class FakeClientFactory:
         agent_roles: set[AgentRole] | None = None,
     ) -> SimpleNamespace:
         self.configs.append(config)
+        self.git.control_path = config.path
         implementer_app = config.integrations.github.implementer_app
         self.github.implementer_identity = (
             implementer_app.bot_name or "implementer[bot]"

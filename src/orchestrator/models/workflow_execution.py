@@ -17,6 +17,7 @@ class WorkflowExecution:
     repository: str = ""
     repository_ref: str = ""
     base_branch: str = ""
+    base_commit: str | None = None
     workspace_path: str | None = None
     working_branch: str | None = None
     commit_sha: str | None = None

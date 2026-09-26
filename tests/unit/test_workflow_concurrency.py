@@ -128,6 +128,9 @@ class _Repository:
     def record_workspace(self, execution_id: str, workspace_path: str) -> None:
         self._execution(execution_id).workspace_path = workspace_path
 
+    def record_base_commit(self, execution_id: str, base_commit: str) -> None:
+        self._execution(execution_id).base_commit = base_commit
+
     def update_stage(self, execution_id: str, stage: WorkflowStage) -> None:
         with self._lock:
             self._execution(execution_id).current_stage = stage

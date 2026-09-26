@@ -7,6 +7,11 @@ import pytest
 from orchestrator.clients.command_client import CommandClient, CommandResult
 from orchestrator.clients.exceptions import GitClientError
 from orchestrator.clients.git_client import GitClient
+from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.services.repository_context import (
+    HeuristicRepositoryContextStrategy,
+    RepositoryContextRequest,
+)
 
 
 class RecordingCommands:
@@ -153,4 +158,83 @@ def test_merge_base_preserves_other_git_failure(tmp_path: Path) -> None:
     with pytest.raises(GitClientError, match="repository unavailable") as error:
         client.ensure_merge_base("develop")
     assert "disconnected history" not in str(error.value)
+
+
+@pytest.mark.parametrize("local_changes", ["behind", "ahead-and-dirty"])
+def test_fetched_base_is_shared_by_planning_worktree_and_diff(
+    tmp_path: Path, local_changes: str
+) -> None:
+    remote = tmp_path / "remote.git"
+    seed = tmp_path / "seed"
+    control = tmp_path / "control"
+
+    def git(*args: str, cwd: Path = tmp_path) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init", "--bare", str(remote))
+    git("init", "-b", "main", str(seed))
+    git("config", "user.name", "Test", cwd=seed)
+    git("config", "user.email", "test@example.com", cwd=seed)
+    (seed / "base.txt").write_text("old", encoding="utf-8")
+    git("add", "base.txt", cwd=seed)
+    git("commit", "-m", "initial", cwd=seed)
+    git("remote", "add", "origin", str(remote), cwd=seed)
+    git("push", "-u", "origin", "main", cwd=seed)
+    git("clone", "-b", "main", str(remote), str(control))
+
+    (seed / "base.txt").write_text("remote only", encoding="utf-8")
+    git("commit", "-am", "remote update", cwd=seed)
+    git("push", cwd=seed)
+    if local_changes == "ahead-and-dirty":
+        git("config", "user.name", "Test", cwd=control)
+        git("config", "user.email", "test@example.com", cwd=control)
+        (control / "local.txt").write_text("local commit", encoding="utf-8")
+        git("add", "local.txt", cwd=control)
+        git("commit", "-m", "local advance", cwd=control)
+        (control / "base.txt").write_text("dirty", encoding="utf-8")
+    original_status = git("status", "--porcelain", cwd=control)
+    original_head = git("rev-parse", "HEAD", cwd=control)
+
+    client = GitClient(CommandClient(), control)
+    base_commit = client.fetch_base("main")
+    assert base_commit == git("rev-parse", "HEAD", cwd=seed)
+    with client.planning_snapshot(base_commit) as snapshot:
+        assert (snapshot / "base.txt").read_text(encoding="utf-8") == "remote only"
+        assert not (snapshot / "local.txt").exists()
+        context = HeuristicRepositoryContextStrategy().render(
+            RepositoryContextRequest(
+                role="planner",
+                repository_path=snapshot,
+                task=DevelopmentTask(
+                    id="1", source="github", title="remote only", description="remote only", url=""
+                ),
+                repository_slug="owner/repo",
+                base_branch="main",
+            )
+        )
+        assert "remote only" in context
+        assert "dirty" not in context
+    worktree = tmp_path / "feature"
+    client.create_worktree(worktree, "main", "feature/test", [], base_commit)
+    assert git("rev-parse", "HEAD", cwd=worktree) == base_commit
+    git("config", "user.name", "Test", cwd=worktree)
+    git("config", "user.email", "test@example.com", cwd=worktree)
+    (worktree / "feature.txt").write_text("feature", encoding="utf-8")
+    git("add", "feature.txt", cwd=worktree)
+    git("commit", "-m", "feature", cwd=worktree)
+
+    (seed / "later.txt").write_text("later", encoding="utf-8")
+    git("add", "later.txt", cwd=seed)
+    git("commit", "-m", "later base update", cwd=seed)
+    git("push", cwd=seed)
+    # Even a later remote-tracking update cannot change this execution's comparison.
+    git("fetch", "origin", "main", cwd=control)
+    diff = client.at_path(worktree).diff(base_commit)
+    assert "feature.txt" in diff
+    assert "base.txt" not in diff
+    assert "later.txt" not in diff
+    assert git("status", "--porcelain", cwd=control) == original_status
+    assert git("rev-parse", "HEAD", cwd=control) == original_head
 
