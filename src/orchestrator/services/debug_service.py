@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from orchestrator.clients.factory import ClientFactory, WorkflowClients
@@ -17,6 +19,7 @@ from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationCheck, ValidationResult
 from orchestrator.models.workflow_execution import WorkflowExecution
+from orchestrator.runtime_logging import redact_text
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.repository_context import (
     RepositoryContextStrategy,
@@ -26,6 +29,18 @@ from orchestrator.services.review_service import ReviewService
 from orchestrator.services.spec_service import SpecService
 from orchestrator.services.task_provider import TaskProvider
 from orchestrator.services.validation_service import ValidationService
+
+logger = logging.getLogger("orchestrator.services.debug_service")
+
+
+def _warn_context_truncated(path: Path, actual_chars: int, cap_chars: int) -> None:
+    """Surface debug prompt truncation without mutating a workflow execution."""
+    logger.warning(
+        "[debug] Durable project context %s has %d characters (cap: %d); prompt truncated",
+        redact_text(str(path)),
+        actual_chars,
+        cap_chars,
+    )
 
 
 class DebugStage(StrEnum):
@@ -171,7 +186,7 @@ class DebugService:
             )
         if stage is DebugStage.IMPLEMENTATION:
             implementation_service = ImplementationService(
-                clients.agent(AgentRole.IMPLEMENTER), clients.git
+                clients.agent(AgentRole.IMPLEMENTER), clients.git, _warn_context_truncated
             )
             if values.prompt is not None:
                 implementation_result = implementation_service.implement_prompt(
@@ -294,7 +309,8 @@ class DebugService:
     ) -> dict[str, Any]:
         executions: list[AgentExecutionReference] = []
         spec = SpecService(
-            clients.agent(AgentRole.PLANNER), repository_context_strategy
+            clients.agent(AgentRole.PLANNER), repository_context_strategy,
+            _warn_context_truncated,
         ).generate(
             task,
             config.path,
@@ -330,7 +346,8 @@ class DebugService:
         diff = values.diff if values.diff is not None else clients.git.diff(base_branch)
         executions: list[AgentExecutionReference] = []
         review = ReviewService(
-            clients.agent(AgentRole.REVIEWER), repository_context_strategy
+            clients.agent(AgentRole.REVIEWER), repository_context_strategy,
+            _warn_context_truncated,
         ).review(
             task=task,
             spec=spec,
