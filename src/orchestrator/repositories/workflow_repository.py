@@ -321,6 +321,9 @@ class WorkflowRepository:
 
         self._mutate(execution_id, mutate)
 
+    def record_base_commit(self, execution_id: str, base_commit: str) -> None:
+        self._mutate(execution_id, lambda entity: setattr(entity, "base_commit", base_commit))
+
     def record_submission_repository(self, execution_id: str, repository_ref: str) -> None:
         """Scope duplicate detection before task/config loading can fail."""
 
@@ -712,6 +715,7 @@ class WorkflowRepository:
             repository=entity.repository,
             repository_ref=entity.repository_ref,
             base_branch=entity.base_branch,
+            base_commit=entity.base_commit,
             workspace_path=entity.workspace_path,
             working_branch=entity.working_branch,
             commit_sha=entity.commit_sha,

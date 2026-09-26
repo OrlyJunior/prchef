@@ -218,7 +218,7 @@ def test_stage_sequencer_resumes_planning_in_stage_order(monkeypatch: pytest.Mon
         def __init__(self, *_: Any) -> None:
             pass
 
-        def generate(self, *_: Any) -> Any:
+        def generate(self, *_: Any, **__: Any) -> Any:
             return spec
 
     class Workspace:
@@ -235,7 +235,15 @@ def test_stage_sequencer_resumes_planning_in_stage_order(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         "orchestrator.services.workflow_stage_sequencer.WorkspaceManager", Workspace
     )
-    git = SimpleNamespace(at_path=lambda path: SimpleNamespace(ensure_merge_base=lambda base: None))
+
+    @contextmanager
+    def snapshot(base: str) -> Any:
+        yield Path("repo")
+
+    git = SimpleNamespace(
+        at_path=lambda path: SimpleNamespace(ensure_merge_base=lambda base: None),
+        planning_snapshot=snapshot,
+    )
     config = SimpleNamespace(
         path=Path("repo"),
         workspace=object(),
@@ -264,7 +272,7 @@ def test_stage_sequencer_resumes_planning_in_stage_order(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(sequencer, "_implement_and_review", implement)
     result = sequencer._resume_planning(
-        SimpleNamespace(id="one"),
+        SimpleNamespace(id="one", base_commit=None),
         SimpleNamespace(id="task", title="Task"),
         config,
         SimpleNamespace(git=git, agent=lambda role: object()),
@@ -286,6 +294,9 @@ def test_stage_actions_commit_records_sha_inside_stage() -> None:
             yield
 
     class Repository:
+        def get_execution(self, execution_id: str) -> Any:
+            return SimpleNamespace(base_commit=None)
+
         def record_commit(self, execution_id: str, sha: str) -> None:
             calls.append((execution_id, sha))
 

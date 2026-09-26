@@ -35,7 +35,11 @@ class StageActions:
         config: ProjectConfig,
     ) -> None:
         with self._events._step(execution_id, WorkflowStage.COMMIT):
-            execution_clients.git.ensure_merge_base(config.repository.base_branch)
+            execution = self._repository.get_execution(execution_id)
+            # Pre-migration executions retain their original local-branch comparison.
+            execution_clients.git.ensure_merge_base(
+                execution.base_commit or config.repository.base_branch
+            )
             commit_sha = execution_clients.git.commit_all(
                 StageValues._commit_message(task),
                 working_branch,

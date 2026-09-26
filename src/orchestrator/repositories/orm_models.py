@@ -18,6 +18,7 @@ class WorkflowExecutionEntity(Base):
     repository: Mapped[str] = mapped_column(Text, nullable=False, default="")
     repository_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
     base_branch: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    base_commit: Mapped[str | None] = mapped_column(String(64))
     workspace_path: Mapped[str | None] = mapped_column(Text)
     working_branch: Mapped[str | None] = mapped_column(String(255))
     commit_sha: Mapped[str | None] = mapped_column(String(64))

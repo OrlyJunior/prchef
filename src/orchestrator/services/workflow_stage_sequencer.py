@@ -30,6 +30,7 @@ from orchestrator.runtime_logging import log_review_summary, log_spec_summary
 from orchestrator.services.exceptions import WorkflowCancelledError, WorkflowError
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.repository_context import (
+    RepositoryContextRequest,
     RepositoryContextStrategy,
     resolve_repository_context_strategy,
 )
@@ -45,6 +46,28 @@ from orchestrator.services.workflow_stage_values import StageValues
 from orchestrator.workspace.manager import WorkspaceManager
 
 logger = logging.getLogger("orchestrator.services.workflow_service")
+
+
+class _DiagnosedRepositoryContext:
+    """Report index provenance before a retrieval can synchronize its metadata."""
+
+    def __init__(
+        self,
+        strategy: RepositoryContextStrategy,
+        on_mismatch: Callable[[str], None],
+        base_commit: str,
+    ) -> None:
+        self._strategy = strategy
+        self._on_mismatch = on_mismatch
+        self._base_commit = base_commit
+
+    def render(self, request: RepositoryContextRequest) -> str:
+        inspect = getattr(self._strategy, "inspect_index", None)
+        if callable(inspect):
+            indexed_commit = inspect().last_indexed_commit
+            if indexed_commit and indexed_commit != self._base_commit:
+                self._on_mismatch(indexed_commit)
+        return self._strategy.render(request)
 
 
 class StageSequencer:
@@ -81,15 +104,38 @@ class StageSequencer:
         self._repository_index_clients = repository_index_clients
         self._context_resolver = context_resolver
 
-    def _repository_context_strategy(self, config: ProjectConfig) -> RepositoryContextStrategy:
+    def _repository_context_strategy(
+        self, config: ProjectConfig, execution_id: str | None = None
+    ) -> RepositoryContextStrategy:
         """Resolve context for each fresh or resumed stage sequence."""
-        return self._context_resolver(
+        strategy = self._context_resolver(
             config.repository_context.strategy,
             settings=config.repository_context,
             repository_key=config.configured_repository_key,
             configured_root=config.path,
             client_manager=self._repository_index_clients,
         )
+        if config.repository_context.strategy != "qdrant" or execution_id is None:
+            return strategy
+        base_commit = self._repository.get_execution(execution_id).base_commit
+        if not base_commit:
+            return strategy
+
+        def record_mismatch(indexed_commit: str) -> None:
+            runtime = self._events._runtimes.peek(execution_id)
+            self._events._record_diagnostic(
+                execution_id,
+                DiagnosticCategory.WORKFLOW_EVENT,
+                {
+                    "kind": "REPOSITORY_INDEX_BASE_MISMATCH",
+                    "severity": "warning",
+                    "indexed_commit": indexed_commit,
+                    "base_commit": base_commit,
+                },
+                stage=runtime.active_stage if runtime else None,
+            )
+
+        return _DiagnosedRepositoryContext(strategy, record_mismatch, base_commit)
 
     def _context_truncation_callback(
         self, execution_id: str
@@ -164,27 +210,33 @@ class StageSequencer:
                 )
                 clients = self._client_factory.create(config)
                 repository_slug = clients.git.github_repository()
-                repository_context_strategy = self._repository_context_strategy(config)
+                base_commit = clients.git.fetch_base(config.repository.base_branch)
+                self._repository.record_base_commit(execution.id, base_commit)
+                repository_context_strategy = self._repository_context_strategy(
+                    config, execution.id
+                )
 
             with self._events._step(execution.id, WorkflowStage.GENERATE_SPEC):
-                spec = SpecService(
-                    self._agents._diagnostic_agent(
-                        clients.agent(AgentRole.PLANNER),
-                        config,
-                        AgentRole.PLANNER,
-                        execution.id,
-                    ),
-                    repository_context_strategy,
-                    self._context_truncation_callback(execution.id),
-                ).generate(
-                    task,
-                    config.path,
-                    repository_slug,
-                    config.repository.base_branch,
-                    lambda reference: self._repository.record_spec_jules_session(
-                        execution.id, reference.external_id, reference.url
-                    ),
-                )
+                with clients.git.planning_snapshot(base_commit) as snapshot:
+                    spec = SpecService(
+                        self._agents._diagnostic_agent(
+                            clients.agent(AgentRole.PLANNER),
+                            config,
+                            AgentRole.PLANNER,
+                            execution.id,
+                        ),
+                        repository_context_strategy,
+                        self._context_truncation_callback(execution.id),
+                    ).generate(
+                        task,
+                        snapshot,
+                        repository_slug,
+                        config.repository.base_branch,
+                        lambda reference: self._repository.record_spec_jules_session(
+                            execution.id, reference.external_id, reference.url
+                        ),
+                        instructions_repository_path=config.path,
+                    )
                 self._repository.record_spec(execution.id, spec)
                 if self._verbose:
                     log_spec_summary(logger, spec)
@@ -204,7 +256,7 @@ class StageSequencer:
                 workspace_path = workspace_manager.workspace_path(execution.id)
                 self._repository.record_workspace(execution.id, str(workspace_path))
                 logger.info("[workspace] Base repository: %s", config.path)
-                logger.info("[workspace] Base ref: origin/%s", config.repository.base_branch)
+                logger.info("[workspace] Base commit: %s", base_commit)
                 logger.info("[workspace] Branch: %s", working_branch)
                 logger.info("[workspace] Path: %s", workspace_path)
                 workspace_path = workspace_manager.create(
@@ -212,9 +264,10 @@ class StageSequencer:
                     config.repository.base_branch,
                     working_branch,
                     config.repository.protected_branches,
+                    base_commit,
                 )
                 self._repository.record_branch(execution.id, working_branch)
-                clients.git.at_path(workspace_path).ensure_merge_base(config.repository.base_branch)
+                clients.git.at_path(workspace_path).ensure_merge_base(base_commit)
             execution_clients = clients.at_path(workspace_path)
 
             implementation_service = ImplementationService(
@@ -292,7 +345,7 @@ class StageSequencer:
                         task=task,
                         spec=spec,
                         pull_request=pull_request,
-                        diff=execution_clients.git.diff(config.repository.base_branch),
+                        diff=execution_clients.git.diff(base_commit),
                         validation=validation,
                         repository_path=workspace_path,
                         instructions_repository_path=config.path,
@@ -417,22 +470,25 @@ class StageSequencer:
         repository_context_strategy: RepositoryContextStrategy,
     ) -> WorkflowExecution:
         """Repeat only planning, then continue through a newly safe workspace."""
+        base_ref = execution.base_commit or config.repository.base_branch
         with self._events._step(execution.id, WorkflowStage.GENERATE_SPEC):
-            spec = SpecService(
-                self._agents._diagnostic_agent(
-                    clients.agent(AgentRole.PLANNER), config, AgentRole.PLANNER, execution.id
-                ),
-                repository_context_strategy,
-                self._context_truncation_callback(execution.id),
-            ).generate(
-                task,
-                config.path,
-                repository_slug,
-                config.repository.base_branch,
-                lambda reference: self._repository.record_spec_jules_session(
-                    execution.id, reference.external_id, reference.url
-                ),
-            )
+            with clients.git.planning_snapshot(base_ref) as snapshot:
+                spec = SpecService(
+                    self._agents._diagnostic_agent(
+                        clients.agent(AgentRole.PLANNER), config, AgentRole.PLANNER, execution.id
+                    ),
+                    repository_context_strategy,
+                    self._context_truncation_callback(execution.id),
+                ).generate(
+                    task,
+                    snapshot,
+                    repository_slug,
+                    config.repository.base_branch,
+                    lambda reference: self._repository.record_spec_jules_session(
+                        execution.id, reference.external_id, reference.url
+                    ),
+                    instructions_repository_path=config.path,
+                )
             self._repository.record_spec(execution.id, spec)
         if spec.has_blocking_ambiguity:
             return self._lifecycle._pause_for_human(
@@ -454,9 +510,10 @@ class StageSequencer:
                 config.repository.base_branch,
                 working_branch,
                 config.repository.protected_branches,
+                base_ref,
             )
             self._repository.record_branch(execution.id, working_branch)
-            clients.git.at_path(workspace_path).ensure_merge_base(config.repository.base_branch)
+            clients.git.at_path(workspace_path).ensure_merge_base(base_ref)
         return self._implement_and_review(
             execution.id,
             task,
@@ -514,7 +571,9 @@ class StageSequencer:
                     task=task,
                     spec=spec,
                     pull_request=pull_request,
-                    diff=execution_clients.git.diff(config.repository.base_branch),
+                    diff=execution_clients.git.diff(
+                        execution.base_commit or config.repository.base_branch
+                    ),
                     validation=validation,
                     repository_path=workspace_path,
                     instructions_repository_path=config.path,
@@ -676,7 +735,10 @@ class StageSequencer:
                         task=task,
                         spec=spec,
                         pull_request=pull_request,
-                        diff=execution_clients.git.diff(config.repository.base_branch),
+                        diff=execution_clients.git.diff(
+                            self._repository.get_execution(execution_id).base_commit
+                            or config.repository.base_branch
+                        ),
                         validation=validation,
                         repository_path=workspace_path,
                         instructions_repository_path=config.path,
@@ -790,7 +852,7 @@ class StageSequencer:
                 config = config.with_agent_runtime_overrides(provider_overrides, runtime_overrides)
             clients = self._client_factory.create(config)
             repository_slug = clients.git.github_repository()
-            repository_context_strategy = self._repository_context_strategy(config)
+            repository_context_strategy = self._repository_context_strategy(config, execution.id)
             previous_responses = [
                 (item.prompt, item.response)
                 for item in execution.human_interactions
@@ -851,7 +913,7 @@ class StageSequencer:
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         repository_slug = clients.git.github_repository()
-        repository_context_strategy = self._repository_context_strategy(config)
+        repository_context_strategy = self._repository_context_strategy(config, execution_id)
         return self._implement_and_review(
             execution_id,
             task,
@@ -881,7 +943,7 @@ class StageSequencer:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         try:
             repository_slug = clients.git.github_repository()
-            repository_context_strategy = self._repository_context_strategy(config)
+            repository_context_strategy = self._repository_context_strategy(config, execution_id)
             # Earlier answers still apply to the repeated planning attempt.
             clarified_task = StageValues._task_with_responses(
                 task,

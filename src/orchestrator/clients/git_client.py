@@ -5,7 +5,9 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
@@ -71,8 +73,9 @@ class GitClient:
         base_branch: str,
         working_branch: str,
         protected_branches: list[str],
+        base_commit: str | None = None,
     ) -> None:
-        """Create an isolated workflow branch from the freshly fetched remote base ref.
+        """Create an isolated workflow branch from the recorded base commit.
 
         This intentionally performs no checkout, clean, stash, reset, or branch switch in
         the control checkout.  Git records the linked worktree in its shared metadata while
@@ -81,12 +84,29 @@ class GitClient:
         self._assert_safe_working_branch(working_branch, protected_branches)
         if workspace_path.exists():
             raise GitClientError(f"Workspace path already exists: {workspace_path}")
-        logger.info("[git] Fetching base branch: origin/%s", base_branch)
-        self._git("fetch", "origin", base_branch)
-        base_ref = f"origin/{base_branch}"
+        # The fallback preserves callers outside the execution workflow.
+        if base_commit is None:
+            base_commit = self.fetch_base(base_branch)
+        base_ref = base_commit
         self._git("rev-parse", "--verify", f"{base_ref}^{{commit}}")
         logger.info("[git] Creating worktree branch %s from %s", working_branch, base_ref)
         self._git("worktree", "add", "-b", working_branch, str(workspace_path), base_ref)
+
+    def fetch_base(self, base_branch: str) -> str:
+        logger.info("[git] Fetching base branch: origin/%s", base_branch)
+        self._git("fetch", "origin", base_branch)
+        return self._git("rev-parse", "--verify", f"origin/{base_branch}^{{commit}}").stdout.strip()
+
+    @contextmanager
+    def planning_snapshot(self, base_commit: str) -> Iterator[Path]:
+        """Expose an exact commit in a disposable detached worktree for local agents."""
+        with tempfile.TemporaryDirectory(prefix="orchestrator-plan-") as directory:
+            snapshot = Path(directory) / "checkout"
+            self._git("worktree", "add", "--detach", str(snapshot), base_commit)
+            try:
+                yield snapshot
+            finally:
+                self._git("worktree", "remove", "--force", str(snapshot))
 
     def remove_worktree(self, workspace_path: Path) -> bool:
         """Remove a linked worktree and prune its shared Git metadata.
@@ -175,17 +195,17 @@ class GitClient:
         self._git("push", "--set-upstream", "origin", working_branch, env=environment)
         logger.info("[git] Push completed: %s", working_branch)
 
-    def diff(self, base_branch: str) -> str:
-        self.ensure_merge_base(base_branch)
-        return self._git("diff", "--no-ext-diff", f"{base_branch}...HEAD").stdout
+    def diff(self, base_ref: str) -> str:
+        self.ensure_merge_base(base_ref)
+        return self._git("diff", "--no-ext-diff", f"{base_ref}...HEAD").stdout
 
     def ensure_merge_base(self, base_branch: str) -> None:
-        """Require ancestry shared with the local ref used by the review diff."""
+        """Require ancestry shared with the recorded base commit."""
         result = self._git("merge-base", base_branch, "HEAD", check=False)
         if result.exit_code == 1:
             raise GitClientError(
-                f"Worktree HEAD has disconnected history from local base branch "
-                f"{base_branch}: no merge base. Rewriting {base_branch} history with "
+                f"Worktree HEAD has disconnected history from base "
+                f"{base_branch}: no merge base. Rewriting base history with "
                 "filter-repo, filter-branch, or rebase --root while this worktree "
                 "was in flight can cause this."
             )
