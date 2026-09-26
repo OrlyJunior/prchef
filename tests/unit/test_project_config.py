@@ -21,8 +21,14 @@ from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.services.repository_context import repository_context_strategy_names
 
 
+def _validated_config(values: dict[str, object]) -> ProjectConfig:
+    if "agents" not in values and "providers" not in values and "roles" not in values:
+        values = {"roles": {"spec": "codex", "review": "codex"}, **values}
+    return ProjectConfig.model_validate(values)
+
+
 def _config(tmp_path: Path, codex: dict[str, object]) -> ProjectConfig:
-    return ProjectConfig.model_validate(
+    return _validated_config(
         {
             "path": tmp_path,
             "integrations": {
@@ -53,7 +59,7 @@ def test_codex_approval_policy_is_disabled_by_default(
 
 
 def test_default_codex_config_keeps_workspace_write_sandbox(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate({"path": tmp_path})
+    config = _validated_config({"path": tmp_path})
 
     assert config.integrations.codex.command[:4] == [
         "codex",
@@ -65,7 +71,7 @@ def test_default_codex_config_keeps_workspace_write_sandbox(tmp_path: Path) -> N
 
 
 def test_repository_context_strategy_defaults_to_heuristic(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate({"path": tmp_path})
+    config = _validated_config({"path": tmp_path})
 
     assert config.repository_context.strategy == "heuristic"
 
@@ -74,7 +80,7 @@ def test_repository_context_strategy_defaults_to_heuristic(tmp_path: Path) -> No
 def test_repository_context_strategy_accepts_registered_names(
     tmp_path: Path, strategy: str
 ) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {"path": tmp_path, "repository_context": {"strategy": strategy}}
     )
 
@@ -83,7 +89,7 @@ def test_repository_context_strategy_accepts_registered_names(
 
 def test_repository_context_strategy_rejects_unknown_name(tmp_path: Path) -> None:
     with pytest.raises(ValidationError) as exc_info:
-        ProjectConfig.model_validate(
+        _validated_config(
             {"path": tmp_path, "repository_context": {"strategy": "semantic"}}
         )
 
@@ -102,7 +108,10 @@ def test_repository_context_strategy_uses_defaults_and_repository_override(
     config_file.write_text(
         yaml.safe_dump(
             {
-                "defaults": {"repository_context": {"strategy": "heuristic"}},
+                "defaults": {
+                    "roles": {"spec": "codex", "review": "codex"},
+                    "repository_context": {"strategy": "heuristic"},
+                },
                 "repositories": {
                     "example": {
                         "path": str(repository),
@@ -137,7 +146,10 @@ def test_loader_wraps_unknown_repository_context_strategy_as_configuration_error
     config_file.write_text(
         yaml.safe_dump(
             {
-                "defaults": {"repository_context": {"strategy": "semantic"}},
+                "defaults": {
+                    "roles": {"spec": "codex", "review": "codex"},
+                    "repository_context": {"strategy": "semantic"},
+                },
                 "repositories": {"example": {"path": str(repository)}},
             }
         ),
@@ -160,42 +172,109 @@ def test_loader_wraps_unknown_repository_context_strategy_as_configuration_error
     assert "heuristic" in message
 
 
-def test_provider_options_label_and_deprioritize_deprecated_jules(tmp_path: Path) -> None:
-    with pytest.warns(DeprecationWarning, match="Jules provider"):
-        config = ProjectConfig.model_validate(
-            {
-                "path": tmp_path,
-                "agents": {
-                    "planner": {"provider": "legacy"},
-                    "implementer": {"provider": "codex"},
-                    "reviewer": {"provider": "api"},
-                },
-                "providers": {
-                    "legacy": {"type": "jules"},
-                    "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
-                    "api": {"type": "litellm", "model": "openai/example"},
-                    "broken": {"type": "unknown-backend"},
-                },
-            }
-        )
+def test_provider_options_include_only_configured_supported_choices(tmp_path: Path) -> None:
+    config = _validated_config(
+        {
+            "path": tmp_path,
+            "agents": {
+                "planner": {"provider": "api"},
+                "implementer": {"provider": "codex"},
+                "reviewer": {"provider": "api"},
+            },
+            "providers": {
+                "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+                "api": {"type": "litellm", "model": "openai/example"},
+                "broken": {"type": "unknown-backend"},
+            },
+        }
+    )
 
     assert config.provider_options() == [
         ("api", "api"),
         ("codex", "codex"),
-        ("legacy (deprecated)", "legacy"),
         ("broken (unsupported)", "broken"),
     ]
     assert ProviderSupportTier.FIRST_CLASS.value == "first-class"
     assert ProviderSupportTier.OPTIONAL.value == "optional"
-    assert ProviderSupportTier.DEPRECATED.value == "deprecated/legacy"
     assert ProviderSupportTier.UNSUPPORTED.value == "unsupported"
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_loader_rejects_named_jules_provider_even_when_unused(
+    tmp_path: Path, selected: bool
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        yaml.safe_dump(
+            {
+                "defaults": {
+                    "agents": {
+                        "planner": {"provider": "retired" if selected else "codex"},
+                        "implementer": {"provider": "codex"},
+                        "reviewer": {"provider": "codex"},
+                    },
+                    "providers": {
+                        "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
+                        "retired": {"type": "jules"},
+                    },
+                },
+                "repositories": {"example": {"path": str(repository)}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    task = DevelopmentTask("1", "trello", "Task", "", "", repository="example")
+
+    with pytest.raises(ConfigurationError) as error:
+        ProjectConfigLoader(config_file).load(task)
+
+    assert "retired" in str(error.value)
+    assert "codex-cli" in str(error.value)
+
+
+def test_explicit_legacy_jules_integration_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match=r"integrations\.jules.*codex-cli"):
+        ProjectConfig.model_validate(
+            {
+                "path": tmp_path,
+                "roles": {"spec": "codex", "review": "codex"},
+                "integrations": {"jules": {}},
+            }
+        )
+
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        "defaults:\n  roles: {spec: codex, review: codex}\n"
+        "  integrations:\n    jules: {}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match=r"integrations\.jules.*codex-cli"):
+        ProjectConfigLoader(config_file).load_defaults()
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [
+        {},
+        {"spec": "jules", "review": "codex"},
+        {"spec": "codex", "review": "jules"},
+    ],
+)
+def test_legacy_roles_require_explicit_supported_providers(
+    tmp_path: Path, roles: dict[str, str]
+) -> None:
+    with pytest.raises(ValidationError, match="roles.spec and roles.review|Legacy role"):
+        ProjectConfig.model_validate({"path": tmp_path, "roles": roles})
 
 
 def test_example_configuration_uses_first_class_litellm_and_codex(tmp_path: Path) -> None:
     example_path = Path(__file__).resolve().parents[2] / "orchestrator.example.yml"
     example = yaml.safe_load(example_path.read_text(encoding="utf-8"))
 
-    config = ProjectConfig.model_validate({"path": tmp_path, **example["defaults"]})
+    config = _validated_config({"path": tmp_path, **example["defaults"]})
 
     assert config.agents.planner.provider == "cloud-api"
     assert config.agents.implementer.provider == "codex"
@@ -221,7 +300,7 @@ def test_example_agent_presets_block_keeps_every_preset_when_uncommented() -> No
 
 
 def test_role_runtime_overrides_are_validated_in_memory_and_keep_defaults(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "providers": {
@@ -237,12 +316,12 @@ def test_role_runtime_overrides_are_validated_in_memory_and_keep_defaults(tmp_pa
                     "model": "configured-gemini",
                     "generation": {"temperature": 0.2},
                 },
-                "jules": {"type": "jules"},
+                "api": {"type": "litellm", "model": "test/model"},
             },
             "agents": {
                 "planner": {"provider": "vertex"},
                 "implementer": {"provider": "codex"},
-                "reviewer": {"provider": "jules"},
+                "reviewer": {"provider": "api"},
             },
         }
     )
@@ -277,7 +356,7 @@ def test_role_runtime_overrides_are_validated_in_memory_and_keep_defaults(tmp_pa
 def test_litellm_role_runtime_materialization_preserves_backend_and_vertex_settings(
     tmp_path: Path,
 ) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "agents": {
@@ -319,10 +398,10 @@ def test_litellm_role_runtime_materialization_preserves_backend_and_vertex_setti
 
 
 def test_role_runtime_overrides_reject_unsupported_and_invalid_values(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate({"path": tmp_path})
+    config = _validated_config({"path": tmp_path})
 
     with pytest.raises(ConfigurationError, match="does not support runtime option"):
-        config.with_agent_runtime_overrides({}, {"planner": {"model": "not-supported"}})
+        config.with_agent_runtime_overrides({}, {"planner": {"permission_mode": "auto"}})
     with pytest.raises(ConfigurationError, match="must be a non-empty string"):
         config.with_agent_runtime_overrides(
             {}, {"implementer": {"reasoning_effort": " "}}
@@ -330,7 +409,7 @@ def test_role_runtime_overrides_reject_unsupported_and_invalid_values(tmp_path: 
 
 
 def test_claude_permission_and_effort_are_role_local_runtime_overrides(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "providers": {
@@ -385,7 +464,7 @@ def test_claude_permission_and_effort_are_role_local_runtime_overrides(tmp_path:
     with pytest.raises(ConfigurationError, match="literal_error"):
         config.with_agent_runtime_overrides({}, {"planner": {"reasoning_effort": "deep"}})
     with pytest.raises(ConfigurationError, match="does not support runtime option"):
-        ProjectConfig.model_validate({"path": tmp_path}).with_agent_runtime_overrides(
+        _validated_config({"path": tmp_path}).with_agent_runtime_overrides(
             {}, {"planner": {"permission_mode": "dontAsk"}}
         )
 
@@ -393,7 +472,7 @@ def test_claude_permission_and_effort_are_role_local_runtime_overrides(tmp_path:
 def test_claude_permission_and_effort_preset_omits_defaults_and_applies_override(
     tmp_path: Path,
 ) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "providers": {
@@ -439,7 +518,7 @@ def test_claude_permission_and_effort_preset_omits_defaults_and_applies_override
 
 
 def test_agent_presets_are_role_scoped_and_apply_as_runtime_templates(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "providers": {
@@ -448,12 +527,12 @@ def test_agent_presets_are_role_scoped_and_apply_as_runtime_templates(tmp_path: 
                     "command": ["codex", "exec", "-"],
                     "model": "configured-model",
                 },
-                "jules": {"type": "jules"},
+                "api": {"type": "litellm", "model": "test/model"},
             },
             "agents": {
-                "planner": {"provider": "jules"},
+                "planner": {"provider": "api"},
                 "implementer": {"provider": "codex"},
-                "reviewer": {"provider": "jules"},
+                "reviewer": {"provider": "api"},
             },
             "agent_presets": {
                 "implementer": {
@@ -463,7 +542,7 @@ def test_agent_presets_are_role_scoped_and_apply_as_runtime_templates(tmp_path: 
                         "reasoning_effort": "xhigh",
                     }
                 },
-                "reviewer": {"default": {"provider": "jules"}},
+                "reviewer": {"default": {"provider": "api"}},
             },
         }
     )
@@ -484,11 +563,11 @@ def test_agent_presets_are_role_scoped_and_apply_as_runtime_templates(tmp_path: 
 
 
 def test_role_fallback_preset_is_optional_and_resolves_its_provider(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "providers": {
-                "primary": {"type": "jules"},
+                "primary": {"type": "litellm", "model": "test/model"},
                 "backup": {
                     "type": "litellm",
                     "model": "openai/default-model",
@@ -531,10 +610,10 @@ def test_role_fallback_preset_rejects_invalid_targets(
     tmp_path: Path, agent_presets: dict[str, object], message: str
 ) -> None:
     with pytest.raises(ValidationError, match=message):
-        ProjectConfig.model_validate(
+        _validated_config(
             {
                 "path": tmp_path,
-                "providers": {"primary": {"type": "jules"}},
+                "providers": {"primary": {"type": "litellm", "model": "test/model"}},
                 "agents": {
                     "planner": {"provider": "primary", "fallback_preset": "cloud"},
                     "implementer": {"provider": "primary"},
@@ -548,7 +627,7 @@ def test_role_fallback_preset_rejects_invalid_targets(
 def test_missing_preset_provider_is_retained_and_rejected_only_when_selected(
     tmp_path: Path,
 ) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "agent_presets": {"planner": {"retired": {"provider": "missing"}}},
@@ -561,7 +640,7 @@ def test_missing_preset_provider_is_retained_and_rejected_only_when_selected(
 
 
 def test_agent_preset_supports_provider_generation_options(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "providers": {
@@ -596,7 +675,7 @@ def test_agent_preset_supports_provider_generation_options(tmp_path: Path) -> No
 
 
 def test_workspace_root_is_configurable(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {"path": tmp_path, "workspace": {"root": "C:/Git/orchestrator-workspaces"}}
     )
 
@@ -606,33 +685,33 @@ def test_workspace_root_is_configurable(tmp_path: Path) -> None:
 
 
 def test_max_validation_retries_defaults_to_two_and_rejects_negative_values(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate({"path": tmp_path})
+    config = _validated_config({"path": tmp_path})
 
     assert config.validation.max_validation_retries == 2
     with pytest.raises(ValidationError, match="greater than or equal to 0"):
-        ProjectConfig.model_validate(
+        _validated_config(
             {"path": tmp_path, "validation": {"max_validation_retries": -1}}
         )
 
 
 def test_max_review_retries_defaults_to_one_and_rejects_negative_values(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate({"path": tmp_path})
+    config = _validated_config({"path": tmp_path})
 
     assert config.review.max_review_retries == 1
     with pytest.raises(ValidationError, match="greater than or equal to 0"):
-        ProjectConfig.model_validate(
+        _validated_config(
             {"path": tmp_path, "review": {"max_review_retries": -1}}
         )
 
 
 def test_notifications_are_disabled_by_default_and_normalize_the_channel(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {"path": tmp_path, "notifications": {"enabled": True, "channel": " Desktop "}}
     )
 
     assert config.notifications.enabled is True
     assert config.notifications.channel == "desktop"
-    assert ProjectConfig.model_validate({"path": tmp_path}).notifications.enabled is False
+    assert _validated_config({"path": tmp_path}).notifications.enabled is False
 
 
 def test_repository_configuration_ignores_legacy_local_override_and_warns(
@@ -648,6 +727,7 @@ def test_repository_configuration_ignores_legacy_local_override_and_warns(
     config_file = tmp_path / "orchestrator.yml"
     config_file.write_text(
         """defaults:
+  roles: {spec: codex, review: codex}
   notifications:
     enabled: false
     channel: ignored
@@ -677,7 +757,7 @@ repositories:
 
 
 def test_github_app_configuration_accepts_exactly_one_private_key_source(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "integrations": {
@@ -698,7 +778,7 @@ def test_github_app_configuration_accepts_exactly_one_private_key_source(tmp_pat
 
 
 def test_planner_implementer_and_reviewer_github_apps_are_independent(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "integrations": {
@@ -724,19 +804,19 @@ def test_planner_implementer_and_reviewer_github_apps_are_independent(tmp_path: 
         }
     )
 
-    clients = ClientFactory(None).create(config, agent_roles=set())
+    clients = ClientFactory().create(config, agent_roles=set())
 
     assert config.integrations.github.app.app_id == 123
     assert config.integrations.github.implementer_app.app_id == 789
     assert config.integrations.github.planner_app.app_id == 321
     assert clients.git._implementer_authenticator is clients.github._implementer_authenticator
     assert (
-        ProjectConfig.model_validate({"path": tmp_path})
+        _validated_config({"path": tmp_path})
         .integrations.github.implementer_app.is_configured
         is False
     )
     assert not (
-        ProjectConfig.model_validate({"path": tmp_path})
+        _validated_config({"path": tmp_path})
         .integrations.github.planner_app.is_configured
     )
 
@@ -746,12 +826,12 @@ def test_each_github_app_identity_validates_its_own_credentials(
     tmp_path: Path, role: str
 ) -> None:
     with pytest.raises(ValueError, match="requires app_id, installation_id"):
-        ProjectConfig.model_validate({
+        _validated_config({
             "path": tmp_path,
             "integrations": {"github": {role: {"app_id": 1}}},
         })
     with pytest.raises(ValueError, match="either private_key_path or private_key_env"):
-        ProjectConfig.model_validate({
+        _validated_config({
             "path": tmp_path,
             "integrations": {"github": {role: {
                 "app_id": 1, "installation_id": 2,
@@ -772,6 +852,7 @@ def test_tui_configuration_writer_updates_resolved_global_config_and_preserves_o
         """unrelated:
   keep: this value
 defaults:
+  roles: {spec: codex, review: codex}
   notifications:
     enabled: false
 repositories:
@@ -840,6 +921,7 @@ def test_clearing_inherited_planner_app_disables_it_only_for_selected_repository
     config_file.write_text(
         """unrelated: keep
 defaults:
+  roles: {spec: codex, review: codex}
   integrations:
     github:
       planner_app:
@@ -886,6 +968,7 @@ def test_repository_crud_round_trips_commands_and_preserves_configuration(
     config_file.write_text(
         """# global configuration comment
 defaults:
+  roles: {spec: codex, review: codex}
   validation:
     auto_detect: false
   notifications:
@@ -967,12 +1050,13 @@ def test_agent_preset_crud_persists_in_resolved_config_without_touching_provider
     config_file = tmp_path / "orchestrator.yml"
     config_file.write_text(
         """defaults:
+  roles: {spec: codex, review: codex}
   agents:
-    planner: {provider: jules}
+    planner: {provider: api}
     implementer: {provider: codex}
-    reviewer: {provider: jules}
+    reviewer: {provider: api}
   providers:
-    jules: {type: jules}
+    api: {type: litellm, model: test/model}
     codex: {type: codex-cli, command: [codex, exec, -]}
 repositories:
   example:
@@ -1028,12 +1112,13 @@ def test_agent_fallback_preset_persistence_tracks_rename_and_explicit_disable(
     config_file = tmp_path / "orchestrator.yml"
     config_file.write_text(
         """defaults:
+  roles: {spec: codex, review: codex}
   agents:
-    planner: {provider: jules}
+    planner: {provider: api}
     implementer: {provider: codex}
-    reviewer: {provider: jules}
+    reviewer: {provider: api}
   providers:
-    jules: {type: jules}
+    api: {type: litellm, model: test/model}
     codex: {type: codex-cli, command: [codex, exec, -]}
 repositories:
   example:
@@ -1043,7 +1128,7 @@ repositories:
     )
     loader = ProjectConfigLoader(config_file)
     loader.save_agent_preset(
-        "example", "planner", "backup", AgentPresetConfig(provider="jules")
+        "example", "planner", "backup", AgentPresetConfig(provider="api")
     )
 
     loader.save_agent_fallback_preset("example", "planner", "backup")
@@ -1092,7 +1177,7 @@ def test_codex_approval_policy_rejects_unknown_values(tmp_path: Path) -> None:
 
 def test_approve_for_me_rejects_a_non_workspace_write_sandbox(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="requires the workspace-write sandbox"):
-        ProjectConfig.model_validate(
+        _validated_config(
             {
                 "path": tmp_path,
                 "integrations": {
@@ -1110,9 +1195,9 @@ def test_legacy_roles_and_integrations_are_migrated_to_named_providers(
 ) -> None:
     config = _config(tmp_path, {"approval_policy": "approve-for-me"})
 
-    assert config.agents.planner.provider == "jules"
+    assert config.agents.planner.provider == "codex"
     assert config.agents.implementer.provider == "codex"
-    assert config.agents.reviewer.provider == "jules"
+    assert config.agents.reviewer.provider == "codex"
     codex = CodexCliProviderSettings.model_validate(
         config.providers["codex"].model_dump()
     )
@@ -1133,7 +1218,7 @@ def test_legacy_codex_runtime_settings_are_migrated_to_named_provider(tmp_path: 
 def test_new_agent_configuration_keeps_provider_options_scoped_by_name(
     tmp_path: Path,
 ) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "agents": {
@@ -1142,7 +1227,7 @@ def test_new_agent_configuration_keeps_provider_options_scoped_by_name(
                 "reviewer": {"provider": "planner"},
             },
             "providers": {
-                "planner": {"type": "jules", "poll_interval_seconds": 9},
+                "planner": {"type": "litellm", "model": "test/model"},
                 "worker": {
                     "type": "codex-cli",
                     "command": ["codex", "exec", "-"],
@@ -1152,19 +1237,18 @@ def test_new_agent_configuration_keeps_provider_options_scoped_by_name(
         }
     )
 
-    assert config.providers["planner"].model_dump()["poll_interval_seconds"] == 9
+    assert config.providers["planner"].model_dump()["model"] == "test/model"
     assert config.providers["worker"].model_dump()["approval_policy"] == "approve-for-me"
 
 
 def test_explicit_agent_configuration_takes_precedence_over_legacy_roles(
     tmp_path: Path,
 ) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
-            "roles": {"spec": "jules", "implementation": "codex", "review": "jules"},
+            "roles": {"spec": "codex", "implementation": "codex", "review": "codex"},
             "integrations": {
-                "jules": {"poll_interval_seconds": 5},
                 "codex": {
                     "command": ["codex", "exec", "-"],
                     "model": "legacy-model",
@@ -1212,12 +1296,12 @@ def test_partial_modern_agent_configuration_fails_instead_of_using_legacy_defaul
     tmp_path: Path, partial_configuration: dict[str, object]
 ) -> None:
     with pytest.raises(ValidationError, match="Modern agent configuration requires both"):
-        ProjectConfig.model_validate({"path": tmp_path, **partial_configuration})
+        _validated_config({"path": tmp_path, **partial_configuration})
 
 
 def test_explicit_agent_configuration_requires_every_role(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="Explicit agents configuration is missing roles"):
-        ProjectConfig.model_validate(
+        _validated_config(
             {
                 "path": tmp_path,
                 "agents": {"planner": {"provider": "vertex-gemini"}},
@@ -1404,7 +1488,7 @@ def test_global_config_discovery_reports_every_searched_location(tmp_path: Path)
 
 
 def test_qdrant_connection_modes_validate_exclusive_fields(tmp_path: Path) -> None:
-    local = ProjectConfig.model_validate(
+    local = _validated_config(
         {
             "path": tmp_path,
             "repository_context": {
@@ -1413,7 +1497,7 @@ def test_qdrant_connection_modes_validate_exclusive_fields(tmp_path: Path) -> No
             },
         }
     )
-    url_server = ProjectConfig.model_validate(
+    url_server = _validated_config(
         {
             "path": tmp_path,
             "repository_context": {
@@ -1422,7 +1506,7 @@ def test_qdrant_connection_modes_validate_exclusive_fields(tmp_path: Path) -> No
             },
         }
     )
-    host_server = ProjectConfig.model_validate(
+    host_server = _validated_config(
         {
             "path": tmp_path,
             "repository_context": {
@@ -1444,7 +1528,7 @@ def test_qdrant_connection_modes_validate_exclusive_fields(tmp_path: Path) -> No
     ]
     for qdrant in invalid_settings:
         with pytest.raises(ValidationError):
-            ProjectConfig.model_validate(
+            _validated_config(
                 {
                     "path": tmp_path,
                     "repository_context": {"strategy": "qdrant", "qdrant": qdrant},
@@ -1461,6 +1545,7 @@ def test_loader_resolves_qdrant_identity_and_external_local_path(tmp_path: Path)
         yaml.safe_dump(
             {
                 "defaults": {
+                    "roles": {"spec": "codex", "review": "codex"},
                     "repository_context": {
                         "strategy": "qdrant",
                         "qdrant": {"mode": "local", "path": "indexes"},
@@ -1493,7 +1578,10 @@ def test_loader_rejects_qdrant_for_path_only_repository_or_index_inside_repo(
     path_only_config.write_text(
         yaml.safe_dump(
             {
-                "defaults": {"repository_context": {"strategy": "qdrant"}},
+                "defaults": {
+                    "roles": {"spec": "codex", "review": "codex"},
+                    "repository_context": {"strategy": "qdrant"},
+                },
                 "repositories": {},
             }
         ),
@@ -1506,7 +1594,10 @@ def test_loader_rejects_qdrant_for_path_only_repository_or_index_inside_repo(
     inside_config.write_text(
         yaml.safe_dump(
             {
-                "defaults": {"repository_context": {"strategy": "qdrant"}},
+                "defaults": {
+                    "roles": {"spec": "codex", "review": "codex"},
+                    "repository_context": {"strategy": "qdrant"},
+                },
                 "repositories": {
                     "example": {
                         "path": str(repository),
@@ -1535,7 +1626,7 @@ def test_loader_rejects_qdrant_for_path_only_repository_or_index_inside_repo(
 
 
 def _concurrency_config(tmp_path: Path, providers: dict[str, object]) -> ProjectConfig:
-    return ProjectConfig.model_validate(
+    return _validated_config(
         {
             "path": tmp_path,
             "agents": {
@@ -1690,7 +1781,7 @@ def test_runtime_overrides_retain_the_original_provider_concurrency_identity(
 
 
 def test_presets_retain_the_original_provider_concurrency_identity(tmp_path: Path) -> None:
-    config = ProjectConfig.model_validate(
+    config = _validated_config(
         {
             "path": tmp_path,
             "agents": {

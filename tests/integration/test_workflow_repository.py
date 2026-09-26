@@ -58,10 +58,13 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     repository.record_workspace(execution.id, "/workspaces/api/execution-1")
     repository.update_status(execution.id, WorkflowStatus.RUNNING)
     repository.update_stage(execution.id, WorkflowStage.GENERATE_SPEC)
-    repository.record_spec_jules_session(execution.id, "spec-1", "https://jules.example/spec-1")
+    repository.record_spec_jules_session(execution.id, "spec-1", "https://example.test/spec-1")
+    repository.record_review_jules_session(
+        execution.id, "review-1", "https://example.test/review-1"
+    )
     step_id = repository.start_step(execution.id, WorkflowStage.GENERATE_SPEC)
-    repository.finish_step(step_id, StepStatus.FAILED, "jules unavailable")
-    repository.record_error(execution.id, "jules unavailable")
+    repository.finish_step(step_id, StepStatus.FAILED, "provider unavailable")
+    repository.record_error(execution.id, "provider unavailable")
     repository.finish(execution.id, WorkflowStatus.FAILED)
 
     persisted = repository.get_execution(execution.id)
@@ -77,14 +80,16 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     assert persisted.repository_ref == ""
     assert persisted.workspace_path == "/workspaces/api/execution-1"
     assert persisted.spec_jules_session_id == "spec-1"
-    assert persisted.spec_jules_session_url == "https://jules.example/spec-1"
+    assert persisted.spec_jules_session_url == "https://example.test/spec-1"
+    assert persisted.review_jules_session_id == "review-1"
+    assert persisted.review_jules_session_url == "https://example.test/review-1"
     assert persisted.status is WorkflowStatus.FAILED
-    assert persisted.error_message == "jules unavailable"
+    assert persisted.error_message == "provider unavailable"
     assert persisted.finished_at is not None
     assert len(steps) == 1
     assert steps[0].stage is WorkflowStage.GENERATE_SPEC
     assert steps[0].status is StepStatus.FAILED
-    assert steps[0].error_message == "jules unavailable"
+    assert steps[0].error_message == "provider unavailable"
 
     github_execution = repository.create_execution("42", task_source="github")
     github_task = DevelopmentTask(

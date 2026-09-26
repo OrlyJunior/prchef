@@ -5,7 +5,7 @@
 - `models`: dataclasses e enums do dominio, sem dependencias de infraestrutura.
 - `services`: providers de task, prompts, parsing de resultados, validacao, debug isolado e maquina de workflow.
 - `providers`: contrato comum de agentes, adaptadores e registry explicito por tipo.
-- `clients`: Trello HTTP, GitHub Issues/PRs via `gh`, API de sessoes Jules, Codex e Git.
+- `clients`: Trello HTTP, GitHub Issues/PRs via `gh`, Codex, Claude Code e Git.
 - `repositories`: entidades SQLAlchemy, serializacao e `WorkflowRepository`.
 - `config`: settings de ambiente, merge YAML e fabrica de sessoes.
 - `cli`: composicao das dependencias e interface Typer.
@@ -41,13 +41,9 @@ ha migration. `docs/PROJECT_CONTEXT.md` continua sendo carregado separadamente e
 4. Defaults e a configuracao registrada em `repositories.<key>` do `orchestrator.yml` sao
    mesclados. Um `.orchestrator.yml` no alvo e ignorado com aviso.
 5. O provider associado a `agents.planner` recebe um `AgentRequest`, incluindo o contexto duravel
-   versionado de `docs/PROJECT_CONTEXT.md` quando presente. Com Jules, o adaptador cria
-   uma sessao remota read-only com `AUTOMATION_MODE_UNSPECIFIED`; seu ID e URL sao persistidos antes
-   do polling. Com `gemini-vertex`, o adaptador faz uma chamada Vertex AI request/response usando
-   ADC, sem acesso a filesystem, shell ou ferramentas locais. Com `litellm`, o adaptador faz uma
-   chamada API-modelo genÃ©rica (cloud ou endpoint local/self-hosted), tambÃ©m sem acesso implÃ­cito a
-   filesystem, shell ou ferramentas locais. A spec parte da branch base e o review
-   parte da feature branch.
+   versionado de `docs/PROJECT_CONTEXT.md` quando presente. Providers de API como
+   `gemini-vertex` e `litellm` nao possuem acesso implicito a filesystem, shell ou
+   ferramentas locais. A spec parte da branch base e o review da feature branch.
 6. Ambiguidade bloqueante encerra em `NEEDS_HUMAN`.
 7. Git cria uma branch nova a partir da branch base, recusando qualquer branch protegida.
 8. O provider associado a `agents.implementer` recebe a task original e a spec, e trabalha apenas
@@ -56,7 +52,7 @@ ha migration. `docs/PROJECT_CONTEXT.md` continua sendo carregado separadamente e
 10. Git cria commit e push; o `gh` autenticado cria o PR; o provider associado a
     `agents.reviewer` revisa task, spec, diff, PR e checks.
 11. O review devolve decisão estruturada (`APPROVED`, `CHANGES_REQUESTED` ou `NEEDS_HUMAN`).
-    JSON inválido/contraditório ou estados Jules aguardando intervenção humana viram
+    JSON inválido/contraditório ou pedido de intervenção humana viram
     `NEEDS_HUMAN`; falhas operacionais viram `FAILED`.
 
 O comando `debug` monta inputs explícitos e chama apenas a etapa selecionada. Uma
@@ -76,7 +72,7 @@ Spec/Implementation/Review service
 AgentProvider.execute(AgentRequest) -> AgentResult
               |
               v
-JulesClient (REST/polling), CodexClient (CLI/subprocesso), Gemini Vertex ou LiteLLM (SDK/API)
+Codex e Claude Code (CLI/subprocesso), Gemini Vertex ou LiteLLM (SDK/API)
 ```
 
 O papel define as instrucoes e a expectativa de output estruturado. O provider resolve o mecanismo
@@ -127,9 +123,9 @@ cada etapa, permitindo que uma V2 selecione um ponto de retomada sem mudar o sch
 ## Persistencia
 
 `workflow_executions` guarda `task_source`, `task_id`, `task_url`, identificadores operacionais,
-IDs/URLs das sessoes Jules e
-snapshots JSON de task, spec, implementacao, validacao e review. `workflow_steps` guarda inicio, fim, estado e erro de cada
-etapa. As colunas Trello legadas permanecem para compatibilidade. As foreign keys usam
+referencias historicas de execucao e snapshots JSON de task, spec, implementacao, validacao e
+review. `workflow_steps` guarda inicio, fim, estado e erro de cada etapa. As colunas Trello legadas
+permanecem para compatibilidade. As foreign keys usam
 `ON DELETE CASCADE`; indices atendem busca por origem/ID, card legado, status e etapa.
 
 ## Limites intencionais

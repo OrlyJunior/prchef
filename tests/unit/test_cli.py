@@ -37,7 +37,8 @@ def test_cli_and_tui_select_only_the_matching_planner_app(
         (tmp_path / name / ".git").mkdir(parents=True)
     config_file = tmp_path / "orchestrator.yml"
     config_file.write_text(
-        """defaults: {}
+        """defaults:
+  roles: {spec: codex, review: codex}
 repositories:
   first:
     path: first
@@ -98,7 +99,7 @@ def test_cli_slug_with_duplicate_origins_uses_only_a_shared_identity(
         "unconfigured": "        planner_app: {}\n",
     }[second_identity]
     config_file.write_text(
-        "defaults: {}\nrepositories:\n"
+        "defaults:\n  roles: {spec: codex, review: codex}\nrepositories:\n"
         "  first:\n    path: first\n    integrations:\n      github:\n"
         "        planner_app:\n          app_id: 1\n"
         "          installation_id: 11\n          private_key_env: FIRST_KEY\n"
@@ -132,7 +133,7 @@ def test_cli_slug_with_duplicate_origins_and_no_planner_app_keeps_gh_fallback(
         (tmp_path / name / ".git").mkdir(parents=True)
     config_file = tmp_path / "orchestrator.yml"
     config_file.write_text(
-        "defaults: {}\nrepositories:\n"
+        "defaults:\n  roles: {spec: codex, review: codex}\nrepositories:\n"
         "  first:\n    path: first\n"
         "  second:\n    path: second\n",
         encoding="utf-8",
@@ -240,7 +241,7 @@ def test_cli_providers_lists_configured_provider_names_and_types(
     monkeypatch.setattr(
         main,
         "ClientFactory",
-        lambda api_key: (_ for _ in ()).throw(AssertionError("must not create clients")),
+        lambda: (_ for _ in ()).throw(AssertionError("must not create clients")),
     )
 
     result = runner.invoke(main.app, ["providers", "--config", str(config)])
@@ -277,7 +278,7 @@ def test_cli_providers_uses_global_config_from_an_isolated_cwd(
     for variable in ("ORCHESTRATOR_CONFIG", "ORCHESTRATOR_CONFIG_FILE"):
         monkeypatch.delenv(variable, raising=False)
     config = tmp_path / "orchestrator.yml"
-    config.write_text("defaults: {}\n", encoding="utf-8")
+    config.write_text("defaults:\n  roles: {spec: codex, review: codex}\n", encoding="utf-8")
     isolated_cwd = tmp_path / "unrelated" / "directory"
     isolated_cwd.mkdir(parents=True)
     monkeypatch.chdir(isolated_cwd)
@@ -286,7 +287,32 @@ def test_cli_providers_uses_global_config_from_an_isolated_cwd(
     result = runner.invoke(main.app, ["providers"])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "jules  jules\ncodex  codex-cli\n"
+    assert result.stdout == "codex  codex-cli\n"
+
+
+@pytest.mark.parametrize("command", ["providers", "tui"])
+def test_cli_surfaces_rejected_jules_provider_before_startup(
+    tmp_path: Path, command: str
+) -> None:
+    config = tmp_path / "orchestrator.yml"
+    config.write_text(
+        """defaults:
+  agents:
+    planner: {provider: codex}
+    implementer: {provider: codex}
+    reviewer: {provider: codex}
+  providers:
+    codex: {type: codex-cli, command: [codex, exec, -]}
+    retired: {type: jules}
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(main.app, [command, "--config", str(config)])
+
+    assert result.exit_code == 2
+    assert "retired" in result.output
+    assert "codex-cli" in result.output
 
 
 def test_cli_help_starts_from_an_arbitrary_directory_without_configuration(
@@ -396,7 +422,7 @@ def _stub_runtime(monkeypatch: Any) -> None:
             has_planner_github_app=lambda: False,
         ),
     )
-    monkeypatch.setattr(main, "ClientFactory", lambda api_key: object())
+    monkeypatch.setattr(main, "ClientFactory", lambda: object())
 
 
 def test_cli_debug_runs_only_selected_stage_and_supports_dry_run(
@@ -554,7 +580,7 @@ def test_cli_respond_uses_same_execution_and_service_logic(monkeypatch: Any) -> 
         lambda path: SimpleNamespace(load_defaults=lambda: SimpleNamespace(providers={})),
     )
     monkeypatch.setattr(main, "WorkflowService", RespondService)
-    monkeypatch.setattr(main, "ClientFactory", lambda api_key: object())
+    monkeypatch.setattr(main, "ClientFactory", lambda: object())
 
     result = runner.invoke(
         main.app,
@@ -569,7 +595,7 @@ def test_cli_launches_textual_tui_after_migrations(monkeypatch: Any, tmp_path: P
     _stub_runtime(monkeypatch)
     launched = False
     config = tmp_path / "orchestrator.yml"
-    config.write_text("defaults: {}\n", encoding="utf-8")
+    config.write_text("defaults:\n  roles: {spec: codex, review: codex}\n", encoding="utf-8")
     monkeypatch.setattr(main, "_config_loader", lambda path: main.ProjectConfigLoader(path))
 
     class TuiApp:
