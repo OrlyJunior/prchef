@@ -85,9 +85,11 @@
   the normal submission path and reload the current task without changing earlier branches,
   worktrees, PRs, or human actions. The service checks the latest repository-scoped execution
   when creating each new row, including CLI submissions. Configured repository keys and resolved
-  paths identify the same repository for launcher lookups and admission; SQLite admission locks
-  before reading the latest run and inserting a new row so concurrent launchers serialize.
-  A CLI run without a repository resolves
+  paths identify the same repository for launcher lookups and admission; SQLite reserves its
+  writer slot and PostgreSQL takes a transaction advisory lock by task source and ID before
+  reading the latest run and inserting a new row, so concurrent launchers serialize. When a
+  provider read fails, repository inference groups configured keys and resolved path aliases
+  before deciding whether prior history is ambiguous. A CLI run without a repository resolves
   it from a task snapshot at submission and uses that same snapshot after dispatcher admission,
   so a queued provider edit cannot change the repository being executed. If task loading fails,
   a unique prior repository can supply that identity; the original provider error is recorded

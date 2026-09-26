@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
+from unittest.mock import Mock, call
 
 import pytest
 from alembic import command
@@ -18,7 +19,10 @@ from orchestrator.models import (
     WorkflowStage,
     WorkflowStatus,
 )
-from orchestrator.repositories.workflow_repository import WorkflowRepository
+from orchestrator.repositories.workflow_repository import (
+    WorkflowRepository,
+    _lock_fresh_run_admission,
+)
 from orchestrator.services.workflow_service import WorkflowService
 from orchestrator.workspace.manager import WorkspaceManager
 
@@ -604,6 +608,25 @@ def test_concurrent_fresh_run_admission_serializes_sqlite_read_and_insert(
     assert repository.executions_for_tasks("github", ["12"], "example")["12"].id in results
 
 
+def test_postgresql_fresh_run_admission_locks_provider_task_before_status_read() -> None:
+    session = Mock()
+    session.get_bind.return_value.dialect.name = "postgresql"
+    calls = Mock()
+    calls.attach_mock(session.connection.return_value.exec_driver_sql, "driver")
+    calls.attach_mock(session.execute, "execute")
+
+    _lock_fresh_run_admission(session, "github", "12")
+
+    assert calls.mock_calls[0] == call.driver("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+    assert str(calls.mock_calls[1].args[0]) == "SELECT pg_advisory_xact_lock(:key)"
+    first_key = calls.mock_calls[1].args[1]["key"]
+    assert -(2**63) <= first_key < 2**63
+    _lock_fresh_run_admission(session, "github", "12")
+    assert calls.mock_calls[3].args[1]["key"] == first_key
+    _lock_fresh_run_admission(session, "trello", "12")
+    assert calls.mock_calls[5].args[1]["key"] != first_key
+
+
 def test_service_fresh_run_reloads_edited_task_and_keeps_earlier_execution(
     tmp_path: Path,
 ) -> None:
@@ -718,6 +741,51 @@ def test_failed_admission_read_is_recorded_without_refetching_task(tmp_path: Pat
     assert result.task_snapshot is None
     assert "provider unavailable" in (result.error_message or "")
     assert provider_reads == 1
+
+
+def test_failed_provider_read_infers_one_repository_from_key_and_path_history(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "inferred-repository-aliases.db")
+    project = tmp_path / "project"
+    project.mkdir()
+    config = tmp_path / "orchestrator.yml"
+    config.write_text(f"repositories:\n  example:\n    path: {project.as_posix()}\n")
+
+    by_key = repository.create_execution("12", "github", repository_ref="example")
+    repository.update_status(by_key.id, WorkflowStatus.FAILED)
+    by_path = repository.create_execution("12", "github", repository_ref=str(project.resolve()))
+    provider_reads = 0
+
+    class Provider:
+        source = "github"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            nonlocal provider_reads
+            provider_reads += 1
+            raise RuntimeError("provider unavailable")
+
+    service = WorkflowService(
+        repository, Provider(), ProjectConfigLoader(config), object(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("12")
+    assert repository.get_execution(by_path.id).status == WorkflowStatus.PENDING
+
+    repository.update_status(by_path.id, WorkflowStatus.FAILED)
+    result = service.run("12")
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.current_stage == WorkflowStage.LOAD_TASK
+    assert "provider unavailable" in (result.error_message or "")
+    assert result.id not in {by_key.id, by_path.id}
+    assert provider_reads == 2
+    assert repository.get_execution(by_key.id).status == WorkflowStatus.FAILED
+    assert repository.get_execution(by_path.id).status == WorkflowStatus.FAILED
+    aliases = ProjectConfigLoader(config).repository_identity_aliases("example")
+    assert repository.executions_for_tasks(
+        "github", ["12"], "example", repository_aliases=aliases
+    )["12"].id == result.id
 
 
 def test_fresh_runs_keep_separate_branch_and_worktree_records(tmp_path: Path) -> None:

@@ -263,8 +263,18 @@ class WorkflowService:
                     else admission_task.repository
                 )
             if not repository_ref:
+                def historical_aliases(reference: str) -> tuple[str, ...]:
+                    if not isinstance(self._config_loader, ProjectConfigLoader):
+                        return (reference,)
+                    try:
+                        return self._config_loader.repository_identity_aliases(reference)
+                    except (ConfigurationError, OSError):
+                        # LOAD_CONFIG can report a broken configuration after
+                        # the provider's LOAD_TASK error is recorded.
+                        return (reference,)
+
                 repository_ref = self._repository.inferred_repository_for_task(
-                    self._task_provider.source, task_id
+                    self._task_provider.source, task_id, historical_aliases
                 )
         if isinstance(self._repository, WorkflowRepository):
             aliases: tuple[str, ...] = ()

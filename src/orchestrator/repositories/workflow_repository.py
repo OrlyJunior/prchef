@@ -5,9 +5,10 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any, cast
 
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import case, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -63,6 +64,30 @@ def _load(value: str | None) -> dict[str, Any] | None:
 _ACTIVE_STATUS_VALUES = frozenset(status.value for status in ACTIVE_WORKFLOW_STATUSES)
 
 
+def _lock_fresh_run_admission(session: Session, task_source: str, task_id: str) -> None:
+    """Serialize the latest-status read and insert for a provider task.
+
+    Locking by source and ID (across repositories) also covers submissions
+    using different aliases for the same configured repository.
+    """
+
+    bind = session.get_bind()
+    if bind.dialect.name == "sqlite":
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    elif bind.dialect.name == "postgresql":
+        # READ COMMITTED gives the status query a new snapshot after a
+        # competing transaction releases its advisory lock and commits.
+        session.connection().exec_driver_sql("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        lock_key = int.from_bytes(
+            sha256(f"{task_source}\0{task_id}".encode()).digest()[:8], "big", signed=True
+        )
+        session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+    else:
+        raise RuntimeError(
+            f"Fresh-run admission requires a database lock for {bind.dialect.name}"
+        )
+
+
 class WorkflowRepository:
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._sessions = session_factory
@@ -91,11 +116,7 @@ class WorkflowRepository:
         )
         with self._sessions() as session, session.begin():
             if repository_ref:
-                # SQLite SELECTs in deferred transactions do not reserve the
-                # writer slot. Take it before reading so competing launchers
-                # cannot both admit a new PENDING row from the same old run.
-                if session.bind is not None and session.bind.dialect.name == "sqlite":
-                    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                _lock_fresh_run_admission(session, task_source, task_id)
                 references = tuple(dict.fromkeys((repository_ref, *repository_aliases)))
                 latest = session.scalars(
                     select(WorkflowExecutionEntity)
@@ -222,7 +243,12 @@ class WorkflowRepository:
                 latest.setdefault(entity.task_id, self._to_domain(entity))
             return latest
 
-    def inferred_repository_for_task(self, task_source: str, task_id: str) -> str | None:
+    def inferred_repository_for_task(
+        self,
+        task_source: str,
+        task_id: str,
+        identity_aliases: Callable[[str], Sequence[str]] | None = None,
+    ) -> str | None:
         """Recover an unambiguous prior repository if task loading is unavailable."""
 
         with self._sessions() as session:
@@ -235,16 +261,22 @@ class WorkflowRepository:
                     WorkflowExecutionEntity.task_id == task_id,
                 )
             ).all()
-        references = {
+        references = sorted({
             reference or repository for reference, repository in rows
             if reference or repository
-        }
-        if len(references) > 1:
+        })
+        identities = [
+            set(identity_aliases(reference)) | {reference} if identity_aliases else {reference}
+            for reference in references
+        ]
+        if identities and any(
+            not identities[0].intersection(identity) for identity in identities[1:]
+        ):
             raise ValueError(
                 f"Cannot resolve repository for {task_source} task {task_id} while "
                 "the task provider is unavailable; specify the repository"
             )
-        return next(iter(references)) if references else None
+        return references[0] if references else None
 
     def update_task(self, execution_id: str, task: DevelopmentTask) -> None:
         def mutate(entity: WorkflowExecutionEntity) -> None:
