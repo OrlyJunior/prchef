@@ -234,7 +234,14 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     assert "Stable architecture rule." in provider.requests[0].instructions
     assert "LOCAL REPOSITORY CONTEXT" in provider.requests[0].instructions
     assert "src/provider_contract.py" in provider.requests[0].instructions
-    assert "keep\ndocs/PROJECT_CONTEXT.md accurate" in provider.requests[0].instructions
+    planner_prompt = " ".join(provider.requests[0].instructions.split())
+    assert "configured durable project context file only if" in planner_prompt
+    assert (
+        "project purpose, operating model, layering, an invariant, or a design decision"
+        in planner_prompt
+    )
+    assert "Do not request feature behavior, UI details, or per-change notes" in planner_prompt
+    assert "architecture, workflows, domain behavior" not in planner_prompt
     assert (
         "Treat the TUI as a first-class product\n  interface"
         in provider.requests[0].instructions
@@ -375,7 +382,9 @@ def test_implementer_depends_only_on_common_agent_provider(tmp_path: Path) -> No
     assert result.changed_files == ["src/example.py"]
     assert provider.requests[0].workspace_path == tmp_path
     assert "Stable architecture rule." in provider.requests[0].instructions
-    assert "Keep docs/PROJECT_CONTEXT.md accurate" in provider.requests[0].instructions
+    assert "Update the configured durable project context file only when" in (
+        provider.requests[0].instructions
+    )
     assert provider.requests[0].instructions.count("Prefer small, tested changes.") == 1
     assert "Plan with concise steps." not in provider.requests[0].instructions
     assert "Prioritize regression risks." not in provider.requests[0].instructions
@@ -419,6 +428,39 @@ def test_implementer_instructions_are_included_in_all_implementation_prompts(
 
     assert all(prompt.count("Prefer small, tested changes.") == 1 for prompt in prompts)
     assert all("Prioritize regression risks." not in prompt for prompt in prompts)
+
+
+@pytest.mark.parametrize("path", list(_ImplementerPath))
+def test_every_implementer_path_limits_durable_context_updates(
+    tmp_path: Path, path: _ImplementerPath
+) -> None:
+    service = ImplementationService(
+        RecordingProvider(AgentResult(output="unused")), ChangedFilesGit()  # type: ignore[arg-type]
+    )
+    prompt = service._build_request(
+        path,
+        tmp_path,
+        task=_task(),
+        spec=_spec(),
+        validation=ValidationResult(success=False),
+        review=CodeReview(result=ReviewDecision.CHANGES_REQUESTED, summary="Fix this."),
+        suggestions=[],
+        pull_request=PullRequest(5, "https://github.example/pull/5", "Task", "develop", "feature"),
+        feedback="Finish the edge case",
+        prompt_input="Make the requested change.",
+    ).instructions
+    normalized = " ".join(prompt.split())
+
+    assert prompt.count("Update the configured durable project context file only when") == 1
+    assert (
+        "project purpose, operating model, layering, an invariant, or a design decision"
+        in normalized
+    )
+    assert "Never add feature behavior, UI details, or per-change notes" in normalized
+    assert "within its configured prompt cap" in normalized
+    assert "condensing or replacing existing lines instead of appending" in normalized
+    assert "architecture, workflows, domain behavior" not in normalized
+    assert "docs/PROJECT_CONTEXT.md" not in normalized
 
 
 @pytest.mark.parametrize(
@@ -1086,6 +1128,13 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
         in provider.requests[0].instructions
     )
     assert "may accompany APPROVED" in provider.requests[0].instructions
+    reviewer_prompt = " ".join(provider.requests[0].instructions.split())
+    assert "configured durable project context file" in reviewer_prompt
+    assert "feature-level or redundant additions in `suggestions`" in reviewer_prompt
+    assert "non-blocking and may accompany APPROVED" in reviewer_prompt
+    assert "changed file exceeds its configured prompt cap" in reviewer_prompt
+    assert "report a blocking finding and request changes" in reviewer_prompt
+    assert "unchanged durable context file was already over the cap" in reviewer_prompt
     assert provider.requests[0].instructions.count("Prioritize regression risks.") == 1
     assert "Prefer small, tested changes." not in provider.requests[0].instructions
     assert '"repository": "owner/repo"' in provider.requests[0].instructions

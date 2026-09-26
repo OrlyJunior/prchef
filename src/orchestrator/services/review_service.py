@@ -143,8 +143,12 @@ RISK REVIEW:
   behavior; and regressions in pre-existing flows.
 - Also assess unnecessary work, performance, memory/storage growth, token and prompt efficiency,
   redundant model calls or duplicated context, provider coupling, quota/rate-limit handling,
-  configuration compatibility, migration safety, and consistency with durable project context in
-  docs/PROJECT_CONTEXT.md.
+  configuration compatibility, migration safety, and consistency with the configured durable
+  project context file.
+- If the diff changes the configured durable project context file, put feature-level or redundant
+  additions in `suggestions`; they are non-blocking and may accompany APPROVED. If the changed file
+  exceeds its configured prompt cap, report a blocking finding and request changes. Do not block
+  solely because an unchanged durable context file was already over the cap.
 - When the task or diff affects a user-facing surface (CLI, TUI, terminal interface, or
   user-facing messaging), assess usability alongside technical quality. Check label and message
   clarity, action discoverability, unnecessary steps, loading/error/empty/blocked states, and

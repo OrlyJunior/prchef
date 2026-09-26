@@ -157,11 +157,10 @@ USER-FACING PLANNING:
 - Capture relevant UX decisions and interaction constraints in implementation_proposal and
   acceptance_criteria.
 - Do not invent UX requirements for backend-only changes.
-When writing implementation_proposal, explicitly direct
-the implementation agent to keep
-docs/PROJECT_CONTEXT.md accurate when the change affects durable project knowledge
-(architecture, workflows, domain behavior, invariants, configuration, persistence,
-integrations, or design decisions).
+When writing implementation_proposal, direct the implementation agent to update the configured
+durable project context file only if the change alters project purpose, operating model, layering,
+an invariant, or a design decision. Do not request feature behavior, UI details, or per-change notes
+in that file.
 
 Return exactly one JSON object with this shape:
 {{
