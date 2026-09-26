@@ -1,605 +1,113 @@
-# Durable agent context
+# Durable project context
+
+This file holds what the code alone doesn't make obvious: purpose and boundaries, the operating
+model, layering rules, invariants, and design decisions (including things deliberately not done).
+Feature behavior, UI layout, and implementation details are not described here; the code, tests,
+and repository retrieval cover those.
 
 ## Purpose and boundaries
 
-- Python 3.11+ CLI and Textual terminal UI that turn one Trello card or GitHub issue into a
-  guarded change: plan → isolated implementation → validation → commit/push → GitHub PR →
-  review publication.
-- It coordinates providers, Git, GitHub, and persistence. It is **not** a merge bot or a generic
-  repository browser/RAG service. Human-blocked executions are resumable using their persisted
-  workflow state; this is not a provider-session resume system.
-- `docs/PROJECT_CONTEXT.md` is shared supporting context for planning, implementation, and review prompts
-  (capped at 12,000 characters). `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` are optional,
-  capped, role-specific local guidance loaded from the configured repository root at execution
-  time: planners receive only `PLANNER.md`, implementers receive only `IMPLEMENTER.md`, and
-  reviewers receive only `REVIEWER.md`. All are supplementary; the current
-  task, repository state, and core orchestrator invariants win. The role files are Git-ignored by
-  default, can be versioned deliberately, and are editable from the TUI without staging or commit.
-  Symlinked and non-regular role files are ignored when loading; the TUI refuses to save
-  through a symlink. Role-file loading uses bounded memory before prompt rendering.
+- Python 3.11+ CLI and Textual TUI that turn one Trello card or GitHub issue into a guarded change:
+  plan → isolated implementation → validation → commit/push → GitHub PR → review publication.
+- It coordinates providers, Git, GitHub, and persistence. It is not a merge bot and never merges.
+  It is not a generic repository browser or RAG service.
+- It must work for other repositories and languages. Core behavior stays language- and
+  tool-agnostic; nothing in core may assume this repository's structure, tools, or issue numbers.
+- Human-blocked executions resume from persisted workflow state. This is not a provider-session
+  resume system.
+- `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` are optional, local, Git-ignored-by-default
+  role guidance; each role receives only its own file. This file is shared by all roles. All of
+  them are supplementary: the task, repository state, and core invariants win.
 
-## Ownership and layering
+## Operating model
+
+- Single user, single process. Dispatch queues are in-memory; SQLite is the default database;
+  Qdrant local mode is single-process. Concurrent processes, other database backends, and
+  adversarial timing are outside the supported model and are not requirements.
+- Persisted `PENDING`/`WAITING` executions are not recovered automatically at startup.
+- Configuration comes only from a global `orchestrator.yml` (`defaults` deep-merged with
+  `repositories.<key>`). Repository-local configuration files are ignored. Discovery and
+  persistence never depend on the current directory or a source checkout.
+- Persistent state is global per user. Installed as an isolated per-user `pipx` package; the
+  application never alters PATH or shell profiles.
+- Logs go to stderr with UTC timestamps; final `run` and `debug` JSON go to stdout.
+
+## Layering
 
 - `models`: infrastructure-free domain data. `services`: workflow policy, prompts, parsing,
-  validation, and debug orchestration. `providers`: role-neutral agent adapter boundary.
-- `clients`: transport/subprocess/Git details. `repositories`: the only SQLAlchemy persistence
-  boundary. `cli`: dependency composition and stdout/stderr contract. `tui`: a Textual
-  presentation/controller layer over configuration, task providers, the workflow service, and
-  persisted execution reads; it must not implement workflow policy or a second state machine.
-- The TUI presents workflow observer events as a concise user-facing stage timeline by default.
-  A successful planner or reviewer step that leads to NEEDS_HUMAN is shown as waiting for human
-  input in live single-task and batch timelines and persisted batch timelines, since step success
-  alone does not make its result usable. A later successful attempt gets its own completed line;
-  failed attempts stay failed.
-  Sanitized persisted diagnostics are available through its detailed-log toggle and a full-log
-  clipboard export action; they record effective agent requests/responses, validation command
-  results, errors, and workflow events. Clipboard exports preserve readable section metadata and
-  apply the same redaction boundary as persisted diagnostics.
-  Expanded diagnostics grow in the screen's main vertical scroll area rather than using a nested
-  vertical log viewport, so long entries remain readable in live runs and execution history.
-  This does not alter the CLI's concise progress view or workflow observer semantics. `--verbose`
-  emits that same structured diagnostic stream to stderr.
-- The single-task runner renders stopped execution outcomes in a separate panel after the stage
-  timeline instead of adding `WORKFLOW_FINISHED` as another stage line. NEEDS_HUMAN identifies the
-  pending response and exposes the answer/resume form; CHANGES_REQUESTED and eligible FAILED
-  executions link to the existing continuation screen. Ineligible failures, approvals, and
-  cancellations state that no further action is available. These controls follow persisted human
-  interactions and `WorkflowController.continuation_stage`; batch row labels and actions are
-  unchanged. The runner refreshes its outcome and persisted stage timeline when returning from
-  execution detail.
-- TUI screens use `OrchestratorSelect` for Select controls in vertical scroll regions. It reserves
-  visible overlay space after mouse or keyboard activation and restores focus without triggering
-  parent-scroll jumps. Repository controls use its `RepositorySelect` specialization: configured
-  repository keys are both their visible labels and Select values, with the selected key retained
-  by `WorkflowController` across screen navigation.
-- The dedicated TUI Repositories screen creates, edits, renames, and removes entries only under
-  `repositories` in the resolved global `orchestrator.yml`. It retains unrelated YAML content and
-  repository ordering, stores validation commands as argument lists, and reports missing paths
-  without preventing deliberate configuration. Removing an entry never removes its directory,
-  changes Git state, or creates repository-local configuration.
-- That same dedicated Repositories screen is the index-management surface: it shows each selected
-  repository's context strategy and independent semantic-index lifecycle (`not indexed`,
-  `indexing`, `ready`, `stale`, or `failed`), last successful commit/timestamp and counts, and
-  manual build/rebuild, changed-file refresh, and clear actions. Its operations run in TUI workers;
-  the workflow launcher deliberately has no index controls.
-- The TUI launcher may select configured provider instances and role-local runtime settings
-  (model, reasoning, Claude permission mode, and exposed provider generation options) for one run. These overrides are
-  schema-validated in memory, never alter YAML defaults, and may give roles sharing a configured
-  provider independent runtime settings. Validated launch selections are recorded with the execution's
-  diagnostics so a human-blocked execution reapplies them when it resumes. Its default launcher view presents compact per-role
-  provider/model/runtime summaries; role configuration and generation controls are progressive,
-  and generation fields identify Provider/YAML defaults versus temporary overrides. GitHub App
-  identities remain separately persisted, inspectable configuration.
-- With `--verbose`, TUI startup logs each role's configured provider and backend type before the
-  workflow begins; a synthetic `__tui_runtime_*` name indicates only an in-memory override and
-  never changes the selected backend. Provider type is always taken from the configured provider,
-  not inferred from its model name.
-- The TUI launcher automatically browses tasks for its selected repository and task provider.
-  Rows show titles, labels, and checkboxes; users may launch one task through the unchanged
-  single-workflow path or select an ordered batch whose shared role presets/runtime overrides are
-  applied to every item. Rows show the latest execution in the same repository and task source.
-  A latest FAILED, CANCELLED, NEEDS_HUMAN, or CHANGES_REQUESTED execution permits an individually
-  selected fresh run; PENDING, WAITING, RUNNING, and APPROVED do not. Select all includes only
-  tasks without an earlier execution. A selection containing earlier runs requires confirmation
-  and can omit individual reruns while preserving earlier executions in history. Fresh runs use
-  the normal submission path and reload the current task without changing earlier branches,
-  worktrees, PRs, or human actions. The service checks the latest repository-scoped execution
-  when creating each row, including CLI submissions. Configured keys and resolved paths share
-  an identity; SQLite and PostgreSQL lock the latest-status read and insert so concurrent
-  launchers serialize. The new row is timestamped after the prior matching row. Missing or
-  empty CLI repository overrides use one task snapshot for admission and execution, so queued
-  edits cannot switch repositories. If task loading fails, aliased history may provide an
-  unambiguous repository; the provider error is recorded at LOAD_TASK without refetching.
-  Confirmation scrolls within terminal width and keeps its actions visible. Refresh, loading,
-  empty, and inline-error states remain available, as do explicit CLI task identifiers.
-- Label filtering is an optional task-provider capability (`LabelCatalogProvider.list_labels`),
-  implemented only by GitHub issues (the full catalog via the Planner App REST API when
-  configured, otherwise `gh api --paginate`, never the capped `gh label list`); Trello
-  deliberately lacks it.
-  `WorkflowController.list_task_labels` returns `None` for unsupported providers, distinct from an
-  empty catalog, and failures surface as an explicit inline label error rather than hiding the
-  filter. The launcher loads labels with tasks under the same request token, and filters only the
-  loaded list (the default 50-issue browse limit) in memory by exact, case-sensitive names with
-  AND semantics. Selections persist while hidden and still launch; the hint counts them. Select
-  all affects only shown rows without executions. Refresh keeps labels still in the catalog;
-  repository/provider changes and load failures clear the filter.
-- Batch policy is owned by `WorkflowController` and `WorkflowRepository`, not TUI widgets. A batch
-  is persisted before its tasks are submitted in list order through `submit_execution`; it adds no
-  concurrency limit beyond the shared dispatcher and per-provider ceilings. The dispatcher may skip
-  queued jobs behind a closed admission gate while leaving them PENDING, and reevaluates gates when
-  notified. NEEDS_HUMAN, FAILED, and CHANGES_REQUESTED items do not delay other submissions. Answers
-  and continuations for a live batch rejoin the dispatcher tail. The batch stays open while any item
-  is queued, running, waiting for provider capacity, or awaiting human input; it closes when every
-  item is APPROVED, CHANGES_REQUESTED, FAILED, CANCELLED, skipped, or never submitted. Stopping a
-  batch cancels all active items and closes it without requiring answers to NEEDS_HUMAN items.
-  An individual linked batch item in PENDING, WAITING, RUNNING, or NEEDS_HUMAN can be
-  cancelled from either batch view. Active work observes a durable request at a safe
-  boundary; explicit cancellation of NEEDS_HUMAN transitions it directly to CANCELLED
-  and wakes live batch completion bookkeeping. A request made before dispatch
-  registration is checked again after registration, so a closed admission gate
-  cannot strand a cancelled PENDING item. Answer recording and requeueing are
-  one durable transition that cannot revive a concurrently cancelled item. Workflow
-  finish writes honor a cancellation request atomically, including one arriving after
-  the last safe-boundary check, so an accepted request cannot leave an item at
-  NEEDS_HUMAN. Late finish events cannot reopen a cancelled batch row. Live batches
-  also reconcile unresolved items from durable status while waiting, so
-  cancellation from another controller can close the original batch. The persisted
-  view reloads after a request; running rows show cancellation requested until they
-  settle. Returning from batch detail refreshes the live projection from durable
-  execution rows, including status and summary counts while other items remain open.
-  A legacy NEEDS_HUMAN row with a recorded cancellation request shows
-  Cancel so the request can be settled; it does not offer Answer, which the
-  repository would reject. Other items are unaffected.
-  Individual execution detail also offers confirmed cancellation for active
-  executions, including those opened from history or a batch. It uses the
-  controller's durable cancellation path, refreshes the execution after the
-  request, and checks durable status while a request is pending so the open
-  detail screen shows the terminal result when active work settles. Returning
-  to persisted batch detail reloads its rows and summary from durable state.
-  Stored batches remain browsable after restart. `on_batch_created` fires synchronously after the
-  durable batch row commits and before the first submission, exposing its stable identity and order.
-- Batch progress is a read-side TUI projection (`orchestrator.tui.batch_progress`), not a second
-  workflow state machine: it reshapes durable batch items, workflow observer events, and persisted
-  execution/step rows into one ordered, per-position view shared by the active `WorkflowRunnerScreen`
-  batch launch and the persisted `BatchDetailScreen`. Both render the same `BatchProgressView`/
-  `BatchItemRow` widgets, and both reuse the single-task stage/status wording factored into
-  `orchestrator.tui.workflow_presentation` so the two views cannot drift. A summary line always
-  counts every semantic status (queued, waiting for provider, running, needs human, approved,
-  changes requested, failed, cancelled) and is never cleared when the batch finishes; an unlinked
-  batch item (no execution yet) renders as queued rather than disappearing. Each row is independently
-  expandable in the owning screen's existing main scroll region (no nested scroll viewport), showing
-  a concise timeline plus its own show/copy detailed-log and open-execution controls.
-  While visible, `BatchDetailScreen` reconciles linked rows from durable execution state at a
-  bounded interval and immediately on return from execution detail. Changed rows and summary
-  counts update in place, including after a closed batch item's continuation or answer; this
-  does not reopen the batch or resume its live listener.
-- Only a normalized `quota` failure attributed to a named provider makes that provider unavailable
-  for the current batch. Queued items whose selected role or fallback presets use it remain PENDING;
-  other queued items proceed. The live batch view labels held rows, counts them, and lets the user
-  mark the provider available again manually. Availability is batch-scoped and process-local; reset
-  times do not reopen it automatically. Persisted or restarted batches show plain QUEUED/WAITING
-  with no availability state and do not imply queued work resumes after restart. Submitting every
-  item up front can leave multiple PENDING executions after a crash; queued recovery is separate.
-  A quota failure during planning happens before a worktree/spec exists; continuing that execution
-  repeats planning (with earlier answers and the continuation feedback) and then proceeds exactly
-  like a fresh run. `WorkflowService.continuation_stage` is the single eligibility rule every view
-  uses; an already-continued quota failure does not make a later ordinary failure continuable.
-- The live batch view rebuilds its provider-availability controls only when the set of unavailable
-  providers changes (counts update in place, so focus and clicks survive events) and notifies when
-  a provider first starts holding tasks, since those controls usually sit below the launch form.
-- The TUI's Agent Instructions view edits the selected repository's optional `PLANNER.md`,
-  `IMPLEMENTER.md`, and `REVIEWER.md` independently. Missing files remain absent until their own
-  save action; the TUI never stages or commits these files.
-- Provider-specific commands, polling, credentials, or API shapes stay below
-  `AgentProvider.execute(AgentRequest)`. Planner/implementer/reviewer services stay provider
-  neutral.
-- `AgentProvider` is the orchestrator's provider boundary. Model-routing libraries such as
-  LiteLLM are implementation backends behind that boundary and must not own workflow semantics,
-  persistence, scheduling, role behavior, or lifecycle state.
-- `RepositoryContextStrategy` is the separate, orchestrator-owned retrieval-policy boundary used
-  by planner and reviewer prompt composition. The configured strategy is resolved once per
-  workflow/debug invocation and reused across retries and resume paths; it is not an agent
-  provider. `heuristic` remains the compatibility default: planning keeps the existing bounded
-  local tree and ranked excerpts, while review keeps its existing repository/branch metadata block.
-  `qdrant` adds dense semantic retrieval below the same boundary through the official client and a
-  provider-neutral, lazy local FastEmbed boundary; workflow services never import either backend.
-- Qdrant uses one collection per registered repository, derived from both its immutable configured
-  key and a canonical-path identifier. Every point operation is additionally scoped by repository,
-  configured-path, and checkout/worktree `source_root_id`. The orchestrator owns Git-aware source
-  eligibility, full-file hashes, language/symbol/location metadata, bounded overlapping chunks,
-  deterministic point IDs, incremental upsert-before-delete, and complete-block prompt budgeting.
-  Private role files and the separately supplied `docs/PROJECT_CONTEXT.md` are never indexed.
-- Collection metadata retains the latest successful index timestamp and Git HEAD, plus sanitized
-  lifecycle failures. Status inspection compares the stored commit with the current HEAD (an
-  unavailable Git revision is inconclusive rather than an inspection error); a configured
-  `repository_context.fallback_to_heuristic` allows a failed semantic lookup to use the bounded
-  heuristic strategy without preventing the workflow.
-- Qdrant collection metadata records the named `dense` vector, cosine distance, index schema, and
-  embedding provider/model/version/dimension; incompatibility deliberately recreates and fully
-  reindexes the collection. Sparse/hybrid retrieval is not implemented, but the named vector and
-  payload schema leave room for it without changing workflows. Index state is outside SQLAlchemy
-  and outside repositories. A process-owned client manager keyed by canonical connection settings
-  owns one lazily created, long-lived client per configured store, shared by workflow, debug, and
-  TUI index operations; local-mode operations are serialized through a per-store lock. An operation
-  failure never closes that shared client, and each client is closed exactly once at process
-  shutdown. Persistent local mode remains single-process; concurrent *processes* still require
-  Qdrant server mode. A failed sync is not
-  queried, is idempotently repairable, never mutates repository files, and yields a sanitized
-  repository-context diagnostic without widening collection/filter scope.
-- Database schema changes require versioned Alembic migrations; never add runtime
-  `Base.metadata.create_all()`.
+  validation. `providers`: role-neutral agent adapters. `clients`: transport, subprocess, Git.
+  `repositories`: the only SQLAlchemy boundary. `cli`: composition and stdout/stderr contract.
+  `tui`: presentation over the controller.
+- The TUI never implements workflow policy or a second state machine; its batch progress is a
+  read-side projection of durable state.
+- Provider commands, credentials, polling, and API shapes stay below
+  `AgentProvider.execute(AgentRequest)`. Role services are provider-neutral. Model-routing
+  libraries (LiteLLM) are backends behind that boundary and never own workflow semantics.
+- Repository context retrieval is a separate orchestrator-owned strategy boundary (heuristic by
+  default, Qdrant optional). Workflow services never import retrieval backends. Role files and
+  this file are never indexed.
+- Every execution, response, and continuation enters through one submission seam. Scheduling
+  features must use it rather than adding their own concurrency.
+- Schema changes require versioned Alembic migrations; never `create_all` at runtime.
 
-## Runtime and persistence contract
+## Workflow invariants
 
-- `run` and `tui` apply pending Alembic migrations before opening the workflow repository. `show`,
-  and `debug --from-execution`, do the same before database access; a migration failure aborts with
-  a clear error. Keep `alembic upgrade head` usable for manual operations.
-- Persistent state is global rather than repository- or cwd-scoped. Database resolution prefers
-  `ORCHESTRATOR_DATABASE_URL`/`ORCHESTRATOR_DATABASE_PATH`, then global
-  `defaults.persistence.database_url`/`database_path`, then an existing `orchestrator.db` beside
-  the discovered global configuration, and finally `~/.orchestrator/orchestrator.db`. Relative
-  explicit SQLite locations are anchored to the global configuration directory (or the user state
-  directory if no configuration is discovered). Runtime and manual Alembic migrations share this
-  resolver; repository-local configuration never selects persistence. The packaged `orchestrator`
-  console script is intended for an isolated per-user `pipx` installation: discovery considers
-  explicit CLI/environment selection and user-global configuration locations, never the cwd,
-  source checkout, or its `.venv`; packaged migration scripts support both wheel and editable
-  installs without a repository-root path. `pipx ensurepath` is the supported PATH remedy; the
-  application never alters PATH or shell profiles.
-- Runtime logs are UTC ISO-8601 timestamps on stderr. Final `run` execution JSON and all `debug`
-  result JSON stay on stdout. Redact secrets before logging.
-- Execution diagnostics are persisted as JSON-safe `execution_diagnostics` rows and must be
-  redacted before persistence and before observer delivery. They preserve full non-sensitive
-  prompt/output/context data; any future size limit must be explicit to the user. Agent-request
-  diagnostics store `effective_instructions` as the one canonical provider prompt; a distinct
-  `instructions` field is retained only when it adds prompt-construction context. TUI detailed
-  logs and clipboard exports also collapse duplicate legacy prompt fields.
-- Every execution enters through one process-scoped submission seam. `submit_execution`,
-  `submit_response`, and `submit_continuation` synchronously persist the row, return an
-  `ExecutionHandle` exposing the persisted ID plus non-blocking polling and blocking wait/result,
-  and queue bounded in-process work. Submissions may supply a cheap admission gate; a closed gate
-  leaves its job PENDING while workers admit later eligible jobs in FIFO order. `run`,
-  `respond_and_resume`, and `continue_execution` are thin
-  wrappers that submit and immediately wait, so CLI/TUI output and exit behavior are unchanged.
-  Batch, scheduling, continuous-execution, and label-selection features (#44/#45/#46/#147) must
-  submit here rather than adding their own concurrency handling.
-- Ordered batch identity is stored separately in `workflow_batches` and
-  `workflow_batch_items` (repository, task source, title snapshots, positions, and nullable
-  execution links). Batch items never overload execution rows; deleting batch metadata cascades
-  only to its items and leaves linked executions intact.
-- An execution is created as `PENDING` and becomes `RUNNING` only when a dispatcher worker starts
-  it; resumes and continuations return to `PENDING` and compete for the same capacity. Each entered
-  stage is a separately persisted step. Repeated validation/correction attempts create repeated
-  `VALIDATE`/`IMPLEMENT` steps.
-- Concurrency is bounded per *named provider*, because the configured provider instance is the
-  shared resource: one API quota pool, or one GPU's VRAM for a local model. Every provider
-  definition accepts `defaults.providers.<name>.max_concurrency`, a positive integer defaulting to
-  `1`. It is authoritative in exactly one place: a `repositories.<key>.providers.<name>` entry that
-  sets `max_concurrency` is rejected with an actionable configuration error, even when it repeats
-  the default. Other repository provider overrides are unaffected. Ceilings are fixed at startup;
-  changing one requires a restart. There is no global ceiling, resource-pool mapping, backend
-  detection, live resizing, or cross-process coordination.
-- A permit is held only for `AgentProvider.execute`, never across Git, validation, or GitHub work,
-  and is always released. A call that cannot acquire immediately queues FIFO and moves a started
-  execution to `WAITING` — distinct from `PENDING`, which is work that has not begun — emitting the
-  normal persisted status event naming the provider; admission restores `RUNNING`. Different
-  provider names admit independently. TUI runtime overrides and role-local presets are charged to
-  the configured provider they were derived from, so a temporary model change never creates a
-  second quota pool. Fallback releases the primary permit before acquiring the fallback provider's
-  own permit.
-- Concurrent executions share a `WorkflowService` instance, so the event listener and active stage
-  live in per-execution runtime state rather than on the service. Execution-derived worktree paths,
-  branches, and worktree-bound Git/GitHub clients remain distinct per execution.
-- Queueing is in-memory and single-process. Persisted `PENDING`/`WAITING` rows survive a crash but
-  are deliberately **not** resumed automatically at startup; recovery is deferred to #46.
-- Persist: normalized task, resolved repository/base branch and configured repository reference,
-  worktree path, branch, latest
-  implementation and validation snapshots, commit, PR, review, status/error, and timestamps.
-  The implementation/validation snapshots are latest-attempt snapshots, not an attempt history.
-- A `NEEDS_HUMAN` transition creates an append-only human-interaction record containing the
-  requesting stage, exact blocking prompt, request/response timestamps, and the response. `respond`
-  and the TUI resume the same execution ID; planner responses rerun planning before any workspace is
-  created, while review responses reuse the persisted worktree, branch, PR, and snapshots.
-- Any non-terminal execution — `PENDING`, `WAITING`, or `RUNNING` — can receive a durable
-  cancellation request through the workflow service/controller boundary; terminal executions
-  refuse it. It ends as `CANCELLED`, never `FAILED`; providers that cannot be
-  interrupted immediately finish their current operation, but no later stage is scheduled.
-  Queued dispatcher work and provider-queued work are woken or dropped, cancellation is checked
-  immediately before and after permit acquisition, any acquired permit is released, and
-  cancellation-versus-admission races resolve idempotently to `CANCELLED`.
-  Cancellation status and diagnostics remain inspectable after restart.
-- Terminal `CHANGES_REQUESTED` executions, and `FAILED` executions that retained both a
-  workspace and working branch, can be manually continued from the TUI execution detail view.
-  The operator edits the persisted terminal feedback, which is recorded as a diagnostic, then a
-  fresh implementer invocation resumes in the retained worktree at `IMPLEMENT`. Continuations use
-  normal validation/review correction limits but have no manual retry ceiling. A persisted PR must
-  still be open before each resumed push; pushing its retained branch updates the PR, while a
-  missing PR is created after push. A closed or unavailable persisted PR blocks continuation and is
-  never recreated automatically. The open execution detail view reloads persisted status after an
-  answer or continuation. For live batch submissions it keeps refreshing from workflow status
-  events as the item moves through queued, waiting, running, and terminal states; other submissions
-  refresh after their blocking operation completes.
-- Provider startup references during spec/review are persisted immediately in legacy-named
-  `spec_jules_session_*` / `review_jules_session_*` fields. Preserve those fields for later human
-  inspection; no automatic session/workflow resume exists.
-- Workflow observer events are emitted only after persisted status/step transitions. They are for
-  live terminal presentation and listeners may never change workflow semantics or make a run fail.
-- The TUI treats a `WORKFLOW_FINISHED` event as terminal for its active-run controls regardless of
-  final status (including `CHANGES_REQUESTED`), reacting to the event itself rather than waiting
-  for the blocking workflow call to return; this avoids the runner screen appearing stuck on a
-  finished run.
-- TUI history, detail, and live progress distinguish queued `PENDING` ("QUEUED"), provider-capacity
-  `WAITING` ("WAITING FOR AGENT", naming the provider in live status where known), `RUNNING`, and a
-  requested-but-unfinished cancellation. The stop control stays available for all three active
-  states. Concurrency is configured in YAML only; no launcher control exposes it.
+- Status is the outcome; stage is progress. `PENDING` = not started; `WAITING` = started but
+  waiting for provider capacity. A successful review ends at stage `COMPLETED`; other terminal
+  executions keep the stage that stopped them.
+- A blocking planning ambiguity ends as `NEEDS_HUMAN` before any branch or worktree exists.
+- Each execution works in its own linked worktree created from freshly fetched
+  `origin/<base_branch>`. The control checkout is never switched, cleaned, stashed, or reset.
+  Worktrees are retained on every outcome; removal happens only through the explicit cleanup
+  command.
+- Agents never commit, push, create PRs, or merge; the orchestrator owns Git and GitHub. A
+  reported successful implementation with no changes is a failure.
+- Commit and push refuse protected branches; push is only `--set-upstream origin <branch>`. The
+  worktree must share a merge base with the local base branch before every commit and review.
+- All selected validation commands run. A timeout is a failed check only once the whole process
+  tree is confirmed stopped; otherwise the workflow fails without correction.
+- Validation failures and requested changes are corrected in the same worktree, within configured
+  retry budgets. Planning, branch, and worktree are never recreated during corrections.
+- An approved review may get at most one optional polish pass, which can never turn the approval
+  into a change request.
+- No compensation after external side effects: a later failure never rolls back a commit, push,
+  PR, or worktree.
+- Cancellation is a durable request that ends as `CANCELLED`, never `FAILED`, observed at safe
+  boundaries.
+- Configuration errors and explicit human-needed errors end as `NEEDS_HUMAN`; everything else
+  ends as `FAILED`.
+- `debug` is diagnostics, not resume: it runs one boundary and never mutates executions, branches,
+  commits, or PRs.
 
-## Normal `run` behavior
+## Concurrency and providers
 
-1. CLI accepts exactly one task origin: `--trello-card`, `--github-issue`, or `--task-id`.
-   `--task-id` uses configured `task.provider`; GitHub task loading requires `--repository`.
-   Trello/GitHub clients normalize input into `DevelopmentTask` before configuration is resolved.
-2. Resolve the project configuration and derive the GitHub slug from `origin`. Create configured
-   planner/implementer/reviewer instances; a named provider shared by roles is instantiated once.
-3. Generate one structured `RepositorySpec` from the base checkout/base branch. Planning receives
-   bounded, read-only repository context from the configured strategy (`heuristic` tree/excerpts or
-   Qdrant dense chunks), alongside `docs/PROJECT_CONTEXT.md` when present. A blocking spec ambiguity
-   ends the execution as `NEEDS_HUMAN` before any branch or worktree is created.
-4. Build a unique, non-protected working branch name from configured prefix, task identity/title,
-   UTC timestamp, and execution ID. Create a linked worktree from freshly fetched
-   `origin/<base_branch>`; do not switch, clean, stash, reset, or otherwise mutate the control
-   checkout.
-5. Bind mutable Git, GitHub, command, and implementation operations to that worktree. The initial
-   implementation agent may edit it, but is instructed never to commit, push, create a PR, or
-   merge. A reported successful implementation with no Git changes is a failure.
-6. Run validation in the worktree. On success: commit, push, create PR, then run the reviewer
-   against the PR data, validation result, and `base...HEAD` diff. Each review loop is published by
-   the GitHub integration as `APPROVE`, `REQUEST_CHANGES`, or a neutral comment for `NEEDS_HUMAN`.
-   The workflow never auto-merges.
+- Concurrency is bounded per named provider instance (`max_concurrency`, default 1, set only in
+  `defaults.providers`), because that instance is the real shared resource: one quota pool or one
+  GPU. There is no global ceiling, resource-pool mapping, or live resizing.
+- A permit is held only during the provider call, never across Git, validation, or GitHub work.
+  Runtime overrides and presets are charged to the provider they derive from.
+- Fallback is explicit and one hop, only for normalized quota, rate-limit, or capacity failures.
+  There is never a silent provider fallback.
+- Planner and reviewer are read-only and return structured output validated locally. Ambiguous or
+  malformed output is rejected, never guessed.
+- Codex CLI and Claude Code are the first-class local-worktree backends; Claude Code runs in
+  restricted mode with a fixed tool set. LiteLLM is the generic API backend with no implicit
+  filesystem access.
+- Behaviors that trade quota against throughput are configurable, not hardcoded to one user's
+  limits.
 
-## Worktree and Git invariants
+## Safety and diagnostics
 
-- Worktree root is configurable. The default is a sibling `orchestrator-workspaces` directory;
-  configured roots may not resolve inside the control checkout. Existing target paths are errors.
-- Worktrees are retained automatically on success, failure, cancellation, and human intervention so they remain
-  available for inspection and recovery. `cleanup-workspaces --repository <key-or-path> --dry-run`
-  lists their retention decisions; without `--dry-run` it removes successful (`APPROVED` or
-  `CHANGES_REQUESTED`) worktrees and prunes Git metadata. `FAILED`/`CANCELLED`/`NEEDS_HUMAN` worktrees require
-  `--include-failed` (or `--all`); `PENDING`, `WAITING`, `RUNNING`, unmanaged, and out-of-root paths
-  are never removed by this command.
-- Commit/push refuse protected branches and refuse if the current checkout is not the workflow
-  branch. Commit stages **all** worktree changes and fails if nothing is staged. Push is only
-  `git push --set-upstream origin <working-branch>`.
-- The worktree's HEAD must share a merge base with the configured **local** base branch used by
-  the review diff, even if that branch has advanced since the worktree was created from
-  `origin/<base_branch>`. This is checked during branch preparation, before every commit
-  (including continuation, correction, and polish), and again before each review diff. A
-  disconnected history fails at that stage with a specific error. Rewriting the base branch
-  with filter-repo, filter-branch, or rebase --root while a worktree is in flight can cause it.
-- PR creation occurs only after a successful push. `gh pr create` must yield a URL, then `gh pr
-  view` supplies the persisted PR fields. When an implementer App is configured, its resolved bot
-  identity is assigned to the created PR; assignment failures are logged but do not fail the
-  workflow. A later failure never rolls back a commit, push, PR, or worktree.
+- Credentials never go in YAML or tracked files; API keys are environment-variable references.
+- Diagnostics are redacted before persistence and before observer delivery. Observer events are
+  emitted only after persisted transitions and can never change workflow semantics.
+- GitHub App identities (planner, implementer, reviewer) are optional and separate; without them,
+  ambient `gh` authentication is used. Publication failures never change a review decision.
+- Notifications are opt-in and best-effort; delivery failure never affects workflow state.
 
-## Validation and review correction loops
+## Maintaining this file
 
-- Validation starts with configured commands, then appends conservative auto-detected commands.
-  Exact duplicates are skipped; any explicit mypy command suppresses auto-detected `mypy .`.
-  All selected commands run, so the result contains every check rather than stopping at first
-  failure.
-- With `require_tests: true`, absence of a recognizable test command is itself a validation
-  failure. Empty validation is allowed only when tests are not required.
-- `max_validation_retries` defaults to `2` and must be non-negative. A failed validation records
-  its result, then—while budget remains—asks the same implementer to correct the **same worktree**.
-  The correction prompt includes failed commands, exit codes, and redacted output. Recognized
-  pytest `FAILURES` sections cap each test's failure block independently at 4,000 characters,
-  then append the complete redacted `short test summary info` section so every failed test name
-  remains visible. Multiple recognized summaries in one command are retained; text after the
-  last summary has a separate 4,000-character prefix cap. Other completed failure output uses
-  the existing 4,000-character prefix cap. When pytest's report is on stdout and stderr also
-  has output, the prompt includes the parsed stdout report and a capped, redacted stderr excerpt.
-  Text between the `FAILURES` heading and first test header has its own prefix cap; intervening
-  pytest output remains subject to the preceding failure block's cap.
-- A validation command that exceeds `validation.timeout_seconds` is a failed check, not a workflow
-  error: `CommandClient` raises `CommandTimeoutError` (a `CommandExecutionError` subtype) carrying
-  the configured duration and the partial stdout/stderr, decoded as UTF-8 with replacement.
-  The check has no exit code and sets `timed_out`/`timeout_seconds`, later commands still run,
-  and it uses the same retry budget. Its correction prompt names the command and timeout and
-  includes the redacted tails of both captured streams, sharing one 4,000-character output budget.
-  Detection relies only on the subprocess timeout and never parses tool
-  output. Other command execution errors still fail the workflow.
-- On any timeout, `CommandClient` kills the command's whole process tree, reaps the command, then
-  waits a bounded time for output, so children (e.g. behind `npm run test`/Gradle) cannot keep
-  running in the worktree. Windows commands start suspended inside a job object
-  (`clients/windows_job.py`) that is terminated on timeout, reaching descendants even after the
-  launcher (e.g. a `.cmd` shim) exited; `taskkill /F /T` is only a fallback when a job is
-  unavailable. Linux commands run under `clients/process_supervisor.py`, a stdlib-only script
-  started as `python -I -S` that registers as a child subreaper: descendants that leave the
-  process group (`setsid`, double fork) are still reparented to it. It relays output through its
-  own pipes and exits with the command's own status once the command exited and its output
-  closed. On timeout it kills every descendant found through `/proc` and reports `stopped` only
-  once it has no children left. Neither mechanism kills on normal completion, so completed
-  commands, including background processes that released their output, behave as before.
-  Whenever the orchestrator stops reading a stopped command (interruption such as Ctrl+C, or a
-  post-timeout drain that expired), it first closes the command's pipes on POSIX, so a supervisor
-  relaying into a full pipe gets `EPIPE` and exits instead of outliving the bounded wait.
-- A timeout becomes `CommandTimeoutError` only once the tree is confirmed stopped: job empty or
-  supervisor reported `stopped`, output closed, and the command reaped. On other POSIX platforms
-  (e.g. macOS), or on Linux when the supervisor is unavailable, the command leads its own process
-  group; the group is `SIGKILL`ed and confirmed once a bounded `killpg(pgid, 0)` poll finds no
-  member left, so macOS timeouts also reach the correction loop. Known limit there: a descendant
-  that left the group (`setsid`) and released its output cannot be detected. Whenever
-  confirmation fails (a member or pipe-holder survives, or the group cannot be signalled), the
-  timeout raises a plain `CommandExecutionError` and the workflow fails without correction, so an
-  implementer never edits a worktree that a known-live validation process may still be using.
-- Planning, execution ID, branch, and worktree are never recreated during corrections. A passing
-  retry continues to commit/push/PR/review. Exhaustion or correction failure ends as `FAILED` and
-  preserves the worktree.
-- A `CHANGES_REQUESTED` review is retried up to `review.max_review_retries` (default `1`,
-  non-negative). While budget remains, the implementer receives the structured review feedback in
-  the same worktree, then validation (with its own retry budget) runs again. A passing correction
-  is committed and pushed to the existing working branch, updating the existing PR without a new
-  PR creation attempt; the reviewer receives a fresh base...HEAD diff in a newly persisted
-  `REVIEW` step. Repeated requested changes after the budget is exhausted finish as
-  `CHANGES_REQUESTED`; approval finishes as `APPROVED`.
-- An `APPROVED` review with non-blocking suggestions gets at most one optional `POLISH` stage per
-  execution. The implementer may decline every suggestion; that preserves the approval and posts
-  one concise implementer PR comment confirming the suggestions were evaluated and intentionally
-  skipped. The persisted polish outcome and pre-publication comment-attempt marker prevent a
-  resumed or retried execution from repeating either the evaluation or timeline comment. Comment
-  publication failures are non-fatal. Applied scoped polish is validated,
-  committed, and pushed to the existing branch before a fresh review; failed polish validation is
-  discarded, receives the same skip explanation, and never turns the prior approval into a change
-  request.
-- A GitHub review-publication failure is logged and recorded without changing the structured
-  reviewer decision or its terminal status. GitHub App credentials use separate optional reviewer
-  (`integrations.github.app`), implementer (`integrations.github.implementer_app`), and planner
-  (`integrations.github.planner_app`) identities. The planner App uses its installation token for
-  repository-scoped issue and label reads in the TUI and explicit CLI issue lookup. Without it,
-  task discovery retains the existing `gh` path. Clearing an inherited App in the GitHub Apps
-  screen stores a repository-level `null` override, which resolves to an unconfigured identity
-  without changing the global default. Planner-agent execution remains read-only.
-  Explicit CLI issue lookup uses the origin slug to find a configured Planner identity; if
-  multiple registered checkouts share that origin with different resolved Planner settings, it
-  reports an ambiguity instead of selecting one by configuration order.
-  The implementer token is scoped to PR CLI operations and HTTPS pushes, while its bot metadata is
-  set only for commit subprocesses; SSH pushes retain ambient transport authentication. See
-  `docs/github_app.md`.
-
-## Structured agents and integrations
-
-- Planner and reviewer require structured objects. Provider-native structured output is preferred;
-  textual output accepts plain JSON, one fenced JSON object, or exactly one safely extractable
-  object with surrounding prose. Ambiguous/malformed data is rejected, never guessed.
-- For user-facing planning, the planner treats the TUI as a first-class interface and grounds UX
-  decisions in the task and current behavior. Specs consider interaction flow, discoverability,
-  layout complexity, defaults, state handling, terminal constraints, input behavior, and existing
-  patterns where relevant; they keep primary workflows simple, moving configuration to dedicated
-  settings views when appropriate, and record applicable decisions in implementation proposals and
-  acceptance criteria. Backend-only specs do not receive invented UX requirements.
-- Review is adversarial and evidence-based: beyond task/spec compliance, it considers relevant
-  operational, architectural, reliability, efficiency, and regression risks. When a task or diff
-  affects a CLI, TUI, terminal interface, or user-facing messaging, it also considers grounded
-  usability risks; backend-only changes do not receive invented UX requirements. Serious concrete
-  usability defects may block approval, while subjective polish remains a non-blocking suggestion.
-  Structured reviews separate concrete blocking findings from non-blocking suggestions; suggestions
-  may accompany approval. Invalid output is converted conservatively to `NEEDS_HUMAN`;
-  contradictory decisions (for example, approval with blocking findings or change requests with
-  none) are also unsafe. Final review maps only to `APPROVED`, `CHANGES_REQUESTED`, or
-  `NEEDS_HUMAN`.
-- Jules uses official asynchronous REST sessions: create → persist identity/URL → poll session
-  state → fetch paged activities. It uses configurable poll interval, overall timeout, and bounded
-  exponential retries only for transient polling/result requests. It never creates a replacement
-  session after creation. `FAILED`, `CANCELLED`, timeout, or human-intervention states surface
-  with the original session ID.
-- Claude Code is a first-class local-workspace CLI provider. Its safe configuration accepts one
-  executable, timeout, optional model and native `effort` (`low`, `medium`, `high`, `xhigh`, or
-  `max`), `dontAsk`/`acceptEdits`/`auto` permission mode, optional turn/budget limits, and bare
-  mode, never arbitrary flags. When configured, effort becomes exactly `--effort <value>`; when
-  omitted, Claude's CLI default applies. The provider constructs `claude -p`
-  with JSON output itself, always adds Claude's `--restricted` mode and fixed `Read,Edit,Write,Glob,Grep`
-  tool set, passes request instructions on stdin, and uses exactly the supplied workspace as cwd.
-  Restricted mode ignores user/project settings, confines file tools to cwd, and prevents shell,
-  MCP, and cloud execution; `bare_mode: true` additionally skips auto-discovery. It never creates
-  Claude worktrees, adds directories, resumes/continues sessions, bypasses permissions, or owns Git
-  branches/commits/pushes/PRs/reviews. Native `--json-schema` structured output is parsed and
-  validated locally before `AgentResult`; a successful envelope requires `type=result`,
-  `subtype=success`, and non-empty result text. Completion session IDs, whitelisted usage/cost, and
-  selected terminal error fields are diagnostic-only and never resume. Permission mode and the
-  provider-neutral `reasoning_effort` (translated to Claude's native `effort`) are exposed as
-  schema-validated role-local preset/per-run overrides; one named Claude provider can therefore
-  give planner/reviewer read-only or distinct thinking depths and implementer editing access without
-  duplicate definitions. Provider YAML remains the default whenever that role-local value is omitted.
-  Its unavailable CLI,
-  authentication, timeout, malformed envelope/schema, invalid model, quota, rate-limit, and capacity
-  failures remain provider-local; only normalized quota/rate-limit/capacity errors participate in
-  existing one-hop fallback. Claude Code v2.1.259+ and externally supplied authentication are required.
-- Jules plan/review requests explicitly disable publishing automation and prompt for read-only
-  behavior. Codex uses configured argument lists via the generic command client and forces
-  `codex exec --json`; when an `AgentRequest` carries a structured-output expectation, it also
-  materializes that existing JSON Schema in a system temporary file and supplies it through
-  `--output-schema`, while orchestrator-side validation remains authoritative. Only structured
-  `error`, `turn.failed`, or failed-item events can classify
-  a sandbox/execution failure. Never infer a failure from free-form command output, diffs, or test
-  fixtures. A structured failure after an exit-0 run still inspects Git status so persisted results
-  retain any files changed before the failure. Codex may edit only its assigned local workspace.
-  Gemini Vertex is an optional specialized backend that uses ADC and has no local shell/filesystem
-  access. LiteLLM is a first-class core dependency and generic cloud/local API-model backend; its
-  configured API key is an environment-variable reference only, and it also has no implicit local
-  shell/filesystem access. Codex CLI is the first-class specialized local-worktree backend. Jules
-  is deprecated/legacy: its remote session API does not provide current interactive worktree
-  execution, so existing Jules configurations warn on load and instantiation and must not be
-  presented as recommended in the TUI or examples. Unknown provider types are unsupported.
-- Jules credentials come from `JULES_API_KEY` or `ORCHESTRATOR_JULES_API_KEY`; GitHub PR creation
-  uses ambient `gh` authentication unless a configured implementer App supplies a short-lived,
-  process-local installation token. Formal review publication independently uses its configured
-  reviewer App token or ambient `gh` authentication. The reviewer App is never automatically
-  assigned; only the configured implementer App bot can be assigned to created PRs. Do not put
-  credentials in YAML or tracked files.
-
-## Configuration precedence
-
-- `repository_context.strategy` is project-scoped, participates in the normal defaults then
-  repository override deep merge, and defaults to `heuristic`. `qdrant` requires a registered
-  repository key; path-only overrides are rejected. Its local path defaults to
-  `~/.orchestrator/qdrant`, resolves explicit relative paths beside the global config, and must be
-  outside repository/worktree roots. Server mode accepts exactly one of URL or host (plus optional
-  port). Chunk size/overlap, result count, context budget, and explicit embedding identity are
-  validated configuration. Unknown strategy names are rejected with the supported names.
-- Global `orchestrator.yml` contains top-level task selection and `defaults`; project settings at
-  global top level are rejected. For a repository, merge in order: `defaults` → matching
-  `repositories.<key>` entry (later wins). Repository-local `.orchestrator.yml` files are ignored
-  with a warning and are never created or updated.
-- Global configuration discovery is ordered: explicit `--config`; `ORCHESTRATOR_CONFIG`,
-  `ORCHESTRATOR_CONFIG_PATH`, or legacy `ORCHESTRATOR_CONFIG_FILE`; then
-  `~/.config/orchestrator/orchestrator.yml` and `~/.orchestrator/orchestrator.yml`. It never
-  consults the current directory, a repository checkout, or the installed source tree. An
-  explicitly selected or
-  environment-selected missing file is an error; a failed implicit search reports every path tried.
-- Repository selection comes from explicit CLI override when supplied, otherwise normalized task
-  repository metadata. A registered entry supplies its local path; an unregistered override is
-  interpreted as a repository path.
-- Modern configuration is an all-or-nothing pair: both `agents` and `providers` must be present,
-  and all three roles must be assigned. Its roles are authoritative; legacy `roles` plus
-  `integrations.jules/codex` are normalized only when modern configuration is absent. Never add a
-  silent provider fallback. A role may explicitly name one role-local `fallback_preset`; the
-  primary remains the first attempt and the fallback is attempted exactly once only for normalized
-  quota, rate-limit, or temporary-capacity provider failures. Authentication, configuration,
-  validation/schema, policy, and other request failures never trigger failover.
-- Safety defaults: direct merge is rejected, protected branches include main/master/develop unless
-  changed, and tests are required unless deliberately disabled. Repository-specific settings,
-  including TUI edits, are stored in the corresponding `repositories.<key>` entry of the resolved
-  global configuration; keep examples generic.
-- `agent_presets` contains named, role-scoped (`planner`, `implementer`, `reviewer`) templates of
-  a configured provider plus the launcher-exposed model, reasoning, Claude permission mode, and generation options. The
-  dedicated TUI Agent Presets screen creates, updates, renames, and deletes them in the resolved
-  global configuration; the compact launcher exposes an independent selector per role and only
-  applies its preset to that one run. Editing a selected role's launcher settings returns that
-  role to Manual, while choosing Manual restores its configured provider/YAML defaults. Switching
-  a preset's provider in the editor hides, but does not clear, runtime inputs the newly-selected
-  provider does not support (preserving their value if the user switches back); saving only
-  serializes fields whose input is currently displayed, so a persisted preset can never contain a
-  runtime option foreign to its assigned provider. Presets
-  never alter or remove provider definitions. A preset with a missing provider remains persisted
-  and is shown as an actionable launcher warning unless it is selected as a fallback, in which
-  case configuration validation rejects it before execution. The Agent Presets screen also views,
-  enables, changes, and disables each role's fallback. Fallback activation is persisted as a
-  sanitized workflow diagnostic/event containing the role and primary/fallback provider and preset
-  identities, and is shown in the live TUI timeline.
-- Notifications are opt-in per resolved project configuration through `notifications.enabled`
-  (default `false`) and `notifications.channel` (currently `desktop`). Workflow policy emits one
-  best-effort alert only for terminal `APPROVED`, `FAILED`, `CANCELLED`, `NEEDS_HUMAN`, or exhausted-review
-  `CHANGES_REQUESTED` outcomes. Desktop delivery selects native Windows toasts; unsupported,
-  headless, or failed delivery only writes a warning and can never alter workflow state.
-
-## Failure semantics
-
-- Configuration errors and explicit `AgentNeedsHumanError` end as `NEEDS_HUMAN`; requested user
-  cancellation ends as `CANCELLED`; all other stage,
-  provider, Git, command, or persistence errors end as `FAILED`. The triggering step is persisted
-  as failed with its error and the execution retains its last recorded snapshots.
-- No compensation is attempted after external side effects. Inspect persisted execution ID,
-  workspace, branch, session reference, and PR/commit fields rather than assuming a clean retry.
-- A successful review sets `current_stage=COMPLETED`; terminal failed/cancelled/human executions retain the
-  stage that failed or stopped them.
-
-## `debug` is diagnostics, not resume
-
-- `debug` runs exactly one selected boundary (`task-loading`, `spec-generation`, `implementation`,
-  `validation`, or `review`) and never mutates the referenced execution, creates workflow steps,
-  branches, commits, pushes, or PRs.
-- `--from-execution` is read-only input fallback (task/spec/validation/PR/branch metadata), not a
-  request to restore its workspace or Git state. Explicit files/options override historical data.
-- Non-dry implementation debug uses the currently configured repository checkout, not the original
-  working branch/worktree; it can therefore edit that selected checkout. Use `--dry-run` for
-  input/configuration validation without creating clients, fetching tasks, or invoking providers.
-- Inputs: task loading needs a task source/ID; spec needs task + repository; implementation needs
-  prompt or task+spec; validation needs repository configuration; review needs task, spec,
-  validation, PR, feature branch, and diff (explicit or current workspace).
-
-## Agent maintenance rules
-
-- Keep this file compact, behavioral, and durable. Update it only when architecture, lifecycle,
-  invariants, persistence, configuration precedence, safety policy, or supported operational flow
-  changes.
-- Do not turn this into a source-file inventory or duplicate code. Keep provider details below the
-  provider boundary and preserve the existing safety/ownership split.
+- Update it only when purpose, operating model, layering, an invariant, or a design decision
+  changes. Do not add feature behavior, UI details, or per-change notes.
+- It must stay under the 12,000-character prompt cap. Condense or replace existing lines instead
+  of appending.
