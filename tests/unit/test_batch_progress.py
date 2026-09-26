@@ -27,7 +27,48 @@ from orchestrator.tui.batch_progress import (
     persisted_row,
     summarize,
 )
+from orchestrator.tui.diagnostics import format_diagnostics_for_export
 from orchestrator.tui.workflow_presentation import step_timeline_lines
+
+
+def test_context_size_warning_appears_in_live_and_persisted_batch_rows() -> None:
+    payload = {
+        "kind": "PROJECT_CONTEXT_TRUNCATED",
+        "severity": "warning",
+        "path": "/other-repository/docs/PROJECT_CONTEXT.md",
+        "actual_chars": 12_001,
+        "cap_chars": 12_000,
+    }
+    progress = LiveBatchProgress(_batch(1))
+    progress.apply(WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.EXECUTION_CREATED,
+        payload={"batch_position": 0},
+    ))
+    progress.apply(WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.DIAGNOSTIC,
+        category=DiagnosticCategory.WORKFLOW_EVENT.value,
+        stage=WorkflowStage.GENERATE_SPEC,
+        payload={**payload, "batch_position": 0},
+    ))
+    assert "12001 / 12000 characters" in progress.rows()[0].timeline[-1]
+    assert progress.diagnostics_for(0)[-1].payload["path"] == payload["path"]
+    assert "PROJECT_CONTEXT_TRUNCATED" in format_diagnostics_for_export(
+        progress.diagnostics_for(0)
+    )
+
+    controller = _Controller()
+    controller.executions["execution-1"] = (
+        WorkflowExecution(id="execution-1", status=WorkflowStatus.RUNNING), []
+    )
+    controller.diagnostics["execution-1"] = [ExecutionDiagnostic(
+        execution_id="execution-1", category=DiagnosticCategory.WORKFLOW_EVENT,
+        payload=payload, stage=WorkflowStage.GENERATE_SPEC,
+    )]
+    row = persisted_row(
+        WorkflowBatchItem(0, "task-0", "Task 0", "execution-1"),
+        controller,  # type: ignore[arg-type]
+    )
+    assert "12001 / 12000 characters" in row.timeline[-1]
 
 
 def _batch(positions: int = 3) -> WorkflowBatch:

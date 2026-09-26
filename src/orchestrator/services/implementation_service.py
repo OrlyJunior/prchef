@@ -1,5 +1,6 @@
 import json
 import re
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 
@@ -134,9 +135,15 @@ class _ImplementerPath(Enum):
 
 
 class ImplementationService:
-    def __init__(self, provider: AgentProvider, git_client: GitClient) -> None:
+    def __init__(
+        self,
+        provider: AgentProvider,
+        git_client: GitClient,
+        on_context_truncated: Callable[[Path, int, int], None] | None = None,
+    ) -> None:
         self._provider = provider
         self._git = git_client
+        self._on_context_truncated = on_context_truncated
 
     def implement(
         self,
@@ -454,10 +461,11 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
                 result.error_message = "Implementation provider completed without changing files"
         return result
 
-    @staticmethod
-    def _prompt_context(repository_path: Path, instructions_repository_path: Path | None) -> str:
+    def _prompt_context(
+        self, repository_path: Path, instructions_repository_path: Path | None
+    ) -> str:
         return (
-            project_context_prompt(repository_path)
+            project_context_prompt(repository_path, self._on_context_truncated)
             + implementer_instructions_prompt(
                 instructions_repository_path or repository_path,
                 repository_path,

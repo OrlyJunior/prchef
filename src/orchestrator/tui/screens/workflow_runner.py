@@ -1469,7 +1469,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 self._successful_timeline_stages[event.stage] = active_line
             else:
                 self._successful_timeline_stages.pop(event.stage, None)
-        elif event.kind == WorkflowEventKind.AGENT_FALLBACK:
+        elif event.kind in {WorkflowEventKind.AGENT_FALLBACK, WorkflowEventKind.DIAGNOSTIC}:
             self._event_lines.append(message)
 
         self.query_one("#workflow-events", Static).update("\n".join(self._event_lines[-10:]))

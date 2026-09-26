@@ -23,6 +23,7 @@ from orchestrator.services.debug_service import (
     DebugStage,
     parse_debug_stage,
 )
+from orchestrator.services.project_context import MAX_PROJECT_CONTEXT_CHARS
 from orchestrator.services.repository_context import RepositoryContextRequest
 from tests.unit.fakes import FakeClientFactory, FakeConfigLoader, FakeTrelloClient
 
@@ -162,19 +163,42 @@ def test_spec_debug_reuses_persisted_task_without_mutating_execution(tmp_path: P
     assert factory.create_calls == 1
 
 
+@pytest.mark.parametrize(
+    "stage",
+    [DebugStage.SPEC_GENERATION, DebugStage.IMPLEMENTATION, DebugStage.REVIEW],
+)
+def test_debug_agent_stages_warn_when_project_context_is_truncated(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, stage: DebugStage
+) -> None:
+    context = tmp_path / "docs" / "PROJECT_CONTEXT.md"
+    context.parent.mkdir()
+    service, _ = _service(tmp_path)
+    execution = _execution(tmp_path)
+
+    context.write_text("x" * MAX_PROJECT_CONTEXT_CHARS, encoding="utf-8")
+    service.execute(execution, stage)
+    assert "Durable project context" not in caplog.text
+
+    context.write_text("x" * (MAX_PROJECT_CONTEXT_CHARS + 1), encoding="utf-8")
+    service.execute(execution, stage)
+    assert str(context) in caplog.text
+    assert f"{MAX_PROJECT_CONTEXT_CHARS + 1} characters" in caplog.text
+    assert f"cap: {MAX_PROJECT_CONTEXT_CHARS}" in caplog.text
+
+
 def test_spec_debug_uses_snapshot_or_direct_task_comments(tmp_path: Path) -> None:
     execution = _execution(tmp_path)
     execution.task_snapshot["metadata"]["comments"] = ["Snapshot note"]
     factory = RecordingFactory()
     prompts: list[str] = []
-    original_execute = factory.jules.execute
+    original_execute = factory.planner.execute
 
     def record_planner(request, *, on_started=None):
         if request.structured_output and request.structured_output.name == "repository-spec":
             prompts.append(request.instructions)
         return original_execute(request, on_started=on_started)
 
-    factory.jules.execute = record_planner
+    factory.planner.execute = record_planner
 
     class Provider:
         def get_task(self, task_id: str) -> DevelopmentTask:

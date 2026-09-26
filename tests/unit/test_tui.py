@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -79,6 +80,39 @@ from orchestrator.tui.widgets import (
     RepositorySelect,
 )
 from tests.unit.tui_sync import settle_tui, wait_for_tui
+
+
+def test_single_task_context_warning_stays_in_timeline_and_detailed_logs(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    payload = {
+        "kind": "PROJECT_CONTEXT_TRUNCATED",
+        "severity": "warning",
+        "path": str(tmp_path / "docs" / "PROJECT_CONTEXT.md"),
+        "actual_chars": 12_001,
+        "cap_chars": 12_000,
+    }
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id="execution-1", kind=WorkflowEventKind.DIAGNOSTIC,
+                category=DiagnosticCategory.WORKFLOW_EVENT.value,
+                stage=WorkflowStage.GENERATE_SPEC, payload=payload,
+            ))
+            assert "12001 / 12000 characters" in screen._event_lines[-1]
+            assert "12001 / 12000 characters" in str(
+                screen.query_one("#workflow-events", Static).renderable
+            )
+            exported = format_diagnostics_for_export(screen._live_diagnostics)
+            assert "PROJECT_CONTEXT_TRUNCATED" in exported
+            assert json.dumps(payload["path"]) in exported
+
+    asyncio.run(drive())
 
 
 @pytest.mark.parametrize("stage", [WorkflowStage.GENERATE_SPEC, WorkflowStage.REVIEW])
