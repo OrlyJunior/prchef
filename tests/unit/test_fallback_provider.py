@@ -132,7 +132,7 @@ def test_workflow_wrapper_persists_and_streams_sanitized_fallback_event(tmp_path
     events = []
     # Listener and stage attribution belong to one execution's runtime, not to
     # the shared service, so concurrent executions cannot cross-contaminate.
-    runtime = service._begin_runtime("execution-1", events.append)
+    runtime = service._runtimes.begin("execution-1", events.append)
     runtime.active_stage = WorkflowStage.GENERATE_SPEC
     config = ProjectConfig.model_validate(
         {

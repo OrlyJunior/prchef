@@ -19,7 +19,7 @@ from orchestrator.models import (
     ValidationResult,
 )
 from orchestrator.services import project_context
-from orchestrator.services.implementation_service import ImplementationService
+from orchestrator.services.implementation_service import ImplementationService, _ImplementerPath
 from orchestrator.services.project_context import (
     MAX_AGENT_INSTRUCTIONS_CHARS,
     load_implementer_instructions,
@@ -419,6 +419,75 @@ def test_implementer_instructions_are_included_in_all_implementation_prompts(
 
     assert all(prompt.count("Prefer small, tested changes.") == 1 for prompt in prompts)
     assert all("Prioritize regression risks." not in prompt for prompt in prompts)
+
+
+@pytest.mark.parametrize(
+    ("path", "specific_input", "prompt_marker"),
+    [
+        (_ImplementerPath.INITIAL, None, "Implement the original task."),
+        (_ImplementerPath.VALIDATION, "validation", "VALIDATION FAILURES"),
+        (_ImplementerPath.REVIEW, "review", "REVIEWER CHANGE REQUESTS"),
+        (_ImplementerPath.POLISH, "suggestions", "NON-BLOCKING REVIEW SUGGESTIONS"),
+        (_ImplementerPath.CONTINUATION, "feedback", "OPERATOR FEEDBACK"),
+    ],
+)
+def test_every_workflow_implementer_path_uses_the_shared_request_builder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: _ImplementerPath,
+    specific_input: str | None,
+    prompt_marker: str,
+) -> None:
+    provider = RecordingProvider(AgentResult(output="implemented"))
+    service = ImplementationService(provider, ChangedFilesGit())  # type: ignore[arg-type]
+    task, spec = _task(), _spec()
+    validation = ValidationResult(success=False)
+    review = CodeReview(result=ReviewDecision.CHANGES_REQUESTED, summary="Fix this.")
+    suggestions = ["Clarify the name"]
+    pull_request = PullRequest(5, "https://github.example/pull/5", "Task", "develop", "feature")
+    feedback = "Finish the edge case"
+    calls: list[tuple[_ImplementerPath, Path, dict[str, Any], AgentRequest]] = []
+    original = service._build_request
+
+    def spy(choice: _ImplementerPath, workspace: Path, **kwargs: Any) -> AgentRequest:
+        request = original(choice, workspace, **kwargs)
+        calls.append((choice, workspace, kwargs, request))
+        return request
+
+    monkeypatch.setattr(service, "_build_request", spy)
+    if path is _ImplementerPath.INITIAL:
+        service.implement(task, spec, tmp_path)
+    elif path is _ImplementerPath.VALIDATION:
+        service.correct_validation_failures(task, spec, validation, tmp_path)
+    elif path is _ImplementerPath.REVIEW:
+        service.correct_review_findings(task, spec, review, tmp_path)
+    elif path is _ImplementerPath.POLISH:
+        service.run_polish_pass(task, spec, suggestions, tmp_path, pull_request)
+    else:
+        service.continue_implementation(task, spec, feedback, tmp_path)
+
+    assert len(calls) == 1
+    choice, workspace, kwargs, request = calls[0]
+    assert choice is path
+    assert workspace == tmp_path
+    assert set(kwargs) == {"task", "spec", "instructions_repository_path"} | (
+        {specific_input} if specific_input else set()
+    ) | ({"pull_request"} if path is _ImplementerPath.POLISH else set())
+    assert kwargs["task"] is task
+    assert kwargs["spec"] is spec
+    if specific_input:
+        assert kwargs[specific_input] is {
+            "validation": validation,
+            "review": review,
+            "suggestions": suggestions,
+            "feedback": feedback,
+        }[specific_input]
+    if path is _ImplementerPath.POLISH:
+        assert kwargs["pull_request"] is pull_request
+    assert request == provider.requests[0]
+    assert request.title == "Orchestrator implementation"
+    assert request.workspace_path == tmp_path
+    assert prompt_marker in request.instructions
 
 
 def test_validation_failures_render_timeouts_alongside_completed_failures() -> None:

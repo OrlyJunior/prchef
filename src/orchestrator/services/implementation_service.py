@@ -1,5 +1,6 @@
 import json
 import re
+from enum import Enum
 from pathlib import Path
 
 from orchestrator.clients.git_client import GitClient
@@ -23,18 +24,10 @@ _CORRECTION_OUTPUT_LIMIT = 4_000
 _TRUNCATED_OUTPUT_MARKER = "[... earlier output truncated ...]\n"
 _PYTEST_FAILURES_HEADER = re.compile(r"^={2,} FAILURES ={2,}\r?$", re.MULTILINE)
 # A traceback frame separator contains only underscores and spaces, even when it ends in "_".
-_PYTEST_FAILURE_HEADER = re.compile(
-    r"^_+ (?=[^\r\n]*[^_ \r\n])[^\r\n]+ _+\r?$", re.MULTILINE
-)
-_PYTEST_SUMMARY_HEADER = re.compile(
-    r"^={2,} short test summary info ={2,}\r?$", re.MULTILINE
-)
-_PYTEST_SUMMARY_ENTRY = re.compile(
-    r"^(?:FAILED|ERROR|SKIPPED|XFAIL|XPASS|PASSED)\s+\S+"
-)
-_PYTEST_SESSION_RESULT = re.compile(
-    r"^={2,} (?:\d+ [^=\r\n]+|no tests ran[^=\r\n]*) ={2,}\r?$"
-)
+_PYTEST_FAILURE_HEADER = re.compile(r"^_+ (?=[^\r\n]*[^_ \r\n])[^\r\n]+ _+\r?$", re.MULTILINE)
+_PYTEST_SUMMARY_HEADER = re.compile(r"^={2,} short test summary info ={2,}\r?$", re.MULTILINE)
+_PYTEST_SUMMARY_ENTRY = re.compile(r"^(?:FAILED|ERROR|SKIPPED|XFAIL|XPASS|PASSED)\s+\S+")
+_PYTEST_SESSION_RESULT = re.compile(r"^={2,} (?:\d+ [^=\r\n]+|no tests ran[^=\r\n]*) ={2,}\r?$")
 
 
 def _pytest_summary_end(output: str, header_end: int) -> int | None:
@@ -123,6 +116,15 @@ def _bounded_tails(stdout: str, stderr: str) -> tuple[str, str]:
     return _bounded_tail(stdout, stdout_budget), _bounded_tail(stderr, stderr_budget)
 
 
+class _ImplementerPath(Enum):
+    INITIAL = "initial"
+    EXPLICIT = "explicit"
+    VALIDATION = "validation"
+    REVIEW = "review"
+    CONTINUATION = "continuation"
+    POLISH = "polish"
+
+
 class ImplementationService:
     def __init__(self, provider: AgentProvider, git_client: GitClient) -> None:
         self._provider = provider
@@ -136,28 +138,14 @@ class ImplementationService:
         *,
         instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
-        context = self._prompt_context(repository_path, instructions_repository_path)
-        prompt = f"""ORIGINAL TASK:
-{task.as_original_prompt()}
-
-REPOSITORY SPEC:
-{spec.as_prompt_context()}
-
-{context}Keep docs/PROJECT_CONTEXT.md accurate when this task meaningfully
-changes durable project knowledge:
-architecture, workflows, domain behavior, invariants, configuration, persistence, integrations,
-or important design decisions. Treat any necessary docs/PROJECT_CONTEXT.md update as part of
-the normal diff.
-Do not update it for trivial implementation details. The current repository is authoritative if it
-conflicts with docs/PROJECT_CONTEXT.md.
-
-Implement the original task.
-Use the repository spec only as supporting technical context.
-Do not invent requirements.
-Preserve the conventions of the target repository.
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
-"""
-        return self._run_prompt(prompt, repository_path)
+        request = self._build_request(
+            _ImplementerPath.INITIAL,
+            repository_path,
+            task=task,
+            spec=spec,
+            instructions_repository_path=instructions_repository_path,
+        )
+        return self._run_prompt(request)
 
     def implement_prompt(
         self,
@@ -167,21 +155,13 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
         """Run explicit implementation input while retaining the safety contract."""
-        if not prompt.strip():
-            raise ValueError("Implementation prompt must not be empty")
-        context = self._prompt_context(repository_path, instructions_repository_path)
-        safe_prompt = f"""EXPLICIT IMPLEMENTATION INPUT:
-{prompt}
-
-STRICT SAFETY RULES:
-Implement only the requested input in the configured workspace.
-{context}Keep docs/PROJECT_CONTEXT.md accurate when the requested change
-meaningfully changes durable project knowledge; include any needed update in the normal diff. Do
-not update it for trivial details, and treat the repository as authoritative if it conflicts with
-docs/PROJECT_CONTEXT.md.
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
-"""
-        return self._run_prompt(safe_prompt, repository_path)
+        request = self._build_request(
+            _ImplementerPath.EXPLICIT,
+            repository_path,
+            prompt_input=prompt,
+            instructions_repository_path=instructions_repository_path,
+        )
+        return self._run_prompt(request)
 
     def correct_validation_failures(
         self,
@@ -193,26 +173,15 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
         """Ask the implementer to repair the existing workspace after validation failed."""
-        failures = self._render_validation_failures(validation)
-        context = self._prompt_context(repository_path, instructions_repository_path)
-        prompt = f"""ORIGINAL TASK:
-{task.as_original_prompt()}
-
-REPOSITORY SPEC:
-{spec.as_prompt_context()}
-
-VALIDATION FAILURES FROM THE CURRENT IMPLEMENTATION:
-{failures}
-
-{context}Keep docs/PROJECT_CONTEXT.md accurate if correcting these failures also
-changes durable project knowledge.
-Do not update it for trivial details; current repository behavior is authoritative.
-
-Correct the existing implementation in this workspace to address the validation failures.
-Do not start over or revert unrelated existing changes.
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
-"""
-        return self._run_prompt(prompt, repository_path)
+        request = self._build_request(
+            _ImplementerPath.VALIDATION,
+            repository_path,
+            task=task,
+            spec=spec,
+            validation=validation,
+            instructions_repository_path=instructions_repository_path,
+        )
+        return self._run_prompt(request)
 
     def correct_review_findings(
         self,
@@ -224,27 +193,15 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
         """Ask the implementer to address a review in the existing workspace."""
-        feedback = self.render_review_findings(review)
-        context = self._prompt_context(repository_path, instructions_repository_path)
-        prompt = f"""ORIGINAL TASK:
-{task.as_original_prompt()}
-
-REPOSITORY SPEC:
-{spec.as_prompt_context()}
-
-REVIEWER CHANGE REQUESTS FOR THE CURRENT IMPLEMENTATION:
-{feedback}
-
-{context}Keep docs/PROJECT_CONTEXT.md accurate if addressing these findings also
-changes durable project knowledge.
-Do not update it for trivial details; current repository behavior is authoritative.
-
-Correct the existing implementation in this workspace to address every blocking review finding.
-Use the findings, blocking findings, and suggestions above as review feedback; do not start over
-or revert unrelated existing changes.
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
-"""
-        return self._run_prompt(prompt, repository_path)
+        request = self._build_request(
+            _ImplementerPath.REVIEW,
+            repository_path,
+            task=task,
+            spec=spec,
+            review=review,
+            instructions_repository_path=instructions_repository_path,
+        )
+        return self._run_prompt(request)
 
     def continue_implementation(
         self,
@@ -256,25 +213,15 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
         """Start a fresh implementer invocation in a retained workflow workspace."""
-        if not feedback.strip():
-            raise ValueError("Continuation feedback must not be empty")
-        context = self._prompt_context(repository_path, instructions_repository_path)
-        prompt = f"""ORIGINAL TASK:
-{task.as_original_prompt()}
-
-REPOSITORY SPEC:
-{spec.as_prompt_context()}
-
-OPERATOR FEEDBACK FOR CONTINUING THE CURRENT IMPLEMENTATION:
-{feedback}
-
-{context}Continue the existing implementation in this workspace. Address the operator feedback
-without starting over or reverting unrelated existing changes. The workspace may contain retained
-changes from the prior terminal attempt; inspect its current state using your tools.
-Keep docs/PROJECT_CONTEXT.md accurate if this correction changes durable project knowledge.
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
-"""
-        return self._run_prompt(prompt, repository_path)
+        request = self._build_request(
+            _ImplementerPath.CONTINUATION,
+            repository_path,
+            task=task,
+            spec=spec,
+            feedback=feedback,
+            instructions_repository_path=instructions_repository_path,
+        )
+        return self._run_prompt(request)
 
     @staticmethod
     def render_validation_failures(validation: ValidationResult) -> str:
@@ -306,19 +253,158 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         instructions_repository_path: Path | None = None,
     ) -> ImplementationResult:
         """Offer approved-review suggestions as one optional, scoped polish pass."""
-        feedback = json.dumps(suggestions, ensure_ascii=False, indent=2)
-        pull_request_context = json.dumps(
-            {
-                "url": pull_request.url,
-                "title": pull_request.title,
-                "base_branch": pull_request.base_branch,
-                "head_branch": pull_request.head_branch,
-            },
-            ensure_ascii=False,
-            indent=2,
+        request = self._build_request(
+            _ImplementerPath.POLISH,
+            repository_path,
+            task=task,
+            spec=spec,
+            suggestions=suggestions,
+            pull_request=pull_request,
+            instructions_repository_path=instructions_repository_path,
         )
-        context = self._prompt_context(repository_path, instructions_repository_path)
-        prompt = f"""ORIGINAL TASK:
+        result = self._run_prompt(request, allow_no_changes=True)
+        if result.success and not result.changed_files:
+            result.polish_skip_reasons = self._parse_polish_skip_reasons(
+                result.summary, suggestions
+            )
+        return result
+
+    def _build_request(
+        self,
+        path: _ImplementerPath,
+        repository_path: Path,
+        *,
+        task: DevelopmentTask | None = None,
+        spec: RepositorySpec | None = None,
+        validation: ValidationResult | None = None,
+        review: CodeReview | None = None,
+        suggestions: list[str] | None = None,
+        pull_request: PullRequest | None = None,
+        feedback: str | None = None,
+        prompt_input: str | None = None,
+        instructions_repository_path: Path | None = None,
+    ) -> AgentRequest:
+        """Render the selected workflow input and create its sole agent request."""
+        if path is _ImplementerPath.INITIAL:
+            assert task is not None and spec is not None
+            context = self._prompt_context(repository_path, instructions_repository_path)
+            prompt = f"""ORIGINAL TASK:
+{task.as_original_prompt()}
+
+REPOSITORY SPEC:
+{spec.as_prompt_context()}
+
+{context}Keep docs/PROJECT_CONTEXT.md accurate when this task meaningfully
+changes durable project knowledge:
+architecture, workflows, domain behavior, invariants, configuration, persistence, integrations,
+or important design decisions. Treat any necessary docs/PROJECT_CONTEXT.md update as part of
+the normal diff.
+Do not update it for trivial implementation details. The current repository is authoritative if it
+conflicts with docs/PROJECT_CONTEXT.md.
+
+Implement the original task.
+Use the repository spec only as supporting technical context.
+Do not invent requirements.
+Preserve the conventions of the target repository.
+Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+"""
+        elif path is _ImplementerPath.EXPLICIT:
+            assert prompt_input is not None
+            prompt = prompt_input
+            if not prompt.strip():
+                raise ValueError("Implementation prompt must not be empty")
+            context = self._prompt_context(repository_path, instructions_repository_path)
+            safe_prompt = f"""EXPLICIT IMPLEMENTATION INPUT:
+{prompt}
+
+STRICT SAFETY RULES:
+Implement only the requested input in the configured workspace.
+{context}Keep docs/PROJECT_CONTEXT.md accurate when the requested change
+meaningfully changes durable project knowledge; include any needed update in the normal diff. Do
+not update it for trivial details, and treat the repository as authoritative if it conflicts with
+docs/PROJECT_CONTEXT.md.
+Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+"""
+            prompt = safe_prompt
+        elif path is _ImplementerPath.VALIDATION:
+            assert task is not None and spec is not None and validation is not None
+            failures = self._render_validation_failures(validation)
+            context = self._prompt_context(repository_path, instructions_repository_path)
+            prompt = f"""ORIGINAL TASK:
+{task.as_original_prompt()}
+
+REPOSITORY SPEC:
+{spec.as_prompt_context()}
+
+VALIDATION FAILURES FROM THE CURRENT IMPLEMENTATION:
+{failures}
+
+{context}Keep docs/PROJECT_CONTEXT.md accurate if correcting these failures also
+changes durable project knowledge.
+Do not update it for trivial details; current repository behavior is authoritative.
+
+Correct the existing implementation in this workspace to address the validation failures.
+Do not start over or revert unrelated existing changes.
+Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+"""
+        elif path is _ImplementerPath.REVIEW:
+            assert task is not None and spec is not None and review is not None
+            feedback = self.render_review_findings(review)
+            context = self._prompt_context(repository_path, instructions_repository_path)
+            prompt = f"""ORIGINAL TASK:
+{task.as_original_prompt()}
+
+REPOSITORY SPEC:
+{spec.as_prompt_context()}
+
+REVIEWER CHANGE REQUESTS FOR THE CURRENT IMPLEMENTATION:
+{feedback}
+
+{context}Keep docs/PROJECT_CONTEXT.md accurate if addressing these findings also
+changes durable project knowledge.
+Do not update it for trivial details; current repository behavior is authoritative.
+
+Correct the existing implementation in this workspace to address every blocking review finding.
+Use the findings, blocking findings, and suggestions above as review feedback; do not start over
+or revert unrelated existing changes.
+Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+"""
+        elif path is _ImplementerPath.CONTINUATION:
+            assert task is not None and spec is not None and feedback is not None
+            if not feedback.strip():
+                raise ValueError("Continuation feedback must not be empty")
+            context = self._prompt_context(repository_path, instructions_repository_path)
+            prompt = f"""ORIGINAL TASK:
+{task.as_original_prompt()}
+
+REPOSITORY SPEC:
+{spec.as_prompt_context()}
+
+OPERATOR FEEDBACK FOR CONTINUING THE CURRENT IMPLEMENTATION:
+{feedback}
+
+{context}Continue the existing implementation in this workspace. Address the operator feedback
+without starting over or reverting unrelated existing changes. The workspace may contain retained
+changes from the prior terminal attempt; inspect its current state using your tools.
+Keep docs/PROJECT_CONTEXT.md accurate if this correction changes durable project knowledge.
+Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+"""
+        elif path is _ImplementerPath.POLISH:
+            assert task is not None and spec is not None
+            assert suggestions is not None and pull_request is not None
+            feedback = json.dumps(suggestions, ensure_ascii=False, indent=2)
+            pull_request_context = json.dumps(
+                {
+                    "url": pull_request.url,
+                    "title": pull_request.title,
+                    "base_branch": pull_request.base_branch,
+                    "head_branch": pull_request.head_branch,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            context = self._prompt_context(repository_path, instructions_repository_path)
+            prompt = f"""ORIGINAL TASK:
 {task.as_original_prompt()}
 
 REPOSITORY SPEC:
@@ -353,23 +439,18 @@ Keep docs/PROJECT_CONTEXT.md accurate only if an applied change meaningfully cha
 project knowledge.
 Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
 """
-        result = self._run_prompt(prompt, repository_path, allow_no_changes=True)
-        if result.success and not result.changed_files:
-            result.polish_skip_reasons = self._parse_polish_skip_reasons(
-                result.summary, suggestions
-            )
-        return result
+        else:
+            raise ValueError(f"Unknown implementer path: {path}")
+        return AgentRequest(
+            instructions=prompt,
+            title="Orchestrator implementation",
+            workspace_path=repository_path,
+        )
 
     def _run_prompt(
-        self, prompt: str, repository_path: Path, *, allow_no_changes: bool = False
+        self, request: AgentRequest, *, allow_no_changes: bool = False
     ) -> ImplementationResult:
-        agent_result = self._provider.execute(
-            AgentRequest(
-                instructions=prompt,
-                title="Orchestrator implementation",
-                workspace_path=repository_path,
-            )
-        )
+        agent_result = self._provider.execute(request)
         result = ImplementationResult(
             success=agent_result.success,
             summary=agent_result.output,
@@ -387,9 +468,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
         return result
 
     @staticmethod
-    def _prompt_context(
-        repository_path: Path, instructions_repository_path: Path | None
-    ) -> str:
+    def _prompt_context(repository_path: Path, instructions_repository_path: Path | None) -> str:
         return project_context_prompt(repository_path) + implementer_instructions_prompt(
             instructions_repository_path or repository_path,
             repository_path,
@@ -411,8 +490,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
                 pytest_stdout = _render_pytest_failure_output(stdout)
                 if pytest_stdout is not None:
                     rendered_output = (
-                        f"Stderr:\n{stderr[:_CORRECTION_OUTPUT_LIMIT]}"
-                        f"\n\nStdout:\n{pytest_stdout}"
+                        f"Stderr:\n{stderr[:_CORRECTION_OUTPUT_LIMIT]}\n\nStdout:\n{pytest_stdout}"
                     )
             rendered.append(
                 "\n".join(
