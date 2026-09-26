@@ -243,25 +243,18 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     )
     assert "Do not request feature behavior, UI details, or per-change notes" in planner_prompt
     assert "architecture, workflows, domain behavior" not in planner_prompt
-    assert (
-        "Treat the TUI as a first-class product\n  interface"
-        in provider.requests[0].instructions
-    )
+    assert "affects a user-facing interface or user-facing messaging" in planner_prompt
+    assert "UX consideration grounded in the task and current product behavior" in planner_prompt
     assert (
         "interaction flow, action discoverability, layout complexity, sensible defaults"
         in provider.requests[0].instructions
     )
     assert "loading/error/empty states" in provider.requests[0].instructions
-    assert "constrained-terminal behavior" in provider.requests[0].instructions
-    assert (
-        "keyboard navigation, focus management, and scrolling"
-        in provider.requests[0].instructions
-    )
     assert "consistency with existing interface patterns" in provider.requests[0].instructions
-    assert (
-        "configuration belongs in a dedicated settings screen instead"
-        in provider.requests[0].instructions
-    )
+    assert "Prefer a simple primary workflow." in provider.requests[0].instructions
+    assert "TUI" not in planner_prompt
+    assert "terminal" not in planner_prompt
+    assert "settings screen" not in planner_prompt
     assert (
         "Capture relevant UX decisions and interaction constraints in implementation_proposal and\n"
         "  acceptance_criteria"
@@ -1162,27 +1155,19 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
         "idempotency, duplicate execution, and partial-failure recovery"
         in provider.requests[0].instructions
     )
-    assert "token and prompt efficiency" in provider.requests[0].instructions
-    assert (
-        "provider coupling, quota/rate-limit handling" in provider.requests[0].instructions
-    )
-    assert (
-        "CLI, TUI, terminal interface, or\n  user-facing messaging"
-        in provider.requests[0].instructions
-    )
-    assert (
-        "label and message\n  clarity, action discoverability, unnecessary steps"
-        in provider.requests[0].instructions
-    )
+    reviewer_prompt = " ".join(provider.requests[0].instructions.split())
+    assert "unnecessary work, performance, memory/storage growth" in reviewer_prompt
+    assert "user-facing interface or user-facing messaging, assess usability" in reviewer_prompt
+    assert "label and message clarity, action discoverability, unnecessary steps" in reviewer_prompt
     assert "loading/error/empty/blocked states" in provider.requests[0].instructions
-    assert (
-        "focus,\n  scrolling, and keyboard behavior"
-        in provider.requests[0].instructions
-    )
-    assert (
-        "primary actions remain reachable in\n  constrained terminal sizes"
-        in provider.requests[0].instructions
-    )
+    assert "token and prompt efficiency" not in reviewer_prompt
+    assert "redundant model calls or duplicated context" not in reviewer_prompt
+    assert "provider coupling" not in reviewer_prompt
+    assert "quota/rate-limit handling" not in reviewer_prompt
+    assert "token-optimization" not in reviewer_prompt
+    assert "TUI" not in reviewer_prompt
+    assert "Textual" not in reviewer_prompt
+    assert "terminal interface" not in reviewer_prompt
     assert (
         "Do not invent UX\n  requirements for backend-only changes"
         in provider.requests[0].instructions
@@ -1201,7 +1186,6 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
         in provider.requests[0].instructions
     )
     assert "may accompany APPROVED" in provider.requests[0].instructions
-    reviewer_prompt = " ".join(provider.requests[0].instructions.split())
     assert "configured durable project context file" in reviewer_prompt
     assert "feature-level or redundant additions in `suggestions`" in reviewer_prompt
     assert "non-blocking and may accompany APPROVED" in reviewer_prompt
