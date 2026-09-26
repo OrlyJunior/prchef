@@ -231,7 +231,8 @@ class QdrantRepositoryContextStrategy:
                 if request.temporary_source:
                     self._delete_source_points(source_root_id)
         except Exception as exc:
-            self._record_failure(exc)
+            if not request.temporary_source:
+                self._record_failure(exc)
             if self._settings.fallback_to_heuristic:
                 from orchestrator.services.repository_context import (
                     HeuristicRepositoryContextStrategy,

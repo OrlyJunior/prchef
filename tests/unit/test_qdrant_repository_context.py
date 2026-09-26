@@ -238,7 +238,7 @@ def test_linked_worktree_points_are_isolated_within_one_collection(tmp_path: Pat
     assert "alpha control checkout" in control_again
 
 
-def test_temporary_planning_worktrees_leave_no_points_or_change_index_commit(
+def test_temporary_planning_worktrees_leave_index_unchanged_on_query_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from qdrant_client import models
@@ -312,6 +312,7 @@ def test_temporary_planning_worktrees_leave_no_points_or_change_index_commit(
                     raise RuntimeError("simulated query failure")
 
                 monkeypatch.setattr(strategy, "_query", fail_query)
+            before = strategy.inspect_index()
             result = strategy.render(request)
             if index_number == 0:
                 assert "beta fetched base content" in result
@@ -320,6 +321,8 @@ def test_temporary_planning_worktrees_leave_no_points_or_change_index_commit(
                 assert "REPOSITORY CONTEXT DIAGNOSTIC" in result
             assert source.read_text(encoding="utf-8") == "gamma dirty control content"
             status = strategy.inspect_index()
+            assert status.state is before.state is IndexLifecycleState.STALE
+            assert status.error_message == before.error_message is None
             assert status.last_indexed_commit == baseline.last_indexed_commit
             assert status.point_count == baseline.point_count
             with strategy._session() as client:
@@ -334,6 +337,12 @@ def test_temporary_planning_worktrees_leave_no_points_or_change_index_commit(
                 check=True,
                 capture_output=True,
             )
+
+    failed = strategy.render(_request(root, "alpha"))
+    assert "REPOSITORY CONTEXT DIAGNOSTIC" in failed
+    status = strategy.inspect_index()
+    assert status.state is IndexLifecycleState.FAILED
+    assert status.error_message == "Semantic index operation failed (RuntimeError)."
 
 
 def test_embedding_version_change_recreates_and_reindexes_collection(tmp_path: Path) -> None:
