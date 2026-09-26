@@ -67,7 +67,11 @@ from orchestrator.tui.screens.task_selector import (
     TaskSelector,
     TaskTableHeader,
 )
-from orchestrator.tui.screens.workflow_runner import StopWorkflowConfirmation, WorkflowRunnerScreen
+from orchestrator.tui.screens.workflow_runner import (
+    FreshRunConfirmation,
+    StopWorkflowConfirmation,
+    WorkflowRunnerScreen,
+)
 from orchestrator.tui.widgets import (
     BatchItemRow,
     BatchProgressView,
@@ -1053,9 +1057,49 @@ def test_controller_rejects_batch_task_with_an_existing_execution(tmp_path: Path
                 agent_providers={},
             )
         )
-
     assert service.calls == []
     assert repository.batch_rows == []
+
+
+def test_controller_batch_accepts_failed_prior_run_and_new_task_in_order(
+    tmp_path: Path,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.task_source = "github"
+    repository.execution.task_id = "7"
+    repository.execution.repository_ref = "example"
+    repository.execution.status = WorkflowStatus.FAILED
+    provider = _TaskProvider()
+    provider.list_tasks = lambda limit=50: [
+        DevelopmentTask("12", "github", "New", "", "https://example/12"),
+        DevelopmentTask("7", "github", "Retry", "", "https://example/7"),
+    ]
+    controller._task_provider_factory = lambda source, selected_repository: provider
+
+    batch = controller.start_batch(_batch_launch("12", "7"))
+
+    assert batch is not None
+    assert [call[0] for call in service.calls] == ["12", "7"]
+    assert repository.execution.status == WorkflowStatus.FAILED
+
+
+def test_controller_batch_rechecks_prior_run_before_submission(tmp_path: Path) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.task_source = "github"
+    repository.execution.task_id = "12"
+    repository.execution.repository_ref = "example"
+    repository.execution.status = WorkflowStatus.FAILED
+
+    batch = controller.start_batch(
+        _batch_launch("12"),
+        on_batch_created=lambda _: setattr(
+            repository.execution, "status", WorkflowStatus.APPROVED
+        ),
+    )
+
+    assert batch is not None
+    assert service.calls == []
+    assert repository.get_batch(batch.id).items[0].execution_id is None
 
 
 def test_controller_saves_renames_and_deletes_repository_configuration(
@@ -4036,6 +4080,154 @@ def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
     asyncio.run(drive())
 
 
+def test_fresh_run_confirmation_preserves_selection_and_starts_checked_task(
+    tmp_path: Path,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.task_source = "github"
+    repository.execution.task_id = "12"
+    repository.execution.repository_ref = "example"
+    repository.execution.status = WorkflowStatus.NEEDS_HUMAN
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot,
+                lambda: len(application.screen.query(TaskRow)) == 1,
+                description="fresh-run row",
+            )
+            screen = application.screen
+            row = screen.query_one("#task-checkbox-0", TaskRow)
+            assert row.disabled is False
+            assert "Latest execution: NEEDS_HUMAN" in str(row.label)
+            assert "earlier runs remain in Execution history" in str(row.label)
+            assert screen.query_one("#select-all-tasks", Checkbox).disabled is True
+            row.value = True
+            await settle_tui(pilot)
+            screen.query_one("#start-workflow", Button).press()
+            await wait_for_tui(
+                pilot,
+                lambda: isinstance(application.screen, FreshRunConfirmation),
+                description="fresh-run confirmation",
+            )
+            modal = application.screen
+            assert modal.query_one("#fresh-run-0", Checkbox).value is True
+            assert any(
+                "pending question" in str(widget.renderable)
+                for widget in modal.query(Static)
+            )
+            modal.query_one("#fresh-run-0", Checkbox).value = False
+            await settle_tui(pilot)
+            assert modal.query_one("#confirm-fresh-run", Button).disabled is True
+            modal.query_one("#dismiss-fresh-run", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#task-selector", TaskSelector).selected_task_ids == ("12",)
+            screen.query_one("#start-workflow", Button).press()
+            await wait_for_tui(
+                pilot,
+                lambda: isinstance(application.screen, FreshRunConfirmation),
+                description="fresh-run confirmation again",
+            )
+            application.screen.query_one("#confirm-fresh-run", Button).press()
+            await wait_for_tui(
+                pilot, lambda: len(service.calls) == 1,
+                description="confirmed fresh run",
+            )
+            assert service.calls[0][0] == "12"
+
+    asyncio.run(drive())
+
+
+def test_fresh_run_confirmation_omits_unchecked_prior_run_but_launches_new_task(
+    tmp_path: Path,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.task_source = "github"
+    repository.execution.task_id = "12"
+    repository.execution.repository_ref = "example"
+    repository.execution.status = WorkflowStatus.CHANGES_REQUESTED
+    repository.execution.pr_url = "https://example/pr/1"
+    provider = _TaskProvider()
+    provider.list_tasks = lambda limit=50: [
+        DevelopmentTask("12", "github", "Retry", "", "https://example/12"),
+        DevelopmentTask("7", "github", "New", "", "https://example/7"),
+    ]
+    controller._task_provider_factory = lambda source, selected_repository: provider
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot, lambda: len(application.screen.query(TaskRow)) == 2,
+                description="mixed fresh-run tasks",
+            )
+            screen = application.screen
+            screen.query_one("#select-all-tasks", Checkbox).value = True
+            await settle_tui(pilot)
+            screen.query_one("#task-checkbox-0", TaskRow).value = True
+            await settle_tui(pilot)
+            assert screen.query_one("#task-selector", TaskSelector).selected_task_ids == ("12", "7")
+            screen.query_one("#start-workflow", Button).press()
+            await wait_for_tui(
+                pilot, lambda: isinstance(application.screen, FreshRunConfirmation),
+                description="mixed fresh-run confirmation",
+            )
+            modal = application.screen
+            assert any(
+                "second PR" in str(widget.renderable) for widget in modal.query(Static)
+            )
+            modal.query_one("#fresh-run-0", Checkbox).value = False
+            await settle_tui(pilot)
+            assert modal.query_one("#confirm-fresh-run", Button).disabled is False
+            modal.query_one("#confirm-fresh-run", Button).press()
+            await wait_for_tui(
+                pilot, lambda: len(service.calls) == 1,
+                description="new task launch after excluding rerun",
+            )
+            assert [call[0] for call in service.calls] == ["7"]
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize("size", [(40, 20), (30, 16)])
+def test_fresh_run_confirmation_fits_narrow_terminal_and_keeps_actions_visible(
+    size: tuple[int, int],
+) -> None:
+    task = DevelopmentTask("12", "github", "A task with a long title", "", "https://example/12")
+    execution = WorkflowExecution("earlier", status=WorkflowStatus.NEEDS_HUMAN)
+
+    class ConfirmationApp(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(FreshRunConfirmation(((task, execution),), 0))
+
+    async def drive() -> None:
+        application = ConfirmationApp()
+        async with application.run_test(size=size) as pilot:
+            await settle_tui(pilot)
+            modal = application.screen
+            dialog = modal.query_one("#fresh-run-confirmation", Vertical)
+            launch = modal.query_one("#confirm-fresh-run", Button)
+            back = modal.query_one("#dismiss-fresh-run", Button)
+            assert str(modal.query_one("#fresh-run-0", Checkbox).label).startswith(
+                "12 [NEEDS_HUMAN]"
+            )
+            assert dialog.region.x >= 0
+            assert dialog.region.x + dialog.region.width <= size[0]
+            assert dialog.region.y >= 0
+            assert dialog.region.y + dialog.region.height <= size[1]
+            for button in (launch, back):
+                assert button.region.x >= 0
+                assert button.region.x + button.region.width <= size[0]
+                assert button.region.y >= 0
+                assert button.region.y + button.region.height <= size[1]
+            assert launch.disabled is False
+
+    asyncio.run(drive())
+
+
 def _batch_launch(*task_ids: str) -> WorkflowBatchLaunch:
     return WorkflowBatchLaunch(
         repository="example",
@@ -5457,7 +5649,7 @@ def test_select_all_applies_only_to_shown_available_tasks(tmp_path: Path) -> Non
                 description="bug label filter",
             )
             assert header.value is False
-            assert str(header.label) == "Select all shown tasks"
+            assert str(header.label) == "Select all shown tasks without earlier runs"
 
             header.value = True
             await wait_for_tui(
@@ -5468,6 +5660,9 @@ def test_select_all_applies_only_to_shown_available_tasks(tmp_path: Path) -> Non
             # Task 7 has an execution; task 3 stays selected while hidden.
             assert screen.query_one("#task-checkbox-4", TaskRow).value is False
             assert header.value is True
+            assert "Select all includes only tasks without earlier runs." in str(
+                screen.query_one("#task-hint", Static).renderable
+            )
             assert "1 selected task(s) hidden by the filter will also start." in str(
                 screen.query_one("#task-hint", Static).renderable
             )
@@ -5491,7 +5686,7 @@ def test_select_all_applies_only_to_shown_available_tasks(tmp_path: Path) -> Non
             )
             assert selector.selected_task_ids == ("3",)
             assert header.value is False
-            assert str(header.label) == "Select all available tasks"
+            assert str(header.label) == "Select all tasks without earlier runs"
 
             screen.query_one("#start-workflow", Button).press()
             await wait_for_tui(

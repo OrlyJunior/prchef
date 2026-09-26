@@ -24,6 +24,20 @@ ACTIVE_WORKFLOW_STATUSES = frozenset(
 )
 
 
+FRESH_RUN_STATUSES = frozenset({
+    WorkflowStatus.FAILED,
+    WorkflowStatus.CANCELLED,
+    WorkflowStatus.NEEDS_HUMAN,
+    WorkflowStatus.CHANGES_REQUESTED,
+})
+
+
+def can_start_fresh_run(latest: WorkflowStatus | None) -> bool:
+    """Whether a task may acquire another execution in the same repository."""
+
+    return latest is None or latest in FRESH_RUN_STATUSES
+
+
 class WorkflowStage(StrEnum):
     LOAD_TASK = "LOAD_TASK"
     LOAD_CONFIG = "LOAD_CONFIG"

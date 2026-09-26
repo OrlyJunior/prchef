@@ -77,10 +77,21 @@
 - The TUI launcher automatically browses tasks for its selected repository and task provider.
   Rows show titles, labels, and checkboxes; users may launch one task through the unchanged
   single-workflow path or select an ordered batch whose shared role presets/runtime overrides are
-  applied to every item. Tasks with any existing execution in the same repository and task source
-  show that status and remain unselectable, with inspection/resume delegated to execution history.
-  Refresh, loading, empty, and inline-error states remain available, while explicit CLI task
-  identifiers remain supported.
+  applied to every item. Rows show the latest execution in the same repository and task source.
+  A latest FAILED, CANCELLED, NEEDS_HUMAN, or CHANGES_REQUESTED execution permits an individually
+  selected fresh run; PENDING, WAITING, RUNNING, and APPROVED do not. Select all includes only
+  tasks without an earlier execution. A selection containing earlier runs requires confirmation
+  and can omit individual reruns while preserving earlier executions in history. Fresh runs use
+  the normal submission path and reload the current task without changing earlier branches,
+  worktrees, PRs, or human actions. The service checks the latest repository-scoped execution
+  when creating each row, including CLI submissions. Configured keys and resolved paths share
+  an identity; SQLite and PostgreSQL lock the latest-status read and insert so concurrent
+  launchers serialize. The new row is timestamped after the prior matching row. Missing or
+  empty CLI repository overrides use one task snapshot for admission and execution, so queued
+  edits cannot switch repositories. If task loading fails, aliased history may provide an
+  unambiguous repository; the provider error is recorded at LOAD_TASK without refetching.
+  Confirmation scrolls within terminal width and keeps its actions visible. Refresh, loading,
+  empty, and inline-error states remain available, as do explicit CLI task identifiers.
 - Label filtering is an optional task-provider capability (`LabelCatalogProvider.list_labels`),
   implemented only by GitHub issues (the full catalog via the Planner App REST API when
   configured, otherwise `gh api --paginate`, never the capped `gh label list`); Trello

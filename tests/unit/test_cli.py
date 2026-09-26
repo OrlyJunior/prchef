@@ -495,6 +495,19 @@ def test_cli_runs_trello_provider(monkeypatch: Any) -> None:
     assert StubWorkflowService.calls == [("trello", "card-1", None)]
 
 
+def test_cli_reports_rejected_fresh_run_without_traceback(monkeypatch: Any) -> None:
+    _stub_runtime(monkeypatch)
+
+    def reject(self: StubWorkflowService, task_id: str, repository: str | None):
+        raise ValueError(f"Task {task_id} already has a PENDING execution")
+
+    monkeypatch.setattr(StubWorkflowService, "run", reject)
+    result = runner.invoke(main.app, ["run", "--trello-card", "card-1"])
+
+    assert result.exit_code == 2
+    assert "already has a PENDING execution" in result.output
+
+
 def test_cli_respond_uses_same_execution_and_service_logic(monkeypatch: Any) -> None:
     execution = WorkflowExecution(
         id="execution-human",

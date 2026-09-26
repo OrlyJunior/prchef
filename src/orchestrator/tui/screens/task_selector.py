@@ -14,6 +14,7 @@ from textual.widgets import Button, Checkbox, SelectionList, Static
 
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.workflow_execution import WorkflowExecution
+from orchestrator.models.workflow_status import can_start_fresh_run
 
 # Checked/unchecked/blocked glyphs. ASCII keeps every column aligned on
 # terminals that render the Unicode ballot boxes as double-width cells.
@@ -262,6 +263,14 @@ class TaskSelector(Vertical):
     def selected_tasks(self) -> tuple[DevelopmentTask, ...]:
         return tuple(task for task in self._tasks if task.id in self._selected)
 
+    @property
+    def selected_previous_executions(self) -> dict[str, WorkflowExecution]:
+        return {
+            task.id: self._executions[task.id]
+            for task in self._tasks
+            if task.id in self._selected and task.id in self._executions
+        }
+
     def compose(self) -> ComposeResult:
         yield Static("Tasks", classes="field-label")
         yield Button("Refresh tasks", id="refresh-tasks")
@@ -277,7 +286,7 @@ class TaskSelector(Vertical):
             yield Static("", id="task-label-status")
         with Vertical(id="task-table"):
             yield _GlyphCheckbox(
-                "Select all available tasks",
+                "Select all tasks without earlier runs",
                 id="select-all-tasks",
                 disabled=True,
                 classes="task-select-all",
@@ -318,7 +327,12 @@ class TaskSelector(Vertical):
         self._tasks = list(tasks)
         self._executions = dict(executions or {})
         self._provider = provider
-        selectable = {task.id for task in self._tasks if task.id not in self._executions}
+        selectable = {
+            task.id for task in self._tasks
+            if can_start_fresh_run(
+                self._executions[task.id].status if task.id in self._executions else None
+            )
+        }
         self._selected = previous & selectable
         self._checkbox_tasks.clear()
         self._set_label_catalog(labels, label_error=label_error, retained=previous_filter)
@@ -342,7 +356,12 @@ class TaskSelector(Vertical):
             status = ""
             if execution is not None:
                 status = execution.status.value
-                suffix += f" — {status} (open in Execution history)"
+                suffix += (
+                    f" — Latest execution: {status}. Selecting starts a new run; "
+                    "earlier runs remain in Execution history."
+                    if can_start_fresh_run(execution.status)
+                    else f" — Latest execution: {status} (open in Execution history)"
+                )
             row = TaskRow(
                 Text(f"{task.id}: {title}{suffix}"),
                 number=task.id,
@@ -352,7 +371,7 @@ class TaskSelector(Vertical):
                 metrics=metrics,
                 value=task.id in self._selected,
                 id=checkbox_id,
-                disabled=execution is not None,
+                disabled=not can_start_fresh_run(execution.status if execution else None),
                 classes="task-row",
             )
             self._rows.append((task, row))
@@ -495,7 +514,8 @@ class TaskSelector(Vertical):
             summary.update("Label filter: off. Select labels to narrow the task list.")
         self.query_one("#clear-task-label-filter", Button).disabled = not self._label_filter
         self.query_one("#select-all-tasks", Checkbox).label = (
-            "Select all shown tasks" if self._label_filter else "Select all available tasks"
+            "Select all shown tasks without earlier runs"
+            if self._label_filter else "Select all tasks without earlier runs"
         )
 
     def clear_tasks(self) -> None:
@@ -589,7 +609,11 @@ class TaskSelector(Vertical):
     def _sync_header_and_hint(self) -> None:
         visible = self._visible_tasks()
         shown = {task.id for task in visible if task.id not in self._executions}
-        selectable_count = sum(task.id not in self._executions for task in self._tasks)
+        selectable_count = sum(
+            can_start_fresh_run(
+                self._executions[task.id].status if task.id in self._executions else None
+            ) for task in self._tasks
+        )
         header = self.query_one("#select-all-tasks", Checkbox)
         header.disabled = not shown
         self._updating = True
@@ -599,11 +623,14 @@ class TaskSelector(Vertical):
             )
         finally:
             self._updating = False
-        blocked_count = len(visible) - len(shown)
-        blocked = f" {blocked_count} already have executions." if blocked_count else ""
+        blocked_count = sum(
+            not can_start_fresh_run(self._executions[task.id].status)
+            for task in visible if task.id in self._executions
+        )
+        blocked = f" {blocked_count} have active or approved executions." if blocked_count else ""
         selected = (
             f"Selected {len(self._selected)} of {selectable_count} available "
-            f"{self._provider} tasks."
+            f"{self._provider} tasks. Select all includes only tasks without earlier runs."
         )
         if not self._label_filter:
             self.query_one("#task-hint", Static).update(f"{selected}{blocked}")
@@ -618,7 +645,7 @@ class TaskSelector(Vertical):
                 f"No loaded {self._provider} tasks have every selected label ({labels}). "
                 "Clear the filter to show all tasks."
             )
-        hidden_count = len(self._selected - shown)
+        hidden_count = len(self._selected - {task.id for task in visible})
         hidden = (
             f" {hidden_count} selected task(s) hidden by the filter will also start."
             if hidden_count
