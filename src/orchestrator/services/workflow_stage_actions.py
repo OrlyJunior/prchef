@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from orchestrator.clients.exceptions import GitHubClientError
+from orchestrator.clients.factory import WorkflowClients
+from orchestrator.config.project_config import ProjectConfig
+from orchestrator.models.code_review import CodeReview
+from orchestrator.models.development_task import DevelopmentTask
+from orchestrator.models.workflow_status import ReviewDecision, WorkflowStage
+from orchestrator.repositories.workflow_repository import WorkflowRepository
+from orchestrator.runtime_logging import redact_text
+from orchestrator.services.exceptions import WorkflowError
+from orchestrator.services.review_service import format_pull_request_review
+from orchestrator.services.workflow_stage_events import StageEvents
+from orchestrator.services.workflow_stage_values import StageValues
+
+logger = logging.getLogger("orchestrator.services.workflow_service")
+
+
+class StageActions:
+    """Apply Git and GitHub stage effects and render stage messages."""
+
+    def __init__(self, repository: WorkflowRepository, events: StageEvents) -> None:
+        self._repository = repository
+        self._events = events
+
+    def _commit_changes(
+        self,
+        execution_id: str,
+        execution_clients: WorkflowClients,
+        task: DevelopmentTask,
+        working_branch: str,
+        config: ProjectConfig,
+    ) -> None:
+        with self._events._step(execution_id, WorkflowStage.COMMIT):
+            execution_clients.git.ensure_merge_base(config.repository.base_branch)
+            commit_sha = execution_clients.git.commit_all(
+                StageValues._commit_message(task),
+                working_branch,
+                config.repository.protected_branches,
+            )
+            self._repository.record_commit(execution_id, commit_sha)
+
+    @staticmethod
+    def _assert_pull_request_open(
+        execution_clients: WorkflowClients, repository_slug: str, pull_request_number: int
+    ) -> None:
+        try:
+            is_open = execution_clients.github.is_pull_request_open(
+                repository_slug, pull_request_number
+            )
+        except GitHubClientError as exc:
+            raise WorkflowError(
+                f"Persisted pull request #{pull_request_number} is unavailable; "
+                "human intervention is required before continuing"
+            ) from exc
+        if not is_open:
+            raise WorkflowError(
+                f"Persisted pull request #{pull_request_number} is closed or unavailable; "
+                "human intervention is required before continuing"
+            )
+
+    def _publish_review(
+        self,
+        *,
+        execution_id: str,
+        execution_clients: WorkflowClients,
+        repository_slug: str,
+        pull_request_number: int,
+        review: CodeReview,
+    ) -> None:
+        event = {
+            ReviewDecision.APPROVED: "APPROVE",
+            ReviewDecision.CHANGES_REQUESTED: "REQUEST_CHANGES",
+            ReviewDecision.NEEDS_HUMAN: "COMMENT",
+        }[review.result]
+        try:
+            execution_clients.github.submit_pull_request_review(
+                repository=repository_slug,
+                pull_request_number=pull_request_number,
+                event=event,
+                body=format_pull_request_review(review),
+            )
+        except Exception as exc:
+            message = f"GitHub review publication failed: {redact_text(str(exc))}"
+            logger.warning("[github] %s", message)
+            # Publication is an external side effect. Preserve the reviewer decision and let
+            # the terminal workflow status reflect it even when GitHub is unavailable.
+            self._repository.record_error(execution_id, message)
+
+    @staticmethod
+    def _assign_implementer(
+        *,
+        execution_clients: WorkflowClients,
+        pull_request_number: int,
+        workspace_path: Path,
+    ) -> None:
+        """Assign the implementer App without making PR creation fail."""
+        try:
+            assignee = execution_clients.github.assign_implementer(
+                pull_request_number, cwd=workspace_path
+            )
+            if assignee is not None:
+                logger.info(
+                    "[github] Assigned implementer %s to pull request #%s",
+                    assignee,
+                    pull_request_number,
+                )
+        except GitHubClientError as exc:
+            logger.warning(
+                "[github] Implementer assignment failed for pull request #%s; "
+                "continuing workflow: %s",
+                pull_request_number,
+                redact_text(str(exc)),
+            )

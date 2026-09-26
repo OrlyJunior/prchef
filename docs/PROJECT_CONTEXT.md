@@ -270,12 +270,6 @@
 - Concurrent executions share a `WorkflowService` instance, so the event listener and active stage
   live in per-execution runtime state rather than on the service. Execution-derived worktree paths,
   branches, and worktree-bound Git/GitHub clients remain distinct per execution.
-- `WorkflowService` remains the controller/CLI/TUI entry point. Its private stage sequencer owns
-  fresh and resumed stage order, correction policy owns validation retries and optional polish,
-  and stage events own step persistence, diagnostics, and observer delivery. All three operate
-  through the facade, preserving per-execution runtime attribution and repository writes through
-  `WorkflowRepository`. `ImplementationService` renders every workflow implementer path through
-  one request builder; each path retains its own prompt and polish retains its no-change policy.
 - Queueing is in-memory and single-process. Persisted `PENDING`/`WAITING` rows survive a crash but
   are deliberately **not** resumed automatically at startup; recovery is deferred to #46.
 - Persist: normalized task, resolved repository/base branch and configured repository reference,
