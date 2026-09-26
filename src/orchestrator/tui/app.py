@@ -217,11 +217,15 @@ class OrchestratorApp(App[None]):
         display: none;
     }
     #execution-human-response { height: 7; }
-    #execution-content {
+    #execution-content-scroll {
         width: 100%;
         height: auto;
         overflow-x: auto;
         overflow-y: hidden;
+    }
+    #execution-content {
+        width: auto;
+        height: auto;
     }
     """
     BINDINGS = [

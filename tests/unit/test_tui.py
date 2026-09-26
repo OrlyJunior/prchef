@@ -3223,6 +3223,43 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
     asyncio.run(drive())
 
 
+def test_execution_detail_open_and_refresh_do_not_fetch_task_or_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    long_payload = "diagnostic" * 3000
+    repository.diagnostics = [
+        ExecutionDiagnostic(
+            execution_id=repository.execution.id,
+            category=DiagnosticCategory.RESPONSE,
+            payload={"output": long_payload},
+        )
+    ]
+
+    def unexpected_call(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("Execution detail must use persisted data only")
+
+    controller._task_provider_factory = unexpected_call
+    monkeypatch.setattr(
+        "orchestrator.services.project_context.load_project_context", unexpected_call
+    )
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 24)) as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            content = screen.query_one("#execution-content", Static)
+            assert long_payload in str(content.renderable)
+            assert screen.query_one("#execution-content-scroll").max_scroll_x > 0
+            screen._refresh_execution()
+            await settle_tui(pilot)
+            assert long_payload in str(content.renderable)
+
+    asyncio.run(drive())
+
+
 @pytest.mark.parametrize("status", list(WorkflowStatus))
 @pytest.mark.parametrize("requested", [False, True])
 def test_execution_detail_cancel_visibility(
