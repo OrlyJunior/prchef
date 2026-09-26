@@ -84,7 +84,10 @@
   and can omit individual reruns while preserving earlier executions in history. Fresh runs use
   the normal submission path and reload the current task without changing earlier branches,
   worktrees, PRs, or human actions. The service checks the latest repository-scoped execution
-  when creating each new row, including CLI submissions. A CLI run without a repository resolves
+  when creating each new row, including CLI submissions. Configured repository keys and resolved
+  paths identify the same repository for launcher lookups and admission; SQLite admission locks
+  before reading the latest run and inserting a new row so concurrent launchers serialize.
+  A CLI run without a repository resolves
   it from the task; if task loading fails, a unique prior repository can supply that identity.
   Refresh, loading, empty, and inline-error states remain available, while explicit CLI task
   identifiers remain supported.

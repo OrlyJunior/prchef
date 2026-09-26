@@ -586,7 +586,7 @@ class WorkflowController:
         missing = [task_id for task_id in task_ids if task_id not in tasks_by_id]
         if missing:
             raise ValueError(f"Selected tasks are no longer open: {', '.join(missing)}")
-        existing = self._repository.executions_for_tasks(
+        existing = self._executions_for_tasks(
             launch.task_provider, list(task_ids), launch.repository
         )
         blocked = {
@@ -622,7 +622,7 @@ class WorkflowController:
                     break
                 # Close the list/start race as far as the repository boundary
                 # permits. A task that gained an execution is skipped.
-                latest = self._repository.executions_for_tasks(
+                latest = self._executions_for_tasks(
                     launch.task_provider, [task.id], launch.repository
                 ).get(task.id)
                 if latest is not None and not can_start_fresh_run(latest.status):
@@ -926,9 +926,19 @@ class WorkflowController:
         task_provider: str,
         tasks: list[DevelopmentTask],
     ) -> dict[str, WorkflowExecution]:
-        return self._repository.executions_for_tasks(
+        return self._executions_for_tasks(
             task_provider, [task.id for task in tasks], repository
         )
+
+    def _executions_for_tasks(
+        self, task_provider: str, task_ids: list[str], repository: str
+    ) -> dict[str, WorkflowExecution]:
+        if isinstance(self._repository, WorkflowRepository):
+            aliases = self._config_loader.repository_identity_aliases(repository)
+            return self._repository.executions_for_tasks(
+                task_provider, task_ids, repository, repository_aliases=aliases
+            )
+        return self._repository.executions_for_tasks(task_provider, task_ids, repository)
 
     def batches(self) -> list[WorkflowBatch]:
         return list(reversed(self._repository.list_batches()))

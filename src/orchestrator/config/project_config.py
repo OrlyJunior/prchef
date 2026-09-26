@@ -1431,6 +1431,26 @@ class ProjectConfigLoader:
             candidate = self._config_file.parent / candidate
         return candidate.resolve()
 
+    def repository_identity_aliases(self, reference: str) -> tuple[str, ...]:
+        """Names that can identify the same repository in execution history.
+
+        Include the resolved path even when the caller supplied a configured
+        key, since path-only CLI runs persist their original path as the ref.
+        """
+        repositories = self.list_repositories()
+        by_key = {repository.key: repository.path for repository in repositories}
+        path = by_key.get(reference) or self.resolve_repository_path(reference)
+        return tuple(
+            dict.fromkeys(
+                (
+                    reference,
+                    str(path),
+                    path.as_posix(),
+                    *(repo.key for repo in repositories if repo.path == path),
+                )
+            )
+        )
+
     def save_repository(
         self,
         repository_key: str,
@@ -1546,7 +1566,7 @@ class ProjectConfigLoader:
     def load(self, task: DevelopmentTask, repository_override: str | None = None) -> ProjectConfig:
         global_config = _load_yaml(self._config_file, required=True)
         self._reject_misplaced_project_settings(global_config)
-        repository_ref = repository_override or self._repository_ref_from_task(task)
+        repository_ref = repository_override or self.repository_reference_for_task(task)
         if not repository_ref:
             raise ConfigurationError(
                 "Task has no repository; configure one in the task or use --repository"
@@ -1905,7 +1925,7 @@ class ProjectConfigLoader:
         return self._config_file
 
     @staticmethod
-    def _repository_ref_from_task(task: DevelopmentTask) -> str | None:
+    def repository_reference_for_task(task: DevelopmentTask) -> str | None:
         if task.repository:
             return task.repository
         custom_fields = task.metadata.get("custom_fields", {})

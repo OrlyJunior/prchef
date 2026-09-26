@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -68,7 +68,9 @@ class WorkflowRepository:
         self._sessions = session_factory
 
     def create_execution(
-        self, task_id: str, task_source: str = "trello", *, repository_ref: str | None = None
+        self, task_id: str, task_source: str = "trello", *,
+        repository_ref: str | None = None,
+        repository_aliases: Sequence[str] = (),
     ) -> WorkflowExecution:
         now = _utcnow()
         legacy_trello_id = task_id if task_source == "trello" else ""
@@ -89,14 +91,20 @@ class WorkflowRepository:
         )
         with self._sessions() as session, session.begin():
             if repository_ref:
+                # SQLite SELECTs in deferred transactions do not reserve the
+                # writer slot. Take it before reading so competing launchers
+                # cannot both admit a new PENDING row from the same old run.
+                if session.bind is not None and session.bind.dialect.name == "sqlite":
+                    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                references = tuple(dict.fromkeys((repository_ref, *repository_aliases)))
                 latest = session.scalars(
                     select(WorkflowExecutionEntity)
                     .where(
                         WorkflowExecutionEntity.task_source == task_source,
                         WorkflowExecutionEntity.task_id == task_id,
                         or_(
-                            WorkflowExecutionEntity.repository_ref == repository_ref,
-                            WorkflowExecutionEntity.repository == repository_ref,
+                            WorkflowExecutionEntity.repository_ref.in_(references),
+                            WorkflowExecutionEntity.repository.in_(references),
                         ),
                     )
                     .order_by(
@@ -186,11 +194,13 @@ class WorkflowRepository:
         task_source: str,
         task_ids: list[str],
         repository: str,
+        repository_aliases: Sequence[str] = (),
     ) -> dict[str, WorkflowExecution]:
         """Return the newest execution for each repository-scoped task identity."""
 
         if not task_ids:
             return {}
+        references = tuple(dict.fromkeys((repository, *repository_aliases)))
         with self._sessions() as session:
             entities = session.scalars(
                 select(WorkflowExecutionEntity)
@@ -198,8 +208,8 @@ class WorkflowRepository:
                     WorkflowExecutionEntity.task_source == task_source,
                     WorkflowExecutionEntity.task_id.in_(task_ids),
                     or_(
-                        WorkflowExecutionEntity.repository_ref == repository,
-                        WorkflowExecutionEntity.repository == repository,
+                        WorkflowExecutionEntity.repository_ref.in_(references),
+                        WorkflowExecutionEntity.repository.in_(references),
                     ),
                 )
                 .order_by(

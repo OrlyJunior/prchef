@@ -1,12 +1,14 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect, text
+from sqlalchemy import event, inspect, text
 
 from orchestrator.config.database import build_engine, build_session_factory
-from orchestrator.config.project_config import WorkspaceSettings
+from orchestrator.config.project_config import ProjectConfigLoader, WorkspaceSettings
 from orchestrator.models import (
     DevelopmentTask,
     DiagnosticCategory,
@@ -504,6 +506,102 @@ def test_fresh_execution_admission_uses_latest_repository_scoped_status(
     # Neither another repository nor another source shares this admission gate.
     repository.create_execution("12", "github", repository_ref="other")
     repository.create_execution("12", "trello", repository_ref="example")
+
+
+def test_repository_key_and_path_share_fresh_run_admission(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "repository-aliases.db")
+    project = tmp_path / "project"
+    project.mkdir()
+    config = tmp_path / "orchestrator.yml"
+    config.write_text(f"repositories:\n  example:\n    path: {project.as_posix()}\n")
+    aliases = ProjectConfigLoader(config).repository_identity_aliases("example")
+    path = str(project.resolve())
+
+    # A path-only CLI row has no resolved repository until LOAD_CONFIG.
+    active = repository.create_execution("12", "github", repository_ref=path)
+    assert repository.executions_for_tasks(
+        "github", ["12"], "example", repository_aliases=aliases
+    )["12"].id == active.id
+    with pytest.raises(ValueError, match="PENDING"):
+        repository.create_execution(
+            "12", "github", repository_ref="example", repository_aliases=aliases
+        )
+
+    class Provider:
+        source = "github"
+
+        def get_task(self, task_id: str) -> DevelopmentTask:
+            return DevelopmentTask(
+                task_id, "github", "Current task", "Description", "https://example/12",
+                repository="example",
+            )
+
+    service = WorkflowService(
+        repository, Provider(), ProjectConfigLoader(config), object(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("12", "example")
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("12")
+
+    repository.update_status(active.id, WorkflowStatus.FAILED)
+    fresh = repository.create_execution(
+        "12", "github", repository_ref="example", repository_aliases=aliases
+    )
+    assert fresh.id != active.id
+    assert repository.executions_for_tasks(
+        "github", ["12"], path, repository_aliases=aliases
+    )["12"].id == fresh.id
+    with pytest.raises(ValueError, match="PENDING"):
+        repository.create_execution(
+            "12", "github", repository_ref=path, repository_aliases=aliases
+        )
+    with pytest.raises(ValueError, match="PENDING"):
+        service.submit_execution("12", path)
+
+
+def test_concurrent_fresh_run_admission_serializes_sqlite_read_and_insert(
+    tmp_path: Path,
+) -> None:
+    repository = _migrated_repository(tmp_path, "concurrent-fresh.db")
+    prior = repository.create_execution("12", "github", repository_ref="example")
+    repository.update_status(prior.id, WorkflowStatus.FAILED)
+    first_read = Event()
+    second_write_lock_attempt = Event()
+    engine = repository._sessions().get_bind()
+    assert engine is not None
+
+    def before_cursor_execute(
+        _connection: object, _cursor: object, statement: str,
+        _parameters: object, _context: object, _executemany: bool,
+    ) -> None:
+        if statement.startswith("SELECT") and "workflow_executions" in statement:
+            if not first_read.is_set():
+                first_read.set()
+                assert second_write_lock_attempt.wait(5)
+        elif statement == "BEGIN IMMEDIATE" and first_read.is_set():
+            second_write_lock_attempt.set()
+
+    event.listen(engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        def submit() -> str:
+            try:
+                return repository.create_execution(
+                    "12", "github", repository_ref="example"
+                ).id
+            except ValueError as exc:
+                return str(exc)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(submit)
+            assert first_read.wait(5)
+            second = pool.submit(submit)
+            results = [first.result(timeout=10), second.result(timeout=10)]
+    finally:
+        event.remove(engine, "before_cursor_execute", before_cursor_execute)
+
+    assert sum("PENDING" in result for result in results) == 1
+    assert repository.executions_for_tasks("github", ["12"], "example")["12"].id in results
 
 
 def test_service_fresh_run_reloads_edited_task_and_keeps_earlier_execution(

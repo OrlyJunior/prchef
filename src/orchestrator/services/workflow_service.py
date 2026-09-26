@@ -253,21 +253,28 @@ class WorkflowService:
                 admission_task = self._task_provider.get_task(task_id)
             except Exception:
                 admission_task = None
+            if admission_task is not None:
+                repository_ref = (
+                    self._config_loader.repository_reference_for_task(admission_task)
+                    if isinstance(self._config_loader, ProjectConfigLoader)
+                    else admission_task.repository
+                )
+            if not repository_ref:
                 repository_ref = self._repository.inferred_repository_for_task(
                     self._task_provider.source, task_id
                 )
-            if admission_task is not None:
-                repository_ref = admission_task.repository
-                try:
-                    admission_config = self._config_loader.load(admission_task, None)
-                except Exception:
-                    pass  # The normal execution records a LOAD_CONFIG failure.
-                else:
-                    repository_ref = repository_ref or str(admission_config.path)
         if isinstance(self._repository, WorkflowRepository):
+            aliases: tuple[str, ...] = ()
+            if repository_ref and isinstance(self._config_loader, ProjectConfigLoader):
+                try:
+                    aliases = self._config_loader.repository_identity_aliases(repository_ref)
+                except (ConfigurationError, OSError):
+                    # The normal LOAD_CONFIG stage records a configuration error.
+                    pass
             execution = self._repository.create_execution(
                 task_id, task_source=self._task_provider.source,
                 repository_ref=repository_ref,
+                repository_aliases=aliases,
             )
         else:
             execution = self._repository.create_execution(
