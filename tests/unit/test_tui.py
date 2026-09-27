@@ -3498,6 +3498,68 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
     asyncio.run(drive())
 
 
+@pytest.mark.parametrize(("width", "maximum_rows"), [(80, 2), (36, 6)])
+def test_execution_detail_actions_reflow_without_diagnostic_overflow(
+    tmp_path: Path, width: int, maximum_rows: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    execution = repository.execution
+    execution.status = WorkflowStatus.RUNNING
+    execution.task_url = "https://example/tasks/12"
+    execution.pr_url = "https://example/pull/34"
+    execution.spec_jules_session_url = "https://example/sessions/planner"
+    execution.review_jules_session_url = "https://example/sessions/reviewer"
+    long_diagnostics = [ExecutionDiagnostic(
+        execution_id=execution.id,
+        category=DiagnosticCategory.RESPONSE,
+        payload={"output": "diagnostic" * 300},
+    )]
+    opened: list[str] = []
+    monkeypatch.setattr("orchestrator.tui.screens.execution_detail.webbrowser.open", opened.append)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(width, 24)) as pilot:
+            application.push_screen(ExecutionDetailScreen(execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            action_ids = (
+                "execution-cancel", "open-task", "open-pr", "open-spec-session",
+                "open-review-session", "copy-detailed-logs-button",
+            )
+            buttons = [screen.query_one(f"#{button_id}", Button) for button_id in action_ids]
+            positions = [(button.virtual_region.x, button.virtual_region.y) for button in buttons]
+            repository.diagnostics = long_diagnostics
+            screen._refresh_execution()
+            await settle_tui(pilot)
+            assert positions == [
+                (button.virtual_region.x, button.virtual_region.y) for button in buttons
+            ]
+            assert all(button.display and not button.disabled for button in buttons)
+            assert len({button.virtual_region.y for button in buttons}) <= maximum_rows
+            assert screen.query_one("#execution-detail", VerticalScroll).max_scroll_x == 0
+            content = screen.query_one("#execution-content-scroll", ScrollableContainer)
+            assert content.max_scroll_x > 0
+
+            for button in buttons:
+                button.focus()
+                await settle_tui(pilot)
+                assert application.focused is button
+                assert 0 <= button.region.x < button.region.right <= width
+                assert 0 <= button.region.y < button.region.bottom <= application.size.height
+
+            buttons[0].focus()
+            await settle_tui(pilot)
+            for button in buttons[1:]:
+                await pilot.press("tab")
+                assert application.focused is button
+            assert await pilot.click("#open-task")
+            await settle_tui(pilot)
+            assert opened == [execution.task_url]
+
+    asyncio.run(drive())
+
+
 def test_execution_detail_open_and_refresh_do_not_fetch_task_or_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
