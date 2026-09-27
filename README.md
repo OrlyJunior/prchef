@@ -155,6 +155,11 @@ imediatamente. Se mudar dependencias ou metadados de empacotamento, atualize o a
 pipx reinstall autonomous-dev-orchestrator
 ```
 
+### Release
+
+Para publicar uma release, mescle `develop` em `main`. Em **Actions → Release**, execute o workflow
+na branch `main` e escolha o incremento `patch`, `minor` ou `major`.
+
 ### Atualizacao, desinstalacao e PATH
 
 Para uma instalacao publicada, execute `pipx upgrade autonomous-dev-orchestrator`. Para uma
