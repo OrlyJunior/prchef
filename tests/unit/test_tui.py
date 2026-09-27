@@ -3502,7 +3502,7 @@ def test_execution_detail_open_and_refresh_do_not_fetch_task_or_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     controller, _, repository = _controller(tmp_path)
-    long_payload = "diagnostic" * 3000
+    long_payload = "diagnostic" * 1000
     repository.diagnostics = [
         ExecutionDiagnostic(
             execution_id=repository.execution.id,
