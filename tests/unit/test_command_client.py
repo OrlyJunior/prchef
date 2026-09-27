@@ -436,8 +436,6 @@ def _unread_pipe_bytes(fd: int) -> int:
 def test_interrupted_cleanup_lets_a_supervisor_blocked_on_full_output_exit(
     tmp_path: Path,
 ) -> None:
-    import fcntl
-
     noisy = tmp_path / "noisy.py"
     noisy.write_text(_NOISY_SCRIPT, encoding="utf-8")
 
@@ -449,13 +447,13 @@ def test_interrupted_cleanup_lets_a_supervisor_blocked_on_full_output_exit(
         assert process.stdout is not None
         assert process.stdout.readline().strip() == "ready"
         stdout_fd = process.stdout.fileno()
-        capacity = fcntl.fcntl(stdout_fd, fcntl.F_GETPIPE_SZ)
-        # Wait until the unread pipe is full, so the supervisor is blocked relaying into it. The
-        # bound only keeps a regression from hanging the suite.
+        # The writer is endless and the pipe is no longer drained. Once output arrives, allow it
+        # to back up; Linux pipes need not expose their full nominal capacity through FIONREAD.
         deadline = time.monotonic() + 60
-        while _unread_pipe_bytes(stdout_fd) < capacity:
-            assert time.monotonic() < deadline, "the output pipe never filled"
+        while _unread_pipe_bytes(stdout_fd) == 0:
+            assert time.monotonic() < deadline, "the output pipe stayed empty"
             time.sleep(0.01)
+        time.sleep(0.1)
 
         command_client._terminate_process_tree(process, containment)
         command_client._reap_interrupted_process(process)
