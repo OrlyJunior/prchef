@@ -74,7 +74,8 @@ and repository retrieval cover those.
 - Status is the outcome; stage is progress. `PENDING` = not started; `WAITING` = started but
   waiting for provider capacity. A successful review ends at stage `COMPLETED`; other terminal
   executions keep the stage that stopped them. Observer events follow persisted transitions;
-  listeners can never change workflow outcomes. A `WORKFLOW_FINISHED` event ends live TUI controls
+  listeners can never change workflow outcomes. TUI observer delivery queues presentation without
+  waiting for the UI. A `WORKFLOW_FINISHED` event ends live TUI controls
   for every terminal status, including `CHANGES_REQUESTED`.
 - A blocking planning ambiguity ends as `NEEDS_HUMAN` before any branch or worktree exists.
 - A fresh execution records one fetched base commit before planning. Planning reads a temporary

@@ -1421,7 +1421,7 @@ class WorkflowRunnerScreen(Screen[None]):
         )
 
     def _on_workflow_event(self, event: WorkflowEvent) -> None:
-        self.app.call_from_thread(self._render_workflow_event, event)
+        self.app.call_later(self._render_workflow_event, event)
 
     def _render_workflow_event(self, event: WorkflowEvent) -> None:
         if self._batch_running and self._batch_progress is not None:

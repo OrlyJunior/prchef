@@ -8,7 +8,6 @@ import stat
 import tempfile
 import threading
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -722,6 +721,7 @@ class WorkflowController:
         self, run: _BatchRun, position: int, event: WorkflowEvent
     ) -> None:
         """Keep batch bookkeeping isolated from workflow observer failures."""
+        listener = run.listener
         try:
             if event.kind is WorkflowEventKind.EXECUTION_CREATED:
                 self._repository.record_batch_item_execution(
@@ -742,10 +742,11 @@ class WorkflowController:
                     and isinstance(payload.get("provider"), str)
                 ):
                     run.unavailable.add(payload["provider"])
+                listener = run.listener
                 run.condition.notify_all()
         except Exception:
             logger.exception("Could not update batch %s from workflow event", run.batch_id)
-        if run.listener is not None:
+        if listener is not None:
             try:
                 payload = dict(event.payload or {})
                 payload.update({
@@ -753,7 +754,7 @@ class WorkflowController:
                     "batch_position": position,
                     "batch_size": run.size,
                 })
-                run.listener(replace(event, payload=payload))
+                listener(replace(event, payload=payload))
             except Exception:
                 logger.exception("Batch %s listener failed", run.batch_id)
 
@@ -882,11 +883,18 @@ class WorkflowController:
 
     def _batch_submission_options(
         self, execution_id: str, listener: WorkflowEventListener | None
-    ) -> tuple[WorkflowEventListener | None, dict[str, Any]]:
+    ) -> tuple[WorkflowEventListener | None, dict[str, Any], _BatchRun | None, int, int]:
         run = self._active_batches.get(self._execution_batches.get(execution_id, ""))
-        if run is None or run.stopping or run.complete():
-            return listener, {}
-        position = run.positions[execution_id]
+        if run is None:
+            return listener, {}, None, -1, -1
+        with run.condition:
+            if run.stopping or run.complete():
+                return listener, {}, None, -1, -1
+            position = run.positions[execution_id]
+            # Reserve the watcher generation before a service can emit events.
+            # Submission itself must run after releasing this condition.
+            generation = run.generations.get(position, 0) + 1
+            run.generations[position] = generation
 
         def observe(event: WorkflowEvent) -> None:
             self._observe_batch_event(run, position, event)
@@ -896,7 +904,7 @@ class WorkflowController:
                 except Exception:
                     logger.exception("Execution %s listener failed", execution_id)
 
-        return observe, {"admission_gate": run.ready}
+        return observe, {"admission_gate": run.ready}, run, position, generation
 
     def executions(self, query: str = "") -> list[WorkflowExecution]:
         normalized = query.strip().casefold()
@@ -973,29 +981,34 @@ class WorkflowController:
         # Register before submitting so a queued resume is already cancellable
         # through its own service; a rejected submission is rolled back.
         self._active_services[execution_id] = service
+        run: _BatchRun | None = None
+        submitted = False
         try:
-            run = self._active_batches.get(self._execution_batches.get(execution_id, ""))
-            with run.condition if run is not None else nullcontext():
-                batch_listener, options = self._batch_submission_options(
-                    execution_id, event_listener
-                )
-                handle = service.submit_response(
-                    execution_id,
-                    response,
-                    event_listener=self._tracking_listener(service, batch_listener),
-                    **options,
-                )
-                if options and run is not None:
-                    position = run.positions[execution_id]
-                    generation = run.generations.get(position, 0) + 1
-                    run.generations[position] = generation
-            if options and run is not None:
+            batch_listener, options, run, position, generation = self._batch_submission_options(
+                execution_id, event_listener
+            )
+            handle = service.submit_response(
+                execution_id,
+                response,
+                event_listener=self._tracking_listener(service, batch_listener),
+                **options,
+            )
+            submitted = True
+            if run is not None:
                 threading.Thread(
                     target=self._watch_batch_handle,
                     args=(run, position, generation, handle), daemon=True,
                 ).start()
+                with run.condition:
+                    stopping = run.stopping
+                if stopping:
+                    self.cancel_workflow(execution_id)
             return handle
         except Exception:
+            if not submitted and run is not None:
+                with run.condition:
+                    if run.generations.get(position) == generation:
+                        run.generations[position] = generation - 1
             self._active_services.pop(execution_id, None)
             raise
 
@@ -1039,29 +1052,34 @@ class WorkflowController:
 
         service = self._service_for_execution(self._repository.get_execution(execution_id))
         self._active_services[execution_id] = service
+        run: _BatchRun | None = None
+        submitted = False
         try:
-            run = self._active_batches.get(self._execution_batches.get(execution_id, ""))
-            with run.condition if run is not None else nullcontext():
-                batch_listener, options = self._batch_submission_options(
-                    execution_id, event_listener
-                )
-                handle = service.submit_continuation(
-                    execution_id,
-                    feedback,
-                    event_listener=self._tracking_listener(service, batch_listener),
-                    **options,
-                )
-                if options and run is not None:
-                    position = run.positions[execution_id]
-                    generation = run.generations.get(position, 0) + 1
-                    run.generations[position] = generation
-            if options and run is not None:
+            batch_listener, options, run, position, generation = self._batch_submission_options(
+                execution_id, event_listener
+            )
+            handle = service.submit_continuation(
+                execution_id,
+                feedback,
+                event_listener=self._tracking_listener(service, batch_listener),
+                **options,
+            )
+            submitted = True
+            if run is not None:
                 threading.Thread(
                     target=self._watch_batch_handle,
                     args=(run, position, generation, handle), daemon=True,
                 ).start()
+                with run.condition:
+                    stopping = run.stopping
+                if stopping:
+                    self.cancel_workflow(execution_id)
             return handle
         except Exception:
+            if not submitted and run is not None:
+                with run.condition:
+                    if run.generations.get(position) == generation:
+                        run.generations[position] = generation - 1
             self._active_services.pop(execution_id, None)
             raise
 
