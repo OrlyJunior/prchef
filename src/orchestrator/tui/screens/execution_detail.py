@@ -125,7 +125,7 @@ class ExecutionDetailScreen(Screen[None]):
                 WorkflowEventKind.WORKFLOW_FINISHED,
             }
         ):
-            self.app.call_from_thread(self._refresh_execution)
+            self.app.call_later(self._refresh_execution)
 
     def _poll_cancellation(self) -> None:
         if self.app.screen is not self:
