@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -67,12 +68,15 @@ class WorkspaceCleanupService:
         git: GitClient,
         control_repository: Path,
         workspace_root: Path,
+        *,
+        delete_index_points: Callable[[Path], None] | None = None,
     ) -> None:
         self._repository = workflow_repository
         self._git = git
         self._control_repository = control_repository.resolve()
         self._workspace_root = workspace_root.resolve()
         self._workspace_base = (self._workspace_root / self._control_repository.name).resolve()
+        self._delete_index_points = delete_index_points
 
     def inspect(self, *, include_failed: bool = False) -> WorkspaceCleanupReport:
         report = WorkspaceCleanupReport(dry_run=True)
@@ -129,6 +133,8 @@ class WorkspaceCleanupService:
             if not item.eligible:
                 continue
             try:
+                if self._delete_index_points is not None:
+                    self._delete_index_points(item.path)
                 self._git.remove_worktree(item.path)
                 item.removed = True
             except Exception as exc:

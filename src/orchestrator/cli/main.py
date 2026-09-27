@@ -43,7 +43,10 @@ from orchestrator.services.debug_service import (
     parse_debug_stage,
 )
 from orchestrator.services.execution_dispatcher import ExecutionDispatcher
-from orchestrator.services.qdrant_repository_context import QdrantClientManager
+from orchestrator.services.qdrant_repository_context import (
+    QdrantClientManager,
+    QdrantRepositoryContextStrategy,
+)
 from orchestrator.services.task_provider import (
     GitHubIssueTaskProvider,
     TaskProvider,
@@ -892,11 +895,20 @@ def cleanup_workspaces(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
 
+    delete_index_points = None
+    if project_config.repository_context.strategy == "qdrant":
+        index_strategy = QdrantRepositoryContextStrategy(
+            project_config.repository_context,
+            project_config.configured_repository_key or repository,
+            project_config.path,
+        )
+        delete_index_points = index_strategy.delete_worktree_points
     service = WorkspaceCleanupService(
         _migrated_repository(settings),
         GitClient(CommandClient(), project_config.path),
         project_config.path,
         workspace_root,
+        delete_index_points=delete_index_points,
     )
     report = service.cleanup(
         dry_run=dry_run,

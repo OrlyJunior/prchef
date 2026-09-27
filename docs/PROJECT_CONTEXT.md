@@ -84,6 +84,8 @@ and repository retrieval cover those.
   command.
 - Cleanup removes only managed, terminal worktrees in the configured root. Failed, cancelled,
   and human-blocked worktrees need explicit inclusion; active and unmanaged paths are excluded.
+  For Qdrant retrieval, cleanup removes a worktree's index points before its Git worktree;
+  index deletion failure leaves the worktree available for retry.
 - Agents never commit, push, create PRs, or merge; the orchestrator owns Git and GitHub. A
   reported successful implementation with no changes is a failure.
 - Commit and push refuse protected branches; push is only `--set-upstream origin <branch>`. The

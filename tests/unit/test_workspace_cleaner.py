@@ -146,3 +146,39 @@ def test_unmanaged_directories_are_listed_but_never_cleaned(tmp_path: Path) -> N
     assert report.workspaces[0].retention is WorkspaceRetention.UNMANAGED
     assert not report.workspaces[0].eligible
     assert git.removed == []
+
+
+def test_index_deletion_runs_before_git_and_failure_preserves_worktree(tmp_path: Path) -> None:
+    base = tmp_path / "workspaces" / "control"
+    approved = (base / "approved").resolve()
+    running = (base / "running").resolve()
+    executions = [
+        _execution(approved, WorkflowStatus.APPROVED),
+        _execution(running, WorkflowStatus.RUNNING),
+    ]
+    service, git, _ = _service(tmp_path, executions)
+    (base / "unmanaged").mkdir(parents=True)
+    deleted: list[Path] = []
+
+    def fail_deletion(path: Path) -> None:
+        deleted.append(path)
+        raise RuntimeError("index unavailable")
+
+    service._delete_index_points = fail_deletion
+    dry = service.cleanup(dry_run=True)
+    assert deleted == []
+    assert git.removed == []
+    assert dry.removed_count == 0
+
+    report = service.cleanup(dry_run=False)
+    assert deleted == [approved]
+    assert git.removed == []
+    assert report.error_count == 1
+    assert report.workspaces[0].error == "index unavailable"
+    assert not report.workspaces[1].eligible
+    assert not report.workspaces[2].eligible
+
+    service._delete_index_points = deleted.append
+    retry = service.cleanup(dry_run=False)
+    assert git.removed == [approved]
+    assert retry.removed_count == 1
