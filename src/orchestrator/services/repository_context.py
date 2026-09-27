@@ -282,6 +282,38 @@ class RepositoryContextStrategyError(ValueError):
     """Raised when a configured repository context strategy cannot be resolved."""
 
 
+def semantic_fallback_diagnostic(exc: Exception) -> dict[str, str]:
+    """Classify backend failures without exposing exception text or local paths."""
+
+    causes: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and len(causes) < 4:
+        causes.append(current)
+        current = current.__cause__
+    detail = " ".join(f"{type(item).__name__} {item}" for item in causes).casefold()
+    if "no module" in detail or "is required for qdrant" in detail:
+        reason = "The local semantic dependencies are unavailable."
+        remedy = "Reinstall the orchestrator with its default dependencies."
+    elif any(word in detail for word in ("unsupported", "platform", "onnxruntime", "architecture")):
+        reason = "The local embedding runtime is unsupported on this platform."
+        remedy = "Use a supported Python platform or select strategy: heuristic."
+    elif any(
+        word in detail for word in ("offline", "download", "huggingface", "connection", "network")
+    ):
+        reason = "The embedding model download or semantic connection is unavailable."
+        remedy = "Retry online after the model is cached, or select strategy: heuristic."
+    elif "lock" in detail:
+        reason = "The local Qdrant index is locked by another process."
+        remedy = "Close the other process or configure Qdrant server mode."
+    else:
+        reason = f"Semantic setup or retrieval failed ({type(exc).__name__})."
+        remedy = (
+            "Check the Qdrant index and embedding settings, then retry or select "
+            "strategy: heuristic."
+        )
+    return {"kind": "REPOSITORY_CONTEXT_FALLBACK", "reason": reason, "remedy": remedy}
+
+
 class HeuristicRepositoryContextStrategy:
     """Compatibility strategy backed by the existing bounded collector."""
 
@@ -331,6 +363,9 @@ def resolve_repository_context_strategy(
     embedding_provider: EmbeddingProvider | None = None,
     client_factory: Callable[[Any], Any] | None = None,
     client_manager: Any | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_diagnostic: Callable[[dict[str, str]], None] | None = None,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> RepositoryContextStrategy:
     """Resolve a stable strategy name through the orchestrator-owned registry.
 
@@ -348,11 +383,24 @@ def resolve_repository_context_strategy(
         ) from exc
     if normalized == "heuristic":
         return builder()
-    if settings is None or repository_key is None or configured_root is None:
+    if settings is None or configured_root is None:
         raise RepositoryContextStrategyError(
-            "Qdrant repository context requires resolved settings, a configured "
-            "repository key, and the configured repository root"
+            "Qdrant repository context requires resolved settings and the configured "
+            "repository root"
         )
+    if repository_key is None:
+        if on_diagnostic is not None:
+            on_diagnostic(
+                {
+                    "kind": "REPOSITORY_CONTEXT_FALLBACK",
+                    "reason": "This repository was selected by path without a registered key.",
+                    "remedy": (
+                        "Register the repository in orchestrator.yml and select its key "
+                        "to use semantic retrieval."
+                    ),
+                }
+            )
+        return HeuristicRepositoryContextStrategy()
     kwargs: dict[str, Any] = {
         "settings": settings,
         "repository_key": repository_key,
@@ -364,7 +412,18 @@ def resolve_repository_context_strategy(
         kwargs["client_factory"] = client_factory
     if client_manager is not None:
         kwargs["client_manager"] = client_manager
-    return builder(**kwargs)
+    if on_progress is not None:
+        kwargs["on_progress"] = on_progress
+    if on_diagnostic is not None:
+        kwargs["on_diagnostic"] = on_diagnostic
+    if cancellation_check is not None:
+        kwargs["cancellation_check"] = cancellation_check
+    try:
+        return builder(**kwargs)
+    except Exception as exc:
+        if on_diagnostic is not None:
+            on_diagnostic(semantic_fallback_diagnostic(exc))
+        return HeuristicRepositoryContextStrategy()
 
 
 def collect_repository_context(repository_path: Path, task: DevelopmentTask) -> str:

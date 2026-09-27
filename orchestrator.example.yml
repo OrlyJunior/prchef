@@ -14,12 +14,12 @@ defaults:
   repository:
     base_branch: develop
     protected_branches: [main, master, develop]
-  # Orchestrator-owned retrieval policy. `heuristic` remains the default and
-  # preserves the existing bounded planner snapshot and reviewer metadata behavior.
+  # Registered repositories use local Qdrant by default. The first run builds
+  # the persistent index and downloads the embedding model if needed.
   repository_context:
-    strategy: heuristic
-    # To enable dense semantic retrieval for a registered repository, use:
-    # strategy: qdrant
+    # Omit this line for the same local Qdrant default. Change it to
+    # strategy: heuristic to use the previous bounded context.
+    strategy: qdrant
     # context_budget_chars: 12000
     # candidate_count: 12
     # chunk_size_chars: 1600

@@ -7,7 +7,9 @@ import json
 import math
 import os
 import subprocess
+import sys
 import threading
+import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
@@ -28,7 +30,12 @@ from orchestrator.services.embeddings import (
     EmbeddingProvider,
     FastEmbedEmbeddingProvider,
 )
-from orchestrator.services.repository_context import RepositoryContextRequest
+from orchestrator.services.exceptions import WorkflowCancelledError
+from orchestrator.services.repository_context import (
+    HeuristicRepositoryContextStrategy,
+    RepositoryContextRequest,
+    semantic_fallback_diagnostic,
+)
 from orchestrator.services.repository_documents import (
     RepositorySourcePipeline,
     chunk_source_file,
@@ -38,6 +45,7 @@ DENSE_VECTOR_NAME = "dense"
 INDEX_SCHEMA_VERSION = 1
 _DISTANCE = "cosine"
 _METADATA_POINT_ID = "00000000-0000-0000-0000-000000000001"
+_CLEANUP_POINT_NAMESPACE = uuid.UUID("1c981b7d-98b6-4a2d-b995-3a271ac61d6c")
 _BATCH_SIZE = 64
 
 QdrantClientFactory = Callable[[QdrantSettings], Any]
@@ -153,10 +161,16 @@ class QdrantRepositoryContextStrategy:
         embedding_provider: EmbeddingProvider | None = None,
         client_factory: QdrantClientFactory = create_qdrant_client,
         client_manager: QdrantClientManager | None = None,
+        on_progress: Callable[[str], None] | None = None,
+        on_diagnostic: Callable[[dict[str, str]], None] | None = None,
+        cancellation_check: Callable[[], None] | None = None,
     ) -> None:
         if not repository_key.strip():
             raise ValueError("Qdrant repository context requires a configured repository key")
         self._settings = settings
+        self._on_progress = on_progress
+        self._on_diagnostic = on_diagnostic
+        self._cancellation_check = cancellation_check
         self._repository_key = repository_key
         self._configured_root = configured_root.resolve()
         self._configured_path_id = canonical_path_identifier(self._configured_root)
@@ -175,7 +189,9 @@ class QdrantRepositoryContextStrategy:
             version=settings.embedding.version,
             dimension=settings.embedding.dimension,
         )
-        self._embedding = embedding_provider or FastEmbedEmbeddingProvider(identity)
+        self._embedding = embedding_provider or FastEmbedEmbeddingProvider(
+            identity, on_progress=on_progress
+        )
         self._validate_index_location(self._configured_root)
         for worktree_root in _git_worktree_roots(self._configured_root):
             self._validate_index_location(worktree_root)
@@ -211,13 +227,27 @@ class QdrantRepositoryContextStrategy:
             manager.close()
 
     def render(self, request: RepositoryContextRequest) -> str:
+        self._check_cancellation()
+        # A rejected root must never reach the heuristic fallback. In particular,
+        # a planning request must not read the control checkout in place of its snapshot.
         source_root = self._validate_request_root(Path(request.repository_path))
         if request.temporary_source and source_root == self._configured_root:
             raise ValueError("Temporary repository context requires a linked worktree")
-        source_root_id = canonical_path_identifier(source_root)
         try:
+            source_root_id = canonical_path_identifier(source_root)
+            self._retry_temporary_cleanup()
+            if self._index_state() in {
+                IndexLifecycleState.NOT_INDEXED,
+                IndexLifecycleState.FAILED,
+            }:
+                self._progress("Building the repository semantic index for first use")
+                self.build_index()
             try:
-                sources = RepositorySourcePipeline(self._repository_key, source_root).discover()
+                self._progress("Discovering files for semantic retrieval")
+                sources = RepositorySourcePipeline(self._repository_key, source_root).discover(
+                    on_progress=self._discovery_progress,
+                    cancellation_check=self._check_cancellation,
+                )
                 self._synchronize(
                     sources,
                     source_root_id,
@@ -230,17 +260,58 @@ class QdrantRepositoryContextStrategy:
                 return self._render_results(request, results)
             finally:
                 if request.temporary_source:
-                    self._delete_source_points(source_root_id)
+                    active_failure = sys.exc_info()[1]
+                    try:
+                        self._delete_source_points(source_root_id)
+                    except Exception as cleanup_exc:
+                        queued = self._mark_temporary_cleanup(source_root_id)
+                        self._cleanup_diagnostic(cleanup_exc, queued=queued)
+                        if active_failure is None:
+                            raise
+        except WorkflowCancelledError:
+            raise
         except Exception as exc:
             if not request.temporary_source:
                 self._record_failure(exc)
-            if self._settings.fallback_to_heuristic:
-                from orchestrator.services.repository_context import (
-                    HeuristicRepositoryContextStrategy,
-                )
+            if self._on_diagnostic is not None:
+                self._on_diagnostic(semantic_fallback_diagnostic(exc))
+            return HeuristicRepositoryContextStrategy().render(request)
 
-                return HeuristicRepositoryContextStrategy().render(request)
-            return self._diagnostic(exc)
+    def _progress(self, message: str) -> None:
+        if self._on_progress is not None:
+            self._on_progress(message)
+
+    def _check_cancellation(self) -> None:
+        if self._cancellation_check is not None:
+            self._cancellation_check()
+
+    def _discovery_progress(self, completed: int, total: int) -> None:
+        self._progress(f"Discovered {completed}/{total} repository paths")
+
+    def _index_state(self) -> IndexLifecycleState:
+        """Read lifecycle metadata without scrolling repository chunks."""
+
+        with self._session() as client:
+            if not client.collection_exists(self._collection_name):
+                return IndexLifecycleState.NOT_INDEXED
+            points = client.retrieve(
+                collection_name=self._collection_name,
+                ids=[_METADATA_POINT_ID],
+                with_payload=True,
+                with_vectors=False,
+            )
+            if not points or not self._metadata_matches(points[0].payload or {}):
+                return IndexLifecycleState.FAILED
+            metadata = points[0].payload or {}
+            if metadata.get("last_error"):
+                return IndexLifecycleState.FAILED
+            if not _string_or_none(metadata.get("last_successful_indexed_at")):
+                return IndexLifecycleState.NOT_INDEXED
+            if _index_is_stale(
+                _string_or_none(metadata.get("last_indexed_commit")), self._configured_root
+            ):
+                return IndexLifecycleState.STALE
+            return IndexLifecycleState.READY
 
     def inspect_index(self) -> RepositoryIndexStatus:
         """Inspect the configured root without mutating its collection."""
@@ -309,6 +380,27 @@ class QdrantRepositoryContextStrategy:
                 error_message=_safe_error_message(exc),
             )
 
+    def inspect_indexed_commit(self) -> str | None:
+        """Read planning provenance without scrolling the configured-root points."""
+
+        try:
+            with self._session() as client:
+                if not client.collection_exists(self._collection_name):
+                    return None
+                points = client.retrieve(
+                    collection_name=self._collection_name,
+                    ids=[_METADATA_POINT_ID],
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                if not points or not self._metadata_matches(points[0].payload or {}):
+                    return None
+                return _string_or_none((points[0].payload or {}).get("last_indexed_commit"))
+        except Exception:
+            # Retrieval performs the full inspection and reports semantic
+            # failures through its existing heuristic fallback.
+            return None
+
     def build_index(self) -> RepositoryIndexStatus:
         """Fully reindex all eligible files for the configured repository."""
 
@@ -333,15 +425,23 @@ class QdrantRepositoryContextStrategy:
 
     def _run_index_operation(self, *, rebuild: bool) -> RepositoryIndexStatus:
         try:
+            self._check_cancellation()
+            self._progress("Discovering repository files for semantic index")
             sources = RepositorySourcePipeline(
                 self._repository_key, self._configured_root
-            ).discover()
+            ).discover(
+                on_progress=self._discovery_progress,
+                cancellation_check=self._check_cancellation,
+            )
+            self._progress(f"Discovered {len(sources)} files for semantic index")
             self._synchronize(
                 sources,
                 canonical_path_identifier(self._configured_root),
                 self._configured_root,
                 rebuild=rebuild,
             )
+        except WorkflowCancelledError:
+            raise
         except Exception as exc:
             self._record_failure(exc)
             raise RepositoryIndexOperationError(_safe_error_message(exc)) from exc
@@ -381,6 +481,7 @@ class QdrantRepositoryContextStrategy:
         rebuild: bool = False,
         record_success: bool = True,
     ) -> None:
+        self._check_cancellation()
         with self._session() as client:
             models = _qdrant_models()
             self._ensure_compatible_collection(client, models)
@@ -396,6 +497,7 @@ class QdrantRepositoryContextStrategy:
             current_paths: set[str] = set()
             changed_paths: set[str] = set()
             for source in sources:
+                self._check_cancellation()
                 current_paths.add(source.path)
                 chunks = chunk_source_file(
                     source,
@@ -423,6 +525,7 @@ class QdrantRepositoryContextStrategy:
                 changed_chunks.extend(chunks)
 
             if changed_chunks:
+                self._progress(f"Preparing {len(changed_chunks)} semantic chunks")
                 reusable = self._reusable_vectors(client, models, changed_chunks)
                 missing = [
                     chunk for chunk in changed_chunks
@@ -430,10 +533,18 @@ class QdrantRepositoryContextStrategy:
                 ]
                 embedded: list[list[float]] = []
                 for offset in range(0, len(missing), _BATCH_SIZE):
+                    self._check_cancellation()
+                    self._progress(
+                        f"Embedding chunks {offset}/{len(missing)} "
+                        f"({len(changed_chunks) - len(missing)} reused)"
+                    )
                     embedded.extend(
                         self._embedding.embed_documents(
                             [chunk.text for chunk in missing[offset : offset + _BATCH_SIZE]]
                         )
+                    )
+                    self._progress(
+                        f"Embedded {min(offset + _BATCH_SIZE, len(missing))}/{len(missing)} chunks"
                     )
                 if len(embedded) != len(missing):
                     raise RuntimeError("Embedding provider returned an unexpected vector count")
@@ -453,6 +564,7 @@ class QdrantRepositoryContextStrategy:
                     for chunk in changed_chunks
                 ]
                 for offset in range(0, len(points), _BATCH_SIZE):
+                    self._check_cancellation()
                     client.upsert(
                         collection_name=self._collection_name,
                         points=points[offset : offset + _BATCH_SIZE],
@@ -476,7 +588,9 @@ class QdrantRepositoryContextStrategy:
                     wait=True,
                 )
             if record_success:
+                self._check_cancellation()
                 self._record_success(client, models, source_root)
+            self._progress("Semantic index ready")
 
     def _reusable_vectors(
         self, client: Any, models: Any, chunks: Sequence[RepositoryChunk]
@@ -489,6 +603,7 @@ class QdrantRepositoryContextStrategy:
         preferred: set[tuple[str, int, str]] = set()
         offset: Any = None
         while True:
+            self._check_cancellation()
             page, offset = client.scroll(
                 collection_name=self._collection_name,
                 scroll_filter=models.Filter(
@@ -569,14 +684,127 @@ class QdrantRepositoryContextStrategy:
         with self._session() as client:
             if not client.collection_exists(self._collection_name):
                 return
-            models = _qdrant_models()
-            client.delete(
-                collection_name=self._collection_name,
-                points_selector=models.FilterSelector(
-                    filter=self._scope_filter(models, source_root_id)
-                ),
-                wait=True,
+            self._delete_source_points_with_client(client, source_root_id)
+
+    def _delete_source_points_with_client(self, client: Any, source_root_id: str) -> None:
+        models = _qdrant_models()
+        client.delete(
+            collection_name=self._collection_name,
+            points_selector=models.FilterSelector(
+                filter=self._scope_filter(models, source_root_id)
+            ),
+            wait=True,
+        )
+
+    def _cleanup_marker_id(self, source_root_id: str) -> str:
+        return str(uuid.uuid5(_CLEANUP_POINT_NAMESPACE, self._collection_name + source_root_id))
+
+    def _mark_temporary_cleanup(self, source_root_id: str) -> bool:
+        """Retain a retry record when temporary point deletion fails."""
+
+        try:
+            with self._session() as client:
+                if not client.collection_exists(self._collection_name):
+                    return True
+                models = _qdrant_models()
+                client.upsert(
+                    collection_name=self._collection_name,
+                    points=[
+                        models.PointStruct(
+                            id=self._cleanup_marker_id(source_root_id),
+                            vector={
+                                DENSE_VECTOR_NAME: [1.0]
+                                + [0.0] * (self._embedding.identity.dimension - 1)
+                            },
+                            payload={
+                                "kind": "temporary_cleanup",
+                                "repository": self._repository_key,
+                                "configured_path_id": self._configured_path_id,
+                                "source_root_id": source_root_id,
+                            },
+                        )
+                    ],
+                    wait=True,
+                )
+            return True
+        except Exception:
+            return False
+
+    def _cleanup_diagnostic(self, exc: Exception, *, queued: bool) -> None:
+        if self._on_diagnostic is None:
+            return
+        try:
+            self._on_diagnostic(
+                {
+                    "kind": "REPOSITORY_CONTEXT_CLEANUP_FAILURE",
+                    "reason": (
+                        f"Temporary semantic snapshot cleanup failed ({type(exc).__name__})."
+                    ),
+                    "remedy": (
+                        "Cleanup will be retried on the next retrieval; clear the repository "
+                        "index in Repository settings if it keeps failing."
+                        if queued
+                        else (
+                            "Clear the repository index in Repository settings to remove "
+                            "temporary snapshot points."
+                        )
+                    ),
+                }
             )
+        except Exception:
+            # Diagnostics must not replace a cancellation or retrieval failure.
+            pass
+
+    def _retry_temporary_cleanup(self) -> None:
+        """Retry previously failed snapshot cleanup before any new retrieval."""
+
+        with self._session() as client:
+            if not client.collection_exists(self._collection_name):
+                return
+            models = _qdrant_models()
+            markers: list[tuple[str, str]] = []
+            offset: Any = None
+            while True:
+                self._check_cancellation()
+                page, offset = client.scroll(
+                    collection_name=self._collection_name,
+                    scroll_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="kind", match=models.MatchValue(value="temporary_cleanup")
+                            ),
+                            models.FieldCondition(
+                                key="repository",
+                                match=models.MatchValue(value=self._repository_key),
+                            ),
+                            models.FieldCondition(
+                                key="configured_path_id",
+                                match=models.MatchValue(value=self._configured_path_id),
+                            ),
+                        ]
+                    ),
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in page:
+                    source_root_id = (point.payload or {}).get("source_root_id")
+                    if isinstance(source_root_id, str):
+                        markers.append((str(point.id), source_root_id))
+                if offset is None:
+                    break
+            for marker_id, source_root_id in markers:
+                self._check_cancellation()
+                try:
+                    self._delete_source_points_with_client(client, source_root_id)
+                    client.delete(
+                        collection_name=self._collection_name,
+                        points_selector=models.PointIdsList(points=[marker_id]),
+                        wait=True,
+                    )
+                except Exception as exc:
+                    self._cleanup_diagnostic(exc, queued=True)
 
     def _query(self, text: str, source_root_id: str) -> list[RetrievedRepositoryChunk]:
         vector = self._embedding.embed_query(text)
@@ -801,6 +1029,7 @@ class QdrantRepositoryContextStrategy:
         points: list[Any] = []
         offset: Any = None
         while True:
+            self._check_cancellation()
             page, offset = client.scroll(
                 collection_name=self._collection_name,
                 scroll_filter=self._scope_filter(models, source_root_id),
@@ -883,14 +1112,6 @@ class QdrantRepositoryContextStrategy:
             blocks.append(block)
             used += len(block)
         return header + "".join(blocks)
-
-    @staticmethod
-    def _diagnostic(exc: Exception) -> str:
-        return (
-            "REPOSITORY CONTEXT DIAGNOSTIC:\n"
-            "Semantic repository context is unavailable for this request "
-            f"({type(exc).__name__}). No broader repository search was attempted.\n\n"
-        )
 
 
 def _qdrant_models() -> Any:

@@ -197,27 +197,30 @@ ou commit; os arquivos sao ignorados pelo Git por padrao.
 
 A recuperacao de contexto do checkout e uma politica propria do orquestrador, separada dos agent
 providers. Configure-a em `defaults.repository_context.strategy` ou sobrescreva-a em
-`repositories.<chave>.repository_context.strategy`. `heuristic` continua sendo o default: preserva
-a arvore local limitada e os excertos ranqueados do planner; o reviewer continua recebendo apenas
-metadados de repositorio e branches nesse bloco. Nomes desconhecidos falham com a lista de
-estrategias suportadas.
+`repositories.<chave>.repository_context.strategy`. Sem uma estrategia explicita, repositorios
+registrados usam `qdrant` em modo local. Para voltar ao contexto limitado anterior, configure
+`strategy: heuristic`: o planner recebe arvore e excertos; o reviewer recebe metadados de
+repositorio e branches. Nomes desconhecidos falham com a lista de estrategias suportadas.
 
 `qdrant` habilita recuperacao semantica densa com o cliente Python oficial e embeddings locais
-FastEmbed. Ela so pode ser usada por uma entrada registrada em `repositories`, cria uma collection
+FastEmbed, incluidos na instalacao padrao. Para repositorios selecionados apenas por caminho, o
+orquestrador usa `heuristic` e informa como registrar o repositorio. Qdrant cria uma collection
 deterministica por chave/caminho configurado e separa o checkout de controle de cada worktree no
 payload. O orquestrador descobre, filtra, calcula hashes e divide os arquivos; arquivos inalterados
 nao sao re-embeddados, enquanto chunks alterados/removidos sao sincronizados sob demanda. Arquivos
 ignorados pelo Git, binarios, symlinks, artefatos gerados conhecidos, `PLANNER.md`,
 `IMPLEMENTER.md`, `REVIEWER.md` e `docs/PROJECT_CONTEXT.md` nao entram no indice.
-No planejamento, cada snapshot temporario recebe um identificador proprio: seus arquivos elegiveis
-sao embeddados novamente e os pontos sao removidos ao fim da consulta. Em repositorios grandes,
-isso pode aumentar o tempo e o custo de cada execucao.
+No primeiro uso, o indice persistente do repositorio registrado e construido automaticamente.
+Planejamento consulta o snapshot temporario e remove seus pontos ao fim da consulta; vetores
+compativeis sao reutilizados. Progresso da indexacao e do primeiro download do modelo aparece no
+TUI e em `--verbose`. Falhas de
+modelo, download ou indice usam contexto `heuristic` e mostram um diagnostico com a causa e solucao.
 
 Exemplo local persistente (o caminho deve ficar fora de todo checkout):
 
 ```yaml
 repository_context:
-  strategy: qdrant
+  strategy: qdrant  # opcional: este e o default
   qdrant:
     mode: local
     path: ~/.orchestrator/qdrant
@@ -230,8 +233,8 @@ repository_context:
 
 O primeiro uso pode baixar o modelo e ter custo de inicializacao. O modo local persistente e para
 indices pequenos e um unico processo, pois o storage possui lock exclusivo. Para processos
-concorrentes, execute um servidor Qdrant e configure `mode: server` com `url`, ou com `host` e
-`port`. A mesma estrategia usa a mesma abstracao de cliente nos dois modos. Mudancas de provider,
+concorrentes, execute um servidor Qdrant e configure `qdrant: {mode: server, url: http://127.0.0.1:6333}`
+em `repository_context`, ou use `host` e `port` no lugar de `url`. Mudancas de provider,
 modelo, versao, dimensao, distancia ou schema recriam a collection e reindexam. Esta iteracao usa
 somente o vetor nomeado `dense`; vetores esparsos e fusao hibrida ficam para uma extensao futura.
 Falhas de scanning, embedding ou Qdrant produzem um diagnostico limitado ao repositorio solicitado

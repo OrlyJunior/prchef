@@ -186,6 +186,20 @@ def test_debug_agent_stages_warn_when_project_context_is_truncated(
     assert f"cap: {MAX_PROJECT_CONTEXT_CHARS}" in caplog.text
 
 
+def test_path_only_semantic_debug_falls_back_with_diagnostic(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, _ = _service(tmp_path)
+    loader = service._config_loader
+    loader.config.repository_context.strategy = "qdrant"  # type: ignore[attr-defined]
+
+    result = service.execute(_execution(tmp_path), DebugStage.SPEC_GENERATION)
+
+    assert result["stage"] == DebugStage.SPEC_GENERATION.value
+    assert "registered key" in caplog.text
+    assert "Register the repository" in caplog.text
+
+
 def test_spec_debug_uses_snapshot_or_direct_task_comments(tmp_path: Path) -> None:
     execution = _execution(tmp_path)
     execution.task_snapshot["metadata"]["comments"] = ["Snapshot note"]

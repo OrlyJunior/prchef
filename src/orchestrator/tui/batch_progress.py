@@ -481,6 +481,8 @@ def persisted_row(
             if diagnostic.payload.get("kind") in {
                 "PROVIDER_QUOTA_EXHAUSTED",
                 "PROJECT_CONTEXT_TRUNCATED",
+                "REPOSITORY_INDEX_PROGRESS",
+                "REPOSITORY_CONTEXT_FALLBACK",
             }:
                 message = timeline_message(
                     WorkflowEvent(
