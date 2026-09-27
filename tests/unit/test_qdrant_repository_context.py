@@ -679,6 +679,55 @@ def test_removed_checkout_chunk_during_query_cannot_silently_change_ranking(
         )
 
 
+@pytest.mark.parametrize("change", ["rewrite", "delete"])
+@pytest.mark.parametrize("temporary", [False, True])
+def test_linked_root_change_during_query_cannot_return_old_checkout_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, temporary: bool
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    worktree = tmp_path / "linked"
+    _committed_repository(root, {"source.py": "alpha original source"})
+    diagnostics: list[dict[str, str]] = []
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(), on_diagnostic=diagnostics.append,
+    )
+    baseline = strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        original_query = strategy._query
+
+        def change_root_during_query(*args: Any) -> Any:
+            if change == "rewrite":
+                (worktree / "source.py").write_text("alpha changed source", encoding="utf-8")
+            else:
+                (worktree / "source.py").unlink()
+            return original_query(*args)
+
+        monkeypatch.setattr(strategy, "_query", change_root_during_query)
+        result = strategy.render(replace(_request(worktree, "alpha"), temporary_source=temporary))
+        assert "alpha original source" not in result
+        if change == "rewrite":
+            assert "alpha changed source" in result
+        assert diagnostics[-1]["kind"] == "REPOSITORY_CONTEXT_FALLBACK"
+        with strategy._session() as client:
+            assert strategy._scroll_source_points(
+                client, models, canonical_path_identifier(worktree)
+            ) == []
+        assert strategy.inspect_index().point_count == baseline.point_count
+        assert strategy.inspect_indexed_commit() == baseline.last_indexed_commit
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
 def test_first_snapshot_retrieval_builds_durable_index_and_reports_progress(tmp_path: Path) -> None:
     from qdrant_client import models
 

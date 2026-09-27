@@ -274,7 +274,19 @@ class QdrantRepositoryContextStrategy:
                     excluded_checkout_paths,
                     malformed_checkout_ids,
                 )
-                return self._render_results(request, results)
+                rendered = self._render_results(request, results)
+                if checkout_sources is not None:
+                    # Discovery is a point-in-time read. A linked root may change
+                    # while its index is synchronized and queried, invalidating
+                    # both borrowed checkout points and its own new points.
+                    current_sources = RepositorySourcePipeline(
+                        self._repository_key, source_root
+                    ).discover(cancellation_check=self._check_cancellation)
+                    if {
+                        source.path: source.content_hash for source in current_sources
+                    } != {source.path: source.content_hash for source in sources}:
+                        raise RuntimeError("Repository source changed during semantic retrieval")
+                return rendered
             finally:
                 if request.temporary_source:
                     active_failure = sys.exc_info()[1]
