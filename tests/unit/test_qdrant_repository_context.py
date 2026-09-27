@@ -582,6 +582,51 @@ def test_worktree_owns_files_without_a_valid_checkout_chunk_set(
         )
 
 
+def test_removed_checkout_chunk_during_query_cannot_silently_change_ranking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    _committed_repository(root, {"source.py": "alpha current source"})
+    diagnostics: list[dict[str, str]] = []
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(), on_diagnostic=diagnostics.append,
+    )
+    strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        original_query = strategy._query
+
+        def remove_approved_point(*args: Any) -> Any:
+            with strategy._session() as client:
+                points = strategy._scroll_source_points(
+                    client, models, canonical_path_identifier(root)
+                )
+                client.delete(
+                    collection_name=strategy.collection_name,
+                    points_selector=models.PointIdsList(points=[points[0].id]),
+                    wait=True,
+                )
+            return original_query(*args)
+
+        monkeypatch.setattr(strategy, "_query", remove_approved_point)
+        result = strategy.render(_request(worktree, "alpha"))
+        assert "alpha current source" in result
+        assert "SEMANTIC REPOSITORY CONTEXT" not in result
+        assert diagnostics[-1]["kind"] == "REPOSITORY_CONTEXT_FALLBACK"
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
 def test_first_snapshot_retrieval_builds_durable_index_and_reports_progress(tmp_path: Path) -> None:
     from qdrant_client import models
 

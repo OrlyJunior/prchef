@@ -943,6 +943,26 @@ class QdrantRepositoryContextStrategy:
                             text=str(payload["chunk_text"]),
                         )
                     )
+            if checkout_points:
+                # A removed checkout point cannot appear in the query response,
+                # even if it would have outranked every returned candidate.
+                # Recheck the complete approved set after querying so a
+                # concurrent refresh cannot silently omit a candidate.
+                approved_ids = tuple(checkout_points)
+                for offset in range(0, len(approved_ids), 256):
+                    self._check_cancellation()
+                    ids = approved_ids[offset : offset + 256]
+                    current = client.retrieve(
+                        collection_name=self._collection_name,
+                        ids=ids,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    if len(current) != len(ids) or any(
+                        (point.payload or {}) != checkout_points.get(str(point.id))
+                        for point in current
+                    ):
+                        raise RuntimeError("Checkout semantic index changed during retrieval")
             return sorted(
                 results,
                 key=lambda item: (
