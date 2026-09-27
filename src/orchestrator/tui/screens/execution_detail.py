@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
-from textual.containers import Horizontal, HorizontalScroll, VerticalScroll
+from textual.containers import Horizontal, ScrollableContainer, VerticalScroll
 from textual.events import DescendantFocus
 from textual.screen import Screen
 from textual.timer import Timer
@@ -50,17 +50,16 @@ class ExecutionDetailScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="execution-detail"):
             yield Static("Execution detail", classes="screen-title")
-            with Horizontal(classes="screen-actions"):
-                yield Static("", id="execution-status")
-                yield Button("Cancel", variant="error", id="execution-cancel")
-            with Horizontal(classes="screen-actions"):
-                yield Button("Open task", id="open-task")
-                yield Button("Open PR", id="open-pr")
-                yield Button("Open planner session", id="open-spec-session")
-                yield Button("Open review session", id="open-review-session")
-                yield Button(
-                    "Copy detailed logs", id="copy-detailed-logs-button", disabled=True
-                )
+            yield Static("", id="execution-status")
+            yield Button("Cancel", variant="error", id="execution-cancel", classes="detail-action")
+            yield Button("Open task", id="open-task", classes="detail-action")
+            yield Button("Open PR", id="open-pr", classes="detail-action")
+            yield Button("Open planner session", id="open-spec-session", classes="detail-action")
+            yield Button("Open review session", id="open-review-session", classes="detail-action")
+            yield Button(
+                "Copy detailed logs", id="copy-detailed-logs-button", disabled=True,
+                classes="detail-action",
+            )
             yield Static("", id="execution-continuation-title")
             yield TextArea("", id="execution-continuation-feedback")
             with Horizontal(classes="screen-actions", id="execution-continuation-actions"):
@@ -80,7 +79,7 @@ class ExecutionDetailScreen(Screen[None]):
                     id="execution-resume",
                     disabled=True,
                 )
-            with HorizontalScroll(id="execution-content-scroll"):
+            with ScrollableContainer(id="execution-content-scroll"):
                 yield Static("Loading execution…", id="execution-content", markup=False)
 
     @property
@@ -343,13 +342,11 @@ class ExecutionDetailScreen(Screen[None]):
         }
         rendered = json.dumps(redact_payload(details), ensure_ascii=False, indent=2, default=str)
         # Rich's default word wrapping is extremely slow on large diagnostic JSON strings.
-        # Keep long lines intact so the surrounding HorizontalScroll can expose all text.
+        # Keep long lines intact so the bounded content area can scroll in both directions.
         self.query_one("#execution-content", Static).update(
             Text(rendered, no_wrap=True, overflow="ignore")
         )
-        # The content Static has its natural height; refresh the owning page
-        # so persisted diagnostics extend the main scroll range immediately.
-        self.query_one("#execution-detail", VerticalScroll).refresh(layout=True)
+        self.query_one("#execution-content-scroll", ScrollableContainer).refresh(layout=True)
 
     def _copy_detailed_logs(self) -> None:
         content = format_diagnostics_for_export(self._diagnostics)
