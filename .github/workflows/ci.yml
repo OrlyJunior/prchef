@@ -39,11 +39,11 @@ jobs:
         run: |
           git config --global user.name "CI Test"
           git config --global user.email "ci-test@example.invalid"
-      - name: Test
-        env:
-          PYTEST_ADDOPTS: -rs
-        run: python -m pytest
       - name: Lint
         run: python -m ruff check .
       - name: Type check
         run: python -m mypy src/orchestrator
+      - name: Test
+        env:
+          PYTEST_ADDOPTS: -rs
+        run: python -m pytest
