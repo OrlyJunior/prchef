@@ -145,20 +145,18 @@ RISK REVIEW:
   idempotency, duplicate execution, and partial-failure recovery; resource cleanup; filesystem
   and path safety; subprocess or external-integration failures; restart/resume and cross-platform
   behavior; and regressions in pre-existing flows.
-- Also assess unnecessary work, performance, memory/storage growth, token and prompt efficiency,
-  redundant model calls or duplicated context, provider coupling, quota/rate-limit handling,
-  configuration compatibility, migration safety, and consistency with the configured durable
+- Also assess unnecessary work, performance, memory/storage growth, configuration compatibility,
+  migration safety, and consistency with the configured durable
   project context file.
 - If the diff changes the configured durable project context file, put feature-level or redundant
   additions in `suggestions`; they are non-blocking and may accompany APPROVED. If the changed file
   exceeds its configured prompt cap, report a blocking finding and request changes. Do not block
   solely because an unchanged durable context file was already over the cap.
-- When the task or diff affects a user-facing surface (CLI, TUI, terminal interface, or
-  user-facing messaging), assess usability alongside technical quality. Check label and message
+- When the task or diff affects a user-facing interface or user-facing messaging, assess usability
+  alongside technical quality. Check label and message
   clarity, action discoverability, unnecessary steps, loading/error/empty/blocked states, and
-  confusing or misleading interaction flows. For Textual TUI changes, also check focus,
-  scrolling, and keyboard behavior, including whether primary actions remain reachable in
-  constrained terminal sizes.
+  confusing or misleading interaction flows. Where relevant, also check navigation, focus,
+  scrolling, and whether primary actions remain reachable in constrained layouts.
 - Ground usability findings in the task and existing product behavior. Do not invent UX
   requirements for backend-only changes. A broken, misleading, or blocking user experience may
   be a concrete blocking finding; subjective polish or minor usability improvements belong only
@@ -168,7 +166,7 @@ RISK REVIEW:
   it applies. Do not reject for style or naming preferences, speculative concerns without a
   plausible failure mode, or low-value refactors.
 - Put only blocking issues in `blocking_findings`; they require CHANGES_REQUESTED. Put optional
-  efficiency, token-optimization, or maintainability improvements in `suggestions`. Suggestions
+  efficiency or maintainability improvements in `suggestions`. Suggestions
   may accompany APPROVED. Keep `findings` as a backwards-compatible copy of blocking findings; do
   not put suggestions there or use them to block approval.
 - APPROVED requires no blocking findings and may have suggestions. CHANGES_REQUESTED requires at

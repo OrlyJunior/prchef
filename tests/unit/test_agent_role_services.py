@@ -243,25 +243,26 @@ def test_planner_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
     )
     assert "Do not request feature behavior, UI details, or per-change notes" in planner_prompt
     assert "architecture, workflows, domain behavior" not in planner_prompt
-    assert (
-        "Treat the TUI as a first-class product\n  interface"
-        in provider.requests[0].instructions
-    )
+    assert "affects a user-facing interface or user-facing messaging" in planner_prompt
+    assert "Treat the TUI as a first-class product interface" not in planner_prompt
+    assert "TUI, CLI, GUI" not in planner_prompt
     assert (
         "interaction flow, action discoverability, layout complexity, sensible defaults"
         in provider.requests[0].instructions
     )
     assert "loading/error/empty states" in provider.requests[0].instructions
-    assert "constrained-terminal behavior" in provider.requests[0].instructions
+    assert "layout constraints" in provider.requests[0].instructions
+    assert "constrained-terminal behavior" not in provider.requests[0].instructions
     assert (
         "keyboard navigation, focus management, and scrolling"
         in provider.requests[0].instructions
     )
     assert "consistency with existing interface patterns" in provider.requests[0].instructions
     assert (
-        "configuration belongs in a dedicated settings screen instead"
+        "configuration belongs in a separate settings area instead"
         in provider.requests[0].instructions
     )
+    assert "dedicated settings screen" not in provider.requests[0].instructions
     assert (
         "Capture relevant UX decisions and interaction constraints in implementation_proposal and\n"
         "  acceptance_criteria"
@@ -1162,27 +1163,32 @@ def test_reviewer_depends_only_on_common_agent_provider(tmp_path: Path) -> None:
         "idempotency, duplicate execution, and partial-failure recovery"
         in provider.requests[0].instructions
     )
-    assert "token and prompt efficiency" in provider.requests[0].instructions
     assert (
-        "provider coupling, quota/rate-limit handling" in provider.requests[0].instructions
-    )
-    assert (
-        "CLI, TUI, terminal interface, or\n  user-facing messaging"
+        "unnecessary work, performance, memory/storage growth"
         in provider.requests[0].instructions
     )
+    assert "configuration compatibility" in provider.requests[0].instructions
+    assert "token and prompt efficiency" not in provider.requests[0].instructions
+    assert "redundant model calls or duplicated context" not in provider.requests[0].instructions
+    assert "provider coupling" not in provider.requests[0].instructions
+    assert "quota/rate-limit handling" not in provider.requests[0].instructions
+    assert "token-optimization" not in provider.requests[0].instructions
+    assert "user-facing interface or user-facing messaging" in provider.requests[0].instructions
+    assert "CLI, TUI, terminal interface" not in provider.requests[0].instructions
     assert (
         "label and message\n  clarity, action discoverability, unnecessary steps"
         in provider.requests[0].instructions
     )
     assert "loading/error/empty/blocked states" in provider.requests[0].instructions
     assert (
-        "focus,\n  scrolling, and keyboard behavior"
+        "navigation, focus,\n  scrolling"
         in provider.requests[0].instructions
     )
     assert (
-        "primary actions remain reachable in\n  constrained terminal sizes"
+        "primary actions remain reachable in constrained layouts"
         in provider.requests[0].instructions
     )
+    assert "Textual TUI" not in provider.requests[0].instructions
     assert (
         "Do not invent UX\n  requirements for backend-only changes"
         in provider.requests[0].instructions
