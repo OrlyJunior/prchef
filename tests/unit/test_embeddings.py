@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,3 +34,28 @@ def test_download_completion_requires_initialized_model(
     assert messages == (
         ["Local embedding model download finished: 1 MiB received"] if initialized else []
     )
+
+
+def test_fastembed_receives_bounded_cpu_thread_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    import orchestrator.services.embeddings as embeddings
+
+    created: list[tuple[str, int]] = []
+
+    class FakeTextEmbedding:
+        def __init__(self, *, model_name: str, threads: int) -> None:
+            created.append((model_name, threads))
+
+        def passage_embed(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(
+        embeddings,
+        "_load_optional_module",
+        lambda _: SimpleNamespace(TextEmbedding=FakeTextEmbedding),
+    )
+    provider = FastEmbedEmbeddingProvider(
+        EmbeddingIdentity("fastembed", "test-model", "1", 2), cpu_threads=3
+    )
+
+    assert provider.embed_documents(["source"]) == [[1.0, 0.0]]
+    assert created == [("test-model", 3)]

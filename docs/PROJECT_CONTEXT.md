@@ -56,8 +56,9 @@ and repository retrieval cover those.
 - Repository context retrieval is a separate orchestrator-owned strategy boundary (local Qdrant by
   default for registered repositories, heuristic on semantic unavailability or explicit selection).
   Workflow services never import retrieval backends. Role files and this file are never indexed.
-  Qdrant collections are isolated per registered repository; first retrieval establishes its durable
-  index. Planning snapshot retrieval removes its points without updating collection provenance.
+  Qdrant collections are repository-scoped; first retrieval builds the durable index. Linked roots
+  reuse valid checkout points and index only differences. Snapshot retrieval removes its points;
+  linked-root retrieval never updates collection provenance.
 - Every execution, response, and continuation enters through one submission seam. Scheduling
   features must use it rather than adding their own concurrency.
 - The TUI may launch one task or an ordered persisted batch. Batch policy, cancellation, and

@@ -74,6 +74,23 @@ def test_repository_context_strategy_defaults_to_qdrant(tmp_path: Path) -> None:
     config = _validated_config({"path": tmp_path})
 
     assert config.repository_context.strategy == "qdrant"
+    assert config.repository_context.embedding.cpu_threads == 2
+    configured = _validated_config({
+        "path": tmp_path,
+        "repository_context": {"embedding": {"cpu_threads": 3}},
+    })
+    assert configured.repository_context.embedding.cpu_threads == 3
+
+
+@pytest.mark.parametrize("cpu_threads", [0, -1, 65, "2", 2.5, True])
+def test_repository_embedding_rejects_invalid_cpu_threads(
+    tmp_path: Path, cpu_threads: object
+) -> None:
+    with pytest.raises(ValidationError):
+        _validated_config({
+            "path": tmp_path,
+            "repository_context": {"embedding": {"cpu_threads": cpu_threads}},
+        })
 
 
 def test_loader_resolves_default_local_index_for_registered_repository(tmp_path: Path) -> None:
