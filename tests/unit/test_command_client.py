@@ -16,7 +16,11 @@ import pytest
 from orchestrator.clients import codex_client, command_client
 from orchestrator.clients.codex_client import CodexClient
 from orchestrator.clients.command_client import CommandClient, CommandResult
-from orchestrator.clients.exceptions import CommandExecutionError, CommandTimeoutError
+from orchestrator.clients.exceptions import (
+    CommandExecutionError,
+    CommandProcessTreeUnconfirmedError,
+    CommandTimeoutError,
+)
 from orchestrator.config.project_config import CodexCliProviderSettings
 
 
@@ -350,7 +354,7 @@ def test_timeout_is_not_correctable_when_an_escaped_descendant_keeps_output_open
     )
     _install_scripted_process(monkeypatch, process, events)
 
-    with pytest.raises(CommandExecutionError) as raised:
+    with pytest.raises(CommandProcessTreeUnconfirmedError) as raised:
         CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
 
     assert not isinstance(raised.value, CommandTimeoutError)
@@ -379,7 +383,7 @@ def test_timeout_is_not_correctable_when_the_process_tree_kill_is_unconfirmed(
     )
     _install_scripted_process(monkeypatch, process, events, tree_stopped=False)
 
-    with pytest.raises(CommandExecutionError) as raised:
+    with pytest.raises(CommandProcessTreeUnconfirmedError) as raised:
         CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=30)
 
     assert not isinstance(raised.value, CommandTimeoutError)

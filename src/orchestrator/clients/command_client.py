@@ -13,7 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
 
-from orchestrator.clients.exceptions import CommandExecutionError, CommandTimeoutError
+from orchestrator.clients.exceptions import (
+    CommandExecutionError,
+    CommandProcessTreeUnconfirmedError,
+    CommandTimeoutError,
+)
 from orchestrator.clients.windows_job import CREATE_SUSPENDED, WindowsJob
 from orchestrator.runtime_logging import format_command
 
@@ -464,7 +468,7 @@ class CommandClient:
         except _ProcessTreeSurvivedError as exc:
             # Deliberately not a CommandTimeoutError: callers must not treat this as a completed,
             # correctable failure while part of the command may still be running.
-            raise CommandExecutionError(
+            raise CommandProcessTreeUnconfirmedError(
                 f"Command timed out after {timeout_seconds}s and its process tree could not be "
                 f"confirmed terminated: {format_command(command)}"
             ) from exc

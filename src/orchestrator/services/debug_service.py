@@ -7,6 +7,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from orchestrator.clients.exceptions import (
+    CommandExecutionError,
+    CommandProcessTreeUnconfirmedError,
+    GitHubClientError,
+)
 from orchestrator.clients.factory import ClientFactory, WorkflowClients
 from orchestrator.config.project_config import (
     ConfigurationError,
@@ -19,7 +24,7 @@ from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationCheck, ValidationResult
 from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.runtime_logging import redact_text
+from orchestrator.runtime_logging import redact_text, summarize_text
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.repository_context import (
     HeuristicRepositoryContextStrategy,
@@ -353,6 +358,19 @@ class DebugService:
         feature_branch = self._feature_branch(execution, values)
         base_branch = self._base_branch(execution, values, config)
         diff = values.diff if values.diff is not None else clients.git.diff(base_branch)
+        repository_slug = clients.git.github_repository()
+        try:
+            description = clients.github.pull_request_description(
+                repository_slug, pull_request.number
+            )
+        except CommandProcessTreeUnconfirmedError:
+            raise
+        except (GitHubClientError, CommandExecutionError, OSError) as exc:
+            logger.warning(
+                "[debug] Pull request description unavailable: %s",
+                summarize_text(str(exc), limit=400),
+            )
+            description = None
         executions: list[AgentExecutionReference] = []
         review = ReviewService(
             clients.agent(AgentRole.REVIEWER), repository_context_strategy,
@@ -361,10 +379,11 @@ class DebugService:
             task=task,
             spec=spec,
             pull_request=pull_request,
+            pull_request_description=description,
             diff=diff,
             validation=validation,
             repository_path=config.path,
-            repository_slug=clients.git.github_repository(),
+            repository_slug=repository_slug,
             base_branch=base_branch,
             feature_branch=feature_branch,
             on_execution_started=executions.append,

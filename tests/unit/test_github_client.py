@@ -204,6 +204,56 @@ def test_is_pull_request_open_uses_persisted_pull_request_number(tmp_path: Path)
     ]
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [('{"body":"Current criteria"}', "Current criteria"), ('{"body":null}', "")],
+)
+def test_pull_request_description_uses_reviewer_authentication(
+    tmp_path: Path, payload: str, expected: str
+) -> None:
+    class DescriptionCommands(RecordingCommands):
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            self.calls.append({"command": command, **kwargs})
+            return CommandResult(command, 0, payload, "", 0.01)
+
+    commands = DescriptionCommands()
+    client = GitHubClient(commands, tmp_path, ["gh"], 120)
+
+    class Authenticator:
+        def token(self) -> str:
+            return "ghs_reviewer"
+
+    client._app_authenticator = Authenticator()  # type: ignore[assignment]
+    assert client.pull_request_description("owner/repository", 42) == expected
+    assert commands.calls[0]["command"] == [
+        "gh", "api", "repos/owner/repository/pulls/42"
+    ]
+    assert commands.calls[0]["env"]["GH_TOKEN"] == "ghs_reviewer"
+
+
+@pytest.mark.parametrize("payload", ["{}", '{"body":42}', "[]", "invalid"])
+def test_pull_request_description_rejects_malformed_response(
+    tmp_path: Path, payload: str
+) -> None:
+    class DescriptionCommands(RecordingCommands):
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            return CommandResult(command, 0, payload, "", 0.01)
+
+    client = GitHubClient(DescriptionCommands(), tmp_path, ["gh"], 120)
+    with pytest.raises(GitHubClientError, match="Invalid GitHub pull request description"):
+        client.pull_request_description("owner/repository", 42)
+
+
+def test_pull_request_description_reports_command_failure(tmp_path: Path) -> None:
+    class FailingCommands(RecordingCommands):
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            return CommandResult(command, 1, "", "permission denied", 0.01)
+
+    client = GitHubClient(FailingCommands(), tmp_path, ["gh"], 120)
+    with pytest.raises(GitHubClientError, match="permission denied"):
+        client.pull_request_description("owner/repository", 42)
+
+
 def test_comment_pull_request_uses_implementer_app_token(tmp_path: Path) -> None:
     commands = RecordingCommands()
     client = GitHubClient(commands, tmp_path, ["gh"], 120)

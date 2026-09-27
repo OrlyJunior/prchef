@@ -5,6 +5,11 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from orchestrator.clients.exceptions import (
+    CommandExecutionError,
+    CommandProcessTreeUnconfirmedError,
+    GitHubClientError,
+)
 from orchestrator.clients.factory import ClientFactory, WorkflowClients
 from orchestrator.config.project_config import (
     ConfigurationError,
@@ -26,7 +31,7 @@ from orchestrator.models.workflow_status import (
 )
 from orchestrator.providers.agent_provider import AgentNeedsHumanError
 from orchestrator.repositories.workflow_repository import WorkflowRepository
-from orchestrator.runtime_logging import log_review_summary, log_spec_summary
+from orchestrator.runtime_logging import log_review_summary, log_spec_summary, summarize_text
 from orchestrator.services.exceptions import WorkflowCancelledError, WorkflowError
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.repository_context import (
@@ -185,6 +190,33 @@ class StageSequencer:
             )
 
         return record
+
+    def _pull_request_description(
+        self,
+        execution_id: str,
+        clients: WorkflowClients,
+        repository_slug: str,
+        pull_request: PullRequest,
+    ) -> str | None:
+        try:
+            return clients.github.pull_request_description(
+                repository_slug, pull_request.number
+            )
+        except CommandProcessTreeUnconfirmedError:
+            raise
+        except (GitHubClientError, CommandExecutionError, OSError) as exc:
+            runtime = self._events._runtimes.peek(execution_id)
+            self._events._record_diagnostic(
+                execution_id,
+                DiagnosticCategory.WORKFLOW_EVENT,
+                {
+                    "kind": "PULL_REQUEST_DESCRIPTION_UNAVAILABLE",
+                    "severity": "warning",
+                    "reason": summarize_text(str(exc), limit=400),
+                },
+                stage=runtime.active_stage if runtime else None,
+            )
+            return None
 
     def _execute_workflow(
         self,
@@ -376,6 +408,9 @@ class StageSequencer:
                         spec=spec,
                         pull_request=pull_request,
                         diff=execution_clients.git.diff(base_commit),
+                        pull_request_description=self._pull_request_description(
+                            execution.id, execution_clients, repository_slug, pull_request
+                        ),
                         validation=validation,
                         repository_path=workspace_path,
                         instructions_repository_path=config.path,
@@ -605,6 +640,9 @@ class StageSequencer:
                     diff=execution_clients.git.diff(
                         execution.base_commit or config.repository.base_branch
                     ),
+                    pull_request_description=self._pull_request_description(
+                        execution.id, execution_clients, repository_slug, pull_request
+                    ),
                     validation=validation,
                     repository_path=workspace_path,
                     instructions_repository_path=config.path,
@@ -769,6 +807,9 @@ class StageSequencer:
                         diff=execution_clients.git.diff(
                             self._repository.get_execution(execution_id).base_commit
                             or config.repository.base_branch
+                        ),
+                        pull_request_description=self._pull_request_description(
+                            execution_id, execution_clients, repository_slug, pull_request
                         ),
                         validation=validation,
                         repository_path=workspace_path,
