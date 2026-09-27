@@ -144,6 +144,13 @@ def timeline_message(
         return f"↳ {event.message or 'Agent fallback activated'}"
     if event.kind == WorkflowEventKind.DIAGNOSTIC:
         payload = event.payload or {}
+        if payload.get("kind") == "REPOSITORY_INDEX_PROGRESS":
+            return f"Semantic index: {payload.get('message', 'working')}"
+        if payload.get("kind") == "REPOSITORY_CONTEXT_FALLBACK":
+            return (
+                f"! Semantic context unavailable: {payload.get('reason')} "
+                f"{payload.get('remedy')}"
+            )
         if payload.get("kind") == "PROJECT_CONTEXT_TRUNCATED":
             return (
                 "! docs/PROJECT_CONTEXT.md exceeds prompt cap: "

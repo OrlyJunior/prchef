@@ -22,6 +22,7 @@ from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.runtime_logging import redact_text
 from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.repository_context import (
+    HeuristicRepositoryContextStrategy,
     RepositoryContextStrategy,
     resolve_repository_context_strategy,
 )
@@ -155,13 +156,21 @@ class DebugService:
             )
         )
         config = self._resolve_config(execution, values, task)
-        repository_context_strategy = resolve_repository_context_strategy(
-            config.repository_context.strategy,
-            settings=config.repository_context,
-            repository_key=config.configured_repository_key,
-            configured_root=config.path,
-            client_manager=self._repository_index_clients,
-        )
+        repository_context_strategy: RepositoryContextStrategy
+        if stage in {DebugStage.SPEC_GENERATION, DebugStage.REVIEW}:
+            repository_context_strategy = resolve_repository_context_strategy(
+                config.repository_context.strategy,
+                settings=config.repository_context,
+                repository_key=config.configured_repository_key,
+                configured_root=config.path,
+                client_manager=self._repository_index_clients,
+                on_progress=lambda message: logger.info("[debug] %s", message),
+                on_diagnostic=lambda payload: logger.warning(
+                    "[debug] %s %s", payload["reason"], payload["remedy"]
+                ),
+            )
+        else:
+            repository_context_strategy = HeuristicRepositoryContextStrategy()
         role_by_stage = {
             DebugStage.SPEC_GENERATION: AgentRole.PLANNER,
             DebugStage.IMPLEMENTATION: AgentRole.IMPLEMENTER,

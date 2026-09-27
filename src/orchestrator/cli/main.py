@@ -896,10 +896,13 @@ def cleanup_workspaces(
         raise typer.Exit(code=2) from exc
 
     delete_index_points = None
-    if project_config.repository_context.strategy == "qdrant":
+    if (
+        project_config.repository_context.strategy == "qdrant"
+        and project_config.configured_repository_key is not None
+    ):
         index_strategy = QdrantRepositoryContextStrategy(
             project_config.repository_context,
-            project_config.configured_repository_key or repository,
+            project_config.configured_repository_key,
             project_config.path,
         )
         delete_index_points = index_strategy.delete_worktree_points

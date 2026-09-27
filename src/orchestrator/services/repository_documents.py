@@ -6,6 +6,7 @@ import hashlib
 import re
 import subprocess
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from orchestrator.models.repository_context import RepositoryChunk, RepositorySourceFile
@@ -122,11 +123,23 @@ class RepositorySourcePipeline:
         self._repository = repository
         self._root = root.resolve()
 
-    def discover(self) -> list[RepositorySourceFile]:
+    def discover(
+        self,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+        cancellation_check: Callable[[], None] | None = None,
+    ) -> list[RepositorySourceFile]:
         if not self._root.is_dir():
             raise OSError("Repository source root is unavailable")
         files: list[RepositorySourceFile] = []
-        for relative_path in self._discover_relative_paths():
+        relative_paths = self._discover_relative_paths()
+        completed = 0
+        for position, relative_path in enumerate(relative_paths, start=1):
+            completed = position
+            if cancellation_check is not None:
+                cancellation_check()
+            if on_progress is not None and position % 100 == 0:
+                on_progress(position, len(relative_paths))
             if len(files) >= MAX_INDEXED_FILES:
                 break
             if relative_path.is_absolute() or ".." in relative_path.parts:
@@ -163,6 +176,8 @@ class RepositorySourcePipeline:
                     text=text,
                 )
             )
+        if on_progress is not None:
+            on_progress(completed, len(relative_paths))
         return files
 
     def _discover_relative_paths(self) -> list[Path]:

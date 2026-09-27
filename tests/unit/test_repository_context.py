@@ -15,6 +15,7 @@ from orchestrator.services.repository_context import (
     collect_repository_context,
     repository_context_strategy_names,
     resolve_repository_context_strategy,
+    semantic_fallback_diagnostic,
 )
 
 
@@ -167,3 +168,37 @@ def test_resolver_rejects_unknown_strategy_clearly() -> None:
     message = str(exc_info.value)
     assert "semantic" in message
     assert "heuristic" in message
+
+
+def test_path_only_qdrant_falls_back_with_actionable_diagnostic(tmp_path: Path) -> None:
+    diagnostics: list[dict[str, str]] = []
+    strategy = resolve_repository_context_strategy(
+        "qdrant",
+        settings=RepositoryContextSettings(),
+        repository_key=None,
+        configured_root=tmp_path,
+        on_diagnostic=diagnostics.append,
+    )
+
+    assert isinstance(strategy, HeuristicRepositoryContextStrategy)
+    assert diagnostics[0]["kind"] == "REPOSITORY_CONTEXT_FALLBACK"
+    assert "registered key" in diagnostics[0]["reason"]
+    assert "Register" in diagnostics[0]["remedy"]
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (RuntimeError("offline download at /private/secret"), "download"),
+        (RuntimeError("unsupported platform at /private/secret"), "platform"),
+        (RuntimeError("index lock at /private/secret"), "locked"),
+    ],
+)
+def test_semantic_fallback_diagnostic_is_actionable_and_redacted(
+    failure: RuntimeError, reason: str
+) -> None:
+    diagnostic = semantic_fallback_diagnostic(failure)
+
+    assert reason in diagnostic["reason"]
+    assert diagnostic["remedy"]
+    assert "/private/secret" not in str(diagnostic)

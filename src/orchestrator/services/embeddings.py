@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import os
+import tempfile
+import threading
+from collections.abc import Callable, Iterable, Sequence
 from importlib import import_module
+from pathlib import Path
 from typing import Any, Protocol
 
 from orchestrator.models.repository_context import EmbeddingIdentity
@@ -27,9 +31,12 @@ class EmbeddingProvider(Protocol):
 class FastEmbedEmbeddingProvider:
     """Lazy local embedding provider backed by FastEmbed."""
 
-    def __init__(self, identity: EmbeddingIdentity) -> None:
+    def __init__(
+        self, identity: EmbeddingIdentity, on_progress: Callable[[str], None] | None = None
+    ) -> None:
         self._identity = identity
         self._model: object | None = None
+        self._on_progress = on_progress
 
     @property
     def identity(self) -> EmbeddingIdentity:
@@ -53,12 +60,69 @@ class FastEmbedEmbeddingProvider:
 
     def _get_model(self) -> Any:
         if self._model is None:
+            if self._on_progress is not None:
+                self._on_progress("Loading local embedding model; first use may download it")
             try:
                 text_embedding = _load_optional_module("fastembed").TextEmbedding
             except ImportError as exc:  # pragma: no cover - packaging regression guard
                 raise RuntimeError("FastEmbed is required for Qdrant repository context") from exc
-            self._model = text_embedding(model_name=self._identity.model)
+            # FastEmbed does not expose a download callback. Observe only byte
+            # counts in its cache while it initializes; no cache paths or model
+            # downloader output cross the diagnostic boundary.
+            finished = threading.Event()
+            initialized = threading.Event()
+            watcher: threading.Thread | None = None
+            if self._on_progress is not None:
+                configured_cache = os.getenv("FASTEMBED_CACHE_PATH")
+                cache = (
+                    Path(configured_cache)
+                    if configured_cache else Path(tempfile.gettempdir()) / "fastembed_cache"
+                )
+                watcher = threading.Thread(
+                    target=self._watch_download,
+                    args=(cache, finished, initialized),
+                    daemon=True,
+                    name="orchestrator-embedding-download-progress",
+                )
+                watcher.start()
+            try:
+                self._model = text_embedding(model_name=self._identity.model)
+                initialized.set()
+            finally:
+                finished.set()
+                if watcher is not None:
+                    watcher.join(timeout=1)
+            if self._on_progress is not None:
+                self._on_progress("Local embedding model ready")
         return self._model
+
+    def _watch_download(
+        self, cache: Path, finished: threading.Event, initialized: threading.Event
+    ) -> None:
+        assert self._on_progress is not None
+
+        def size() -> int:
+            try:
+                return sum(
+                    path.stat().st_size for path in cache.rglob("*") if path.is_file()
+                )
+            except OSError:
+                return 0
+
+        baseline = size()
+        last_reported = 0
+        while not finished.wait(0.5):
+            received = max(0, size() - baseline)
+            if received - last_reported >= 8 * 1_048_576:
+                last_reported = received
+                self._on_progress(
+                    f"Downloading local embedding model: {received // 1_048_576} MiB received"
+                )
+        received = max(0, size() - baseline)
+        if received and initialized.is_set():
+            self._on_progress(
+                f"Local embedding model download finished: {received // 1_048_576} MiB received"
+            )
 
     @staticmethod
     def _materialize(vectors: Iterable[Any]) -> list[list[float]]:

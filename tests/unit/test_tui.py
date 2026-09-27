@@ -31,6 +31,7 @@ from orchestrator.config.project_config import (
     GitHubAppSettings,
     ProjectConfig,
     RepositoryConfiguration,
+    RepositoryContextSettings,
 )
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
@@ -111,6 +112,101 @@ def test_single_task_context_warning_stays_in_timeline_and_detailed_logs(tmp_pat
             exported = format_diagnostics_for_export(screen._live_diagnostics)
             assert "PROJECT_CONTEXT_TRUNCATED" in exported
             assert json.dumps(payload["path"]) in exported
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize("batch_run", [False, True])
+def test_embedding_progress_keeps_tui_controls_responsive(
+    tmp_path: Path, batch_run: bool
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def drive() -> None:
+        worker: threading.Thread | None = None
+        try:
+            async with application.run_test(size=(80, 20)) as pilot:
+                application.push_screen(WorkflowRunnerScreen())
+                await settle_tui(pilot)
+                screen = application.screen
+                assert isinstance(screen, WorkflowRunnerScreen)
+                if batch_run:
+                    batch = WorkflowBatch(
+                        id="batch-progress", repository="example", task_source="github",
+                        items=(WorkflowBatchItem(0, "12", "Embedding task"),),
+                    )
+                    screen._batch_running = True
+                    screen._batch_created(batch, _batch_launch("12"))
+
+                class BlockedEmbedding:
+                    def embed_documents(self) -> None:
+                        execution_id = "execution-progress"
+                        screen._on_workflow_event(WorkflowEvent(
+                            execution_id, WorkflowEventKind.EXECUTION_CREATED,
+                            status=WorkflowStatus.PENDING,
+                            payload={"batch_position": 0} if batch_run else None,
+                        ))
+                        screen._on_workflow_event(WorkflowEvent(
+                            execution_id, WorkflowEventKind.STATUS_CHANGED,
+                            status=WorkflowStatus.RUNNING,
+                        ))
+                        screen._on_workflow_event(WorkflowEvent(
+                            execution_id, WorkflowEventKind.DIAGNOSTIC,
+                            stage=WorkflowStage.GENERATE_SPEC,
+                            category=DiagnosticCategory.WORKFLOW_EVENT.value,
+                            payload={
+                                "kind": "REPOSITORY_INDEX_PROGRESS",
+                                "message": "Embedding chunks 0/64",
+                            },
+                        ))
+                        entered.set()
+                        assert release.wait(timeout=15)
+
+                worker = threading.Thread(target=BlockedEmbedding().embed_documents, daemon=True)
+                worker.start()
+                assert await asyncio.to_thread(entered.wait, 2)
+                await wait_for_tui(
+                    pilot,
+                    lambda: (
+                        bool(screen._batch_progress.rows()[0].timeline)
+                        and "Embedding chunks 0/64"
+                        in screen._batch_progress.rows()[0].timeline[-1]
+                        if batch_run and screen._batch_progress is not None
+                        else bool(screen._event_lines)
+                        and "Embedding chunks 0/64" in screen._event_lines[-1]
+                    ),
+                    description="semantic index progress",
+                )
+                content = screen.query_one("#workflow-runner", VerticalScroll)
+                content.scroll_end(animate=False)
+                await wait_for_tui(
+                    pilot, lambda: content.scroll_y > 0,
+                    description="workflow scrolling during embedding",
+                )
+                screen.query_one("#stop-workflow", Button).press()
+                await wait_for_tui(
+                    pilot, lambda: isinstance(application.screen, StopWorkflowConfirmation),
+                    description="stop confirmation during embedding",
+                )
+                application.screen.query_one("#dismiss-stop-workflow", Button).press()
+                await wait_for_tui(
+                    pilot, lambda: application.screen is screen,
+                    description="stop confirmation dismissal",
+                )
+                await pilot.press("r")
+                await wait_for_tui(
+                    pilot, lambda: isinstance(application.screen, RepositorySettingsScreen),
+                    description="repository navigation during embedding",
+                )
+                assert worker.is_alive()
+        finally:
+            release.set()
+            if worker is not None:
+                worker.join(timeout=5)
+                assert not worker.is_alive()
 
     asyncio.run(drive())
 
@@ -1162,6 +1258,9 @@ def test_controller_saves_renames_and_deletes_repository_configuration(
 
 def test_controller_reports_heuristic_context_ready_without_an_index(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
+    controller.project_config("example").repository_context = RepositoryContextSettings(
+        strategy="heuristic"
+    )
 
     status = controller.repository_index_status("example")
 
