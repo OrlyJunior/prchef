@@ -29,6 +29,7 @@ defaults:
     #   model: BAAI/bge-small-en-v1.5
     #   version: "1"
     #   dimension: 384
+    #   cpu_threads: 2  # bounded local embedding CPU threads
     # qdrant:
     #   mode: local
     #   # Persistent and external to every repository. Omit for
