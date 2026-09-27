@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections import deque
+from datetime import UTC, datetime
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from textual import work
@@ -10,6 +13,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus, Resize
 from textual.screen import ModalScreen, Screen
+from textual.timer import Timer
 from textual.widgets import Button, Checkbox, Input, Static, TextArea
 
 from orchestrator.config.project_config import AgentPresetConfig
@@ -26,7 +30,12 @@ from orchestrator.models.workflow_status import (
     WorkflowStatus,
 )
 from orchestrator.runtime_logging import redact_payload, redact_text
-from orchestrator.tui.batch_progress import LiveBatchProgress, build_persisted_rows, summarize
+from orchestrator.tui.batch_progress import (
+    BatchRowView,
+    LiveBatchProgress,
+    build_persisted_rows,
+    summarize,
+)
 from orchestrator.tui.bridge import WorkflowBatchLaunch, WorkflowController, WorkflowLaunch
 from orchestrator.tui.diagnostics import format_diagnostics_for_export
 from orchestrator.tui.screens.task_selector import TaskSelector
@@ -39,6 +48,10 @@ from orchestrator.tui.widgets import (
 )
 from orchestrator.tui.workflow_presentation import (
     STAGE_ROLES,
+    clear_index_progress,
+    is_active_index_line,
+    is_index_progress,
+    is_index_ready,
     stage_activity,
     stage_complete,
     status_message,
@@ -168,6 +181,8 @@ class WorkflowRunnerScreen(Screen[None]):
     """Collect compact launch selections and observe the workflow service."""
 
     BINDINGS = [("escape", "app.pop_screen", "Back")]
+    RECONCILE_INTERVAL = 2.0
+    EVENT_DRAIN_LIMIT = 64
 
     def __init__(self) -> None:
         super().__init__()
@@ -197,6 +212,13 @@ class WorkflowRunnerScreen(Screen[None]):
         self._batch_tasks: tuple[DevelopmentTask, ...] = ()
         self._batch_running = False
         self._batch_progress: LiveBatchProgress | None = None
+        self._event_lock = Lock()
+        self._pending_events: deque[WorkflowEvent] = deque()
+        self._event_drain_scheduled = False
+        self._run_epoch = 0
+        self._reconciled_at: dict[str, datetime] = {}
+        self._finished_event_ids: set[str] = set()
+        self._reconcile_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         # One scroll context keeps a keyboard-focused control visible on small terminals.
@@ -367,6 +389,9 @@ class WorkflowRunnerScreen(Screen[None]):
         return cast("OrchestratorApp", self.app).controller
 
     def on_mount(self) -> None:
+        self._reconcile_timer = self.set_interval(
+            self.RECONCILE_INTERVAL, self._reconcile_visible_execution
+        )
         self._set_layout_mode(self.size.width)
         self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.query_one("#batch-progress", BatchProgressView).display = False
@@ -395,6 +420,22 @@ class WorkflowRunnerScreen(Screen[None]):
 
     def on_resize(self, event: Resize) -> None:
         self._set_layout_mode(event.size.width)
+
+    def on_unmount(self) -> None:
+        if self._reconcile_timer is not None:
+            self._reconcile_timer.stop()
+
+    def _reconcile_visible_execution(self) -> None:
+        if self.app.screen is not self:
+            return
+        if self._batch_running and self._batch_progress is not None:
+            self._reconcile_live_batch(quiet=True)
+        elif (
+            self._batch_progress is None
+            and self._active_execution_id is not None
+            and not self._outcome_visible
+        ):
+            self._reconcile_active_execution()
 
     def on_screen_resume(self) -> None:
         """Reload repository choices and reconcile execution state on return."""
@@ -1307,6 +1348,11 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#workflow-stop-actions", Horizontal).display = False
         self.query_one("#workflow-progress", Static).update("Starting workflow…")
         self._human_input_dismissed = False
+        with self._event_lock:
+            self._run_epoch += 1
+            self._pending_events.clear()
+            self._reconciled_at.clear()
+            self._finished_event_ids.clear()
         self._event_lines.clear()
         self._raw_event_lines.clear()
         self._live_diagnostics.clear()
@@ -1332,7 +1378,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 agent_providers=agent_providers,
                 agent_runtime_options=runtime_options,
             )
-            self._run_workflow(launch)
+            self._run_workflow(launch, self._run_epoch)
             return
         self._batch_running = True
         self._batch_tasks = tuple(
@@ -1349,7 +1395,7 @@ class WorkflowRunnerScreen(Screen[None]):
             agent_providers=agent_providers,
             agent_runtime_options=runtime_options,
         )
-        self._run_batch(batch_launch)
+        self._run_batch(batch_launch, self._run_epoch)
 
     def _set_single_task_controls_visible(self, visible: bool) -> None:
         """Hide single-task timeline/outcome/log controls while a batch is active.
@@ -1368,32 +1414,34 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#workflow-raw-events", Static).display = visible and self._show_raw_events
 
     @work(thread=True, exclusive=True)
-    def _run_workflow(self, launch: WorkflowLaunch) -> None:
+    def _run_workflow(self, launch: WorkflowLaunch, epoch: int) -> None:
         try:
             execution = self.controller.start_workflow(
-                launch, event_listener=self._on_workflow_event
+                launch, event_listener=lambda event: self._on_workflow_event(event, epoch)
             )
         except Exception as exc:
-            self.app.call_from_thread(self._workflow_failed, str(exc))
+            self.app.call_from_thread(self._workflow_failed, str(exc), epoch)
             return
-        self.app.call_from_thread(self._workflow_finished, execution)
+        self.app.call_from_thread(self._workflow_finished, execution, epoch)
 
     @work(thread=True, exclusive=True)
-    def _run_batch(self, launch: WorkflowBatchLaunch) -> None:
+    def _run_batch(self, launch: WorkflowBatchLaunch, epoch: int) -> None:
         try:
             batch = self.controller.start_batch(
                 launch,
-                event_listener=self._on_workflow_event,
+                event_listener=lambda event: self._on_workflow_event(event, epoch),
                 on_batch_created=lambda created_batch: self.app.call_from_thread(
-                    self._batch_created, created_batch, launch
+                    self._batch_created, created_batch, launch, epoch
                 ),
             )
         except Exception as exc:
-            self.app.call_from_thread(self._workflow_failed, str(exc))
+            self.app.call_from_thread(self._workflow_failed, str(exc), epoch)
             return
-        self.app.call_from_thread(self._batch_finished, batch)
+        self.app.call_from_thread(self._batch_finished, batch, epoch)
 
-    def _batch_created(self, batch: WorkflowBatch, launch: WorkflowBatchLaunch) -> None:
+    def _batch_created(
+        self, batch: WorkflowBatch, launch: WorkflowBatchLaunch, epoch: int | None = None
+    ) -> None:
         """Render every queued item as soon as the durable batch row exists.
 
         This runs before the first item is submitted, so the batch identity
@@ -1401,6 +1449,8 @@ class WorkflowRunnerScreen(Screen[None]):
         after the first execution starts.
         """
 
+        if epoch is not None and epoch != self._run_epoch:
+            return
         role_models = {
             role: options.get("model") for role, options in launch.agent_runtime_options.items()
         }
@@ -1420,8 +1470,44 @@ class WorkflowRunnerScreen(Screen[None]):
             f"Batch running: {len(batch.items)} task(s)."
         )
 
-    def _on_workflow_event(self, event: WorkflowEvent) -> None:
-        self.app.call_later(self._render_workflow_event, event)
+    def _on_workflow_event(self, event: WorkflowEvent, epoch: int | None = None) -> None:
+        """Queue worker events without making the worker wait for UI rendering."""
+
+        with self._event_lock:
+            if epoch is not None and epoch != self._run_epoch:
+                return
+            if event.occurred_at <= self._reconciled_at.get(
+                event.execution_id, datetime.min.replace(tzinfo=UTC)
+            ):
+                return
+            if is_index_progress(event):
+                self._pending_events = deque(
+                    pending for pending in self._pending_events
+                    if not (
+                        pending.execution_id == event.execution_id
+                        and is_index_progress(pending)
+                        and not is_index_ready(pending)
+                    )
+                )
+            self._pending_events.append(event)
+            if self._event_drain_scheduled:
+                return
+            self._event_drain_scheduled = True
+        self.app.call_later(self._drain_workflow_events)
+
+    def _drain_workflow_events(self) -> None:
+        for _ in range(self.EVENT_DRAIN_LIMIT):
+            with self._event_lock:
+                if not self._pending_events:
+                    self._event_drain_scheduled = False
+                    return
+                event = self._pending_events.popleft()
+                stale = event.occurred_at <= self._reconciled_at.get(
+                    event.execution_id, datetime.min.replace(tzinfo=UTC)
+                )
+            if not stale:
+                self._render_workflow_event(event)
+        self.app.call_later(self._drain_workflow_events)
 
     def _render_workflow_event(self, event: WorkflowEvent) -> None:
         if self._batch_running and self._batch_progress is not None:
@@ -1429,6 +1515,7 @@ class WorkflowRunnerScreen(Screen[None]):
             return
         if event.kind is WorkflowEventKind.EXECUTION_CREATED:
             self._active_execution_id = event.execution_id
+            self._finished_event_ids.discard(event.execution_id)
         elif self._active_execution_id is None:
             self._active_execution_id = event.execution_id
         self._ensure_stop_controls_visible(event)
@@ -1439,12 +1526,39 @@ class WorkflowRunnerScreen(Screen[None]):
             self._reset_active_workflow_controls()
         self._append_raw_event(event)
         self._append_live_diagnostic(event)
+        if event.status is not None and event.status not in ACTIVE_WORKFLOW_STATUSES:
+            self._finished_event_ids.add(event.execution_id)
+        elif event.status in ACTIVE_WORKFLOW_STATUSES:
+            self._finished_event_ids.discard(event.execution_id)
+        if is_index_progress(event) and (
+            event.execution_id in self._finished_event_ids
+            or (
+                self._stage_attempts
+                and WorkflowStage.GENERATE_SPEC not in self._active_timeline_stages
+            )
+        ):
+            return
         update_human_blocked_line(
             event, self._event_lines, self._successful_timeline_stages
         )
         message = self._timeline_message(event)
         if message is None:
             return
+        if is_index_progress(event):
+            for index, line in enumerate(self._event_lines):
+                if is_active_index_line(line):
+                    self._event_lines[index] = message
+                    break
+            else:
+                self._event_lines.append(message)
+        elif event.kind in {
+            WorkflowEventKind.STAGE_STARTED,
+            WorkflowEventKind.STAGE_FINISHED,
+            WorkflowEventKind.STAGE_FAILED,
+            WorkflowEventKind.STATUS_CHANGED,
+            WorkflowEventKind.WORKFLOW_FINISHED,
+        }:
+            clear_index_progress(self._event_lines)
         self.query_one("#workflow-progress", Static).update(message)
 
         if event.kind == WorkflowEventKind.STAGE_STARTED and event.stage is not None:
@@ -1469,10 +1583,14 @@ class WorkflowRunnerScreen(Screen[None]):
                 self._successful_timeline_stages[event.stage] = active_line
             else:
                 self._successful_timeline_stages.pop(event.stage, None)
-        elif event.kind in {WorkflowEventKind.AGENT_FALLBACK, WorkflowEventKind.DIAGNOSTIC}:
+        elif event.kind is WorkflowEventKind.AGENT_FALLBACK or (
+            event.kind is WorkflowEventKind.DIAGNOSTIC and not is_index_progress(event)
+        ):
             self._event_lines.append(message)
 
-        self.query_one("#workflow-events", Static).update("\n".join(self._event_lines[-10:]))
+        self.query_one("#workflow-events", Static).update(
+            "\n".join([line for line in self._event_lines if line][-10:])
+        )
 
     def _ensure_stop_controls_visible(self, event: WorkflowEvent) -> None:
         """Show the stop control as soon as cancellable work exists.
@@ -1514,15 +1632,17 @@ class WorkflowRunnerScreen(Screen[None]):
                     position, self.controller.continuation_stage(execution) is not None
                 )
         view = self.query_one("#batch-progress", BatchProgressView)
-        progress.set_unavailable_providers(
-            set(self.controller.batch_unavailable_providers(progress.batch_id))
-        )
+        previous_unavailable = view.unavailable_providers
+        unavailable = self.controller.batch_unavailable_providers(progress.batch_id)
+        progress.set_unavailable_providers(set(unavailable))
         rows = progress.rows()
-        for row in rows:
-            view.update_row(row)
+        if previous_unavailable != set(unavailable):
+            for row in rows:
+                view.update_row(row)
+        else:
+            view.update_row(rows[position])
         counts = summarize(rows)
         view.update_summary(counts)
-        unavailable = self.controller.batch_unavailable_providers(progress.batch_id)
         newly_unavailable = set(unavailable) - view.unavailable_providers
         view.set_provider_availability({
             provider: progress.held_count(provider) for provider in unavailable
@@ -1535,12 +1655,26 @@ class WorkflowRunnerScreen(Screen[None]):
                 "Mark it available in the batch progress once its quota resets.",
                 severity="warning",
             )
-        self.query_one("#workflow-progress", Static).update(
-            f"Batch running: {len(rows)} task(s) — {counts['NEEDS_HUMAN']} waiting for you."
-        )
+        self._update_batch_header(rows, counts)
 
-    def _reconcile_live_batch(self) -> None:
-        """Refresh the live projection after a detail screen changes an item."""
+    def _update_batch_header(self, rows: list[BatchRowView], counts: dict[str, int]) -> None:
+        if rows and all(
+            row.execution_id is not None
+            and row.category not in {"QUEUED", "WAITING", "RUNNING"}
+            for row in rows
+        ):
+            self.query_one("#workflow-stop-actions", Horizontal).display = False
+            self.query_one("#start-workflow", Button).disabled = False
+            self.query_one("#workflow-progress", Static).update(
+                f"Batch finished: {len(rows)} of {len(rows)} task(s) submitted."
+            )
+        else:
+            self.query_one("#workflow-progress", Static).update(
+                f"Batch running: {len(rows)} task(s) — {counts['NEEDS_HUMAN']} waiting for you."
+            )
+
+    def _reconcile_live_batch(self, *, quiet: bool = False) -> None:
+        """Refresh visible rows from durable state, including missed observer events."""
 
         progress = self._batch_progress
         if progress is None:
@@ -1548,17 +1682,21 @@ class WorkflowRunnerScreen(Screen[None]):
         try:
             batch = self.controller.batch_detail(progress.batch_id)
         except Exception as exc:
-            self.notify(f"Could not refresh batch progress: {exc}", severity="error")
+            if not quiet:
+                self.notify(f"Could not refresh batch progress: {exc}", severity="error")
             return
         for item in batch.items:
             if item.execution_id is None:
                 continue
             try:
-                execution, _ = self.controller.execution_detail(item.execution_id)
+                execution, steps = self.controller.execution_detail(item.execution_id)
             except Exception as exc:
-                self.notify(f"Could not refresh batch task: {exc}", severity="error")
+                if not quiet:
+                    self.notify(f"Could not refresh batch task: {exc}", severity="error")
                 continue
-            if progress.reconcile_execution(item.position, execution):
+            if progress.reconcile_execution(item.position, execution, steps):
+                with self._event_lock:
+                    self._reconciled_at[execution.id] = datetime.now(UTC)
                 eligible = False
                 if execution.status is WorkflowStatus.FAILED:
                     try:
@@ -1574,9 +1712,7 @@ class WorkflowRunnerScreen(Screen[None]):
             view.update_row(row)
         counts = summarize(rows)
         view.update_summary(counts)
-        self.query_one("#workflow-progress", Static).update(
-            f"Batch running: {len(rows)} task(s) — {counts['NEEDS_HUMAN']} waiting for you."
-        )
+        self._update_batch_header(rows, counts)
 
     def on_batch_progress_view_provider_available_requested(
         self, message: BatchProgressView.ProviderAvailableRequested
@@ -1809,8 +1945,14 @@ class WorkflowRunnerScreen(Screen[None]):
         self.query_one("#start-workflow", Button).disabled = False
         self.query_one("#workflow-stop-actions", Horizontal).display = False
 
-    def _workflow_finished(self, execution: WorkflowExecution) -> None:
+    def _workflow_finished(
+        self, execution: WorkflowExecution, epoch: int | None = None
+    ) -> None:
+        if epoch is not None and epoch != self._run_epoch:
+            return
         self._active_execution_id = execution.id
+        self._finished_event_ids.add(execution.id)
+        self._reconcile_active_execution()
         self._reset_active_workflow_controls()
         progress = self.query_one("#workflow-progress", Static)
         progress.update(self._status_message(execution.status))
@@ -1926,7 +2068,28 @@ class WorkflowRunnerScreen(Screen[None]):
         except Exception:
             return
 
-        self._event_lines = step_timeline_lines(steps, execution.human_interactions)
+        supplemental = [
+            line for line in self._event_lines
+            if line.startswith((
+                "! docs/PROJECT_CONTEXT.md", "! Semantic context unavailable", "Provider ", "↳"
+            ))
+        ]
+        if (
+            steps
+            and steps[-1].stage is WorkflowStage.GENERATE_SPEC
+            and steps[-1].status is StepStatus.RUNNING
+            and execution.status in ACTIVE_WORKFLOW_STATUSES
+        ):
+            supplemental.extend(
+                line for line in self._event_lines if line.startswith("Semantic index: ")
+            )
+        self._event_lines = step_timeline_lines(steps, execution.human_interactions) + supplemental
+        with self._event_lock:
+            self._reconciled_at[execution.id] = datetime.now(UTC)
+        if execution.status not in ACTIVE_WORKFLOW_STATUSES:
+            self._finished_event_ids.add(execution.id)
+        else:
+            self._finished_event_ids.discard(execution.id)
         self._active_timeline_stages.clear()
         self._successful_timeline_stages.clear()
         self._stage_attempts.clear()
@@ -1965,7 +2128,15 @@ class WorkflowRunnerScreen(Screen[None]):
             self._reset_active_workflow_controls()
             self._render_workflow_outcome(execution)
 
-    def _batch_finished(self, batch: WorkflowBatch | None) -> None:
+    def _batch_finished(self, batch: WorkflowBatch | None, epoch: int | None = None) -> None:
+        if epoch is not None and epoch != self._run_epoch:
+            return
+        if batch is not None:
+            with self._event_lock:
+                finished_at = datetime.now(UTC)
+                for item in batch.items:
+                    if item.execution_id is not None:
+                        self._reconciled_at[item.execution_id] = finished_at
         task_count = len(self._batch_tasks)
         linked_count = sum(item.execution_id is not None for item in batch.items) if batch else 0
         self._batch_running = False
@@ -2071,25 +2242,29 @@ class WorkflowRunnerScreen(Screen[None]):
         if not response:
             return
         self.query_one("#resume-workflow", Button).disabled = True
+        self._finished_event_ids.discard(self._active_execution_id)
         self._human_input_dismissed = False
         self._clear_workflow_outcome()
         self.query_one("#start-workflow", Button).disabled = True
         self.query_one("#workflow-stop-actions", Horizontal).display = True
         self.query_one("#workflow-progress", Static).update("Resuming workflow…")
-        self._resume_workflow(self._active_execution_id, response)
+        self._resume_workflow(self._active_execution_id, response, self._run_epoch)
 
     @work(thread=True, exclusive=True)
-    def _resume_workflow(self, execution_id: str, response: str) -> None:
+    def _resume_workflow(self, execution_id: str, response: str, epoch: int) -> None:
         try:
             execution = self.controller.respond_and_resume(
-                execution_id, response, event_listener=self._on_workflow_event
+                execution_id, response,
+                event_listener=lambda event: self._on_workflow_event(event, epoch),
             )
         except Exception as exc:
-            self.app.call_from_thread(self._workflow_failed, str(exc))
+            self.app.call_from_thread(self._workflow_failed, str(exc), epoch)
             return
-        self.app.call_from_thread(self._workflow_finished, execution)
+        self.app.call_from_thread(self._workflow_finished, execution, epoch)
 
-    def _workflow_failed(self, message: str) -> None:
+    def _workflow_failed(self, message: str, epoch: int | None = None) -> None:
+        if epoch is not None and epoch != self._run_epoch:
+            return
         was_batch = self._batch_running
         self._batch_running = False
         self._batch_tasks = ()

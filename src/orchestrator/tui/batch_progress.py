@@ -24,10 +24,14 @@ from orchestrator.models.workflow_status import (
     WorkflowStage,
     WorkflowStatus,
 )
+from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.runtime_logging import redact_payload
 from orchestrator.services.workflow_service import WorkflowService
 from orchestrator.tui.workflow_presentation import (
     STAGE_ROLES,
+    clear_index_progress,
+    is_active_index_line,
+    is_index_progress,
     step_timeline_lines,
     timeline_message,
     update_human_blocked_line,
@@ -214,7 +218,9 @@ class LiveBatchProgress:
         if position is not None:
             self._items[position].cancellation_requested = True
 
-    def reconcile_execution(self, position: int, execution: WorkflowExecution) -> bool:
+    def reconcile_execution(
+        self, position: int, execution: WorkflowExecution, steps: list[WorkflowStep] | None = None
+    ) -> bool:
         """Bring one live row up to date after another screen changed durable state."""
 
         if not (0 <= position < len(self._items)):
@@ -237,6 +243,38 @@ class LiveBatchProgress:
         )
         if execution.status is not WorkflowStatus.WAITING:
             item.provider_wait = None
+        if steps is not None:
+            supplemental = [
+                line for line in item.timeline
+                if line.startswith((
+                    "! docs/PROJECT_CONTEXT.md",
+                    "! Semantic context unavailable",
+                    "Provider ",
+                    "↳",
+                ))
+            ]
+            if (
+                steps
+                and steps[-1].stage is WorkflowStage.GENERATE_SPEC
+                and steps[-1].status is StepStatus.RUNNING
+                and execution.status in ACTIVE_WORKFLOW_STATUSES
+            ):
+                supplemental.extend(
+                    line for line in item.timeline if line.startswith("Semantic index: ")
+                )
+            item.timeline = step_timeline_lines(steps, execution.human_interactions) + supplemental
+            item.active_stage_line.clear()
+            item.successful_stage_lines.clear()
+            item.stage_attempts.clear()
+            for index, step in enumerate(steps):
+                item.stage_attempts[step.stage] = item.stage_attempts.get(step.stage, 0) + 1
+                if step.status is StepStatus.RUNNING:
+                    item.active_stage_line[step.stage] = index
+                elif (
+                    step.status is StepStatus.SUCCEEDED
+                    and "waiting for human input" not in item.timeline[index]
+                ):
+                    item.successful_stage_lines[step.stage] = index
         return True
 
     def apply(self, event: WorkflowEvent) -> int | None:
@@ -289,11 +327,36 @@ class LiveBatchProgress:
         if event.kind is WorkflowEventKind.WORKFLOW_FINISHED:
             item.finished = True
 
+        if event.kind in {
+            WorkflowEventKind.STAGE_STARTED,
+            WorkflowEventKind.STAGE_FINISHED,
+            WorkflowEventKind.STAGE_FAILED,
+            WorkflowEventKind.STATUS_CHANGED,
+            WorkflowEventKind.WORKFLOW_FINISHED,
+        }:
+            clear_index_progress(item.timeline)
+
         message = timeline_message(event, item.stage_attempts, agent_context=self._agent_context)
+        if is_index_progress(event) and (
+            item.finished
+            or (item.status is not None and item.status not in ACTIVE_WORKFLOW_STATUSES)
+            or (item.stage is not None and item.stage is not WorkflowStage.GENERATE_SPEC)
+            or (
+                item.stage_attempts.get(WorkflowStage.GENERATE_SPEC, 0) > 0
+                and WorkflowStage.GENERATE_SPEC not in item.active_stage_line
+            )
+        ):
+            message = None
         if event.stage is not None and event.kind == WorkflowEventKind.STAGE_STARTED:
             item.successful_stage_lines.pop(event.stage, None)
             item.stage_attempts[event.stage] = item.stage_attempts.get(event.stage, 0) + 1
-        if event.stage is not None:
+        if event.stage is not None and event.kind in {
+            WorkflowEventKind.STAGE_STARTED,
+            WorkflowEventKind.STAGE_FINISHED,
+            WorkflowEventKind.STAGE_FAILED,
+            WorkflowEventKind.STATUS_CHANGED,
+            WorkflowEventKind.WORKFLOW_FINISHED,
+        }:
             item.stage = event.stage
         if message is not None and event.kind in _TIMELINE_EVENT_KINDS:
             self._append_timeline(item, event, message)
@@ -311,7 +374,14 @@ class LiveBatchProgress:
         return position
 
     def _append_timeline(self, item: _LiveItem, event: WorkflowEvent, message: str) -> None:
-        if event.kind is WorkflowEventKind.STAGE_STARTED and event.stage is not None:
+        if is_index_progress(event):
+            for index, line in enumerate(item.timeline):
+                if is_active_index_line(line):
+                    item.timeline[index] = message
+                    break
+            else:
+                item.timeline.append(message)
+        elif event.kind is WorkflowEventKind.STAGE_STARTED and event.stage is not None:
             item.active_stage_line[event.stage] = len(item.timeline)
             item.timeline.append(message)
         elif (
@@ -420,7 +490,7 @@ class LiveBatchProgress:
                     stage_label=(
                         item.stage.value.replace("_", " ").title() if item.stage else ""
                     ),
-                    timeline=tuple(item.timeline),
+                    timeline=tuple(line for line in item.timeline if line),
                 )
             )
         return rows
@@ -481,7 +551,6 @@ def persisted_row(
             if diagnostic.payload.get("kind") in {
                 "PROVIDER_QUOTA_EXHAUSTED",
                 "PROJECT_CONTEXT_TRUNCATED",
-                "REPOSITORY_INDEX_PROGRESS",
                 "REPOSITORY_CONTEXT_FALLBACK",
             }:
                 message = timeline_message(
