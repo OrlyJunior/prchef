@@ -5,10 +5,12 @@ import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from orchestrator.config.project_config import RepositoryContextSettings
+from orchestrator.models import WorkflowExecution, WorkflowStatus
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.repository_context import EmbeddingIdentity, IndexLifecycleState
 from orchestrator.services.qdrant_repository_context import (
@@ -19,6 +21,7 @@ from orchestrator.services.qdrant_repository_context import (
     repository_collection_name,
 )
 from orchestrator.services.repository_context import RepositoryContextRequest
+from orchestrator.services.workspace_cleaner import WorkspaceCleanupService
 
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("qdrant_client") is None,
@@ -27,8 +30,15 @@ pytestmark = pytest.mark.skipif(
 
 
 class FakeEmbeddingProvider:
-    def __init__(self, *, version: str = "1") -> None:
-        self._identity = EmbeddingIdentity("fake", "deterministic", version, 2)
+    def __init__(
+        self,
+        *,
+        provider: str = "fake",
+        model: str = "deterministic",
+        version: str = "1",
+        dimension: int = 2,
+    ) -> None:
+        self._identity = EmbeddingIdentity(provider, model, version, dimension)
         self.document_texts: list[str] = []
 
     @property
@@ -42,14 +52,15 @@ class FakeEmbeddingProvider:
     def embed_query(self, text: str) -> list[float]:
         return self._vector(text)
 
-    @staticmethod
-    def _vector(text: str) -> list[float]:
+    def _vector(self, text: str) -> list[float]:
         lowered = text.casefold()
         if "alpha" in lowered:
-            return [1.0, 0.0]
-        if "beta" in lowered:
-            return [0.0, 1.0]
-        return [0.70710678, 0.70710678]
+            values = [1.0, 0.0]
+        elif "beta" in lowered:
+            values = [0.0, 1.0]
+        else:
+            values = [0.70710678, 0.70710678]
+        return values + [0.0] * (self._identity.dimension - 2)
 
 
 def _settings(index_path: Path, *, budget: int = 12_000) -> RepositoryContextSettings:
@@ -93,6 +104,23 @@ def _repository(root: Path, files: dict[str, str]) -> None:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+
+
+def _committed_repository(root: Path, files: dict[str, str]) -> None:
+    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+    for relative, content in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git", "-C", str(root), "-c", "user.name=Test",
+            "-c", "user.email=test@example.test", "commit", "-m", "initial",
+        ],
+        check=True,
+        capture_output=True,
+    )
 
 
 def test_collection_identity_is_stable_and_separates_keys_and_paths(tmp_path: Path) -> None:
@@ -238,6 +266,140 @@ def test_linked_worktree_points_are_isolated_within_one_collection(tmp_path: Pat
     assert "alpha control checkout" in control_again
 
 
+def test_temporary_snapshot_reuses_persistent_vectors_and_embeds_only_changed_file(
+    tmp_path: Path,
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    snapshot = tmp_path / "planning"
+    index = tmp_path / "index"
+    _committed_repository(
+        root,
+        {"unchanged.py": "alpha unchanged source", "changed.py": "beta original source"},
+    )
+    embedding = FakeEmbeddingProvider()
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(index), "repo", root, embedding_provider=embedding
+    )
+    baseline = strategy.build_index()
+    assert baseline.point_count == 2
+    embedding.document_texts.clear()
+    strategy.build_index()
+    assert embedding.document_texts == []
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(snapshot), "HEAD"],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        identical = strategy.render(replace(_request(snapshot), temporary_source=True))
+        assert "alpha unchanged source" in identical
+        assert embedding.document_texts == []
+        (snapshot / "changed.py").write_text("beta changed source", encoding="utf-8")
+        changed = strategy.render(replace(_request(snapshot, "beta"), temporary_source=True))
+        assert "beta changed source" in changed
+        assert embedding.document_texts == ["beta changed source"]
+        assert strategy.inspect_index().point_count == baseline.point_count
+        with strategy._session() as client:
+            assert strategy._scroll_source_points(
+                client, models, canonical_path_identifier(snapshot)
+            ) == []
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(snapshot)],
+            check=True,
+            capture_output=True,
+        )
+
+
+def test_execution_worktree_reuses_retained_worktree_vectors(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    first = tmp_path / "execution-one"
+    second = tmp_path / "execution-two"
+    index = tmp_path / "index"
+    _committed_repository(root, {"source.py": "alpha control source"})
+    embedding = FakeEmbeddingProvider()
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(index), "repo", root, embedding_provider=embedding
+    )
+    strategy.build_index()
+    for worktree in (first, second):
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+            check=True,
+            capture_output=True,
+        )
+        (worktree / "source.py").write_text("beta worktree source", encoding="utf-8")
+    try:
+        embedding.document_texts.clear()
+        assert "beta worktree source" in strategy.render(_request(first, "beta"))
+        assert embedding.document_texts == ["beta worktree source"]
+        embedding.document_texts.clear()
+        assert "beta worktree source" in strategy.render(_request(second, "beta"))
+        assert embedding.document_texts == []
+        assert "beta worktree source" not in strategy.render(_request(root, "alpha"))
+    finally:
+        for worktree in (first, second):
+            subprocess.run(
+                ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+                check=True,
+                capture_output=True,
+            )
+
+
+def test_cleanup_removes_execution_worktree_points_before_worktree(tmp_path: Path) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    workspace_root = tmp_path / "workspaces"
+    worktree = workspace_root / root.name / "execution-one"
+    index = tmp_path / "index"
+    _committed_repository(root, {"source.py": "alpha control source"})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(index), "repo", root, embedding_provider=FakeEmbeddingProvider()
+    )
+    strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True,
+        capture_output=True,
+    )
+    assert "alpha control source" in strategy.render(_request(worktree))
+
+    class Repository:
+        def list_executions(self) -> list[WorkflowExecution]:
+            return [
+                WorkflowExecution(
+                    id="execution-one",
+                    workspace_path=str(worktree),
+                    status=WorkflowStatus.APPROVED,
+                )
+            ]
+
+    class Git:
+        def remove_worktree(self, path: Path) -> bool:
+            with strategy._session() as client:
+                assert strategy._scroll_source_points(
+                    client, models, canonical_path_identifier(path)
+                ) == []
+            subprocess.run(
+                ["git", "-C", str(root), "worktree", "remove", "--force", str(path)],
+                check=True,
+                capture_output=True,
+            )
+            return True
+
+    service = WorkspaceCleanupService(  # type: ignore[arg-type]
+        Repository(), Git(), root, workspace_root,
+        delete_index_points=strategy.delete_worktree_points,
+    )
+    report = service.cleanup(dry_run=False)
+    assert report.removed_count == 1
+    assert not worktree.exists()
+    assert strategy.inspect_index().point_count == 1
+
+
 def test_temporary_planning_worktrees_leave_index_unchanged_on_query_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -345,7 +507,18 @@ def test_temporary_planning_worktrees_leave_index_unchanged_on_query_failure(
     assert status.error_message == "Semantic index operation failed (RuntimeError)."
 
 
-def test_embedding_version_change_recreates_and_reindexes_collection(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "changed_identity",
+    [
+        {"provider": "other"},
+        {"model": "other"},
+        {"version": "2"},
+        {"dimension": 3},
+    ],
+)
+def test_embedding_identity_change_recreates_and_reindexes_collection(
+    tmp_path: Path, changed_identity: dict[str, Any]
+) -> None:
     root = tmp_path / "repository"
     index = tmp_path / "index"
     _repository(root, {"alpha.py": "alpha semantic source"})
@@ -353,7 +526,7 @@ def test_embedding_version_change_recreates_and_reindexes_collection(tmp_path: P
         _settings(index), "repo", root, embedding_provider=FakeEmbeddingProvider(version="1")
     )
     original.render(_request(root))
-    replacement_embedding = FakeEmbeddingProvider(version="2")
+    replacement_embedding = FakeEmbeddingProvider(**changed_identity)
     replacement = QdrantRepositoryContextStrategy(
         _settings(index), "repo", root, embedding_provider=replacement_embedding
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import threading
@@ -324,7 +325,7 @@ class QdrantRepositoryContextStrategy:
         try:
             with self._session() as client:
                 if client.collection_exists(self._collection_name):
-                    client.delete_collection(self._collection_name)
+                    self._delete_collection(client)
         except Exception as exc:
             self._record_failure(exc)
             raise RepositoryIndexOperationError(_safe_error_message(exc)) from exc
@@ -422,19 +423,34 @@ class QdrantRepositoryContextStrategy:
                 changed_chunks.extend(chunks)
 
             if changed_chunks:
-                texts = [chunk.text for chunk in changed_chunks]
-                vectors: list[list[float]] = []
-                for offset in range(0, len(texts), _BATCH_SIZE):
-                    vectors.extend(
-                        self._embedding.embed_documents(texts[offset : offset + _BATCH_SIZE])
+                reusable = self._reusable_vectors(client, models, changed_chunks)
+                missing = [
+                    chunk for chunk in changed_chunks
+                    if (chunk.content_hash, chunk.ordinal, chunk.text) not in reusable
+                ]
+                embedded: list[list[float]] = []
+                for offset in range(0, len(missing), _BATCH_SIZE):
+                    embedded.extend(
+                        self._embedding.embed_documents(
+                            [chunk.text for chunk in missing[offset : offset + _BATCH_SIZE]]
+                        )
                     )
+                if len(embedded) != len(missing):
+                    raise RuntimeError("Embedding provider returned an unexpected vector count")
+                vectors = dict(reusable)
+                for chunk, vector in zip(missing, embedded, strict=True):
+                    vectors[(chunk.content_hash, chunk.ordinal, chunk.text)] = vector
                 points = [
                     models.PointStruct(
                         id=chunk.point_id,
-                        vector={DENSE_VECTOR_NAME: vector},
+                        vector={
+                            DENSE_VECTOR_NAME: vectors[
+                                (chunk.content_hash, chunk.ordinal, chunk.text)
+                            ]
+                        },
                         payload=self._chunk_payload(chunk),
                     )
-                    for chunk, vector in zip(changed_chunks, vectors, strict=True)
+                    for chunk in changed_chunks
                 ]
                 for offset in range(0, len(points), _BATCH_SIZE):
                     client.upsert(
@@ -462,8 +478,93 @@ class QdrantRepositoryContextStrategy:
             if record_success:
                 self._record_success(client, models, source_root)
 
+    def _reusable_vectors(
+        self, client: Any, models: Any, chunks: Sequence[RepositoryChunk]
+    ) -> dict[tuple[str, int, str], list[float]]:
+        """Read matching vectors from this repository's existing collection points."""
+
+        wanted = {(chunk.content_hash, chunk.ordinal, chunk.text) for chunk in chunks}
+        hashes = sorted({chunk.content_hash for chunk in chunks})
+        found: dict[tuple[str, int, str], list[float]] = {}
+        preferred: set[tuple[str, int, str]] = set()
+        offset: Any = None
+        while True:
+            page, offset = client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(key="kind", match=models.MatchValue(value="chunk")),
+                        models.FieldCondition(
+                            key="repository", match=models.MatchValue(value=self._repository_key)
+                        ),
+                        models.FieldCondition(
+                            key="configured_path_id",
+                            match=models.MatchValue(value=self._configured_path_id),
+                        ),
+                        models.FieldCondition(
+                            key="content_hash",
+                            match=models.MatchAny(any=hashes),
+                        ),
+                    ]
+                ),
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=True,
+            )
+            for point in page:
+                payload = point.payload or {}
+                if (
+                    payload.get("embedding") != self._embedding.identity.as_payload()
+                    or payload.get("index_schema_version") != INDEX_SCHEMA_VERSION
+                ):
+                    continue
+                if (
+                    not isinstance(payload.get("content_hash"), str)
+                    or not isinstance(payload.get("chunk_ordinal"), int)
+                    or not isinstance(payload.get("chunk_text"), str)
+                ):
+                    continue
+                key = (
+                    payload.get("content_hash"),
+                    payload.get("chunk_ordinal"),
+                    payload.get("chunk_text"),
+                )
+                if key not in wanted:
+                    continue
+                point_vectors = point.vector
+                vector = (
+                    point_vectors.get(DENSE_VECTOR_NAME)
+                    if isinstance(point_vectors, dict)
+                    else None
+                )
+                if (
+                    not isinstance(vector, list)
+                    or len(vector) != self._embedding.identity.dimension
+                    or any(
+                        not isinstance(value, (int, float)) or not math.isfinite(value)
+                        for value in vector
+                    )
+                ):
+                    continue
+                is_configured = payload.get("source_root_id") == self._configured_path_id
+                if key not in found or (is_configured and key not in preferred):
+                    found[key] = vector
+                    if is_configured:
+                        preferred.add(key)
+            if offset is None:
+                return found
+
+    def delete_worktree_points(self, worktree_root: Path) -> None:
+        """Remove points for one linked worktree without changing index provenance."""
+
+        source_root = worktree_root.resolve()
+        if source_root == self._configured_root:
+            raise ValueError("Cannot delete configured-checkout points as a worktree")
+        self._delete_source_points(canonical_path_identifier(source_root))
+
     def _delete_source_points(self, source_root_id: str) -> None:
-        """Discard points indexed from a disposable planning worktree."""
+        """Discard points for a source root without changing index provenance."""
 
         with self._session() as client:
             if not client.collection_exists(self._collection_name):
@@ -547,7 +648,7 @@ class QdrantRepositoryContextStrategy:
         if compatible:
             return
         if exists:
-            client.delete_collection(self._collection_name)
+            self._delete_collection(client)
         client.create_collection(
             collection_name=self._collection_name,
             vectors_config={
@@ -570,6 +671,20 @@ class QdrantRepositoryContextStrategy:
             ],
             wait=True,
         )
+
+    def _delete_collection(self, client: Any) -> None:
+        """Release local SQLite files before Qdrant removes their directory."""
+
+        if self._settings.qdrant.mode == "local":
+            local_client = getattr(client, "_client", None)
+            collections = getattr(local_client, "collections", None)
+            if isinstance(collections, dict):
+                collection = collections.get(self._collection_name)
+                if collection is not None:
+                    close = getattr(collection, "close", None)
+                    if callable(close):
+                        close()
+        client.delete_collection(self._collection_name)
 
     def _metadata_payload(
         self,
