@@ -211,8 +211,7 @@ def test_repositories_are_collection_isolated_and_unrelated_root_is_rejected(
     assert "a.py" in strategy_a.render(_request(root_a, "alpha"))
     assert "b.py" in strategy_b.render(_request(root_b, "beta"))
     assert strategy_a.collection_name != strategy_b.collection_name
-    with pytest.raises(ValueError, match="not the configured repository"):
-        strategy_a.render(_request(root_b, "alpha"))
+    assert "LOCAL REPOSITORY CONTEXT" in strategy_a.render(_request(root_b, "alpha"))
 
 
 def test_linked_worktree_points_are_isolated_within_one_collection(tmp_path: Path) -> None:
@@ -311,6 +310,60 @@ def test_temporary_snapshot_reuses_persistent_vectors_and_embeds_only_changed_fi
             check=True,
             capture_output=True,
         )
+
+
+def test_first_snapshot_retrieval_builds_durable_index_and_reports_progress(tmp_path: Path) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    snapshot = tmp_path / "planning"
+    _committed_repository(root, {"alpha.py": "def alpha(): return 'semantic'"})
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(snapshot), "HEAD"],
+        check=True,
+        capture_output=True,
+    )
+    embedding = FakeEmbeddingProvider()
+    progress: list[str] = []
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=embedding, on_progress=progress.append,
+    )
+    try:
+        assert strategy.inspect_index().state is IndexLifecycleState.NOT_INDEXED
+        context = strategy.render(replace(_request(snapshot), temporary_source=True))
+        assert "alpha.py" in context
+        assert strategy.inspect_index().state is IndexLifecycleState.READY
+        assert len(embedding.document_texts) == 1
+        assert any("Discovered 1 files" in message for message in progress)
+        assert any("Embedded 1/1 chunks" in message for message in progress)
+        assert progress[-1] == "Semantic index ready"
+        with strategy._session() as client:
+            assert strategy._scroll_source_points(
+                client, models, canonical_path_identifier(snapshot)
+            ) == []
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(snapshot)],
+            check=True,
+            capture_output=True,
+        )
+
+
+def test_embedding_progress_is_reported_after_each_batch(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    _repository(root, {f"source_{number}.py": f"def alpha_{number}(): return {number}"
+                       for number in range(65)})
+    progress: list[str] = []
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(), on_progress=progress.append,
+    )
+
+    strategy.render(_request(root))
+
+    assert "Embedded 64/65 chunks" in progress
+    assert "Embedded 65/65 chunks" in progress
 
 
 def test_execution_worktree_reuses_retained_worktree_vectors(tmp_path: Path) -> None:
@@ -431,8 +484,9 @@ def test_temporary_planning_worktrees_leave_index_unchanged_on_query_failure(
         _settings(index), "repo", root, embedding_provider=FakeEmbeddingProvider()
     )
     baseline = strategy.build_index()
-    with pytest.raises(ValueError, match="requires a linked worktree"):
-        strategy.render(replace(_request(root), temporary_source=True))
+    assert "LOCAL REPOSITORY CONTEXT" in strategy.render(
+        replace(_request(root), temporary_source=True)
+    )
     source.write_text("beta fetched base content", encoding="utf-8")
     subprocess.run(["git", "-C", str(root), "add", "source.py"], check=True)
     subprocess.run(
@@ -480,7 +534,7 @@ def test_temporary_planning_worktrees_leave_index_unchanged_on_query_failure(
                 assert "beta fetched base content" in result
                 assert "gamma dirty control content" not in result
             else:
-                assert "REPOSITORY CONTEXT DIAGNOSTIC" in result
+                assert "LOCAL REPOSITORY CONTEXT" in result
             assert source.read_text(encoding="utf-8") == "gamma dirty control content"
             status = strategy.inspect_index()
             assert status.state is before.state is IndexLifecycleState.STALE
@@ -501,7 +555,7 @@ def test_temporary_planning_worktrees_leave_index_unchanged_on_query_failure(
             )
 
     failed = strategy.render(_request(root, "alpha"))
-    assert "REPOSITORY CONTEXT DIAGNOSTIC" in failed
+    assert "LOCAL REPOSITORY CONTEXT" in failed
     status = strategy.inspect_index()
     assert status.state is IndexLifecycleState.FAILED
     assert status.error_message == "Semantic index operation failed (RuntimeError)."
@@ -566,6 +620,7 @@ def test_qdrant_failure_is_sanitized_and_does_not_mutate_repository(tmp_path: Pa
     index = tmp_path / "index"
     _repository(root, {"source.py": "alpha source"})
     before = (root / "source.py").read_bytes()
+    diagnostics: list[dict[str, str]] = []
 
     def fail_client(_: object) -> object:
         raise RuntimeError("secret server details")
@@ -576,13 +631,37 @@ def test_qdrant_failure_is_sanitized_and_does_not_mutate_repository(tmp_path: Pa
         root,
         embedding_provider=FakeEmbeddingProvider(),
         client_factory=fail_client,
+        on_diagnostic=diagnostics.append,
     )
 
     result = strategy.render(_request(root))
 
-    assert "REPOSITORY CONTEXT DIAGNOSTIC" in result
+    assert "LOCAL REPOSITORY CONTEXT" in result
     assert "secret server details" not in result
+    assert diagnostics[0]["kind"] == "REPOSITORY_CONTEXT_FALLBACK"
+    assert "secret server details" not in str(diagnostics)
+    assert diagnostics[0]["remedy"]
     assert (root / "source.py").read_bytes() == before
+
+
+def test_unavailable_embedding_model_uses_heuristic_with_download_remedy(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    _repository(root, {"source.py": "def alpha(): return 'fallback'"})
+    diagnostics: list[dict[str, str]] = []
+
+    class UnavailableEmbedding(FakeEmbeddingProvider):
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            raise RuntimeError("offline download at /private/secret")
+
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=UnavailableEmbedding(), on_diagnostic=diagnostics.append,
+    )
+
+    assert "LOCAL REPOSITORY CONTEXT" in strategy.render(_request(root))
+    assert "download" in diagnostics[0]["reason"]
+    assert "Retry online" in diagnostics[0]["remedy"]
+    assert "/private/secret" not in str(diagnostics)
 
 
 def test_failed_partial_sync_is_not_queried_and_retry_is_idempotent(tmp_path: Path) -> None:
@@ -630,7 +709,7 @@ def test_failed_partial_sync_is_not_queried_and_retry_is_idempotent(tmp_path: Pa
     failed = strategy.render(_request(root))
     recovered = strategy.render(_request(root))
 
-    assert "REPOSITORY CONTEXT DIAGNOSTIC" in failed
+    assert "LOCAL REPOSITORY CONTEXT" in failed
     assert state["queries"] == 1
     assert "source.py" in recovered
 
@@ -675,7 +754,7 @@ def test_collection_inspection_failure_does_not_delete_existing_index(tmp_path: 
         client_factory=factory,
     ).render(_request(root))
 
-    assert "REPOSITORY CONTEXT DIAGNOSTIC" in failed
+    assert "LOCAL REPOSITORY CONTEXT" in failed
     assert "transient inspection failure" not in failed
     assert state["deletes"] == 0
     recovered = QdrantRepositoryContextStrategy(

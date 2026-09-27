@@ -310,6 +310,7 @@ class FakeConfigLoader:
                     "protected_branches": ["main", "master", "develop"],
                 },
                 "validation": {"auto_detect": False, "commands": [["pytest"]]},
+                "repository_context": {"strategy": "heuristic"},
                 "agents": {
                     "planner": {"provider": "planner"},
                     "implementer": {"provider": "codex"},

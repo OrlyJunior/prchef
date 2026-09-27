@@ -70,10 +70,35 @@ def test_default_codex_config_keeps_workspace_write_sandbox(tmp_path: Path) -> N
     assert "--approve-for-me" not in config.integrations.codex.command
 
 
-def test_repository_context_strategy_defaults_to_heuristic(tmp_path: Path) -> None:
+def test_repository_context_strategy_defaults_to_qdrant(tmp_path: Path) -> None:
     config = _validated_config({"path": tmp_path})
 
-    assert config.repository_context.strategy == "heuristic"
+    assert config.repository_context.strategy == "qdrant"
+
+
+def test_loader_resolves_default_local_index_for_registered_repository(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        yaml.safe_dump({
+            "defaults": {"roles": {"spec": "codex", "review": "codex"}},
+            "repositories": {"example": {"path": str(repository)}},
+        }),
+        encoding="utf-8",
+    )
+    task = DevelopmentTask(
+        id="context", source="test", title="", description="", url="", repository="example"
+    )
+
+    config = ProjectConfigLoader(config_file).load(task)
+
+    assert config.repository_context.strategy == "qdrant"
+    assert config.repository_context.qdrant.mode == "local"
+    assert config.repository_context.qdrant.path == (
+        Path.home() / ".orchestrator" / "qdrant"
+    ).resolve()
 
 
 @pytest.mark.parametrize("strategy", repository_context_strategy_names())
@@ -110,7 +135,7 @@ def test_repository_context_strategy_uses_defaults_and_repository_override(
             {
                 "defaults": {
                     "roles": {"spec": "codex", "review": "codex"},
-                    "repository_context": {"strategy": "heuristic"},
+                    "repository_context": {"strategy": "qdrant"},
                 },
                 "repositories": {
                     "example": {
@@ -1566,7 +1591,7 @@ def test_loader_resolves_qdrant_identity_and_external_local_path(tmp_path: Path)
     assert config.repository_context.qdrant.path == (tmp_path / "indexes").resolve()
 
 
-def test_loader_rejects_qdrant_for_path_only_repository_or_index_inside_repo(
+def test_loader_accepts_path_only_repository_but_rejects_index_inside_repo(
     tmp_path: Path,
 ) -> None:
     repository = tmp_path / "repository"
@@ -1587,8 +1612,9 @@ def test_loader_rejects_qdrant_for_path_only_repository_or_index_inside_repo(
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ConfigurationError, match="registered repository key"):
-        ProjectConfigLoader(path_only_config).load(task, str(repository))
+    path_only = ProjectConfigLoader(path_only_config).load(task, str(repository))
+    assert path_only.configured_repository_key is None
+    assert path_only.repository_context.strategy == "qdrant"
 
     inside_config = tmp_path / "inside.yml"
     inside_config.write_text(

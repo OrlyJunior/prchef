@@ -2,6 +2,7 @@ import logging
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -128,6 +129,48 @@ def test_index_mismatch_is_persisted_on_workflow_diagnostics(workflow) -> None:
     assert mismatch.payload["kind"] == "REPOSITORY_INDEX_BASE_MISMATCH"
     assert mismatch.payload["base_commit"] == execution.base_commit
     assert mismatch.payload["indexed_commit"] == "a" * 40
+
+
+def test_semantic_progress_and_fallback_use_workflow_diagnostics(
+    workflow, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, repository, _, _ = workflow
+    execution = service.run("card-context-progress")
+
+    class Strategy:
+        def render(self, request: object) -> str:
+            callbacks["on_progress"]("Embedded 1/2 chunks")
+            callbacks["on_diagnostic"]({
+                "kind": "REPOSITORY_CONTEXT_FALLBACK",
+                "reason": "Model download unavailable.",
+                "remedy": "Retry online.",
+            })
+            return "LOCAL REPOSITORY CONTEXT"
+
+    callbacks: dict[str, Any] = {}
+
+    def resolve(*args: object, **kwargs: Any) -> Strategy:
+        callbacks.update(kwargs)
+        return Strategy()
+
+    service._sequencer._context_resolver = resolve
+    service._stage_events._verbose = True
+    config = SimpleNamespace(
+        path=Path("repo"), configured_repository_key="repo",
+        repository_context=SimpleNamespace(strategy="qdrant"),
+    )
+    strategy = service._sequencer._repository_context_strategy(config, execution.id)
+
+    with caplog.at_level(logging.DEBUG, logger="orchestrator.services.workflow_service"):
+        assert strategy.render(  # type: ignore[arg-type]
+            SimpleNamespace(role="planner")
+        ) == "LOCAL REPOSITORY CONTEXT"
+    assert [item.payload["kind"] for item in repository.diagnostics[-2:]] == [
+        "REPOSITORY_INDEX_PROGRESS", "REPOSITORY_CONTEXT_FALLBACK"
+    ]
+    assert "Embedded 1/2 chunks" in caplog.text
+    assert "Retry online" in caplog.text
+    assert execution.status is WorkflowStatus.APPROVED
 
 
 def test_oversized_context_warns_in_fresh_and_resumed_role_prompts(

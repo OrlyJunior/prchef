@@ -175,7 +175,7 @@ class RepositoryContextSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    strategy: str = "heuristic"
+    strategy: str = "qdrant"
     fallback_to_heuristic: bool = False
     context_budget_chars: int = Field(default=12_000, ge=512, le=100_000)
     candidate_count: int = Field(default=12, ge=1, le=100)
@@ -1595,19 +1595,17 @@ class ProjectConfigLoader:
         repository_context = merged.get("repository_context", {})
         if repository_context is None:
             repository_context = {}
-            merged["repository_context"] = repository_context
+        merged["repository_context"] = repository_context
         if not isinstance(repository_context, dict):
             raise ConfigurationError("'repository_context' must be a mapping")
-        if str(repository_context.get("strategy", "heuristic")).strip().casefold() == "qdrant":
-            if configured_repository_key is None:
-                raise ConfigurationError(
-                    "Qdrant repository context requires a registered repository key; "
-                    "a path-only repository override is not sufficient"
-                )
+        if str(repository_context.get("strategy", "qdrant")).strip().casefold() == "qdrant":
             qdrant = repository_context.setdefault("qdrant", {})
             if not isinstance(qdrant, dict):
                 raise ConfigurationError("'repository_context.qdrant' must be a mapping")
-            if str(qdrant.get("mode", "local")).strip().casefold() == "local":
+            if (
+                configured_repository_key is not None
+                and str(qdrant.get("mode", "local")).strip().casefold() == "local"
+            ):
                 raw_index_path = qdrant.get("path")
                 index_path = (
                     Path.home().expanduser() / ".orchestrator" / "qdrant"

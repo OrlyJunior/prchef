@@ -113,12 +113,33 @@ class StageSequencer:
         self, config: ProjectConfig, execution_id: str | None = None
     ) -> RepositoryContextStrategy:
         """Resolve context for each fresh or resumed stage sequence."""
+
+        def record(payload: dict[str, str]) -> None:
+            if execution_id is None:
+                return
+            runtime = self._events._runtimes.peek(execution_id)
+            self._events._record_diagnostic(
+                execution_id,
+                DiagnosticCategory.WORKFLOW_EVENT,
+                payload,
+                stage=runtime.active_stage if runtime else None,
+            )
+
+        def progress(message: str) -> None:
+            record({"kind": "REPOSITORY_INDEX_PROGRESS", "message": message})
+
         strategy = self._context_resolver(
             config.repository_context.strategy,
             settings=config.repository_context,
             repository_key=config.configured_repository_key,
             configured_root=config.path,
             client_manager=self._repository_index_clients,
+            on_progress=progress,
+            on_diagnostic=record,
+            cancellation_check=(
+                (lambda: self._events._raise_if_cancellation_requested(execution_id))
+                if execution_id is not None else None
+            ),
         )
         if config.repository_context.strategy != "qdrant" or execution_id is None:
             return strategy

@@ -53,12 +53,11 @@ and repository retrieval cover those.
 - Provider commands, credentials, polling, and API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Role services are provider-neutral. Model-routing
   libraries (LiteLLM) are backends behind that boundary and never own workflow semantics.
-- Repository context retrieval is a separate orchestrator-owned strategy boundary (heuristic by
-  default, Qdrant optional). Workflow services never import retrieval backends. Role files and
-  this file are never indexed. The TUI Repositories screen owns manual index build, refresh, and
-  clear controls; workflow launch does not manage indexes. Qdrant collections are isolated per
-  registered repository. Planning snapshot retrieval removes its points without updating collection
-  index provenance.
+- Repository context retrieval is a separate orchestrator-owned strategy boundary (local Qdrant by
+  default for registered repositories, heuristic on semantic unavailability or explicit selection).
+  Workflow services never import retrieval backends. Role files and this file are never indexed.
+  Qdrant collections are isolated per registered repository; first retrieval establishes its durable
+  index. Planning snapshot retrieval removes its points without updating collection provenance.
 - Every execution, response, and continuation enters through one submission seam. Scheduling
   features must use it rather than adding their own concurrency.
 - The TUI may launch one task or an ordered persisted batch. Batch policy, cancellation, and

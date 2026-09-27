@@ -28,7 +28,12 @@ from orchestrator.services.embeddings import (
     EmbeddingProvider,
     FastEmbedEmbeddingProvider,
 )
-from orchestrator.services.repository_context import RepositoryContextRequest
+from orchestrator.services.exceptions import WorkflowCancelledError
+from orchestrator.services.repository_context import (
+    HeuristicRepositoryContextStrategy,
+    RepositoryContextRequest,
+    semantic_fallback_diagnostic,
+)
 from orchestrator.services.repository_documents import (
     RepositorySourcePipeline,
     chunk_source_file,
@@ -153,10 +158,16 @@ class QdrantRepositoryContextStrategy:
         embedding_provider: EmbeddingProvider | None = None,
         client_factory: QdrantClientFactory = create_qdrant_client,
         client_manager: QdrantClientManager | None = None,
+        on_progress: Callable[[str], None] | None = None,
+        on_diagnostic: Callable[[dict[str, str]], None] | None = None,
+        cancellation_check: Callable[[], None] | None = None,
     ) -> None:
         if not repository_key.strip():
             raise ValueError("Qdrant repository context requires a configured repository key")
         self._settings = settings
+        self._on_progress = on_progress
+        self._on_diagnostic = on_diagnostic
+        self._cancellation_check = cancellation_check
         self._repository_key = repository_key
         self._configured_root = configured_root.resolve()
         self._configured_path_id = canonical_path_identifier(self._configured_root)
@@ -175,7 +186,9 @@ class QdrantRepositoryContextStrategy:
             version=settings.embedding.version,
             dimension=settings.embedding.dimension,
         )
-        self._embedding = embedding_provider or FastEmbedEmbeddingProvider(identity)
+        self._embedding = embedding_provider or FastEmbedEmbeddingProvider(
+            identity, on_progress=on_progress
+        )
         self._validate_index_location(self._configured_root)
         for worktree_root in _git_worktree_roots(self._configured_root):
             self._validate_index_location(worktree_root)
@@ -211,13 +224,22 @@ class QdrantRepositoryContextStrategy:
             manager.close()
 
     def render(self, request: RepositoryContextRequest) -> str:
-        source_root = self._validate_request_root(Path(request.repository_path))
-        if request.temporary_source and source_root == self._configured_root:
-            raise ValueError("Temporary repository context requires a linked worktree")
-        source_root_id = canonical_path_identifier(source_root)
         try:
+            self._check_cancellation()
+            source_root = self._validate_request_root(Path(request.repository_path))
+            if request.temporary_source and source_root == self._configured_root:
+                raise ValueError("Temporary repository context requires a linked worktree")
+            source_root_id = canonical_path_identifier(source_root)
+            status = self.inspect_index()
+            if status.state in {IndexLifecycleState.NOT_INDEXED, IndexLifecycleState.FAILED}:
+                self._progress("Building the repository semantic index for first use")
+                self.build_index()
             try:
-                sources = RepositorySourcePipeline(self._repository_key, source_root).discover()
+                self._progress("Discovering files for semantic retrieval")
+                sources = RepositorySourcePipeline(self._repository_key, source_root).discover(
+                    on_progress=self._discovery_progress,
+                    cancellation_check=self._check_cancellation,
+                )
                 self._synchronize(
                     sources,
                     source_root_id,
@@ -231,16 +253,25 @@ class QdrantRepositoryContextStrategy:
             finally:
                 if request.temporary_source:
                     self._delete_source_points(source_root_id)
+        except WorkflowCancelledError:
+            raise
         except Exception as exc:
             if not request.temporary_source:
                 self._record_failure(exc)
-            if self._settings.fallback_to_heuristic:
-                from orchestrator.services.repository_context import (
-                    HeuristicRepositoryContextStrategy,
-                )
+            if self._on_diagnostic is not None:
+                self._on_diagnostic(semantic_fallback_diagnostic(exc))
+            return HeuristicRepositoryContextStrategy().render(request)
 
-                return HeuristicRepositoryContextStrategy().render(request)
-            return self._diagnostic(exc)
+    def _progress(self, message: str) -> None:
+        if self._on_progress is not None:
+            self._on_progress(message)
+
+    def _check_cancellation(self) -> None:
+        if self._cancellation_check is not None:
+            self._cancellation_check()
+
+    def _discovery_progress(self, completed: int, total: int) -> None:
+        self._progress(f"Discovered {completed}/{total} repository paths")
 
     def inspect_index(self) -> RepositoryIndexStatus:
         """Inspect the configured root without mutating its collection."""
@@ -333,15 +364,23 @@ class QdrantRepositoryContextStrategy:
 
     def _run_index_operation(self, *, rebuild: bool) -> RepositoryIndexStatus:
         try:
+            self._check_cancellation()
+            self._progress("Discovering repository files for semantic index")
             sources = RepositorySourcePipeline(
                 self._repository_key, self._configured_root
-            ).discover()
+            ).discover(
+                on_progress=self._discovery_progress,
+                cancellation_check=self._check_cancellation,
+            )
+            self._progress(f"Discovered {len(sources)} files for semantic index")
             self._synchronize(
                 sources,
                 canonical_path_identifier(self._configured_root),
                 self._configured_root,
                 rebuild=rebuild,
             )
+        except WorkflowCancelledError:
+            raise
         except Exception as exc:
             self._record_failure(exc)
             raise RepositoryIndexOperationError(_safe_error_message(exc)) from exc
@@ -381,6 +420,7 @@ class QdrantRepositoryContextStrategy:
         rebuild: bool = False,
         record_success: bool = True,
     ) -> None:
+        self._check_cancellation()
         with self._session() as client:
             models = _qdrant_models()
             self._ensure_compatible_collection(client, models)
@@ -396,6 +436,7 @@ class QdrantRepositoryContextStrategy:
             current_paths: set[str] = set()
             changed_paths: set[str] = set()
             for source in sources:
+                self._check_cancellation()
                 current_paths.add(source.path)
                 chunks = chunk_source_file(
                     source,
@@ -423,6 +464,7 @@ class QdrantRepositoryContextStrategy:
                 changed_chunks.extend(chunks)
 
             if changed_chunks:
+                self._progress(f"Preparing {len(changed_chunks)} semantic chunks")
                 reusable = self._reusable_vectors(client, models, changed_chunks)
                 missing = [
                     chunk for chunk in changed_chunks
@@ -430,10 +472,18 @@ class QdrantRepositoryContextStrategy:
                 ]
                 embedded: list[list[float]] = []
                 for offset in range(0, len(missing), _BATCH_SIZE):
+                    self._check_cancellation()
+                    self._progress(
+                        f"Embedding chunks {offset}/{len(missing)} "
+                        f"({len(changed_chunks) - len(missing)} reused)"
+                    )
                     embedded.extend(
                         self._embedding.embed_documents(
                             [chunk.text for chunk in missing[offset : offset + _BATCH_SIZE]]
                         )
+                    )
+                    self._progress(
+                        f"Embedded {min(offset + _BATCH_SIZE, len(missing))}/{len(missing)} chunks"
                     )
                 if len(embedded) != len(missing):
                     raise RuntimeError("Embedding provider returned an unexpected vector count")
@@ -453,6 +503,7 @@ class QdrantRepositoryContextStrategy:
                     for chunk in changed_chunks
                 ]
                 for offset in range(0, len(points), _BATCH_SIZE):
+                    self._check_cancellation()
                     client.upsert(
                         collection_name=self._collection_name,
                         points=points[offset : offset + _BATCH_SIZE],
@@ -476,7 +527,9 @@ class QdrantRepositoryContextStrategy:
                     wait=True,
                 )
             if record_success:
+                self._check_cancellation()
                 self._record_success(client, models, source_root)
+            self._progress("Semantic index ready")
 
     def _reusable_vectors(
         self, client: Any, models: Any, chunks: Sequence[RepositoryChunk]
@@ -489,6 +542,7 @@ class QdrantRepositoryContextStrategy:
         preferred: set[tuple[str, int, str]] = set()
         offset: Any = None
         while True:
+            self._check_cancellation()
             page, offset = client.scroll(
                 collection_name=self._collection_name,
                 scroll_filter=models.Filter(
@@ -801,6 +855,7 @@ class QdrantRepositoryContextStrategy:
         points: list[Any] = []
         offset: Any = None
         while True:
+            self._check_cancellation()
             page, offset = client.scroll(
                 collection_name=self._collection_name,
                 scroll_filter=self._scope_filter(models, source_root_id),
@@ -883,14 +938,6 @@ class QdrantRepositoryContextStrategy:
             blocks.append(block)
             used += len(block)
         return header + "".join(blocks)
-
-    @staticmethod
-    def _diagnostic(exc: Exception) -> str:
-        return (
-            "REPOSITORY CONTEXT DIAGNOSTIC:\n"
-            "Semantic repository context is unavailable for this request "
-            f"({type(exc).__name__}). No broader repository search was attempted.\n\n"
-        )
 
 
 def _qdrant_models() -> Any:
