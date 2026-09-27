@@ -284,6 +284,32 @@ class GitHubClient:
         )
         return viewed.stdout.strip().casefold() == "open"
 
+    def pull_request_description(self, repository: str, pull_request_number: int) -> str:
+        """Read the current PR body with the reviewer identity."""
+        if pull_request_number <= 0:
+            raise ValueError("Pull request number must be positive")
+        if not repository.strip():
+            raise ValueError("GitHub repository must be non-empty")
+        viewed = self._run(
+            "api",
+            f"repos/{repository}/pulls/{pull_request_number}",
+            env=self._review_auth_environment(),
+        )
+        try:
+            data = json.loads(viewed.stdout)
+            if not isinstance(data, dict) or "body" not in data:
+                raise ValueError("response body is missing")
+            body = data["body"]
+            if body is None:
+                return ""
+            if not isinstance(body, str):
+                raise ValueError("response body is not a string or null")
+            return body
+        except (ValueError, TypeError) as exc:
+            raise GitHubClientError(
+                f"Invalid GitHub pull request description response: {exc}"
+            ) from exc
+
     def submit_pull_request_review(
         self,
         *,

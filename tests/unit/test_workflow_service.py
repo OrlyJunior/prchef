@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 import orchestrator.services.workflow_service as workflow_service_module
-from orchestrator.clients.exceptions import GitClientError, GitHubClientError
+from orchestrator.clients.exceptions import CommandTimeoutError, GitClientError, GitHubClientError
 from orchestrator.config.project_config import AgentProviderSettings, GitHubAppSettings
 from orchestrator.models import (
     AgentRole,
@@ -81,6 +81,85 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
         }
     ]
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
+
+
+def test_review_retry_fetches_changed_description_each_round(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.planner.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
+    factory.github.descriptions = ["First criteria", "Edited criteria"]
+
+    result = service.run("card-description-retry")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert factory.github.description_calls == [("example/api", 42)] * 2
+    assert "First criteria" in factory.planner.review_prompts[0]
+    assert "Edited criteria" in factory.planner.review_prompts[1]
+    assert "First criteria" not in factory.planner.review_prompts[1]
+    assert "description" not in result.pull_request_snapshot
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GitHubClientError("GH_TOKEN=ghs_secret permission denied"),
+        CommandTimeoutError(
+            "GH_TOKEN=ghs_secret timed out", timeout_seconds=30
+        ),
+    ],
+)
+def test_review_description_failure_warns_without_changing_outcome(
+    workflow, error: Exception
+) -> None:
+    service, repository, _, factory = workflow
+    factory.github.description_error = error
+
+    result = service.run("card-description-failure")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert "[unavailable: description could not be fetched]" in factory.planner.review_prompts[0]
+    warning = next(
+        item for item in repository.diagnostics
+        if item.payload.get("kind") == "PULL_REQUEST_DESCRIPTION_UNAVAILABLE"
+    )
+    assert warning.stage is WorkflowStage.REVIEW
+    assert (
+        "permission denied" in warning.payload["reason"]
+        or "timed out" in warning.payload["reason"]
+    )
+    assert "ghs_secret" not in str(warning.payload)
+
+
+def test_resumed_review_fetches_edited_description(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.planner.malformed_review = True
+    factory.github.description = "Before clarification"
+    paused = service.run("card-description-resume")
+    assert paused.status is WorkflowStatus.NEEDS_HUMAN
+
+    factory.planner.malformed_review = False
+    factory.github.description = "After clarification"
+    resumed = service.respond_and_resume(paused.id, "Proceed with review.")
+
+    assert resumed.status is WorkflowStatus.APPROVED
+    assert factory.github.description_calls == [("example/api", 42)] * 2
+    assert "Before clarification" in factory.planner.review_prompts[0]
+    assert "After clarification" in factory.planner.review_prompts[1]
+
+
+def test_implementation_continuation_fetches_edited_description(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.planner.changes_requested = True
+    factory.github.description = "Original description"
+    paused = service.run("card-description-continuation")
+    assert paused.status is WorkflowStatus.CHANGES_REQUESTED
+
+    factory.planner.changes_requested = False
+    factory.github.description = "Updated description"
+    resumed = service.continue_execution(paused.id, "Address the review.")
+
+    assert resumed.status is WorkflowStatus.APPROVED
+    assert "Updated description" in factory.planner.review_prompts[-1]
+    assert factory.github.description_calls[-1] == ("example/api", 42)
 
 
 def test_index_mismatch_is_reported_before_retrieval_changes_metadata() -> None:
@@ -1246,6 +1325,7 @@ def test_applied_polish_is_validated_pushed_to_existing_pr_and_re_reviewed(workf
     assert factory.git.diff_calls == 2
     assert factory.github.create_calls == 1
     assert factory.planner.review_calls == 2
+    assert factory.github.description_calls == [("example/api", 42)] * 2
     assert factory.github.comment_calls == []
 
 

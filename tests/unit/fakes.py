@@ -340,6 +340,7 @@ class FakeAgentProvider:
         self.review_starting_branch: str | None = None
         self.spec_calls = 0
         self.review_calls = 0
+        self.review_prompts: list[str] = []
 
     def execute(
         self, request: AgentRequest, *, on_started: Any = None
@@ -382,6 +383,7 @@ class FakeAgentProvider:
             )
         self.review_starting_branch = request.revision
         self.review_calls += 1
+        self.review_prompts.append(request.instructions)
         if self.review_error:
             raise self.review_error
         if self.malformed_review:
@@ -553,6 +555,18 @@ class FakeGitHubClient:
         self.comment_calls: list[dict[str, Any]] = []
         self.pr_open = True
         self.pr_open_calls: list[dict[str, Any]] = []
+        self.description = ""
+        self.descriptions: list[str] = []
+        self.description_error: Exception | None = None
+        self.description_calls: list[tuple[str, int]] = []
+
+    def pull_request_description(self, repository: str, pull_request_number: int) -> str:
+        self.description_calls.append((repository, pull_request_number))
+        if self.description_error:
+            raise self.description_error
+        if self.descriptions:
+            return self.descriptions.pop(0)
+        return self.description
 
     def is_pull_request_open(self, repository: str, pull_request_number: int) -> bool:
         self.pr_open_calls.append(

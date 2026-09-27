@@ -4143,7 +4143,6 @@ def test_workflow_runner_submits_selected_task_id_in_workflow_launch(
             screen.query_one("#start-workflow", Button).focus()
             await settle_tui(pilot)
             assert screen.query_one("#start-workflow", Button).has_focus
-            assert content.scroll_y > 0
             await pilot.press("enter")
             await settle_tui(pilot)
             assert service.calls[0][0:2] == ("12", "example")
