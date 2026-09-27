@@ -113,6 +113,29 @@ class OrchestratorApp(App[None]):
     .github-app-role { width: 100%; height: auto; margin-bottom: 1; }
     .screen-actions { margin-top: 1; height: auto; }
     .screen-actions Button { margin-right: 1; }
+    #execution-detail { min-width: 0; overflow-x: hidden; }
+    #execution-status { width: 100%; height: auto; }
+    #execution-detail .detail-action {
+        width: auto;
+        min-width: 0;
+        max-width: 100%;
+        margin-top: 1;
+    }
+    #execution-detail .screen-actions { width: 100%; min-width: 0; }
+    #execution-detail .screen-actions Button {
+        min-width: 0;
+        max-width: 100%;
+        margin-right: 0;
+    }
+    #execution-content-scroll {
+        width: 100%;
+        min-width: 0;
+        height: 12;
+        overflow-x: auto;
+        overflow-y: auto;
+        margin-top: 1;
+    }
+    #execution-content { width: auto; height: auto; }
     .navigation-actions {
         width: 100%;
         height: auto;
@@ -217,16 +240,6 @@ class OrchestratorApp(App[None]):
         display: none;
     }
     #execution-human-response { height: 7; }
-    #execution-content-scroll {
-        width: 100%;
-        height: auto;
-        overflow-x: auto;
-        overflow-y: hidden;
-    }
-    #execution-content {
-        width: auto;
-        height: auto;
-    }
     """
     BINDINGS = [
         Binding("n", "new_workflow", "New workflow"),
