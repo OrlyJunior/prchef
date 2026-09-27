@@ -3617,8 +3617,13 @@ def test_execution_detail_refreshes_after_in_place_submission(
             requested_at=datetime.now(UTC),
         )]
 
+    batch_events: list[WorkflowEventKind] = []
     if live_batch:
-        run = _BatchRun("batch-1", 1, frozenset(), None)
+        def observe_batch(event: WorkflowEvent) -> None:
+            assert not run.condition._is_owned()
+            batch_events.append(event.kind)
+
+        run = _BatchRun("batch-1", 1, frozenset(), observe_batch)
         run.positions[execution.id] = 0
         run.statuses[0] = execution.status
         controller._active_batches[run.batch_id] = run
@@ -3636,6 +3641,8 @@ def test_execution_detail_refreshes_after_in_place_submission(
         assert execution_id == execution.id
         assert value == "Updated input"
         assert (admission_gate is not None) is live_batch
+        if live_batch:
+            assert not run.condition._is_owned()
         if event_listener is not None:
             listeners.append(event_listener)
         execution.status = WorkflowStatus.PENDING if live_batch else WorkflowStatus.APPROVED
@@ -3683,6 +3690,8 @@ def test_execution_detail_refreshes_after_in_place_submission(
             assert application.screen is screen
             if live_batch:
                 assert listeners
+                assert run.generations[0] == 1
+                assert batch_events == [WorkflowEventKind.STATUS_CHANGED]
                 execution.status = WorkflowStatus.RUNNING
                 await asyncio.to_thread(
                     listeners[0],
@@ -3760,6 +3769,148 @@ def test_execution_detail_submission_refresh_uses_latest_persisted_status(
             )
             await settle_tui(pilot)
             assert str(screen.query_one("#execution-status", Static).renderable) == "RUNNING"
+
+    asyncio.run(drive())
+
+
+def test_batch_answer_and_other_event_finish_while_detail_ui_is_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    execution = repository.execution
+    execution.status = WorkflowStatus.NEEDS_HUMAN
+    execution.current_stage = WorkflowStage.REVIEW
+    execution.human_interactions = [HumanInteraction(
+        id=1, workflow_execution_id=execution.id, requesting_stage=WorkflowStage.REVIEW,
+        prompt="Clarify the change.", requested_at=datetime.now(UTC),
+    )]
+    other = WorkflowExecution(id="execution-2", status=WorkflowStatus.WAITING)
+    repository.executions.append(other)
+    batch = repository.create_batch("example", "github", [
+        DevelopmentTask("12", "github", "First task", "", "https://example/12"),
+        DevelopmentTask("7", "github", "Second task", "", "https://example/7"),
+    ])
+    repository.record_batch_item_execution(batch.id, 0, execution.id)
+    repository.record_batch_item_execution(batch.id, 1, other.id)
+    run = _BatchRun(batch.id, 2, frozenset({"planner"}), None)
+    run.positions = {execution.id: 0, other.id: 1}
+    run.statuses = {0: WorkflowStatus.NEEDS_HUMAN, 1: WorkflowStatus.WAITING}
+    controller._active_batches[batch.id] = run
+    controller._execution_batches.update({execution.id: batch.id, other.id: batch.id})
+
+    submission_entered = threading.Event()
+    release_submission = threading.Event()
+    response_event_started = threading.Event()
+    submission_done = threading.Event()
+    other_done = threading.Event()
+    ui_busy = threading.Event()
+    release_ui = threading.Event()
+    outcomes: list[bool] = []
+
+    def submit(
+        execution_id: str, response: str, *, event_listener: Any,
+        admission_gate: Any,
+    ) -> _Handle:
+        assert response == "Answer" and admission_gate()
+        submission_entered.set()
+        assert release_submission.wait(3)
+        execution.status = WorkflowStatus.PENDING
+        response_event_started.set()
+        event_listener(WorkflowEvent(
+            execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.PENDING,
+        ))
+        return _Handle(WorkflowExecution(id=execution_id, status=WorkflowStatus.PENDING))
+
+    monkeypatch.setattr(service, "submit_response", submit)
+    original_submit = controller.submit_response
+
+    def tracked_submit(*args: Any, **kwargs: Any) -> _Handle:
+        try:
+            return original_submit(*args, **kwargs)
+        finally:
+            submission_done.set()
+
+    monkeypatch.setattr(controller, "submit_response", tracked_submit)
+    application = OrchestratorApp(controller)
+
+    def emit_other() -> None:
+        try:
+            other.status = WorkflowStatus.RUNNING
+            controller._observe_batch_event(run, 1, WorkflowEvent(
+                other.id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.RUNNING,
+            ))
+            controller._observe_batch_event(run, 1, WorkflowEvent(
+                other.id, WorkflowEventKind.DIAGNOSTIC,
+                payload={"kind": "PROVIDER_QUOTA_EXHAUSTED", "provider": "planner"},
+            ))
+        finally:
+            other_done.set()
+
+    def monitor() -> None:
+        emitter: threading.Thread | None = None
+        try:
+            if not ui_busy.wait(2):
+                outcomes.append(False)
+                return
+            release_submission.set()
+            if not response_event_started.wait(2):
+                outcomes.append(False)
+                return
+            emitter = threading.Thread(target=emit_other, daemon=True)
+            emitter.start()
+            outcomes.append(submission_done.wait(2) and other_done.wait(2))
+        finally:
+            release_submission.set()
+            release_ui.set()
+            if emitter is not None:
+                emitter.join(timeout=2)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 50)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            runner = application.screen
+            assert isinstance(runner, WorkflowRunnerScreen)
+            run.listener = runner._on_workflow_event
+            runner._batch_running = True
+            runner._batch_created(repository.get_batch(batch.id), _batch_launch("12", "7"))
+            application.push_screen(ExecutionDetailScreen(execution.id))
+            await settle_tui(pilot)
+            detail = application.screen
+            assert isinstance(detail, ExecutionDetailScreen)
+            detail.query_one("#execution-human-response", TextArea).text = "Answer"
+            await settle_tui(pilot)
+            detail.query_one("#execution-resume", Button).press()
+            assert await asyncio.to_thread(submission_entered.wait, 2)
+            monitor_thread = threading.Thread(target=monitor, daemon=True)
+            monitor_thread.start()
+
+            def busy_ui() -> None:
+                ui_busy.set()
+                assert release_ui.wait(6)
+
+            application.call_later(busy_ui)
+            await asyncio.to_thread(monitor_thread.join, 7)
+            assert not monitor_thread.is_alive()
+            assert outcomes == [True], "workflow events waited for the busy UI"
+            await wait_for_tui(
+                pilot,
+                lambda: str(detail.query_one("#execution-status", Static).renderable) == "QUEUED",
+            )
+            await pilot.press("escape")
+            await wait_for_tui(
+                pilot,
+                lambda: "RUNNING" in str(
+                    runner.query_one("#batch-row-1-header", Button).label
+                ) and "planner" in runner.query_one(
+                    "#batch-progress", BatchProgressView
+                ).unavailable_providers,
+            )
+            assert "QUEUED" in str(runner.query_one("#batch-row-0-header", Button).label)
+            assert "planner" in runner.query_one(
+                "#batch-progress", BatchProgressView
+            ).unavailable_providers
+            assert run.generations[0] == 1
 
     asyncio.run(drive())
 
