@@ -18,6 +18,31 @@ from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.models.workflow_step import WorkflowStep
 
+
+def is_index_progress(event: WorkflowEvent) -> bool:
+    return (
+        event.kind is WorkflowEventKind.DIAGNOSTIC
+        and (event.payload or {}).get("kind") == "REPOSITORY_INDEX_PROGRESS"
+    )
+
+
+def is_index_ready(event: WorkflowEvent) -> bool:
+    return (
+        is_index_progress(event)
+        and (event.payload or {}).get("message") == "Semantic index ready"
+    )
+
+
+def is_active_index_line(line: str) -> bool:
+    return line.startswith("Semantic index: ") and line != "Semantic index: Semantic index ready"
+
+
+def clear_index_progress(lines: list[str]) -> None:
+    # Keep stage line indices stable while removing the transient activity.
+    for index, line in enumerate(lines):
+        if is_active_index_line(line):
+            lines[index] = ""
+
 # The stages where an agent provider is actually invoked. Used to add optional
 # provider/model context to a stage's timeline entry.
 STAGE_ROLES: dict[WorkflowStage, AgentRole] = {
