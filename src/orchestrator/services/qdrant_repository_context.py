@@ -15,7 +15,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from orchestrator.config.project_config import QdrantSettings, RepositoryContextSettings
 from orchestrator.models.repository_context import (
@@ -51,6 +51,12 @@ _CLEANUP_POINT_NAMESPACE = uuid.UUID("1c981b7d-98b6-4a2d-b995-3a271ac61d6c")
 _BATCH_SIZE = 64
 
 QdrantClientFactory = Callable[[QdrantSettings], Any]
+
+
+class _PointSummary(NamedTuple):
+    point_id: str
+    payload_fingerprint: int
+    vector_valid: bool
 
 
 class RepositoryIndexOperationError(RuntimeError):
@@ -529,17 +535,18 @@ class QdrantRepositoryContextStrategy:
             models = _qdrant_models()
             self._ensure_compatible_collection(client, models)
             linked_root = checkout_hashes is not None
-            existing = (
-                self._scroll_source_points(client, models, source_root_id, with_vectors=True)
-                if linked_root
-                else self._scroll_source_points(client, models, source_root_id)
-            )
             existing_by_path: dict[str, list[Any]] = {}
-            for point in existing:
-                payload = point.payload or {}
-                path = payload.get("path")
-                if isinstance(path, str):
-                    existing_by_path.setdefault(path, []).append(point)
+            if linked_root:
+                existing_by_path.update(
+                    self._scroll_source_point_summaries(client, models, source_root_id)
+                )
+            else:
+                # Keep the configured checkout's existing scan path unchanged.
+                for point in self._scroll_source_points(client, models, source_root_id):
+                    payload = point.payload or {}
+                    path = payload.get("path")
+                    if isinstance(path, str):
+                        existing_by_path.setdefault(path, []).append(point)
 
             valid_checkout_files, redundant_paths = (
                 self._valid_checkout_files(
@@ -574,8 +581,10 @@ class QdrantRepositoryContextStrategy:
                 records = existing_by_path.get(source.path, [])
                 if (
                     not rebuild
-                    and self._points_match_chunks(
-                        records, chunks, require_vectors=linked_root
+                    and (
+                        self._point_summaries_match_chunks(records, chunks)
+                        if linked_root
+                        else self._points_match_chunks(records, chunks)
                     )
                 ):
                     continue
@@ -594,7 +603,10 @@ class QdrantRepositoryContextStrategy:
             stale_ids: list[Any] = []
             for path, records in existing_by_path.items():
                 if path not in current_paths or path in changed_paths or path in redundant_paths:
-                    stale_ids.extend(point.id for point in records if str(point.id) not in new_ids)
+                    for point in records:
+                        point_id = point.point_id if linked_root else point.id
+                        if str(point_id) not in new_ids:
+                            stale_ids.append(point_id)
             if stale_ids:
                 delete_filter = self._scope_filter(
                     models,
@@ -752,14 +764,25 @@ class QdrantRepositoryContextStrategy:
         self,
         records: Sequence[Any],
         chunks: Sequence[RepositoryChunk],
-        *,
-        require_vectors: bool = False,
     ) -> bool:
         expected = {chunk.point_id: self._chunk_payload(chunk) for chunk in chunks}
         return len(records) == len(expected) and all(
             str(point.id) in expected
             and (point.payload or {}) == expected[str(point.id)]
-            and (not require_vectors or self._valid_dense_vector(point))
+            for point in records
+        )
+
+    def _point_summaries_match_chunks(
+        self, records: Sequence[_PointSummary], chunks: Sequence[RepositoryChunk]
+    ) -> bool:
+        expected = {
+            chunk.point_id: self._point_fingerprint(chunk.point_id, self._chunk_payload(chunk))
+            for chunk in chunks
+        }
+        return len(records) == len(expected) and all(
+            point.point_id in expected
+            and point.payload_fingerprint == expected[point.point_id]
+            and point.vector_valid
             for point in records
         )
 
@@ -1346,6 +1369,37 @@ class QdrantRepositoryContextStrategy:
             points.extend(page)
             if offset is None:
                 return points
+
+    def _scroll_source_point_summaries(
+        self, client: Any, models: Any, source_root_id: str
+    ) -> dict[str, list[_PointSummary]]:
+        """Keep point identities and validity while discarding each page's vectors."""
+        by_path: dict[str, list[_PointSummary]] = {}
+        offset: Any = None
+        while True:
+            self._check_cancellation()
+            page, offset = client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=self._scope_filter(models, source_root_id),
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=True,
+            )
+            for point in page:
+                payload = point.payload or {}
+                path = payload.get("path")
+                if isinstance(path, str):
+                    point_id = str(point.id)
+                    by_path.setdefault(path, []).append(
+                        _PointSummary(
+                            point_id,
+                            self._point_fingerprint(point_id, payload),
+                            self._valid_dense_vector(point),
+                        )
+                    )
+            if offset is None:
+                return by_path
 
     def _scope_filter(
         self,
