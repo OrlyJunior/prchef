@@ -13,6 +13,7 @@ from orchestrator.config.project_config import RepositoryContextSettings
 from orchestrator.models import WorkflowExecution, WorkflowStatus
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.repository_context import EmbeddingIdentity, IndexLifecycleState
+from orchestrator.services.exceptions import WorkflowCancelledError
 from orchestrator.services.qdrant_repository_context import (
     QdrantClientManager,
     QdrantRepositoryContextStrategy,
@@ -372,6 +373,99 @@ def test_first_snapshot_retrieval_builds_durable_index_and_reports_progress(tmp_
             check=True,
             capture_output=True,
         )
+
+
+def test_failed_snapshot_cleanup_preserves_cancellation_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    snapshot = tmp_path / "planning"
+    _committed_repository(root, {"source.py": "alpha snapshot source"})
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(snapshot), "HEAD"],
+        check=True,
+        capture_output=True,
+    )
+    diagnostics: list[dict[str, str]] = []
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(), on_diagnostic=diagnostics.append,
+    )
+    original_delete = strategy._delete_source_points
+    attempts = 0
+
+    def fail_first_delete(source_root_id: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("private snapshot path and credentials")
+        original_delete(source_root_id)
+
+    def cancel_query(*_: object) -> None:
+        raise WorkflowCancelledError("cancelled")
+
+    monkeypatch.setattr(strategy, "_delete_source_points", fail_first_delete)
+    monkeypatch.setattr(strategy, "_query", cancel_query)
+    try:
+        with pytest.raises(WorkflowCancelledError):
+            strategy.render(replace(_request(snapshot), temporary_source=True))
+        source_root_id = canonical_path_identifier(snapshot)
+        with strategy._session() as client:
+            assert strategy._scroll_source_points(client, models, source_root_id)
+            assert client.retrieve(
+                collection_name=strategy.collection_name,
+                ids=[strategy._cleanup_marker_id(source_root_id)],
+                with_payload=True,
+                with_vectors=False,
+            )
+        assert diagnostics[0]["kind"] == "REPOSITORY_CONTEXT_CLEANUP_FAILURE"
+        assert "next retrieval" in diagnostics[0]["remedy"]
+        assert "private" not in str(diagnostics)
+
+        recovered = QdrantRepositoryContextStrategy(
+            _settings(tmp_path / "index"), "repo", root,
+            embedding_provider=FakeEmbeddingProvider(),
+        )
+        assert "source.py" in recovered.render(_request(root))
+        with recovered._session() as client:
+            assert recovered._scroll_source_points(client, models, source_root_id) == []
+            assert client.retrieve(
+                collection_name=recovered.collection_name,
+                ids=[recovered._cleanup_marker_id(source_root_id)],
+                with_payload=True,
+                with_vectors=False,
+            ) == []
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(snapshot)],
+            check=True,
+            capture_output=True,
+        )
+
+
+def test_ready_retrieval_does_not_scan_index_for_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    _repository(root, {"source.py": "alpha source"})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    strategy.build_index()
+    original_scroll = strategy._scroll_source_points
+    scans = 0
+
+    def count_scans(*args: Any) -> list[Any]:
+        nonlocal scans
+        scans += 1
+        return original_scroll(*args)
+
+    monkeypatch.setattr(strategy, "_scroll_source_points", count_scans)
+    assert "source.py" in strategy.render(_request(root))
+    assert scans == 1
 
 
 def test_embedding_progress_is_reported_after_each_batch(tmp_path: Path) -> None:

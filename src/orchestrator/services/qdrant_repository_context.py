@@ -7,7 +7,9 @@ import json
 import math
 import os
 import subprocess
+import sys
 import threading
+import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
@@ -43,6 +45,7 @@ DENSE_VECTOR_NAME = "dense"
 INDEX_SCHEMA_VERSION = 1
 _DISTANCE = "cosine"
 _METADATA_POINT_ID = "00000000-0000-0000-0000-000000000001"
+_CLEANUP_POINT_NAMESPACE = uuid.UUID("1c981b7d-98b6-4a2d-b995-3a271ac61d6c")
 _BATCH_SIZE = 64
 
 QdrantClientFactory = Callable[[QdrantSettings], Any]
@@ -232,8 +235,11 @@ class QdrantRepositoryContextStrategy:
             raise ValueError("Temporary repository context requires a linked worktree")
         try:
             source_root_id = canonical_path_identifier(source_root)
-            status = self.inspect_index()
-            if status.state in {IndexLifecycleState.NOT_INDEXED, IndexLifecycleState.FAILED}:
+            self._retry_temporary_cleanup()
+            if self._index_state() in {
+                IndexLifecycleState.NOT_INDEXED,
+                IndexLifecycleState.FAILED,
+            }:
                 self._progress("Building the repository semantic index for first use")
                 self.build_index()
             try:
@@ -254,7 +260,14 @@ class QdrantRepositoryContextStrategy:
                 return self._render_results(request, results)
             finally:
                 if request.temporary_source:
-                    self._delete_source_points(source_root_id)
+                    active_failure = sys.exc_info()[1]
+                    try:
+                        self._delete_source_points(source_root_id)
+                    except Exception as cleanup_exc:
+                        queued = self._mark_temporary_cleanup(source_root_id)
+                        self._cleanup_diagnostic(cleanup_exc, queued=queued)
+                        if active_failure is None:
+                            raise
         except WorkflowCancelledError:
             raise
         except Exception as exc:
@@ -274,6 +287,31 @@ class QdrantRepositoryContextStrategy:
 
     def _discovery_progress(self, completed: int, total: int) -> None:
         self._progress(f"Discovered {completed}/{total} repository paths")
+
+    def _index_state(self) -> IndexLifecycleState:
+        """Read lifecycle metadata without scrolling repository chunks."""
+
+        with self._session() as client:
+            if not client.collection_exists(self._collection_name):
+                return IndexLifecycleState.NOT_INDEXED
+            points = client.retrieve(
+                collection_name=self._collection_name,
+                ids=[_METADATA_POINT_ID],
+                with_payload=True,
+                with_vectors=False,
+            )
+            if not points or not self._metadata_matches(points[0].payload or {}):
+                return IndexLifecycleState.FAILED
+            metadata = points[0].payload or {}
+            if metadata.get("last_error"):
+                return IndexLifecycleState.FAILED
+            if not _string_or_none(metadata.get("last_successful_indexed_at")):
+                return IndexLifecycleState.NOT_INDEXED
+            if _index_is_stale(
+                _string_or_none(metadata.get("last_indexed_commit")), self._configured_root
+            ):
+                return IndexLifecycleState.STALE
+            return IndexLifecycleState.READY
 
     def inspect_index(self) -> RepositoryIndexStatus:
         """Inspect the configured root without mutating its collection."""
@@ -646,14 +684,127 @@ class QdrantRepositoryContextStrategy:
         with self._session() as client:
             if not client.collection_exists(self._collection_name):
                 return
-            models = _qdrant_models()
-            client.delete(
-                collection_name=self._collection_name,
-                points_selector=models.FilterSelector(
-                    filter=self._scope_filter(models, source_root_id)
-                ),
-                wait=True,
+            self._delete_source_points_with_client(client, source_root_id)
+
+    def _delete_source_points_with_client(self, client: Any, source_root_id: str) -> None:
+        models = _qdrant_models()
+        client.delete(
+            collection_name=self._collection_name,
+            points_selector=models.FilterSelector(
+                filter=self._scope_filter(models, source_root_id)
+            ),
+            wait=True,
+        )
+
+    def _cleanup_marker_id(self, source_root_id: str) -> str:
+        return str(uuid.uuid5(_CLEANUP_POINT_NAMESPACE, self._collection_name + source_root_id))
+
+    def _mark_temporary_cleanup(self, source_root_id: str) -> bool:
+        """Retain a retry record when temporary point deletion fails."""
+
+        try:
+            with self._session() as client:
+                if not client.collection_exists(self._collection_name):
+                    return True
+                models = _qdrant_models()
+                client.upsert(
+                    collection_name=self._collection_name,
+                    points=[
+                        models.PointStruct(
+                            id=self._cleanup_marker_id(source_root_id),
+                            vector={
+                                DENSE_VECTOR_NAME: [1.0]
+                                + [0.0] * (self._embedding.identity.dimension - 1)
+                            },
+                            payload={
+                                "kind": "temporary_cleanup",
+                                "repository": self._repository_key,
+                                "configured_path_id": self._configured_path_id,
+                                "source_root_id": source_root_id,
+                            },
+                        )
+                    ],
+                    wait=True,
+                )
+            return True
+        except Exception:
+            return False
+
+    def _cleanup_diagnostic(self, exc: Exception, *, queued: bool) -> None:
+        if self._on_diagnostic is None:
+            return
+        try:
+            self._on_diagnostic(
+                {
+                    "kind": "REPOSITORY_CONTEXT_CLEANUP_FAILURE",
+                    "reason": (
+                        f"Temporary semantic snapshot cleanup failed ({type(exc).__name__})."
+                    ),
+                    "remedy": (
+                        "Cleanup will be retried on the next retrieval; clear the repository "
+                        "index in Repository settings if it keeps failing."
+                        if queued
+                        else (
+                            "Clear the repository index in Repository settings to remove "
+                            "temporary snapshot points."
+                        )
+                    ),
+                }
             )
+        except Exception:
+            # Diagnostics must not replace a cancellation or retrieval failure.
+            pass
+
+    def _retry_temporary_cleanup(self) -> None:
+        """Retry previously failed snapshot cleanup before any new retrieval."""
+
+        with self._session() as client:
+            if not client.collection_exists(self._collection_name):
+                return
+            models = _qdrant_models()
+            markers: list[tuple[str, str]] = []
+            offset: Any = None
+            while True:
+                self._check_cancellation()
+                page, offset = client.scroll(
+                    collection_name=self._collection_name,
+                    scroll_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="kind", match=models.MatchValue(value="temporary_cleanup")
+                            ),
+                            models.FieldCondition(
+                                key="repository",
+                                match=models.MatchValue(value=self._repository_key),
+                            ),
+                            models.FieldCondition(
+                                key="configured_path_id",
+                                match=models.MatchValue(value=self._configured_path_id),
+                            ),
+                        ]
+                    ),
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in page:
+                    source_root_id = (point.payload or {}).get("source_root_id")
+                    if isinstance(source_root_id, str):
+                        markers.append((str(point.id), source_root_id))
+                if offset is None:
+                    break
+            for marker_id, source_root_id in markers:
+                self._check_cancellation()
+                try:
+                    self._delete_source_points_with_client(client, source_root_id)
+                    client.delete(
+                        collection_name=self._collection_name,
+                        points_selector=models.PointIdsList(points=[marker_id]),
+                        wait=True,
+                    )
+                except Exception as exc:
+                    self._cleanup_diagnostic(exc, queued=True)
 
     def _query(self, text: str, source_root_id: str) -> list[RetrievedRepositoryChunk]:
         vector = self._embedding.embed_query(text)
