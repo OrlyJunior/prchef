@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.widgets import (
     Button,
     Checkbox,
@@ -3393,6 +3393,122 @@ def test_execution_detail_cancel_visibility(
 
 
 @pytest.mark.parametrize(
+    "status",
+    [
+        WorkflowStatus.PENDING,
+        WorkflowStatus.WAITING,
+        WorkflowStatus.RUNNING,
+        WorkflowStatus.NEEDS_HUMAN,
+    ],
+)
+def test_execution_detail_cancel_is_visible_and_keyboard_reachable_with_long_diagnostics(
+    tmp_path: Path, status: WorkflowStatus
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = status
+    repository.diagnostics = [
+        ExecutionDiagnostic(
+            execution_id=repository.execution.id,
+            category=DiagnosticCategory.RESPONSE,
+            payload={"output": "diagnostic" * 300},
+        )
+    ]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(36, 14)) as pilot:
+            application.push_screen(ExecutionHistoryScreen())
+            await settle_tui(pilot)
+            application.screen.query_one("#execution-picker", OrchestratorSelect).value = (
+                repository.execution.id
+            )
+            application.screen.query_one("#inspect-execution", Button).press()
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ExecutionDetailScreen)
+            cancel = screen.query_one("#execution-cancel", Button)
+            assert cancel.display and not cancel.disabled
+            assert 0 <= cancel.region.x < cancel.region.right <= application.size.width
+            assert 0 <= cancel.region.y < cancel.region.bottom <= application.size.height
+            assert screen.query_one("#execution-detail", VerticalScroll).max_scroll_x == 0
+            content = screen.query_one("#execution-content-scroll", ScrollableContainer)
+            assert content.max_scroll_x > 0
+
+            for _ in range(12):
+                if application.focused is cancel:
+                    break
+                await pilot.press("tab")
+            assert application.focused is cancel
+            await pilot.press("enter")
+            await settle_tui(pilot)
+            assert isinstance(application.screen, StopWorkflowConfirmation)
+            assert repository.cancellation_requests == []
+            application.screen.query_one("#confirm-stop-workflow", Button).press()
+            await settle_tui(pilot)
+            assert repository.cancellation_requests == [repository.execution.id]
+
+    asyncio.run(drive())
+
+
+def test_execution_detail_actions_and_diagnostics_stay_bounded_in_narrow_terminal(
+    tmp_path: Path,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.NEEDS_HUMAN
+    repository.execution.task_url = "https://example/tasks/12"
+    repository.execution.pr_url = "https://example/pull/34"
+    repository.execution.human_interactions = [HumanInteraction(
+        id=1,
+        workflow_execution_id=repository.execution.id,
+        requesting_stage=WorkflowStage.REVIEW,
+        prompt="Review finding?",
+        requested_at=datetime.now(UTC),
+    )]
+    repository.diagnostics = [
+        ExecutionDiagnostic(
+            execution_id=repository.execution.id,
+            category=DiagnosticCategory.RESPONSE,
+            payload={"output": "diagnostic" * 300, "row": number},
+        )
+        for number in range(30)
+    ]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(36, 14)) as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            page = screen.query_one("#execution-detail", VerticalScroll)
+            content = screen.query_one("#execution-content-scroll", ScrollableContainer)
+            assert page.max_scroll_x == 0
+            assert page.max_scroll_y > 0
+            assert content.max_scroll_x > 0
+            assert content.max_scroll_y > 0
+            assert content.region.right <= application.size.width
+
+            screen.query_one("#execution-human-response", TextArea).text = "Answer"
+            await settle_tui(pilot)
+            for button_id in ("open-task", "open-pr", "execution-resume"):
+                button = screen.query_one(f"#{button_id}", Button)
+                assert not button.disabled
+                button.focus()
+                await settle_tui(pilot)
+                assert application.focused is button
+                assert 0 <= button.region.x < button.region.right <= application.size.width
+                assert 0 <= button.region.y < button.region.bottom <= application.size.height
+
+            screen.query_one("#execution-cancel", Button).focus()
+            await settle_tui(pilot)
+            assert await pilot.click("#execution-cancel")
+            await settle_tui(pilot)
+            assert isinstance(application.screen, StopWorkflowConfirmation)
+            assert repository.cancellation_requests == []
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
     ("initial_status", "requested", "expected_status"),
     [
         (WorkflowStatus.NEEDS_HUMAN, False, "CANCELLED"),
@@ -3644,7 +3760,7 @@ def test_execution_detail_offers_planner_continuation_after_planning_quota_failu
 def test_execution_detail_continuation_feedback_is_readable_beside_long_details(
     tmp_path: Path,
 ) -> None:
-    """The feedback editor must keep rows of its own next to the auto-height details."""
+    """The feedback editor and Continue action remain reachable beside long details."""
 
     controller, _, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.CHANGES_REQUESTED
@@ -3654,15 +3770,31 @@ def test_execution_detail_continuation_feedback_is_readable_beside_long_details(
     repository.execution.validation_snapshot = {
         f"check_{number}": "passed" for number in range(40)
     }
+    repository.diagnostics = [ExecutionDiagnostic(
+        execution_id=repository.execution.id,
+        category=DiagnosticCategory.RESPONSE,
+        payload={"output": "diagnostic" * 300},
+    )]
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
-        async with application.run_test(size=(80, 24)) as pilot:
+        async with application.run_test(size=(36, 14)) as pilot:
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
             await settle_tui(pilot)
-            feedback = application.screen.query_one("#execution-continuation-feedback", TextArea)
+            screen = application.screen
+            feedback = screen.query_one("#execution-continuation-feedback", TextArea)
             assert feedback.text == "Persisted terminal feedback"
             assert feedback.size.height > 0
+            button = screen.query_one("#execution-continue", Button)
+            assert not button.disabled
+            button.focus()
+            await settle_tui(pilot)
+            assert application.focused is button
+            assert 0 <= button.region.x < button.region.right <= application.size.width
+            assert 0 <= button.region.y < button.region.bottom <= application.size.height
+            assert screen.query_one("#execution-detail", VerticalScroll).max_scroll_x == 0
+            content = screen.query_one("#execution-content-scroll", ScrollableContainer)
+            assert content.max_scroll_x > 0
 
     asyncio.run(drive())
 
@@ -3760,7 +3892,7 @@ def test_execution_detail_refreshes_after_in_place_submission(
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
-        async with application.run_test() as pilot:
+        async with application.run_test(size=(36, 14)) as pilot:
             application.push_screen(ExecutionDetailScreen(execution.id))
             await settle_tui(pilot)
             screen = application.screen
@@ -3801,6 +3933,13 @@ def test_execution_detail_refreshes_after_in_place_submission(
                 )
                 await wait_for_tui(pilot, lambda: str(status.renderable) == "RUNNING")
                 assert application.screen is screen
+                cancel = screen.query_one("#execution-cancel", Button)
+                assert cancel.display and not cancel.disabled
+                cancel.focus()
+                await settle_tui(pilot)
+                assert application.focused is cancel
+                assert 0 <= cancel.region.x < cancel.region.right <= application.size.width
+                assert 0 <= cancel.region.y < cancel.region.bottom <= application.size.height
             await pilot.press("escape")
             await settle_tui(pilot)
             if live_batch:
