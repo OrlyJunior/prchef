@@ -1066,6 +1066,137 @@ def test_invalid_repository_input_does_not_change_configuration(tmp_path: Path) 
     assert config_file.read_text(encoding="utf-8") == original
 
 
+def test_repository_retry_budgets_resolve_defaults_and_zero_override(tmp_path: Path) -> None:
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        """defaults:
+  review: {max_review_retries: 4}
+  validation: {max_validation_retries: 5}
+repositories:
+  inherited: {path: inherited}
+  overridden:
+    path: overridden
+    review: {max_review_retries: 0}
+    validation: {max_validation_retries: 3}
+""",
+        encoding="utf-8",
+    )
+    loader = ProjectConfigLoader(config_file)
+    inherited = loader.repository_settings("inherited")
+    assert (inherited.review_retries, inherited.review_retries_overridden) == (4, False)
+    assert (inherited.validation_retries, inherited.validation_retries_overridden) == (5, False)
+    overridden = loader.repository_settings("overridden")
+    assert (overridden.review_retries, overridden.review_retries_overridden) == (0, True)
+    assert (overridden.validation_retries, overridden.validation_retries_overridden) == (3, True)
+    assert (overridden.inherited_review_retries, overridden.inherited_validation_retries) == (4, 5)
+
+    config_file.write_text("repositories:\n  example: {path: example}\n", encoding="utf-8")
+    schema_defaults = loader.repository_settings("example")
+    assert (schema_defaults.review_retries, schema_defaults.validation_retries) == (1, 2)
+    assert loader.repository_retry_defaults() == (1, 2)
+
+
+def test_repository_retry_budgets_save_clear_and_rename_preserve_yaml(tmp_path: Path) -> None:
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        """# keep this comment
+defaults:
+  roles: {spec: codex, review: codex}
+  review: {max_review_retries: 4}
+  validation: {max_validation_retries: 5}
+repositories:
+  first:
+    path: first
+    review: {max_review_retries: 2, other: keep}
+    validation: {max_validation_retries: 1, timeout_seconds: 30}
+    notifications: {enabled: true}
+  second: {path: second}
+unrelated: # keep this too
+  value: stay
+""",
+        encoding="utf-8",
+    )
+    loader = ProjectConfigLoader(config_file)
+    loader.save_repository(
+        "renamed",
+        "first",
+        True,
+        [],
+        original_key="first",
+        review_retries=0,
+        validation_retries=None,
+    )
+    content = config_file.read_text(encoding="utf-8")
+    persisted = yaml.safe_load(content)
+    assert "# keep this comment" in content
+    assert "# keep this too" in content
+    assert list(persisted["repositories"]) == ["renamed", "second"]
+    renamed = persisted["repositories"]["renamed"]
+    assert renamed["review"] == {"max_review_retries": 0, "other": "keep"}
+    assert renamed["validation"]["timeout_seconds"] == 30
+    assert "max_validation_retries" not in renamed["validation"]
+    assert renamed["notifications"] == {"enabled": True}
+    assert persisted["repositories"]["second"] == {"path": "second"}
+    assert persisted["unrelated"] == {"value": "stay"}
+    settings = loader.repository_settings("renamed")
+    assert (settings.validation_retries, settings.validation_retries_overridden) == (5, False)
+
+    loader.save_repository("renamed", "first", True, [], review_retries=None)
+    persisted = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert persisted["repositories"]["renamed"]["review"] == {"other": "keep"}
+
+    loader.save_repository("second", "second", True, [], review_retries=2)
+    loader.save_repository("second", "second", True, [], review_retries=None)
+    persisted = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert "review" not in persisted["repositories"]["second"]
+
+
+def test_loaded_workflow_config_keeps_budgets_after_repository_save(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(
+        """defaults:
+  roles: {spec: codex, review: codex}
+repositories:
+  example: {path: repo}
+""",
+        encoding="utf-8",
+    )
+    loader = ProjectConfigLoader(config_file)
+    task = DevelopmentTask("1", "test", "", "", "", repository="example")
+    active = loader.load(task)
+    loader.save_repository(
+        "example", "repo", True, [], review_retries=3, validation_retries=4
+    )
+    next_run = loader.load(task)
+    assert (active.review.max_review_retries, active.validation.max_validation_retries) == (1, 2)
+    assert (
+        next_run.review.max_review_retries,
+        next_run.validation.max_validation_retries,
+    ) == (3, 4)
+
+
+@pytest.mark.parametrize("invalid", [-1, 1.5, "", "1.5", "abc", True])
+def test_repository_retry_budget_rejects_invalid_input_without_write(
+    tmp_path: Path, invalid: object
+) -> None:
+    config_file = tmp_path / "orchestrator.yml"
+    original = "repositories:\n  example: {path: example}\n"
+    config_file.write_text(original, encoding="utf-8")
+    loader = ProjectConfigLoader(config_file)
+    with pytest.raises(ConfigurationError, match="non-negative integer"):
+        loader.save_repository(
+            "example", "example", True, [], review_retries=invalid  # type: ignore[arg-type]
+        )
+    with pytest.raises(ConfigurationError, match="non-negative integer"):
+        loader.save_repository(
+            "example", "example", True, [], validation_retries=invalid  # type: ignore[arg-type]
+        )
+    assert config_file.read_text(encoding="utf-8") == original
+
+
 def test_agent_preset_crud_persists_in_resolved_config_without_touching_providers(
     tmp_path: Path,
 ) -> None:

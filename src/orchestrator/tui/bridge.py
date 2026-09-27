@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import EllipsisType
 from typing import Any
 
 from orchestrator.clients.factory import ClientFactory
@@ -419,6 +420,8 @@ class WorkflowController:
         auto_detect: bool,
         commands: list[list[str]],
         original_key: str | None = None,
+        review_retries: int | None | EllipsisType = ...,
+        validation_retries: int | None | EllipsisType = ...,
     ) -> Path:
         """Persist repository settings and retain the resulting key as selected."""
 
@@ -428,10 +431,15 @@ class WorkflowController:
             auto_detect,
             commands,
             original_key=original_key,
+            review_retries=review_retries,
+            validation_retries=validation_retries,
         )
         self._selected_repository = repository_key.strip()
         self.repositories()
         return saved
+
+    def repository_retry_defaults(self) -> tuple[int, int]:
+        return self._config_loader.repository_retry_defaults()
 
     def delete_repository(self, repository: str) -> Path:
         """Delete repository configuration without performing filesystem operations."""

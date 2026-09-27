@@ -8,6 +8,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import EllipsisType
 from typing import Any
 
 import pytest
@@ -469,6 +470,9 @@ class _ConfigLoader:
     def repository_settings(self, repository: str) -> RepositoryConfiguration:
         return self.repository_entries[repository]
 
+    def repository_retry_defaults(self) -> tuple[int, int]:
+        return 1, 2
+
     def resolve_repository_path(self, path: str) -> Path:
         candidate = Path(path)
         return candidate if candidate.is_absolute() else self._path / candidate
@@ -480,17 +484,43 @@ class _ConfigLoader:
         auto_detect: bool,
         commands: list[list[str]],
         original_key: str | None = None,
+        review_retries: int | None | EllipsisType = ...,
+        validation_retries: int | None | EllipsisType = ...,
     ) -> Path:
         source_key = original_key or repository_key
         if source_key != repository_key and repository_key in self.repository_entries:
             raise ValueError("repository already exists")
         resolved = self.resolve_repository_path(path)
+        old = self.repository_entries.get(source_key)
+
+        def budget(
+            update: int | None | EllipsisType, previous: int, overridden: bool, default: int
+        ) -> tuple[int, bool]:
+            if update is ...:
+                return previous, overridden
+            if update is None:
+                return default, False
+            assert isinstance(update, int)
+            return update, True
+
+        review_value, review_overridden = budget(
+            review_retries, old.review_retries if old else 1,
+            old.review_retries_overridden if old else False, 1,
+        )
+        validation_value, validation_overridden = budget(
+            validation_retries, old.validation_retries if old else 2,
+            old.validation_retries_overridden if old else False, 2,
+        )
         replacement = RepositoryConfiguration(
             key=repository_key,
             path=path,
             resolved_path=resolved,
             auto_detect=auto_detect,
             commands=commands,
+            review_retries=review_value,
+            review_retries_overridden=review_overridden,
+            validation_retries=validation_value,
+            validation_retries_overridden=validation_overridden,
         )
         if source_key in self.repository_entries:
             updated = {
@@ -1648,7 +1678,7 @@ def test_repository_settings_creates_repository_and_reorders_commands(
 
             command = screen.query_one("#validation-command-input", Input)
             command.value = "python -m pytest"
-            await pilot.click("#add-validation-command")
+            screen.query_one("#add-validation-command", Button).press()
             await settle_tui(pilot)
             assert screen._commands == [["python", "-m", "pytest"]]
             command.value = "python -m mypy 'src/orchestrator package'"
@@ -1755,6 +1785,93 @@ def test_repository_settings_actions_remain_scrollable_on_small_terminal(
                 description="focused Save repository button in the scrollable viewport",
             )
             assert content.scroll_y > 0
+
+    asyncio.run(drive())
+
+
+def test_repository_retry_budgets_edit_clear_validate_and_switch(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    controller.save_repository("second", "second", True, [])
+    controller.select_repository("example")
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(60, 15)) as pilot:
+            await pilot.press("r")
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, RepositorySettingsScreen)
+            assert screen.query_one("#review-budget", Input).value == "1"
+            assert "inherited from defaults" in str(
+                screen.query_one("#review-budget-source", Static).renderable
+            )
+            review = screen.query_one("#review-budget", Input)
+            review.focus()
+            content = screen.query_one("#repository-settings", VerticalScroll)
+            await wait_for_tui(
+                pilot, lambda: content.scroll_y > 0,
+                description="keyboard focus on review budget in narrow viewport",
+            )
+            review.value = "0"
+            screen.query_one("#validation-budget", Input).value = "4"
+            screen.query_one("#save-repository", Button).press()
+            await settle_tui(pilot)
+            settings = controller.repository_settings("example")
+            assert (settings.review_retries, settings.review_retries_overridden) == (0, True)
+            assert (
+                settings.validation_retries, settings.validation_retries_overridden
+            ) == (4, True)
+            assert "overridden for this repository" in str(
+                screen.query_one("#review-budget-source", Static).renderable
+            )
+
+            for invalid in ("-1", "1.5", "", "abc"):
+                screen.query_one("#review-budget", Input).value = invalid
+                await settle_tui(pilot)
+                assert "non-negative integer" in str(
+                    screen.query_one("#review-budget-error", Static).renderable
+                )
+                screen.query_one("#save-repository", Button).press()
+                await settle_tui(pilot)
+                assert controller.repository_settings("example").review_retries == 0
+
+            screen.query_one("#review-budget", Input).value = "0"
+            screen.query_one("#validation-budget", Input).value = "-2"
+            await settle_tui(pilot)
+            assert "non-negative integer" in str(
+                screen.query_one("#validation-budget-error", Static).renderable
+            )
+            screen.query_one("#save-repository", Button).press()
+            await settle_tui(pilot)
+            assert controller.repository_settings("example").validation_retries == 4
+            screen.query_one("#validation-budget", Input).value = "4"
+
+            screen.query_one("#clear-review-budget", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#review-budget", Input).value == "1"
+            screen.query_one("#save-repository", Button).press()
+            await settle_tui(pilot)
+            settings = controller.repository_settings("example")
+            assert settings.review_retries_overridden is False
+            assert settings.validation_retries_overridden is True
+
+            screen.query_one("#clear-validation-budget", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#validation-budget", Input).value == "2"
+            screen.query_one("#save-repository", Button).press()
+            await settle_tui(pilot)
+            settings = controller.repository_settings("example")
+            assert settings.validation_retries_overridden is False
+
+            screen.query_one("#repository-picker", RepositorySelect).value = "second"
+            await wait_for_tui(
+                pilot, lambda: screen._editing_key == "second",
+                description="second repository selection",
+            )
+            assert screen.query_one("#review-budget", Input).value == "1"
+            assert "inherited from defaults" in str(
+                screen.query_one("#validation-budget-source", Static).renderable
+            )
 
     asyncio.run(drive())
 

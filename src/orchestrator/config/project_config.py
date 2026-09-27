@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from io import StringIO
 from pathlib import Path
+from types import EllipsisType
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -98,6 +99,12 @@ class RepositoryConfiguration:
     resolved_path: Path
     auto_detect: bool
     commands: list[list[str]]
+    review_retries: int = 1
+    review_retries_overridden: bool = False
+    inherited_review_retries: int = 1
+    validation_retries: int = 2
+    validation_retries_overridden: bool = False
+    inherited_validation_retries: int = 2
 
     @property
     def path_exists(self) -> bool:
@@ -1374,20 +1381,29 @@ class ProjectConfigLoader:
 
         defaults = configuration.get("defaults", {})
         default_validation = defaults.get("validation", {}) if isinstance(defaults, dict) else {}
+        default_review = defaults.get("review", {}) if isinstance(defaults, dict) else {}
         repository_validation = repository.get("validation", {})
+        repository_review = repository.get("review", {})
         if not isinstance(default_validation, dict):
             raise ConfigurationError("'defaults.validation' must be a mapping")
         if not isinstance(repository_validation, dict):
             raise ConfigurationError(
                 f"'repositories.{repository_key}.validation' must be a mapping"
             )
+        if not isinstance(default_review, dict):
+            raise ConfigurationError("'defaults.review' must be a mapping")
+        if not isinstance(repository_review, dict):
+            raise ConfigurationError(f"'repositories.{repository_key}.review' must be a mapping")
         try:
+            inherited_validation = ValidationSettings.model_validate(default_validation)
+            inherited_review = ReviewSettings.model_validate(default_review)
             validation = ValidationSettings.model_validate(
                 _deep_merge(default_validation, repository_validation)
             )
+            review = ReviewSettings.model_validate(_deep_merge(default_review, repository_review))
         except ValueError as exc:
             raise ConfigurationError(
-                f"Invalid validation configuration for repository {repository_key!r}: {exc}"
+                f"Invalid correction settings for repository {repository_key!r}: {exc}"
             ) from exc
         return RepositoryConfiguration(
             key=repository_key,
@@ -1395,7 +1411,26 @@ class ProjectConfigLoader:
             resolved_path=resolved_path,
             auto_detect=validation.auto_detect,
             commands=deepcopy(validation.commands),
+            review_retries=review.max_review_retries,
+            review_retries_overridden="max_review_retries" in repository_review,
+            inherited_review_retries=inherited_review.max_review_retries,
+            validation_retries=validation.max_validation_retries,
+            validation_retries_overridden="max_validation_retries" in repository_validation,
+            inherited_validation_retries=inherited_validation.max_validation_retries,
         )
+
+    def repository_retry_defaults(self) -> tuple[int, int]:
+        """Return review and validation budgets after YAML and schema defaults."""
+        configuration = _load_yaml(self._config_file, required=True)
+        defaults = configuration.get("defaults", {})
+        if not isinstance(defaults, dict):
+            raise ConfigurationError("'defaults' must be a mapping")
+        try:
+            review = ReviewSettings.model_validate(defaults.get("review", {}))
+            validation = ValidationSettings.model_validate(defaults.get("validation", {}))
+        except ValueError as exc:
+            raise ConfigurationError(f"Invalid default correction settings: {exc}") from exc
+        return review.max_review_retries, validation.max_validation_retries
 
     def resolve_repository_path(self, path: str) -> Path:
         """Resolve a configured path using the global config directory as its anchor."""
@@ -1432,6 +1467,8 @@ class ProjectConfigLoader:
         auto_detect: bool,
         commands: list[list[str]],
         original_key: str | None = None,
+        review_retries: int | None | EllipsisType = ...,
+        validation_retries: int | None | EllipsisType = ...,
     ) -> Path:
         """Create or update one repository entry in the global configuration.
 
@@ -1456,6 +1493,22 @@ class ProjectConfigLoader:
             raise ConfigurationError("Repository path exists but is not a directory")
 
         normalized_commands: list[list[str]] = []
+        for label, value, settings_type, field_name in (
+            ("Review", review_retries, ReviewSettings, "max_review_retries"),
+            ("Validation", validation_retries, ValidationSettings, "max_validation_retries"),
+        ):
+            if value is ... or value is None:
+                continue
+            if type(value) is not int:
+                raise ConfigurationError(
+                    f"{label} correction budget must be a non-negative integer"
+                )
+            try:
+                settings_type.model_validate({field_name: value})
+            except ValueError as exc:
+                raise ConfigurationError(
+                    f"{label} correction budget must be a non-negative integer"
+                ) from exc
         for index, command in enumerate(commands, start=1):
             if not isinstance(command, list) or not command:
                 raise ConfigurationError(
@@ -1498,6 +1551,28 @@ class ProjectConfigLoader:
             )
         repository_validation["auto_detect"] = validation.auto_detect
         repository_validation["commands"] = deepcopy(validation.commands)
+
+        for mapping_name, field_name, value in (
+            ("review", "max_review_retries", review_retries),
+            ("validation", "max_validation_retries", validation_retries),
+        ):
+            if value is ...:
+                continue
+            mapping = repository.get(mapping_name)
+            if value is None:
+                if isinstance(mapping, dict):
+                    mapping.pop(field_name, None)
+                    if not mapping:
+                        repository.pop(mapping_name)
+            else:
+                if mapping is None:
+                    mapping = {}
+                    repository[mapping_name] = mapping
+                if not isinstance(mapping, dict):
+                    raise ConfigurationError(
+                        f"'repositories.{source_key}.{mapping_name}' must be a mapping"
+                    )
+                mapping[field_name] = value
 
         defaults = configuration.get("defaults", {})
         candidate = _deep_merge(defaults, repository) if isinstance(defaults, dict) else repository
