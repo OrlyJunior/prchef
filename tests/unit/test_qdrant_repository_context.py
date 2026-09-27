@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+from copy import copy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -575,6 +576,57 @@ def test_worktree_owns_files_without_a_valid_checkout_chunk_set(
             assert strategy._scroll_source_points(
                 client, models, canonical_path_identifier(worktree)
             ) == []
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_vector",
+    [None, {"dense": [1.0]}, {"dense": [float("nan"), 0.0]}, {"dense": [0.0, 0.0]}],
+    ids=["missing", "wrong_dimension", "non_finite", "zero"],
+)
+def test_worktree_owns_checkout_file_with_unusable_dense_vector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_vector: Any
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    _committed_repository(root, {"source.py": "alpha current source"})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    baseline = strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    original_scroll = strategy._scroll_source_points
+
+    def scroll_with_bad_checkout_vector(
+        client: Any, qdrant_models: Any, source_root_id: str, *, with_vectors: bool = False
+    ) -> list[Any]:
+        points = original_scroll(
+            client, qdrant_models, source_root_id, with_vectors=with_vectors
+        )
+        if source_root_id == canonical_path_identifier(root) and with_vectors:
+            corrupted = copy(points[0])
+            corrupted.vector = invalid_vector
+            return [corrupted, *points[1:]]
+        return points
+
+    monkeypatch.setattr(strategy, "_scroll_source_points", scroll_with_bad_checkout_vector)
+    try:
+        assert "alpha current source" in strategy.render(_request(worktree, "alpha"))
+        with strategy._session() as client:
+            own_points = original_scroll(client, models, canonical_path_identifier(worktree))
+            assert len(own_points) == baseline.point_count
+            assert all((point.payload or {})["path"] == "source.py" for point in own_points)
+        assert strategy.inspect_indexed_commit() == baseline.last_indexed_commit
     finally:
         subprocess.run(
             ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],

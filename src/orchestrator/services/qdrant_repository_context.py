@@ -503,7 +503,12 @@ class QdrantRepositoryContextStrategy:
         with self._session() as client:
             models = _qdrant_models()
             self._ensure_compatible_collection(client, models)
-            existing = self._scroll_source_points(client, models, source_root_id)
+            linked_root = checkout_sources is not None
+            existing = (
+                self._scroll_source_points(client, models, source_root_id, with_vectors=True)
+                if linked_root
+                else self._scroll_source_points(client, models, source_root_id)
+            )
             existing_by_path: dict[str, list[Any]] = {}
             for point in existing:
                 payload = point.payload or {}
@@ -520,7 +525,7 @@ class QdrantRepositoryContextStrategy:
             malformed_checkout_ids: set[str] = set()
             if checkout_sources is not None:
                 for point in self._scroll_source_points(
-                    client, models, self._configured_path_id
+                    client, models, self._configured_path_id, with_vectors=True
                 ):
                     path = (point.payload or {}).get("path")
                     if isinstance(path, str):
@@ -547,7 +552,9 @@ class QdrantRepositoryContextStrategy:
                         overlap_chars=self._settings.chunk_overlap_chars,
                     )
                     records = checkout_records.get(source.path, [])
-                    if self._points_match_chunks(records, checkout_chunks):
+                    if self._points_match_chunks(
+                        records, checkout_chunks, require_vectors=True
+                    ):
                         valid_checkout_points.update(
                             (str(point.id), deepcopy(point.payload or {}))
                             for point in records
@@ -563,7 +570,9 @@ class QdrantRepositoryContextStrategy:
                 records = existing_by_path.get(source.path, [])
                 if (
                     not rebuild
-                    and self._points_match_chunks(records, chunks)
+                    and self._points_match_chunks(
+                        records, chunks, require_vectors=linked_root
+                    )
                 ):
                     continue
                 changed_paths.add(source.path)
@@ -643,13 +652,33 @@ class QdrantRepositoryContextStrategy:
             )
 
     def _points_match_chunks(
-        self, records: Sequence[Any], chunks: Sequence[RepositoryChunk]
+        self,
+        records: Sequence[Any],
+        chunks: Sequence[RepositoryChunk],
+        *,
+        require_vectors: bool = False,
     ) -> bool:
         expected = {chunk.point_id: self._chunk_payload(chunk) for chunk in chunks}
         return len(records) == len(expected) and all(
             str(point.id) in expected
             and (point.payload or {}) == expected[str(point.id)]
+            and (not require_vectors or self._valid_dense_vector(point))
             for point in records
+        )
+
+    def _valid_dense_vector(self, point: Any) -> bool:
+        vectors = point.vector
+        vector = vectors.get(DENSE_VECTOR_NAME) if isinstance(vectors, dict) else None
+        return (
+            isinstance(vector, list)
+            and len(vector) == self._embedding.identity.dimension
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                for value in vector
+            )
+            and any(value != 0 for value in vector)
         )
 
     def _reusable_vectors(
@@ -707,21 +736,9 @@ class QdrantRepositoryContextStrategy:
                 )
                 if key not in wanted:
                     continue
-                point_vectors = point.vector
-                vector = (
-                    point_vectors.get(DENSE_VECTOR_NAME)
-                    if isinstance(point_vectors, dict)
-                    else None
-                )
-                if (
-                    not isinstance(vector, list)
-                    or len(vector) != self._embedding.identity.dimension
-                    or any(
-                        not isinstance(value, (int, float)) or not math.isfinite(value)
-                        for value in vector
-                    )
-                ):
+                if not self._valid_dense_vector(point):
                     continue
+                vector = point.vector[DENSE_VECTOR_NAME]
                 is_configured = payload.get("source_root_id") == self._configured_path_id
                 if key not in found or (is_configured and key not in preferred):
                     found[key] = vector
@@ -956,10 +973,11 @@ class QdrantRepositoryContextStrategy:
                         collection_name=self._collection_name,
                         ids=ids,
                         with_payload=True,
-                        with_vectors=False,
+                        with_vectors=True,
                     )
                     if len(current) != len(ids) or any(
                         (point.payload or {}) != checkout_points.get(str(point.id))
+                        or not self._valid_dense_vector(point)
                         for point in current
                     ):
                         raise RuntimeError("Checkout semantic index changed during retrieval")
@@ -1144,7 +1162,9 @@ class QdrantRepositoryContextStrategy:
             payload["symbol"] = chunk.symbol
         return payload
 
-    def _scroll_source_points(self, client: Any, models: Any, source_root_id: str) -> list[Any]:
+    def _scroll_source_points(
+        self, client: Any, models: Any, source_root_id: str, *, with_vectors: bool = False
+    ) -> list[Any]:
         points: list[Any] = []
         offset: Any = None
         while True:
@@ -1155,7 +1175,7 @@ class QdrantRepositoryContextStrategy:
                 limit=256,
                 offset=offset,
                 with_payload=True,
-                with_vectors=False,
+                with_vectors=with_vectors,
             )
             points.extend(page)
             if offset is None:
