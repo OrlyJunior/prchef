@@ -115,11 +115,24 @@ class OrchestratorApp(App[None]):
     .screen-actions Button { margin-right: 1; }
     #execution-detail { min-width: 0; overflow-x: hidden; }
     #execution-status { width: 100%; height: auto; }
-    #execution-detail .detail-action {
-        width: auto;
+    #execution-detail-actions {
+        width: 100%;
         min-width: 0;
-        max-width: 100%;
+        height: auto;
+        grid-size: 3;
+        grid-columns: 1fr 1fr 1fr;
+        grid-rows: auto;
+        grid-gutter: 0 1;
         margin-top: 1;
+    }
+    #execution-detail-actions Button { width: 100%; min-width: 0; max-width: 100%; }
+    ExecutionDetailScreen.-medium-actions #execution-detail-actions {
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
+    }
+    ExecutionDetailScreen.-narrow-actions #execution-detail-actions {
+        grid-size: 1;
+        grid-columns: 1fr;
     }
     #execution-detail .screen-actions { width: 100%; min-width: 0; }
     #execution-detail .screen-actions Button {
