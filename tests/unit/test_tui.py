@@ -43,8 +43,9 @@ from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
+from orchestrator.models.workflow_step import WorkflowStep
 from orchestrator.tui.app import OrchestratorApp
-from orchestrator.tui.batch_progress import BatchRowView
+from orchestrator.tui.batch_progress import BatchRowView, persisted_row
 from orchestrator.tui.bridge import (
     WorkflowBatchLaunch,
     WorkflowController,
@@ -4517,10 +4518,12 @@ def test_workflow_runner_submits_selected_task_id_in_workflow_launch(
             screen.query_one("#task-checkbox-0", Checkbox).value = True
             await settle_tui(pilot)
             assert screen.query_one("#task-selector", TaskSelector).selected_task_id == "12"
-            screen.query_one("#start-workflow", Button).focus()
+            start_button = screen.query_one("#start-workflow", Button)
+            start_button.focus()
             await settle_tui(pilot)
-            assert screen.query_one("#start-workflow", Button).has_focus
-            assert content.scroll_y > 0
+            assert start_button.has_focus
+            assert start_button.region.y >= content.content_region.y
+            assert start_button.region.bottom <= content.content_region.bottom
             await pilot.press("enter")
             await settle_tui(pilot)
             assert service.calls[0][0:2] == ("12", "example")
@@ -4940,6 +4943,272 @@ def _batch_launch(*task_ids: str) -> WorkflowBatchLaunch:
             AgentRole.REVIEWER: "reviewer",
         },
     )
+
+
+def _index_event(execution_id: str, message: str, position: int | None = None) -> WorkflowEvent:
+    payload: dict[str, Any] = {"kind": "REPOSITORY_INDEX_PROGRESS", "message": message}
+    if position is not None:
+        payload["batch_position"] = position
+    return WorkflowEvent(
+        execution_id=execution_id,
+        kind=WorkflowEventKind.DIAGNOSTIC,
+        stage=WorkflowStage.GENERATE_SPEC,
+        category=DiagnosticCategory.WORKFLOW_EVENT.value,
+        payload=payload,
+    )
+
+
+@pytest.mark.parametrize("batch_run", [False, True])
+def test_workflow_runner_drains_index_burst_before_later_stage_and_status(
+    tmp_path: Path, batch_run: bool
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    batch = WorkflowBatch(
+        id="batch-burst", repository="example", task_source="github",
+        items=(WorkflowBatchItem(0, "12", "First"), WorkflowBatchItem(1, "7", "Second")),
+    )
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 20)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            assert screen._reconcile_timer is not None
+            screen._reconcile_timer.stop()  # Events here are synthetic, with no durable rows.
+            if batch_run:
+                screen._batch_running = True
+                screen._batch_created(batch, _batch_launch("12", "7"))
+                await settle_tui(pilot)
+
+            def emit() -> None:
+                positions = range(2) if batch_run else range(1)
+                for position in positions:
+                    screen._on_workflow_event(WorkflowEvent(
+                        f"execution-{position}", WorkflowEventKind.EXECUTION_CREATED,
+                        payload={"batch_position": position} if batch_run else None,
+                    ))
+                    screen._on_workflow_event(WorkflowEvent(
+                        f"execution-{position}", WorkflowEventKind.STAGE_STARTED,
+                        stage=WorkflowStage.GENERATE_SPEC,
+                    ))
+                for index in range(1500):
+                    for position in positions:
+                        screen._on_workflow_event(_index_event(
+                            f"execution-{position}", f"Embedding chunks {index}/1500",
+                            position if batch_run else None,
+                        ))
+                for position in positions:
+                    execution_id = f"execution-{position}"
+                    screen._on_workflow_event(_index_event(
+                        execution_id, "Semantic index ready", position if batch_run else None,
+                    ))
+                    screen._on_workflow_event(WorkflowEvent(
+                        execution_id, WorkflowEventKind.STAGE_FINISHED,
+                        stage=WorkflowStage.GENERATE_SPEC, step_status=StepStatus.SUCCEEDED,
+                    ))
+                    screen._on_workflow_event(WorkflowEvent(
+                        execution_id, WorkflowEventKind.STAGE_STARTED,
+                        stage=WorkflowStage.REVIEW,
+                    ))
+                    screen._on_workflow_event(WorkflowEvent(
+                        execution_id, WorkflowEventKind.STATUS_CHANGED,
+                        status=WorkflowStatus.APPROVED,
+                    ))
+                    screen._on_workflow_event(WorkflowEvent(
+                        execution_id, WorkflowEventKind.WORKFLOW_FINISHED,
+                        status=WorkflowStatus.APPROVED,
+                    ))
+
+            worker = threading.Thread(target=emit, daemon=True)
+            worker.start()
+            await asyncio.to_thread(worker.join, 5)
+            assert not worker.is_alive()
+            with screen._event_lock:
+                assert sum(1 for event in screen._pending_events if (
+                    event.payload or {}
+                ).get("kind") == "REPOSITORY_INDEX_PROGRESS") <= (2 if batch_run else 1)
+            if batch_run:
+                await wait_for_tui(pilot, lambda: (
+                    screen._batch_progress is not None
+                    and all(row.category == "APPROVED" for row in screen._batch_progress.rows())
+                ))
+                assert screen._batch_progress is not None
+                for row in screen._batch_progress.rows():
+                    assert "Reviewing pull request" in "\n".join(row.timeline)
+                    assert "Embedding chunks" not in "\n".join(row.timeline)
+                    assert "Semantic index ready" in "\n".join(row.timeline)
+                    assert row.can_cancel is False
+                assert "Approved: 2" in str(
+                    screen.query_one("#batch-progress-summary", Static).renderable
+                )
+                assert screen.query_one("#workflow-stop-actions", Horizontal).display is False
+                assert screen.query_one("#start-workflow", Button).disabled is False
+                screen._render_workflow_event(_index_event(
+                    "execution-0", "Late progress", 0
+                ))
+                assert "Late progress" not in "\n".join(screen._batch_progress.rows()[0].timeline)
+            else:
+                await wait_for_tui(pilot, lambda: (
+                    not screen._pending_events
+                    and "Reviewing pull request" in "\n".join(screen._event_lines)
+                    and str(screen.query_one("#workflow-progress", Static).renderable)
+                    == screen._status_message(WorkflowStatus.APPROVED)
+                ))
+                assert "Embedding chunks" not in "\n".join(screen._event_lines)
+                assert "Semantic index ready" in "\n".join(screen._event_lines)
+                assert screen.query_one("#workflow-stop-actions", Horizontal).display is False
+                assert screen.query_one("#start-workflow", Button).disabled is False
+                screen._render_workflow_event(_index_event("execution-0", "Late progress"))
+                assert "Late progress" not in "\n".join(screen._event_lines)
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_reconciles_missed_stage_and_rejects_queued_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    execution = WorkflowExecution(
+        id="execution-reconcile", current_stage=WorkflowStage.REVIEW,
+        status=WorkflowStatus.APPROVED,
+    )
+    steps = [WorkflowStep(
+        id=1, workflow_execution_id=execution.id, stage=WorkflowStage.GENERATE_SPEC,
+        status=StepStatus.SUCCEEDED, started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+    ), WorkflowStep(
+        id=2, workflow_execution_id=execution.id, stage=WorkflowStage.REVIEW,
+        status=StepStatus.SUCCEEDED, started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+    )]
+    monkeypatch.setattr(controller, "execution_detail", lambda _id: (execution, steps))
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            screen._active_execution_id = execution.id
+            screen._render_workflow_event(
+                _index_event(execution.id, "Preparing 1610 semantic chunks")
+            )
+            stale = _index_event(execution.id, "Embedding chunks 1/1610")
+            screen._render_workflow_event(_index_event(execution.id, "Semantic index ready"))
+            assert "Preparing 1610" not in "\n".join(screen._event_lines)
+            assert "Semantic index ready" in "\n".join(screen._event_lines)
+            screen._render_workflow_event(WorkflowEvent(
+                execution.id, WorkflowEventKind.STAGE_STARTED, stage=WorkflowStage.REVIEW
+            ))
+            assert "Preparing 1610" not in "\n".join(screen._event_lines)
+            screen._reconcile_visible_execution()
+            screen._on_workflow_event(stale)
+            await settle_tui(pilot)
+            assert "Review completed" in "\n".join(screen._event_lines)
+            assert "Semantic index:" not in "\n".join(screen._event_lines)
+            assert screen.query_one("#workflow-stop-actions", Horizontal).display is False
+            assert screen.query_one("#start-workflow", Button).disabled is False
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_reconciles_live_batch_row_without_remounting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+    execution = WorkflowExecution(
+        id="execution-batch-reconcile", current_stage=WorkflowStage.REVIEW,
+        status=WorkflowStatus.APPROVED,
+    )
+    steps = [WorkflowStep(
+        id=1, workflow_execution_id=execution.id, stage=WorkflowStage.REVIEW,
+        status=StepStatus.SUCCEEDED, started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+    )]
+    batch = WorkflowBatch(
+        id="batch-reconcile", repository="example", task_source="github",
+        items=(WorkflowBatchItem(0, "12", "First", execution.id),),
+    )
+    monkeypatch.setattr(controller, "batch_detail", lambda _id: batch)
+    monkeypatch.setattr(controller, "execution_detail", lambda _id: (execution, steps))
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 20)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            screen._batch_running = True
+            screen._batch_created(batch, _batch_launch("12"))
+            await settle_tui(pilot)
+            view = screen.query_one("#batch-progress", BatchProgressView)
+            widget = view.row(0)
+            assert widget is not None
+            widget.query_one("#batch-row-0-header", Button).press()
+            stale = _index_event(execution.id, "Embedding chunks 1/1610", 0)
+            screen._render_workflow_event(_index_event(
+                execution.id, "Preparing 1610 semantic chunks", 0
+            ))
+            screen._render_workflow_event(_index_event(execution.id, "Semantic index ready", 0))
+            assert "Preparing 1610" not in "\n".join(screen._batch_progress.rows()[0].timeline)
+            screen._render_workflow_event(WorkflowEvent(
+                execution.id, WorkflowEventKind.STAGE_STARTED, stage=WorkflowStage.REVIEW
+            ))
+            assert screen._batch_progress is not None
+            assert "Preparing 1610" not in "\n".join(
+                screen._batch_progress.rows()[0].timeline
+            )
+            screen._reconcile_visible_execution()
+            screen._on_workflow_event(stale)
+            await settle_tui(pilot)
+            assert view.row(0) is widget
+            assert widget.query_one("#batch-row-0-body", Vertical).display is True
+            row = screen._batch_progress.rows()[0] if screen._batch_progress else None
+            assert row is not None and row.category == "APPROVED"
+            assert "Review completed" in "\n".join(row.timeline)
+            assert "Semantic index:" not in "\n".join(row.timeline)
+            assert "Approved: 1" in str(
+                screen.query_one("#batch-progress-summary", Static).renderable
+            )
+            assert screen.query_one("#workflow-stop-actions", Horizontal).display is False
+            assert screen.query_one("#start-workflow", Button).disabled is False
+
+    asyncio.run(drive())
+
+
+def test_persisted_batch_row_does_not_append_finished_index_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    execution = WorkflowExecution(
+        id="execution-persisted", current_stage=WorkflowStage.REVIEW,
+        status=WorkflowStatus.APPROVED,
+    )
+    steps = [WorkflowStep(
+        id=1, workflow_execution_id=execution.id, stage=WorkflowStage.REVIEW,
+        status=StepStatus.SUCCEEDED, started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+    )]
+    monkeypatch.setattr(controller, "execution_detail", lambda _id: (execution, steps))
+    monkeypatch.setattr(controller, "execution_diagnostics", lambda _id: [
+        ExecutionDiagnostic(
+            execution_id=execution.id, category=DiagnosticCategory.WORKFLOW_EVENT,
+            stage=WorkflowStage.GENERATE_SPEC,
+            payload={
+                "kind": "REPOSITORY_INDEX_PROGRESS",
+                "message": "Preparing 1610 semantic chunks",
+            },
+        ),
+    ])
+    row = persisted_row(
+        WorkflowBatchItem(0, "12", "First", execution.id), controller
+    )
+    assert "Review completed" in "\n".join(row.timeline)
+    assert "Semantic index:" not in "\n".join(row.timeline)
 
 
 def test_workflow_runner_batch_progress_renders_every_task_in_order(
@@ -6650,6 +6919,7 @@ def test_workflow_runner_terminal_workflow_finished_resets_active_controls(
 
 def test_workflow_runner_human_outcome_can_be_returned_to_and_answered(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller, service, repository = _controller(tmp_path)
     interaction = HumanInteraction(
@@ -6662,6 +6932,15 @@ def test_workflow_runner_human_outcome_can_be_returned_to_and_answered(
     repository.execution.status = WorkflowStatus.NEEDS_HUMAN
     repository.execution.current_stage = WorkflowStage.REVIEW
     repository.execution.human_interactions = [interaction]
+    review_step = WorkflowStep(
+        id=1,
+        workflow_execution_id=repository.execution.id,
+        stage=WorkflowStage.REVIEW,
+        status=StepStatus.SUCCEEDED,
+        started_at=interaction.requested_at,
+        finished_at=interaction.requested_at,
+    )
+    monkeypatch.setattr(repository, "list_steps", lambda _execution_id: [review_step])
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
