@@ -169,6 +169,29 @@ def test_local_index_persists_and_reuses_unchanged_files(tmp_path: Path) -> None
     assert reopened_embedding.document_texts == []
 
 
+def test_indexed_commit_inspection_does_not_scroll_points(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repository"
+    _committed_repository(root, {"alpha.py": "def alpha():\n    return 'semantic'\n"})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    assert strategy.inspect_indexed_commit() is None
+    strategy.build_index()
+    expected = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    monkeypatch.setattr(
+        strategy, "_scroll_source_points",
+        lambda *args: pytest.fail("provenance lookup scrolled repository points"),
+    )
+
+    assert strategy.inspect_indexed_commit() == expected
+
+
 def test_changed_and_deleted_files_replace_stale_points(tmp_path: Path) -> None:
     root = tmp_path / "repository"
     index = tmp_path / "index"

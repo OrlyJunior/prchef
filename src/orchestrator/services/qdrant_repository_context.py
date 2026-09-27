@@ -340,6 +340,27 @@ class QdrantRepositoryContextStrategy:
                 error_message=_safe_error_message(exc),
             )
 
+    def inspect_indexed_commit(self) -> str | None:
+        """Read planning provenance without scrolling the configured-root points."""
+
+        try:
+            with self._session() as client:
+                if not client.collection_exists(self._collection_name):
+                    return None
+                points = client.retrieve(
+                    collection_name=self._collection_name,
+                    ids=[_METADATA_POINT_ID],
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                if not points or not self._metadata_matches(points[0].payload or {}):
+                    return None
+                return _string_or_none((points[0].payload or {}).get("last_indexed_commit"))
+        except Exception:
+            # Retrieval performs the full inspection and reports semantic
+            # failures through its existing heuristic fallback.
+            return None
+
     def build_index(self) -> RepositoryIndexStatus:
         """Fully reindex all eligible files for the configured repository."""
 

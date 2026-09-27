@@ -67,11 +67,14 @@ class _DiagnosedRepositoryContext:
 
     def render(self, request: RepositoryContextRequest) -> str:
         if request.role == "planner":
-            inspect = getattr(self._strategy, "inspect_index", None)
-            if callable(inspect):
-                indexed_commit = inspect().last_indexed_commit
-                if indexed_commit and indexed_commit != self._base_commit:
-                    self._on_mismatch(indexed_commit)
+            inspect_commit = getattr(self._strategy, "inspect_indexed_commit", None)
+            if callable(inspect_commit):
+                indexed_commit = inspect_commit()
+            else:
+                inspect = getattr(self._strategy, "inspect_index", None)
+                indexed_commit = inspect().last_indexed_commit if callable(inspect) else None
+            if indexed_commit and indexed_commit != self._base_commit:
+                self._on_mismatch(indexed_commit)
         return self._strategy.render(request)
 
 

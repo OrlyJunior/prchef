@@ -105,6 +105,28 @@ def test_index_mismatch_is_reported_before_retrieval_changes_metadata() -> None:
     assert calls == ["render"]
 
 
+def test_index_mismatch_uses_lightweight_provenance_when_available() -> None:
+    calls: list[object] = []
+
+    class Strategy:
+        def inspect_indexed_commit(self) -> str:
+            calls.append("commit")
+            return "a" * 40
+
+        def inspect_index(self) -> SimpleNamespace:
+            raise AssertionError("full index inspection is unnecessary")
+
+        def render(self, request: object) -> str:
+            calls.append("render")
+            return "context"
+
+    strategy = _DiagnosedRepositoryContext(
+        Strategy(), lambda commit: calls.append(("mismatch", commit)), "b" * 40
+    )
+    assert strategy.render(SimpleNamespace(role="planner")) == "context"  # type: ignore[arg-type]
+    assert calls == ["commit", ("mismatch", "a" * 40), "render"]
+
+
 def test_index_mismatch_is_persisted_on_workflow_diagnostics(workflow) -> None:
     service, repository, _, _ = workflow
     execution = service.run("card-index-provenance")
