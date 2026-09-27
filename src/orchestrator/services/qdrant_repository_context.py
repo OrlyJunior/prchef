@@ -224,11 +224,13 @@ class QdrantRepositoryContextStrategy:
             manager.close()
 
     def render(self, request: RepositoryContextRequest) -> str:
+        self._check_cancellation()
+        # A rejected root must never reach the heuristic fallback. In particular,
+        # a planning request must not read the control checkout in place of its snapshot.
+        source_root = self._validate_request_root(Path(request.repository_path))
+        if request.temporary_source and source_root == self._configured_root:
+            raise ValueError("Temporary repository context requires a linked worktree")
         try:
-            self._check_cancellation()
-            source_root = self._validate_request_root(Path(request.repository_path))
-            if request.temporary_source and source_root == self._configured_root:
-                raise ValueError("Temporary repository context requires a linked worktree")
             source_root_id = canonical_path_identifier(source_root)
             status = self.inspect_index()
             if status.state in {IndexLifecycleState.NOT_INDEXED, IndexLifecycleState.FAILED}:

@@ -234,7 +234,8 @@ def test_repositories_are_collection_isolated_and_unrelated_root_is_rejected(
     assert "a.py" in strategy_a.render(_request(root_a, "alpha"))
     assert "b.py" in strategy_b.render(_request(root_b, "beta"))
     assert strategy_a.collection_name != strategy_b.collection_name
-    assert "LOCAL REPOSITORY CONTEXT" in strategy_a.render(_request(root_b, "alpha"))
+    with pytest.raises(ValueError, match="not the configured repository"):
+        strategy_a.render(_request(root_b, "alpha"))
 
 
 def test_linked_worktree_points_are_isolated_within_one_collection(tmp_path: Path) -> None:
@@ -507,9 +508,8 @@ def test_temporary_planning_worktrees_leave_index_unchanged_on_query_failure(
         _settings(index), "repo", root, embedding_provider=FakeEmbeddingProvider()
     )
     baseline = strategy.build_index()
-    assert "LOCAL REPOSITORY CONTEXT" in strategy.render(
-        replace(_request(root), temporary_source=True)
-    )
+    with pytest.raises(ValueError, match="requires a linked worktree"):
+        strategy.render(replace(_request(root), temporary_source=True))
     source.write_text("beta fetched base content", encoding="utf-8")
     subprocess.run(["git", "-C", str(root), "add", "source.py"], check=True)
     subprocess.run(
