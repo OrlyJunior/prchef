@@ -6,6 +6,10 @@ class CommandExecutionError(ExternalClientError):
     pass
 
 
+class CommandProcessTreeUnconfirmedError(CommandExecutionError):
+    """A timed-out command may still have a running process or descendant."""
+
+
 class CommandTimeoutError(CommandExecutionError):
     """A command exceeded its configured timeout and was terminated.
 
