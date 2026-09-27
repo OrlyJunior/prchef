@@ -414,6 +414,59 @@ def test_snapshot_upserts_only_changed_and_added_files(tmp_path: Path) -> None:
         )
 
 
+def test_linked_query_reads_checkout_vectors_once_in_bounded_pages(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    _committed_repository(root, {"source.py": "alpha source\n" * 80})
+    settings = _settings(tmp_path / "index")
+    observed: list[tuple[str, bool, int]] = []
+    tracking = {"enabled": False}
+
+    def factory(qdrant_settings: object) -> object:
+        client = create_qdrant_client(qdrant_settings)  # type: ignore[arg-type]
+
+        class Client:
+            def __getattr__(self, name: str) -> object:
+                return getattr(client, name)
+
+            def scroll(self, **kwargs: Any) -> Any:
+                page, offset = client.scroll(**kwargs)
+                if tracking["enabled"]:
+                    observed.append(("scroll", kwargs["with_vectors"], len(page)))
+                return page, offset
+
+            def retrieve(self, **kwargs: Any) -> Any:
+                if tracking["enabled"]:
+                    observed.append(("retrieve", kwargs["with_vectors"], len(kwargs["ids"])))
+                return client.retrieve(**kwargs)
+
+            def close(self) -> None:
+                client.close()
+
+        return Client()
+
+    strategy = QdrantRepositoryContextStrategy(
+        settings, "repo", root, embedding_provider=FakeEmbeddingProvider(),
+        client_factory=factory,
+    )
+    strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        tracking["enabled"] = True
+        assert "alpha source" in strategy.render(_request(worktree))
+        assert sum(kind == "scroll" and vectors for kind, vectors, _ in observed) == 2
+        assert all(count <= 256 for kind, _, count in observed if kind == "scroll")
+        assert all(not vectors for kind, vectors, _ in observed if kind == "retrieve")
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
 def test_worktree_excludes_deleted_checkout_file_and_removes_redundant_points(
     tmp_path: Path,
 ) -> None:
@@ -606,20 +659,16 @@ def test_worktree_owns_checkout_file_with_unusable_dense_vector(
         check=True, capture_output=True,
     )
     original_scroll = strategy._scroll_source_points
+    original_validate = strategy._valid_dense_vector
 
-    def scroll_with_bad_checkout_vector(
-        client: Any, qdrant_models: Any, source_root_id: str, *, with_vectors: bool = False
-    ) -> list[Any]:
-        points = original_scroll(
-            client, qdrant_models, source_root_id, with_vectors=with_vectors
-        )
-        if source_root_id == canonical_path_identifier(root) and with_vectors:
-            corrupted = copy(points[0])
+    def validate_with_bad_checkout_vector(point: Any) -> bool:
+        if (point.payload or {}).get("source_root_id") == canonical_path_identifier(root):
+            corrupted = copy(point)
             corrupted.vector = invalid_vector
-            return [corrupted, *points[1:]]
-        return points
+            return original_validate(corrupted)
+        return original_validate(point)
 
-    monkeypatch.setattr(strategy, "_scroll_source_points", scroll_with_bad_checkout_vector)
+    monkeypatch.setattr(strategy, "_valid_dense_vector", validate_with_bad_checkout_vector)
     try:
         assert "alpha current source" in strategy.render(_request(worktree, "alpha"))
         with strategy._session() as client:

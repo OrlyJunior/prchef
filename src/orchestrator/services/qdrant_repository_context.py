@@ -10,9 +10,8 @@ import subprocess
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
-from copy import deepcopy
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -38,8 +37,10 @@ from orchestrator.services.repository_context import (
     semantic_fallback_diagnostic,
 )
 from orchestrator.services.repository_documents import (
+    MAX_INDEXED_FILE_BYTES,
     RepositorySourcePipeline,
     chunk_source_file,
+    language_for_path,
 )
 
 DENSE_VECTOR_NAME = "dense"
@@ -245,46 +246,58 @@ class QdrantRepositoryContextStrategy:
                 self.build_index()
             try:
                 self._progress("Discovering files for semantic retrieval")
-                sources = RepositorySourcePipeline(self._repository_key, source_root).discover(
-                    on_progress=self._discovery_progress,
-                    cancellation_check=self._check_cancellation,
-                )
-                checkout_sources = (
-                    RepositorySourcePipeline(self._repository_key, self._configured_root).discover(
+                source_pipeline = RepositorySourcePipeline(self._repository_key, source_root)
+                sources: Sequence[RepositorySourceFile] | Callable[
+                    [], Iterator[RepositorySourceFile]
+                ]
+                if source_root != self._configured_root:
+                    def linked_sources() -> Iterator[RepositorySourceFile]:
+                        return source_pipeline.iter_sources(
+                            on_progress=self._discovery_progress,
+                            cancellation_check=self._check_cancellation,
+                        )
+
+                    sources = linked_sources
+                else:
+                    sources = source_pipeline.discover(
+                        on_progress=self._discovery_progress,
                         cancellation_check=self._check_cancellation,
                     )
+                checkout_hashes = (
+                    RepositorySourcePipeline(
+                        self._repository_key, self._configured_root
+                    ).discover_hashes(cancellation_check=self._check_cancellation)
                     if source_root != self._configured_root
                     else None
                 )
                 (
-                    checkout_points,
-                    excluded_checkout_paths,
-                    malformed_checkout_ids,
+                    checkout_files,
+                    checkout_paths,
+                    source_hashes,
                 ) = self._synchronize(
                     sources,
                     source_root_id,
                     source_root,
                     record_success=not request.temporary_source,
-                    checkout_sources=checkout_sources,
+                    checkout_hashes=checkout_hashes,
                 )
                 results = self._query(
                     f"{request.task.title}\n\n{request.task.description}",
                     source_root_id,
-                    checkout_points,
-                    excluded_checkout_paths,
-                    malformed_checkout_ids,
+                    checkout_files,
+                    checkout_paths,
+                    source_root,
+                    source_hashes,
                 )
                 rendered = self._render_results(request, results)
-                if checkout_sources is not None:
+                if checkout_hashes is not None:
                     # Discovery is a point-in-time read. A linked root may change
                     # while its index is synchronized and queried, invalidating
                     # both borrowed checkout points and its own new points.
-                    current_sources = RepositorySourcePipeline(
+                    current_hashes = RepositorySourcePipeline(
                         self._repository_key, source_root
-                    ).discover(cancellation_check=self._check_cancellation)
-                    if {
-                        source.path: source.content_hash for source in current_sources
-                    } != {source.path: source.content_hash for source in sources}:
+                    ).discover_hashes(cancellation_check=self._check_cancellation)
+                    if current_hashes != source_hashes:
                         raise RuntimeError("Repository source changed during semantic retrieval")
                 return rendered
             finally:
@@ -503,19 +516,19 @@ class QdrantRepositoryContextStrategy:
 
     def _synchronize(
         self,
-        sources: Sequence[RepositorySourceFile],
+        sources: Sequence[RepositorySourceFile] | Callable[[], Iterator[RepositorySourceFile]],
         source_root_id: str,
         source_root: Path,
         *,
         rebuild: bool = False,
         record_success: bool = True,
-        checkout_sources: Sequence[RepositorySourceFile] | None = None,
-    ) -> tuple[dict[str, dict[str, Any]], set[str], set[str]]:
+        checkout_hashes: dict[str, str] | None = None,
+    ) -> tuple[dict[str, tuple[int, int]], set[str], dict[str, str]]:
         self._check_cancellation()
         with self._session() as client:
             models = _qdrant_models()
             self._ensure_compatible_collection(client, models)
-            linked_root = checkout_sources is not None
+            linked_root = checkout_hashes is not None
             existing = (
                 self._scroll_source_points(client, models, source_root_id, with_vectors=True)
                 if linked_root
@@ -528,51 +541,30 @@ class QdrantRepositoryContextStrategy:
                 if isinstance(path, str):
                     existing_by_path.setdefault(path, []).append(point)
 
-            checkout_by_path = (
-                {source.path: source for source in checkout_sources}
-                if checkout_sources is not None
-                else {}
+            valid_checkout_files, redundant_paths = (
+                self._valid_checkout_files(
+                    client, models, sources() if callable(sources) else sources, checkout_hashes
+                )
+                if checkout_hashes is not None else ({}, set())
             )
-            checkout_records: dict[str, list[Any]] = {}
-            malformed_checkout_ids: set[str] = set()
-            if checkout_sources is not None:
-                for point in self._scroll_source_points(
-                    client, models, self._configured_path_id, with_vectors=True
-                ):
-                    path = (point.payload or {}).get("path")
-                    if isinstance(path, str):
-                        checkout_records.setdefault(path, []).append(point)
-                    else:
-                        malformed_checkout_ids.add(str(point.id))
-            valid_checkout_points: dict[str, dict[str, Any]] = {}
-            redundant_paths: set[str] = set()
 
             changed_chunks: list[RepositoryChunk] = []
+            new_ids: set[str] = set()
             current_paths: set[str] = set()
+            source_hashes: dict[str, str] = {}
             changed_paths: set[str] = set()
-            for source in sources:
+            for source in sources() if callable(sources) else sources:
                 self._check_cancellation()
                 current_paths.add(source.path)
-                checkout_source = checkout_by_path.get(source.path)
-                if checkout_source is not None and (
-                    checkout_source.content_hash == source.content_hash
+                source_hashes[source.path] = source.content_hash
+                if (
+                    source.path in redundant_paths
+                    and checkout_hashes is not None
+                    and checkout_hashes.get(source.path) != source.content_hash
                 ):
-                    checkout_chunks = chunk_source_file(
-                        checkout_source,
-                        source_root_id=self._configured_path_id,
-                        chunk_size_chars=self._settings.chunk_size_chars,
-                        overlap_chars=self._settings.chunk_overlap_chars,
-                    )
-                    records = checkout_records.get(source.path, [])
-                    if self._points_match_chunks(
-                        records, checkout_chunks, require_vectors=True
-                    ):
-                        valid_checkout_points.update(
-                            (str(point.id), deepcopy(point.payload or {}))
-                            for point in records
-                        )
-                        redundant_paths.add(source.path)
-                        continue
+                    raise RuntimeError("Repository source changed during semantic retrieval")
+                if source.path in redundant_paths:
+                    continue
                 chunks = chunk_source_file(
                     source,
                     source_root_id=source_root_id,
@@ -589,56 +581,17 @@ class QdrantRepositoryContextStrategy:
                     continue
                 changed_paths.add(source.path)
                 changed_chunks.extend(chunks)
+                new_ids.update(chunk.point_id for chunk in chunks)
+                if linked_root and len(changed_chunks) >= 256:
+                    self._upsert_chunks(client, models, changed_chunks)
+                    changed_chunks.clear()
 
+            if redundant_paths - current_paths:
+                raise RuntimeError("Repository source changed during semantic retrieval")
             if changed_chunks:
-                self._progress(f"Preparing {len(changed_chunks)} semantic chunks")
-                reusable = self._reusable_vectors(client, models, changed_chunks)
-                missing = [
-                    chunk for chunk in changed_chunks
-                    if (chunk.content_hash, chunk.ordinal, chunk.text) not in reusable
-                ]
-                embedded: list[list[float]] = []
-                for offset in range(0, len(missing), _BATCH_SIZE):
-                    self._check_cancellation()
-                    self._progress(
-                        f"Embedding chunks {offset}/{len(missing)} "
-                        f"({len(changed_chunks) - len(missing)} reused)"
-                    )
-                    embedded.extend(
-                        self._embedding.embed_documents(
-                            [chunk.text for chunk in missing[offset : offset + _BATCH_SIZE]]
-                        )
-                    )
-                    self._progress(
-                        f"Embedded {min(offset + _BATCH_SIZE, len(missing))}/{len(missing)} chunks"
-                    )
-                if len(embedded) != len(missing):
-                    raise RuntimeError("Embedding provider returned an unexpected vector count")
-                vectors = dict(reusable)
-                for chunk, vector in zip(missing, embedded, strict=True):
-                    vectors[(chunk.content_hash, chunk.ordinal, chunk.text)] = vector
-                points = [
-                    models.PointStruct(
-                        id=chunk.point_id,
-                        vector={
-                            DENSE_VECTOR_NAME: vectors[
-                                (chunk.content_hash, chunk.ordinal, chunk.text)
-                            ]
-                        },
-                        payload=self._chunk_payload(chunk),
-                    )
-                    for chunk in changed_chunks
-                ]
-                for offset in range(0, len(points), _BATCH_SIZE):
-                    self._check_cancellation()
-                    client.upsert(
-                        collection_name=self._collection_name,
-                        points=points[offset : offset + _BATCH_SIZE],
-                        wait=True,
-                    )
+                self._upsert_chunks(client, models, changed_chunks)
 
             stale_ids: list[Any] = []
-            new_ids = {chunk.point_id for chunk in changed_chunks}
             for path, records in existing_by_path.items():
                 if path not in current_paths or path in changed_paths or path in redundant_paths:
                     stale_ids.extend(point.id for point in records if str(point.id) not in new_ids)
@@ -658,10 +611,142 @@ class QdrantRepositoryContextStrategy:
                 self._record_success(client, models, source_root)
             self._progress("Semantic index ready")
             return (
-                valid_checkout_points,
-                set(checkout_records) - redundant_paths,
-                malformed_checkout_ids,
+                valid_checkout_files,
+                redundant_paths,
+                source_hashes,
             )
+
+    def _upsert_chunks(
+        self, client: Any, models: Any, chunks: Sequence[RepositoryChunk]
+    ) -> None:
+        self._progress(f"Preparing {len(chunks)} semantic chunks")
+        reusable = self._reusable_vectors(client, models, chunks)
+        missing = [
+            chunk for chunk in chunks
+            if (chunk.content_hash, chunk.ordinal, chunk.text) not in reusable
+        ]
+        embedded: list[list[float]] = []
+        for offset in range(0, len(missing), _BATCH_SIZE):
+            self._check_cancellation()
+            self._progress(
+                f"Embedding chunks {offset}/{len(missing)} "
+                f"({len(chunks) - len(missing)} reused)"
+            )
+            embedded.extend(
+                self._embedding.embed_documents(
+                    [chunk.text for chunk in missing[offset : offset + _BATCH_SIZE]]
+                )
+            )
+            self._progress(
+                f"Embedded {min(offset + _BATCH_SIZE, len(missing))}/{len(missing)} chunks"
+            )
+        if len(embedded) != len(missing):
+            raise RuntimeError("Embedding provider returned an unexpected vector count")
+        vectors = dict(reusable)
+        for chunk, vector in zip(missing, embedded, strict=True):
+            vectors[(chunk.content_hash, chunk.ordinal, chunk.text)] = vector
+        points = [
+            models.PointStruct(
+                id=chunk.point_id,
+                vector={
+                    DENSE_VECTOR_NAME: vectors[
+                        (chunk.content_hash, chunk.ordinal, chunk.text)
+                    ]
+                },
+                payload=self._chunk_payload(chunk),
+            )
+            for chunk in chunks
+        ]
+        for offset in range(0, len(points), _BATCH_SIZE):
+            self._check_cancellation()
+            client.upsert(
+                collection_name=self._collection_name,
+                points=points[offset : offset + _BATCH_SIZE],
+                wait=True,
+            )
+
+    def _valid_checkout_files(
+        self,
+        client: Any,
+        models: Any,
+        sources: Iterable[RepositorySourceFile],
+        checkout_hashes: dict[str, str],
+    ) -> tuple[dict[str, tuple[int, int]], set[str]]:
+        """Validate complete chunk sets in pages without retaining individual points."""
+        expected_counts: dict[str, int] = {}
+        expected_payload_checksums: dict[str, int] = {}
+        expected_id_checksums: dict[str, int] = {}
+        for source in sources:
+            self._check_cancellation()
+            if checkout_hashes.get(source.path) != source.content_hash:
+                continue
+            chunks = chunk_source_file(
+                source,
+                source_root_id=self._configured_path_id,
+                chunk_size_chars=self._settings.chunk_size_chars,
+                overlap_chars=self._settings.chunk_overlap_chars,
+            )
+            expected_counts[source.path] = len(chunks)
+            for chunk in chunks:
+                expected_payload_checksums[source.path] = (
+                    expected_payload_checksums.get(source.path, 0)
+                    ^ self._point_fingerprint(chunk.point_id, self._chunk_payload(chunk))
+                )
+                expected_id_checksums[source.path] = (
+                    expected_id_checksums.get(source.path, 0)
+                    ^ self._id_fingerprint(chunk.point_id)
+                )
+        if not expected_counts:
+            return {}, set()
+        found_counts: dict[str, int] = {}
+        found_payload_checksums: dict[str, int] = {}
+        invalid_paths: set[str] = set()
+        offset: Any = None
+        while True:
+            self._check_cancellation()
+            page, offset = client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=self._scope_filter(models, self._configured_path_id),
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=True,
+            )
+            for point in page:
+                payload = point.payload or {}
+                path = payload.get("path")
+                if not isinstance(path, str) or path not in expected_counts:
+                    continue
+                if not self._valid_dense_vector(point):
+                    invalid_paths.add(path)
+                found_counts[path] = found_counts.get(path, 0) + 1
+                found_payload_checksums[path] = (
+                    found_payload_checksums.get(path, 0)
+                    ^ self._point_fingerprint(str(point.id), payload)
+                )
+            if offset is None:
+                break
+        valid_paths = {
+            path for path, count in expected_counts.items()
+            if path not in invalid_paths
+            and found_counts.get(path, 0) == count
+            and found_payload_checksums.get(path, 0)
+            == expected_payload_checksums.get(path, 0)
+        }
+        return (
+            {path: (expected_counts[path], expected_id_checksums.get(path, 0))
+             for path in valid_paths},
+            valid_paths,
+        )
+
+    @staticmethod
+    def _id_fingerprint(point_id: str) -> int:
+        return int.from_bytes(hashlib.sha256(point_id.encode("utf-8")).digest(), "big")
+
+    @staticmethod
+    def _point_fingerprint(point_id: str, payload: dict[str, Any]) -> int:
+        encoded = json.dumps([point_id, payload], sort_keys=True).encode("utf-8")
+        return int.from_bytes(hashlib.sha256(encoded).digest(), "big")
 
     def _points_match_chunks(
         self,
@@ -895,18 +980,53 @@ class QdrantRepositoryContextStrategy:
                 except Exception as exc:
                     self._cleanup_diagnostic(exc, queued=True)
 
+    def _expected_checkout_payloads(
+        self, source_root: Path, path: str, content_hash: str
+    ) -> dict[str, int]:
+        relative = Path(path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("Repository source changed during semantic retrieval")
+        source_path = source_root / relative
+        if source_path.is_symlink():
+            raise RuntimeError("Repository source changed during semantic retrieval")
+        resolved = source_path.resolve()
+        try:
+            resolved.relative_to(source_root)
+        except ValueError as exc:
+            raise RuntimeError("Repository source changed during semantic retrieval") from exc
+        data = resolved.read_bytes()
+        if len(data) > MAX_INDEXED_FILE_BYTES or hashlib.sha256(data).hexdigest() != content_hash:
+            raise RuntimeError("Repository source changed during semantic retrieval")
+        source = RepositorySourceFile(
+            repository=self._repository_key,
+            path=path,
+            language=language_for_path(relative),
+            content_hash=content_hash,
+            text=data.decode("utf-8"),
+        )
+        return {
+            chunk.point_id: self._point_fingerprint(chunk.point_id, self._chunk_payload(chunk))
+            for chunk in chunk_source_file(
+                source,
+                source_root_id=self._configured_path_id,
+                chunk_size_chars=self._settings.chunk_size_chars,
+                overlap_chars=self._settings.chunk_overlap_chars,
+            )
+        }
+
     def _query(
         self,
         text: str,
         source_root_id: str,
-        checkout_points: dict[str, dict[str, Any]] | None = None,
-        excluded_checkout_paths: set[str] | None = None,
-        malformed_checkout_ids: set[str] | None = None,
+        checkout_files: dict[str, tuple[int, int]] | None = None,
+        checkout_paths: set[str] | None = None,
+        source_root: Path | None = None,
+        source_hashes: dict[str, str] | None = None,
     ) -> list[RetrievedRepositoryChunk]:
         vector = self._embedding.embed_query(text)
         with self._session() as client:
             models = _qdrant_models()
-            responses: list[tuple[str, dict[str, dict[str, Any]] | None, Any]] = [
+            responses: list[tuple[str, dict[str, tuple[int, int]] | None, Any]] = [
                 (
                     source_root_id,
                     None,
@@ -921,11 +1041,11 @@ class QdrantRepositoryContextStrategy:
                     ),
                 )
             ]
-            if checkout_points:
+            if checkout_files:
                 responses.append(
                     (
                         self._configured_path_id,
-                        checkout_points,
+                        checkout_files,
                         client.query_points(
                             collection_name=self._collection_name,
                             query=vector,
@@ -933,8 +1053,12 @@ class QdrantRepositoryContextStrategy:
                             query_filter=self._scope_filter(
                                 models,
                                 self._configured_path_id,
-                                excluded_paths=excluded_checkout_paths,
-                                excluded_ids=malformed_checkout_ids,
+                                extra=[
+                                    models.FieldCondition(
+                                        key="path",
+                                        match=models.MatchAny(any=sorted(checkout_paths or set())),
+                                    )
+                                ],
                             ),
                             limit=self._settings.candidate_count,
                             with_payload=True,
@@ -943,13 +1067,27 @@ class QdrantRepositoryContextStrategy:
                     )
                 )
             results: list[RetrievedRepositoryChunk] = []
-            for expected_root_id, approved_points, response in responses:
+            expected_payloads: dict[str, dict[str, int]] = {}
+            for expected_root_id, approved_files, response in responses:
                 for point in response.points:
                     payload = point.payload or {}
-                    if approved_points is not None and payload != approved_points.get(
-                        str(point.id)
-                    ):
-                        raise RuntimeError("Checkout semantic index changed during retrieval")
+                    if approved_files is not None:
+                        path = payload.get("path")
+                        if (
+                            not isinstance(path, str)
+                            or path not in approved_files
+                            or source_root is None
+                            or source_hashes is None
+                        ):
+                            raise RuntimeError("Checkout semantic index changed during retrieval")
+                        if path not in expected_payloads:
+                            expected_payloads[path] = self._expected_checkout_payloads(
+                                source_root, path, source_hashes[path]
+                            )
+                        if expected_payloads[path].get(str(point.id)) != self._point_fingerprint(
+                            str(point.id), payload
+                        ):
+                            raise RuntimeError("Checkout semantic index changed during retrieval")
                     if (
                         payload.get("repository") != self._repository_key
                         or payload.get("configured_path_id") != self._configured_path_id
@@ -972,27 +1110,43 @@ class QdrantRepositoryContextStrategy:
                             text=str(payload["chunk_text"]),
                         )
                     )
-            if checkout_points:
+            if checkout_files:
                 # A removed checkout point cannot appear in the query response,
                 # even if it would have outranked every returned candidate.
-                # Recheck the complete approved set after querying so a
-                # concurrent refresh cannot silently omit a candidate.
-                approved_ids = tuple(checkout_points)
-                for offset in range(0, len(approved_ids), 256):
+                # Recheck the approved ID count and checksum without payloads or vectors.
+                expected_count = sum(count for count, _ in checkout_files.values())
+                expected_ids = 0
+                for _, checksum in checkout_files.values():
+                    expected_ids ^= checksum
+                found_count = 0
+                found_ids = 0
+                offset: Any = None
+                while True:
                     self._check_cancellation()
-                    ids = approved_ids[offset : offset + 256]
-                    current = client.retrieve(
+                    page, offset = client.scroll(
                         collection_name=self._collection_name,
-                        ids=ids,
-                        with_payload=True,
-                        with_vectors=True,
+                        scroll_filter=self._scope_filter(
+                            models,
+                            self._configured_path_id,
+                            extra=[
+                                models.FieldCondition(
+                                    key="path",
+                                    match=models.MatchAny(any=sorted(checkout_paths or set())),
+                                )
+                            ],
+                        ),
+                        limit=256,
+                        offset=offset,
+                        with_payload=False,
+                        with_vectors=False,
                     )
-                    if len(current) != len(ids) or any(
-                        (point.payload or {}) != checkout_points.get(str(point.id))
-                        or not self._valid_dense_vector(point)
-                        for point in current
-                    ):
-                        raise RuntimeError("Checkout semantic index changed during retrieval")
+                    for point in page:
+                        found_count += 1
+                        found_ids ^= self._id_fingerprint(str(point.id))
+                    if offset is None:
+                        break
+                if (found_count, found_ids) != (expected_count, expected_ids):
+                    raise RuntimeError("Checkout semantic index changed during retrieval")
             return sorted(
                 results,
                 key=lambda item: (
