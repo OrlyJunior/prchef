@@ -6,7 +6,7 @@ import hashlib
 import re
 import subprocess
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from orchestrator.models.repository_context import RepositoryChunk, RepositorySourceFile
@@ -129,9 +129,28 @@ class RepositorySourcePipeline:
         on_progress: Callable[[int, int], None] | None = None,
         cancellation_check: Callable[[], None] | None = None,
     ) -> list[RepositorySourceFile]:
+        return list(
+            self.iter_sources(on_progress=on_progress, cancellation_check=cancellation_check)
+        )
+
+    def discover_hashes(
+        self, *, cancellation_check: Callable[[], None] | None = None
+    ) -> dict[str, str]:
+        """Keep only file identities when comparing a linked root to the checkout."""
+        return {
+            source.path: source.content_hash
+            for source in self.iter_sources(cancellation_check=cancellation_check)
+        }
+
+    def iter_sources(
+        self,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+        cancellation_check: Callable[[], None] | None = None,
+    ) -> Iterator[RepositorySourceFile]:
         if not self._root.is_dir():
             raise OSError("Repository source root is unavailable")
-        files: list[RepositorySourceFile] = []
+        indexed = 0
         relative_paths = self._discover_relative_paths()
         completed = 0
         for position, relative_path in enumerate(relative_paths, start=1):
@@ -140,7 +159,7 @@ class RepositorySourcePipeline:
                 cancellation_check()
             if on_progress is not None and position % 100 == 0:
                 on_progress(position, len(relative_paths))
-            if len(files) >= MAX_INDEXED_FILES:
+            if indexed >= MAX_INDEXED_FILES:
                 break
             if relative_path.is_absolute() or ".." in relative_path.parts:
                 continue
@@ -167,18 +186,16 @@ class RepositorySourcePipeline:
                 text = data.decode("utf-8")
             except UnicodeDecodeError:
                 continue
-            files.append(
-                RepositorySourceFile(
-                    repository=self._repository,
-                    path=normalized,
-                    language=language_for_path(relative_path),
-                    content_hash=hashlib.sha256(data).hexdigest(),
-                    text=text,
-                )
+            indexed += 1
+            yield RepositorySourceFile(
+                repository=self._repository,
+                path=normalized,
+                language=language_for_path(relative_path),
+                content_hash=hashlib.sha256(data).hexdigest(),
+                text=text,
             )
         if on_progress is not None:
             on_progress(completed, len(relative_paths))
-        return files
 
     def _discover_relative_paths(self) -> list[Path]:
         if not self._is_git_root():
