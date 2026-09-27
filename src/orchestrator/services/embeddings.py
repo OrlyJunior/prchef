@@ -70,6 +70,7 @@ class FastEmbedEmbeddingProvider:
             # counts in its cache while it initializes; no cache paths or model
             # downloader output cross the diagnostic boundary.
             finished = threading.Event()
+            initialized = threading.Event()
             watcher: threading.Thread | None = None
             if self._on_progress is not None:
                 configured_cache = os.getenv("FASTEMBED_CACHE_PATH")
@@ -79,13 +80,14 @@ class FastEmbedEmbeddingProvider:
                 )
                 watcher = threading.Thread(
                     target=self._watch_download,
-                    args=(cache, finished),
+                    args=(cache, finished, initialized),
                     daemon=True,
                     name="orchestrator-embedding-download-progress",
                 )
                 watcher.start()
             try:
                 self._model = text_embedding(model_name=self._identity.model)
+                initialized.set()
             finally:
                 finished.set()
                 if watcher is not None:
@@ -94,7 +96,9 @@ class FastEmbedEmbeddingProvider:
                 self._on_progress("Local embedding model ready")
         return self._model
 
-    def _watch_download(self, cache: Path, finished: threading.Event) -> None:
+    def _watch_download(
+        self, cache: Path, finished: threading.Event, initialized: threading.Event
+    ) -> None:
         assert self._on_progress is not None
 
         def size() -> int:
@@ -115,7 +119,7 @@ class FastEmbedEmbeddingProvider:
                     f"Downloading local embedding model: {received // 1_048_576} MiB received"
                 )
         received = max(0, size() - baseline)
-        if received:
+        if received and initialized.is_set():
             self._on_progress(
                 f"Local embedding model download finished: {received // 1_048_576} MiB received"
             )
