@@ -312,6 +312,7 @@ class RepositorySettingsScreen(Screen[None]):
         try:
             repositories = self.controller.repositories()
         except Exception as exc:
+            self._disable_editor()
             self._error(f"Cannot load configured repositories: {exc}")
             return
         selector = self.query_one("#repository-picker", RepositorySelect)
@@ -332,8 +333,10 @@ class RepositorySettingsScreen(Screen[None]):
             settings = self.controller.repository_settings(repository)
             self.controller.select_repository(repository)
         except Exception as exc:
+            self._disable_editor()
             self._error(f"Cannot load repository configuration: {exc}")
             return
+        self.query_one("#repository-editor-pane", Vertical).disabled = False
         self._creating_repository = False
         self._editing_key = repository
         self.query_one("#repository-key", Input).value = settings.key
@@ -362,6 +365,7 @@ class RepositorySettingsScreen(Screen[None]):
         self._status(f"Editing repository {repository!r}.")
 
     def _new_repository(self) -> None:
+        self.query_one("#repository-editor-pane", Vertical).disabled = False
         self._creating_repository = True
         self._editing_key = None
         self._commands = []
@@ -372,6 +376,7 @@ class RepositorySettingsScreen(Screen[None]):
         try:
             review_default, validation_default = self.controller.repository_retry_defaults()
         except Exception as exc:
+            self._disable_editor()
             self._error(f"Cannot load default correction budgets: {exc}")
             return
         self._set_budgets(
@@ -392,6 +397,39 @@ class RepositorySettingsScreen(Screen[None]):
         self._error("")
         self._status("Enter repository settings, then save.")
         self.query_one("#repository-key", Input).focus()
+
+    def _disable_editor(self) -> None:
+        """Discard a stale form when its selected repository cannot be loaded."""
+        self._creating_repository = False
+        self._editing_key = None
+        self._commands = []
+        self._selected_command = None
+        self._budget_original.clear()
+        self._cleared_budgets.clear()
+        self._index_status_token += 1
+        self.query_one("#repository-editor-pane", Vertical).disabled = True
+        for input_id in (
+            "repository-key",
+            "repository-path",
+            "review-budget",
+            "validation-budget",
+            "validation-command-input",
+        ):
+            self.query_one(f"#{input_id}", Input).value = ""
+        for status_id in (
+            "repository-path-warning",
+            "review-budget-source",
+            "review-budget-error",
+            "validation-budget-source",
+            "validation-budget-error",
+            "index-context-strategy",
+            "index-status",
+            "index-metadata",
+            "index-errors",
+        ):
+            self.query_one(f"#{status_id}", Static).update("")
+        self._refresh_command_list()
+        self._status("Repository settings are unavailable. Select another repository or add one.")
 
     def _command_from_input(self) -> list[str] | None:
         value = self.query_one("#validation-command-input", Input).value.strip()
@@ -564,6 +602,9 @@ class RepositorySettingsScreen(Screen[None]):
         )
 
     def _save_repository(self) -> None:
+        if self._editing_key is None and not self._creating_repository:
+            self._error("Select a repository or add one before saving.")
+            return
         key = self.query_one("#repository-key", Input).value.strip()
         path = self.query_one("#repository-path", Input).value.strip()
         error = self._validate_repository(key, path)

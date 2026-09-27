@@ -1876,6 +1876,65 @@ def test_repository_retry_budgets_edit_clear_validate_and_switch(tmp_path: Path)
     asyncio.run(drive())
 
 
+def test_repository_load_failure_disables_stale_editor_and_prevents_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    controller.save_repository("invalid", "invalid", True, [])
+    controller.select_repository("example")
+    original_settings = controller.repository_settings
+
+    def repository_settings(repository: str) -> RepositoryConfiguration:
+        if repository == "invalid":
+            raise ValueError("review.max_review_retries must be a non-negative integer")
+        return original_settings(repository)
+
+    monkeypatch.setattr(controller, "repository_settings", repository_settings)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 45)) as pilot:
+            await pilot.press("r")
+            await wait_for_tui(
+                pilot,
+                lambda: isinstance(application.screen, RepositorySettingsScreen)
+                and application.screen._editing_key == "example",
+                description="valid repository editor",
+            )
+            screen = application.screen
+            assert isinstance(screen, RepositorySettingsScreen)
+            screen.query_one("#repository-key", Input).value = "accidental-rename"
+            screen.query_one("#repository-picker", RepositorySelect).value = "invalid"
+            await wait_for_tui(
+                pilot,
+                lambda: "Cannot load repository configuration" in str(
+                    screen.query_one("#repository-errors", Static).renderable
+                ),
+                description="invalid repository load error",
+            )
+            assert screen._editing_key is None
+            assert screen.query_one("#repository-key", Input).value == ""
+            assert screen.query_one("#save-repository", Button).is_disabled
+            assert screen.query_one("#delete-repository", Button).is_disabled
+            screen.query_one("#save-repository", Button).press()
+            screen._save_repository()
+            await settle_tui(pilot)
+            assert [repository.key for repository in controller.repositories()] == [
+                "example", "invalid"
+            ]
+
+            screen.query_one("#repository-picker", RepositorySelect).value = "example"
+            await wait_for_tui(
+                pilot,
+                lambda: screen._editing_key == "example",
+                description="valid repository restored",
+            )
+            assert not screen.query_one("#save-repository", Button).is_disabled
+            assert screen.query_one("#repository-key", Input).value == "example"
+
+    asyncio.run(drive())
+
+
 def test_repository_index_management_renders_independent_status_and_dispatches_actions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
