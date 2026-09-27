@@ -7,7 +7,12 @@ from typing import Any
 import pytest
 
 import orchestrator.services.workflow_service as workflow_service_module
-from orchestrator.clients.exceptions import CommandTimeoutError, GitClientError, GitHubClientError
+from orchestrator.clients.exceptions import (
+    CommandProcessTreeUnconfirmedError,
+    CommandTimeoutError,
+    GitClientError,
+    GitHubClientError,
+)
 from orchestrator.config.project_config import AgentProviderSettings, GitHubAppSettings
 from orchestrator.models import (
     AgentRole,
@@ -127,6 +132,23 @@ def test_review_description_failure_warns_without_changing_outcome(
         or "timed out" in warning.payload["reason"]
     )
     assert "ghs_secret" not in str(warning.payload)
+
+
+def test_review_description_unconfirmed_process_tree_fails_before_reviewer(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.github.description_error = CommandProcessTreeUnconfirmedError(
+        "Command timed out and its process tree could not be confirmed terminated"
+    )
+
+    result = service.run("card-description-unconfirmed-process")
+
+    assert result.status is WorkflowStatus.FAILED
+    assert factory.github.description_calls == [("example/api", 42)]
+    assert factory.planner.review_prompts == []
+    assert not any(
+        item.payload.get("kind") == "PULL_REQUEST_DESCRIPTION_UNAVAILABLE"
+        for item in repository.diagnostics
+    )
 
 
 def test_resumed_review_fetches_edited_description(workflow) -> None:

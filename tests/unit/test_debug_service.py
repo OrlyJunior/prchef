@@ -8,7 +8,10 @@ from typing import Any
 import pytest
 
 import orchestrator.services.debug_service as debug_service_module
-from orchestrator.clients.exceptions import GitHubClientError
+from orchestrator.clients.exceptions import (
+    CommandProcessTreeUnconfirmedError,
+    GitHubClientError,
+)
 from orchestrator.config.project_config import ProjectConfig
 from orchestrator.models import (
     AgentRole,
@@ -398,6 +401,24 @@ def test_review_debug_description_states_and_redacted_failure(
     assert "[unavailable: description could not be fetched]" in factory.planner.review_prompts[-1]
     assert "forbidden" in caplog.text
     assert "ghs_secret" not in caplog.text
+    assert asdict(execution) == before
+
+
+def test_review_debug_unconfirmed_process_tree_stops_before_reviewer(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    execution = _execution(tmp_path)
+    before = asdict(execution)
+    service, factory = _service(tmp_path)
+    factory.github.description_error = CommandProcessTreeUnconfirmedError(
+        "Command timed out and its process tree could not be confirmed terminated"
+    )
+
+    with pytest.raises(CommandProcessTreeUnconfirmedError):
+        service.execute(execution, DebugStage.REVIEW)
+
+    assert factory.planner.review_prompts == []
+    assert "Pull request description unavailable" not in caplog.text
     assert asdict(execution) == before
 
 

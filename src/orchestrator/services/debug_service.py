@@ -7,7 +7,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from orchestrator.clients.exceptions import CommandExecutionError, GitHubClientError
+from orchestrator.clients.exceptions import (
+    CommandExecutionError,
+    CommandProcessTreeUnconfirmedError,
+    GitHubClientError,
+)
 from orchestrator.clients.factory import ClientFactory, WorkflowClients
 from orchestrator.config.project_config import (
     ConfigurationError,
@@ -359,6 +363,8 @@ class DebugService:
             description = clients.github.pull_request_description(
                 repository_slug, pull_request.number
             )
+        except CommandProcessTreeUnconfirmedError:
+            raise
         except (GitHubClientError, CommandExecutionError, OSError) as exc:
             logger.warning(
                 "[debug] Pull request description unavailable: %s",
