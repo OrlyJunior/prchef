@@ -285,6 +285,15 @@ def language_for_path(path: Path) -> str:
     return _LANGUAGES.get(path.suffix.casefold(), "text")
 
 
+def chunk_point_id(
+    repository: str, source_root_id: str, path: str, content_hash: str, ordinal: int
+) -> str:
+    """Return the stable ID of a source chunk in one root."""
+
+    identity = "\0".join((repository, source_root_id, path, content_hash, str(ordinal)))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
+
+
 def chunk_source_file(
     source: RepositorySourceFile,
     *,
@@ -323,15 +332,6 @@ def chunk_source_file(
             start_line = units[start][0]
             end_line = units[end - 1][0]
             ordinal = len(chunks)
-            identity = "\0".join(
-                (
-                    source.repository,
-                    source_root_id,
-                    source.path,
-                    source.content_hash,
-                    str(ordinal),
-                )
-            )
             chunks.append(
                 RepositoryChunk(
                     repository=source.repository,
@@ -344,7 +344,9 @@ def chunk_source_file(
                     end_line=end_line,
                     text=text,
                     ordinal=ordinal,
-                    point_id=str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+                    point_id=chunk_point_id(
+                        source.repository, source_root_id, source.path, source.content_hash, ordinal
+                    ),
                 )
             )
         if end >= len(units):

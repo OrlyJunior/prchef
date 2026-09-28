@@ -4520,7 +4520,13 @@ def test_workflow_runner_submits_selected_task_id_in_workflow_launch(
             assert screen.query_one("#task-selector", TaskSelector).selected_task_id == "12"
             start_button = screen.query_one("#start-workflow", Button)
             start_button.focus()
-            await settle_tui(pilot)
+            await wait_for_tui(
+                pilot,
+                lambda: start_button.has_focus
+                and start_button.region.y >= content.content_region.y
+                and start_button.region.bottom <= content.content_region.bottom,
+                description="focused Start workflow button in the runner viewport",
+            )
             assert start_button.has_focus
             assert start_button.region.y >= content.content_region.y
             assert start_button.region.bottom <= content.content_region.bottom
