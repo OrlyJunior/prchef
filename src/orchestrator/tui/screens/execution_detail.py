@@ -59,6 +59,8 @@ class ExecutionDetailScreen(Screen[None]):
         self._displayed_timeline: str | None = None
         self._interaction_id: int | None = None
         self._continuation_seeded = False
+        self._continuation_status: WorkflowStatus | None = None
+        self._continuation_stage: WorkflowStage | None = None
         self._event_refresh_lock = threading.Lock()
         self._event_refresh_queued = False
 
@@ -414,7 +416,10 @@ class ExecutionDetailScreen(Screen[None]):
         else:
             self._interaction_id = None
 
-        continuation_stage = self.controller.continuation_stage(execution)
+        if execution.status is not self._continuation_status:
+            self._continuation_stage = self.controller.continuation_stage(execution)
+            self._continuation_status = execution.status
+        continuation_stage = self._continuation_stage
         continuation_eligible = continuation_stage is not None
         for widget_id in (
             "execution-continuation-title",

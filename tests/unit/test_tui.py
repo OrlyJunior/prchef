@@ -4589,6 +4589,43 @@ def test_execution_detail_reenables_continue_after_continuation_error(tmp_path: 
     asyncio.run(drive())
 
 
+def test_execution_detail_checks_continuation_eligibility_once_per_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.FAILED
+    reads = 0
+    original_list = repository.list_diagnostics
+
+    def tracked_list(execution_id: str) -> list[ExecutionDiagnostic]:
+        nonlocal reads
+        reads += 1
+        return original_list(execution_id)
+
+    monkeypatch.setattr(repository, "list_diagnostics", tracked_list)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ExecutionDetailScreen)
+            assert reads == 2  # Initial log load and eligibility check.
+
+            screen._refresh_execution()
+            screen._refresh_execution()
+            assert reads == 2
+
+            repository.execution.status = WorkflowStatus.RUNNING
+            screen._refresh_execution()
+            repository.execution.status = WorkflowStatus.FAILED
+            screen._refresh_execution()
+            assert reads == 3
+
+    asyncio.run(drive())
+
+
 def test_execution_detail_copies_all_persisted_detailed_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
