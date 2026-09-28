@@ -15,7 +15,7 @@ config = context.config
 # same global resolver as the application instead of the process cwd.
 sqlalchemy_url = config.get_main_option("sqlalchemy.url") or ""
 if not sqlalchemy_url.strip():
-    config.set_main_option("sqlalchemy.url", resolve_database_url())
+    config.set_main_option("sqlalchemy.url", resolve_database_url().replace("%", "%%"))
 
 if config.config_file_name is not None:
     # Keep the orchestrator's application loggers enabled while Alembic
