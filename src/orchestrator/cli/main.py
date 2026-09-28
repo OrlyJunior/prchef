@@ -140,7 +140,10 @@ def _apply_pending_migrations(settings: Settings) -> None:
         with as_file(files("orchestrator.migrations")) as migrations_directory:
             alembic_config = Config()
             alembic_config.set_main_option("script_location", str(migrations_directory))
-            alembic_config.set_main_option("sqlalchemy.url", _database_url(settings))
+            # Alembic stores options in ConfigParser, where % introduces interpolation.
+            alembic_config.set_main_option(
+                "sqlalchemy.url", _database_url(settings).replace("%", "%%")
+            )
             command.upgrade(alembic_config, "head")
     except Exception as exc:
         raise MigrationError(f"Could not apply pending database migrations: {exc}") from exc
