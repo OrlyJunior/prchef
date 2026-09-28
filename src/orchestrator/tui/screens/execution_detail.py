@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, cast
 from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
-from textual.containers import Horizontal, ScrollableContainer, VerticalScroll
-from textual.events import DescendantFocus
+from textual.containers import Grid, Horizontal, ScrollableContainer, VerticalScroll
+from textual.events import DescendantFocus, Resize
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Button, Static, TextArea
@@ -51,15 +51,13 @@ class ExecutionDetailScreen(Screen[None]):
         with VerticalScroll(id="execution-detail"):
             yield Static("Execution detail", classes="screen-title")
             yield Static("", id="execution-status")
-            yield Button("Cancel", variant="error", id="execution-cancel", classes="detail-action")
-            yield Button("Open task", id="open-task", classes="detail-action")
-            yield Button("Open PR", id="open-pr", classes="detail-action")
-            yield Button("Open planner session", id="open-spec-session", classes="detail-action")
-            yield Button("Open review session", id="open-review-session", classes="detail-action")
-            yield Button(
-                "Copy detailed logs", id="copy-detailed-logs-button", disabled=True,
-                classes="detail-action",
-            )
+            with Grid(id="execution-detail-actions"):
+                yield Button("Cancel", variant="error", id="execution-cancel")
+                yield Button("Open task", id="open-task")
+                yield Button("Open PR", id="open-pr")
+                yield Button("Open planner session", id="open-spec-session")
+                yield Button("Open review session", id="open-review-session")
+                yield Button("Copy detailed logs", id="copy-detailed-logs-button", disabled=True)
             yield Static("", id="execution-continuation-title")
             yield TextArea("", id="execution-continuation-feedback")
             with Horizontal(classes="screen-actions", id="execution-continuation-actions"):
@@ -87,7 +85,15 @@ class ExecutionDetailScreen(Screen[None]):
         return cast("OrchestratorApp", self.app).controller
 
     def on_mount(self) -> None:
+        self._set_action_layout(self.size.width)
         self._refresh_execution()
+
+    def on_resize(self, event: Resize) -> None:
+        self._set_action_layout(event.size.width)
+
+    def _set_action_layout(self, width: int) -> None:
+        self.set_class(width < 80, "-medium-actions")
+        self.set_class(width < 55, "-narrow-actions")
 
     def on_unmount(self) -> None:
         if self._cancellation_timer is not None:

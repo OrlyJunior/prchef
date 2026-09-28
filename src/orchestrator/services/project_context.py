@@ -159,6 +159,8 @@ def _open_instruction_file(path: Path) -> TextIOBase:
 
 def _open_windows_instruction_file(path: Path) -> TextIOBase:
     """Open a Windows role file with reparse-point following disabled."""
+    if sys.platform != "win32":
+        raise OSError("Windows role files can only be opened on Windows")
     import ctypes
     import msvcrt
     from ctypes import wintypes

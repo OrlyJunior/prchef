@@ -674,8 +674,12 @@ def test_cli_runs_github_issue_provider(monkeypatch: Any) -> None:
     assert StubWorkflowService.calls == [("github", "42", "owner/api")]
 
 
-def test_cli_aborts_before_repository_when_migration_fails(monkeypatch: Any) -> None:
+def test_cli_aborts_before_repository_when_migration_fails(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
     repository_accessed = False
+    config = tmp_path / "orchestrator.yml"
+    config.write_text("defaults:\n  roles: {spec: codex, review: codex}\n", encoding="utf-8")
 
     def fail_migration(settings: Any) -> None:
         raise main.MigrationError("Could not apply pending database migrations: database locked")
@@ -688,7 +692,9 @@ def test_cli_aborts_before_repository_when_migration_fails(monkeypatch: Any) -> 
     monkeypatch.setattr(main, "_apply_pending_migrations", fail_migration)
     monkeypatch.setattr(main, "_repository", repository_should_not_run)
 
-    result = runner.invoke(main.app, ["run", "--trello-card", "card-1"])
+    result = runner.invoke(
+        main.app, ["run", "--trello-card", "card-1", "--config", str(config)]
+    )
 
     assert result.exit_code == 2
     assert "Could not apply pending database migrations" in result.output
@@ -699,6 +705,16 @@ def test_pending_migrations_are_applied_to_configured_database(tmp_path: Path) -
     database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
 
     main._apply_pending_migrations(Settings(database_url=database_url))
+    main._apply_pending_migrations(Settings(database_url=database_url))
+
+    engine = build_engine(database_url)
+    assert "workflow_executions" in inspect(engine).get_table_names()
+    engine.dispose()
+
+
+def test_pending_migrations_accept_percent_in_database_url(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'workflow%25.db').as_posix()}"
+
     main._apply_pending_migrations(Settings(database_url=database_url))
 
     engine = build_engine(database_url)

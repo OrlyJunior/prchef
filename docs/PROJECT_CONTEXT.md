@@ -9,15 +9,14 @@ and repository retrieval cover those.
 
 - Python 3.11+ CLI and Textual TUI that turn one Trello card or GitHub issue into a guarded change:
   plan → isolated implementation → validation → commit/push → GitHub PR → review publication.
-- It coordinates providers, Git, GitHub, and persistence. It is not a merge bot and never merges.
-  It is not a generic repository browser or RAG service.
+- It coordinates providers, Git, GitHub, and persistence; it never merges and is not a generic
+  repository browser or RAG service.
 - It must work for other repositories and languages. Core behavior stays language- and
   tool-agnostic; nothing in core may assume this repository's structure, tools, or issue numbers.
 - Human-blocked executions resume from persisted workflow state. This is not a provider-session
   resume system.
-- Planning uses the task's own comment thread as supporting context, bounded to 12,000 characters
-  with the newest content retained. Resumed planning uses the persisted task snapshot; other roles
-  do not receive a separate comment section.
+- Planning uses up to 12,000 characters of the task's newest comments. Resumed planning uses the
+  persisted snapshot; other roles receive no separate comment section.
 - `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` are optional, local, Git-ignored-by-default
   role guidance; each role receives only its own file. This file is shared by all roles. All of
   them are supplementary: the task, repository state, and core invariants win. Role files load
@@ -28,7 +27,7 @@ and repository retrieval cover those.
 
 - Dispatch queues are in-memory and process-scoped; SQLite is the default database. Qdrant local
   mode is single-process. Provider ceilings have no cross-process coordination.
-- Persisted `PENDING`/`WAITING` executions are not recovered automatically at startup.
+- Persisted `PENDING`/`WAITING` executions do not recover at startup.
 - Configuration comes only from a global `orchestrator.yml` (`defaults` deep-merged with
   `repositories.<key>`). Repository-local configuration files are ignored. Discovery and
   persistence never depend on the current directory or a source checkout. Explicit CLI and
@@ -56,8 +55,9 @@ and repository retrieval cover those.
 - Repository context retrieval is a separate orchestrator-owned strategy boundary (local Qdrant by
   default for registered repositories, heuristic on semantic unavailability or explicit selection).
   Workflow services never import retrieval backends. Role files and this file are never indexed.
-  Qdrant collections are isolated per registered repository; first retrieval establishes its durable
-  index. Planning snapshot retrieval removes its points without updating collection provenance.
+  Qdrant collections are repository-scoped; first retrieval builds the index. Linked roots never
+  update provenance. Exact text and embedding identity key reusable vectors across roots; root
+  inventories own source points, while vectors survive temporary cleanup. Schema changes rebuild.
 - Every execution, response, and continuation enters through one submission seam. Scheduling
   features must use it rather than adding their own concurrency.
 - The TUI may launch one task or an ordered persisted batch. Batch policy, cancellation, and
