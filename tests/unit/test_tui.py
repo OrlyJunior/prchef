@@ -4676,6 +4676,49 @@ def test_execution_detail_copies_all_persisted_detailed_logs(
     assert copied[0].count("implement the requested change") == 1
 
 
+def test_execution_detail_can_copy_after_terminal_initial_diagnostic_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.diagnostics = [ExecutionDiagnostic(
+        execution_id=repository.execution.id,
+        category=DiagnosticCategory.ERROR,
+        payload={"message": "persisted failure"},
+    )]
+    original_list = repository.list_diagnostics
+    reads = 0
+
+    def fail_once(execution_id: str) -> list[ExecutionDiagnostic]:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("temporary storage failure")
+        return original_list(execution_id)
+
+    monkeypatch.setattr(repository, "list_diagnostics", fail_once)
+    application = OrchestratorApp(controller)
+    copied: list[str] = []
+    monkeypatch.setattr(application, "copy_to_clipboard", copied.append)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ExecutionDetailScreen)
+            assert screen._reconcile_timer is None
+            assert not screen.query_one("#copy-detailed-logs-button", Button).disabled
+            screen.query_one("#copy-detailed-logs-button", Button).press()
+            await settle_tui(pilot)
+
+    asyncio.run(drive())
+
+    # The terminal continuation check retries after the initial log read fails;
+    # copying then makes a fresh read to export the complete persisted history.
+    assert reads == 3
+    assert copied == [format_diagnostics_for_export(original_list(repository.execution.id))]
+
+
 def test_execution_detail_appends_only_new_diagnostics_and_preserves_ui_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

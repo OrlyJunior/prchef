@@ -50,7 +50,6 @@ class ExecutionDetailScreen(Screen[None]):
         super().__init__()
         self.execution_id = execution_id
         self._links: dict[str, str] = {}
-        self._diagnostics: list[ExecutionDiagnostic] = []
         self._last_steps: list[WorkflowStep] = []
         self._reconcile_timer: Timer | None = None
         self._diagnostics_loaded = False
@@ -76,7 +75,7 @@ class ExecutionDetailScreen(Screen[None]):
                 yield Button("Open PR", id="open-pr")
                 yield Button("Open planner session", id="open-spec-session")
                 yield Button("Open review session", id="open-review-session")
-                yield Button("Copy detailed logs", id="copy-detailed-logs-button", disabled=True)
+                yield Button("Copy detailed logs", id="copy-detailed-logs-button")
             yield Static("", id="execution-continuation-title")
             yield TextArea("", id="execution-continuation-feedback")
             with Horizontal(classes="screen-actions", id="execution-continuation-actions"):
@@ -216,10 +215,8 @@ class ExecutionDetailScreen(Screen[None]):
                 default=str,
             )
             log.write_line(rendered)
-            self._diagnostics.append(diagnostic)
             if diagnostic.id is not None:
                 self._diagnostic_cursor = diagnostic.id
-        self.query_one("#copy-detailed-logs-button", Button).disabled = not self._diagnostics
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         self.query_one("#execution-detail", VerticalScroll).scroll_to_widget(
