@@ -32,11 +32,18 @@ class FastEmbedEmbeddingProvider:
     """Lazy local embedding provider backed by FastEmbed."""
 
     def __init__(
-        self, identity: EmbeddingIdentity, on_progress: Callable[[str], None] | None = None
+        self,
+        identity: EmbeddingIdentity,
+        on_progress: Callable[[str], None] | None = None,
+        *,
+        cpu_threads: int = 2,
     ) -> None:
+        if cpu_threads < 1:
+            raise ValueError("Embedding CPU thread count must be positive")
         self._identity = identity
         self._model: object | None = None
         self._on_progress = on_progress
+        self._cpu_threads = cpu_threads
 
     @property
     def identity(self) -> EmbeddingIdentity:
@@ -86,7 +93,9 @@ class FastEmbedEmbeddingProvider:
                 )
                 watcher.start()
             try:
-                self._model = text_embedding(model_name=self._identity.model)
+                self._model = text_embedding(
+                    model_name=self._identity.model, threads=self._cpu_threads
+                )
                 initialized.set()
             finally:
                 finished.set()

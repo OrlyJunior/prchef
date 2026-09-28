@@ -127,6 +127,7 @@ class EmbeddingSettings(BaseModel):
     model: str = "BAAI/bge-small-en-v1.5"
     version: str = "1"
     dimension: int = Field(default=384, gt=0, le=65_536)
+    cpu_threads: StrictInt = Field(default=2, ge=1, le=64)
 
     @field_validator("model", "version")
     @classmethod

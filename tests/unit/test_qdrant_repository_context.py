@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+import uuid
+from copy import copy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from orchestrator.services.qdrant_repository_context import (
     repository_collection_name,
 )
 from orchestrator.services.repository_context import RepositoryContextRequest
+from orchestrator.services.repository_documents import RepositorySourcePipeline, chunk_source_file
 from orchestrator.services.workspace_cleaner import WorkspaceCleanupService
 
 pytestmark = pytest.mark.skipif(
@@ -168,6 +171,24 @@ def test_local_index_persists_and_reuses_unchanged_files(tmp_path: Path) -> None
 
     assert "alpha.py" in reopened_result
     assert reopened_embedding.document_texts == []
+
+
+def test_unchanged_index_does_not_rewrite_root_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    _repository(root, {"alpha.py": "alpha source"})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    strategy.build_index()
+    monkeypatch.setattr(
+        strategy, "_write_inventory",
+        lambda *args: pytest.fail("unchanged root inventory was rewritten"),
+    )
+
+    strategy.refresh_changed_files()
 
 
 def test_indexed_commit_inspection_does_not_scroll_points(
@@ -337,6 +358,521 @@ def test_temporary_snapshot_reuses_persistent_vectors_and_embeds_only_changed_fi
         )
 
 
+def test_snapshot_upserts_only_changed_and_added_files(tmp_path: Path) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    snapshot = tmp_path / "planning"
+    _committed_repository(root, {
+        "unchanged.py": "alpha unchanged source",
+        "changed.py": "beta old source",
+    })
+    upserted_paths: list[str] = []
+
+    def factory(settings: object) -> object:
+        client = create_qdrant_client(settings)  # type: ignore[arg-type]
+
+        class TrackingClient:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(client, name)
+
+            def upsert(self, **kwargs: Any) -> Any:
+                upserted_paths.extend(
+                    point.payload["path"] for point in kwargs["points"]
+                    if (point.payload or {}).get("kind") == "chunk"
+                )
+                return client.upsert(**kwargs)
+
+            def close(self) -> None:
+                client.close()
+
+        return TrackingClient()
+
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(), client_factory=factory,
+    )
+    baseline = strategy.build_index()
+    upserted_paths.clear()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(snapshot), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        original_query = strategy._query
+        points_at_query: list[list[str]] = []
+
+        def inspect_query(*args: Any) -> Any:
+            with strategy._session() as client:
+                points_at_query.append([
+                    (point.payload or {})["path"] for point in strategy._scroll_source_points(
+                        client, models, canonical_path_identifier(snapshot)
+                    )
+                ])
+            return original_query(*args)
+
+        strategy._query = inspect_query  # type: ignore[method-assign]
+        request = replace(_request(snapshot, "alpha"), temporary_source=True)
+        assert "alpha unchanged source" in strategy.render(request)
+        assert upserted_paths == []
+        assert points_at_query == [[]]
+
+        (snapshot / "changed.py").write_text("beta new source", encoding="utf-8")
+        (snapshot / "added.py").write_text("beta added source", encoding="utf-8")
+        result = strategy.render(replace(_request(snapshot, "beta"), temporary_source=True))
+        assert "beta new source" in result
+        assert "beta old source" not in result
+        assert "beta added source" in result
+        assert sorted(upserted_paths) == ["added.py", "changed.py"]
+        assert sorted(points_at_query[1]) == ["added.py", "changed.py"]
+        assert strategy.inspect_index().point_count == baseline.point_count
+        assert strategy.inspect_indexed_commit() == baseline.last_indexed_commit
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(snapshot)],
+            check=True, capture_output=True,
+        )
+
+
+def test_linked_query_reads_checkout_vectors_once_in_bounded_pages(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    _committed_repository(root, {"source.py": "alpha source\n" * 80})
+    settings = _settings(tmp_path / "index")
+    observed: list[tuple[str, bool, int]] = []
+    tracking = {"enabled": False}
+
+    def factory(qdrant_settings: object) -> object:
+        client = create_qdrant_client(qdrant_settings)  # type: ignore[arg-type]
+
+        class Client:
+            def __getattr__(self, name: str) -> object:
+                return getattr(client, name)
+
+            def scroll(self, **kwargs: Any) -> Any:
+                page, offset = client.scroll(**kwargs)
+                if tracking["enabled"]:
+                    observed.append(("scroll", kwargs["with_vectors"], len(page)))
+                return page, offset
+
+            def retrieve(self, **kwargs: Any) -> Any:
+                if tracking["enabled"]:
+                    observed.append(("retrieve", kwargs["with_vectors"], len(kwargs["ids"])))
+                return client.retrieve(**kwargs)
+
+            def close(self) -> None:
+                client.close()
+
+        return Client()
+
+    strategy = QdrantRepositoryContextStrategy(
+        settings, "repo", root, embedding_provider=FakeEmbeddingProvider(),
+        client_factory=factory,
+    )
+    strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        tracking["enabled"] = True
+        assert "alpha source" in strategy.render(_request(worktree))
+        assert not any(kind == "scroll" for kind, _, _ in observed)
+        assert any(kind == "retrieve" and vectors for kind, vectors, _ in observed)
+        assert all(count <= 64 for kind, _, count in observed if kind == "retrieve")
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
+def test_large_collection_reuse_and_linked_retrieval_use_bounded_ids(tmp_path: Path) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    snapshot = tmp_path / "planning"
+    _committed_repository(root, {
+        "same.py": "alpha shared source",
+        "changed.py": "beta old source",
+    })
+    embedding = FakeEmbeddingProvider()
+    calls: list[tuple[str, int]] = []
+    collection_name = repository_collection_name("repo", root)
+
+    def factory(settings: object) -> object:
+        client = create_qdrant_client(settings)  # type: ignore[arg-type]
+
+        class TrackingClient:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(client, name)
+
+            def scroll(self, **kwargs: Any) -> Any:
+                if kwargs["collection_name"] == collection_name:
+                    pytest.fail("main repository collection was scrolled")
+                return client.scroll(**kwargs)
+
+            def retrieve(self, **kwargs: Any) -> Any:
+                if kwargs["collection_name"] == collection_name:
+                    calls.append(("retrieve", len(kwargs["ids"])))
+                return client.retrieve(**kwargs)
+
+            def close(self) -> None:
+                client.close()
+
+        return TrackingClient()
+
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=embedding, client_factory=factory,
+    )
+    strategy.build_index()
+    with strategy._session() as client:
+        client.upsert(
+            collection_name=strategy.collection_name,
+            points=[models.PointStruct(
+                id=str(uuid.uuid5(uuid.NAMESPACE_URL, str(number))),
+                vector={"dense": [1.0, 0.0]},
+                payload={"kind": "unrelated"},
+            ) for number in range(512)],
+            wait=True,
+        )
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(snapshot), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        (snapshot / "changed.py").write_text("beta new source", encoding="utf-8")
+        embedding.document_texts.clear()
+        first_result = strategy.render(
+            replace(_request(snapshot, "beta"), temporary_source=True)
+        )
+        assert "beta new source" in first_result
+        assert embedding.document_texts == ["beta new source"]
+        assert calls and all(size <= 64 for _, size in calls)
+        embedding.document_texts.clear()
+        second_result = strategy.render(
+            replace(_request(snapshot, "beta"), temporary_source=True)
+        )
+        assert second_result == first_result
+        assert embedding.document_texts == []
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(snapshot)],
+            check=True, capture_output=True,
+        )
+
+
+def test_worktree_excludes_deleted_checkout_file_and_removes_redundant_points(
+    tmp_path: Path,
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    _committed_repository(root, {
+        "deleted.py": "alpha deleted source",
+        "changed.py": "beta old source",
+        "unchanged.py": "other unchanged source",
+    })
+    settings = _settings(tmp_path / "index").model_copy(update={"candidate_count": 1})
+    strategy = QdrantRepositoryContextStrategy(
+        settings, "repo", root, embedding_provider=FakeEmbeddingProvider()
+    )
+    baseline = strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        (worktree / "deleted.py").unlink()
+        (worktree / "changed.py").write_text("alpha new source", encoding="utf-8")
+        result = strategy.render(_request(worktree, "alpha"))
+        assert "alpha new source" in result
+        assert "alpha deleted source" not in result
+        assert "beta old source" not in result
+        ranked_checkout = strategy.render(_request(worktree, "beta"))
+        assert "other unchanged source" in ranked_checkout
+        assert "alpha new source" not in ranked_checkout
+        with strategy._session() as client:
+            points = strategy._scroll_source_points(
+                client, models, canonical_path_identifier(worktree)
+            )
+            assert [(point.payload or {})["path"] for point in points] == ["changed.py"]
+
+        (worktree / "changed.py").write_text("beta old source", encoding="utf-8")
+        assert "beta old source" in strategy.render(_request(worktree, "beta"))
+        with strategy._session() as client:
+            assert strategy._scroll_source_points(
+                client, models, canonical_path_identifier(worktree)
+            ) == []
+        strategy.delete_worktree_points(worktree)
+        assert strategy.inspect_index().point_count == baseline.point_count
+        assert strategy.inspect_indexed_commit() == baseline.last_indexed_commit
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
+def test_failed_worktree_retrieval_keeps_checkout_provenance_and_cleanup_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    _committed_repository(root, {"source.py": "alpha checkout source"})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    baseline = strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        (worktree / "source.py").write_text("beta execution source", encoding="utf-8")
+
+        def fail_query(*_: object) -> None:
+            raise RuntimeError("simulated query failure")
+
+        monkeypatch.setattr(strategy, "_query", fail_query)
+        assert "LOCAL REPOSITORY CONTEXT" in strategy.render(_request(worktree))
+        status = strategy.inspect_index()
+        assert status.state is IndexLifecycleState.READY
+        assert status.last_indexed_commit == baseline.last_indexed_commit
+        assert status.point_count == baseline.point_count
+        with strategy._session() as client:
+            assert strategy._scroll_source_points(
+                client, models, canonical_path_identifier(worktree)
+            )
+
+        strategy.delete_worktree_points(worktree)
+        with strategy._session() as client:
+            assert strategy._scroll_source_points(
+                client, models, canonical_path_identifier(worktree)
+            ) == []
+        assert strategy.inspect_index().point_count == baseline.point_count
+        assert strategy.inspect_indexed_commit() == baseline.last_indexed_commit
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "staleness", ["missing", "incomplete", "corrupt", "changed_checkout"]
+)
+def test_worktree_owns_files_without_a_valid_checkout_chunk_set(
+    tmp_path: Path, staleness: str
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    original = "alpha source " * 40
+    _committed_repository(root, {"source.py": original})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        if staleness == "changed_checkout":
+            (root / "source.py").write_text("beta dirty checkout", encoding="utf-8")
+        else:
+            with strategy._session() as client:
+                points = strategy._scroll_source_points(
+                    client, models, canonical_path_identifier(root)
+                )
+                assert len(points) > 1
+                if staleness == "corrupt":
+                    client.set_payload(
+                        collection_name=strategy.collection_name,
+                        payload={"chunk_text": "corrupted checkout chunk"},
+                        points=[points[0].id],
+                        wait=True,
+                    )
+                else:
+                    doomed = points if staleness == "missing" else points[:1]
+                    client.delete(
+                        collection_name=strategy.collection_name,
+                        points_selector=models.PointIdsList(
+                            points=[point.id for point in doomed]
+                        ),
+                        wait=True,
+                    )
+        result = strategy.render(_request(worktree, "alpha"))
+        assert "alpha source" in result
+        assert "corrupted checkout chunk" not in result
+        assert "beta dirty checkout" not in result
+        with strategy._session() as client:
+            points = strategy._scroll_source_points(
+                client, models, canonical_path_identifier(worktree)
+            )
+            assert points
+            assert all((point.payload or {})["path"] == "source.py" for point in points)
+        strategy.delete_worktree_points(worktree)
+        with strategy._session() as client:
+            assert strategy._scroll_source_points(
+                client, models, canonical_path_identifier(worktree)
+            ) == []
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_vector",
+    [None, {"dense": [1.0]}, {"dense": [float("nan"), 0.0]}, {"dense": [0.0, 0.0]}],
+    ids=["missing", "wrong_dimension", "non_finite", "zero"],
+)
+def test_worktree_owns_checkout_file_with_unusable_dense_vector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_vector: Any
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    _committed_repository(root, {"source.py": "alpha current source"})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    baseline = strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    original_scroll = strategy._scroll_source_points
+    original_validate = strategy._valid_dense_vector
+
+    def validate_with_bad_checkout_vector(point: Any) -> bool:
+        if (point.payload or {}).get("source_root_id") == canonical_path_identifier(root):
+            corrupted = copy(point)
+            corrupted.vector = invalid_vector
+            return original_validate(corrupted)
+        return original_validate(point)
+
+    monkeypatch.setattr(strategy, "_valid_dense_vector", validate_with_bad_checkout_vector)
+    try:
+        assert "alpha current source" in strategy.render(_request(worktree, "alpha"))
+        with strategy._session() as client:
+            own_points = original_scroll(client, models, canonical_path_identifier(worktree))
+            assert len(own_points) == baseline.point_count
+            assert all((point.payload or {})["path"] == "source.py" for point in own_points)
+        assert strategy.inspect_indexed_commit() == baseline.last_indexed_commit
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
+def test_removed_checkout_chunk_during_query_cannot_silently_change_ranking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    _committed_repository(root, {"source.py": "alpha current source"})
+    diagnostics: list[dict[str, str]] = []
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(), on_diagnostic=diagnostics.append,
+    )
+    strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        original_query = strategy._query
+
+        def remove_approved_point(*args: Any) -> Any:
+            with strategy._session() as client:
+                points = strategy._scroll_source_points(
+                    client, models, canonical_path_identifier(root)
+                )
+                client.delete(
+                    collection_name=strategy.collection_name,
+                    points_selector=models.PointIdsList(points=[points[0].id]),
+                    wait=True,
+                )
+            return original_query(*args)
+
+        monkeypatch.setattr(strategy, "_query", remove_approved_point)
+        result = strategy.render(_request(worktree, "alpha"))
+        assert "alpha current source" in result
+        assert "SEMANTIC REPOSITORY CONTEXT" not in result
+        assert diagnostics[-1]["kind"] == "REPOSITORY_CONTEXT_FALLBACK"
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
+@pytest.mark.parametrize("change", ["rewrite", "delete"])
+@pytest.mark.parametrize("temporary", [False, True])
+def test_linked_root_change_during_query_cannot_return_old_checkout_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, temporary: bool
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    worktree = tmp_path / "linked"
+    _committed_repository(root, {"source.py": "alpha original source"})
+    diagnostics: list[dict[str, str]] = []
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(), on_diagnostic=diagnostics.append,
+    )
+    baseline = strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        original_query = strategy._query
+
+        def change_root_during_query(*args: Any) -> Any:
+            if change == "rewrite":
+                (worktree / "source.py").write_text("alpha changed source", encoding="utf-8")
+            else:
+                (worktree / "source.py").unlink()
+            return original_query(*args)
+
+        monkeypatch.setattr(strategy, "_query", change_root_during_query)
+        result = strategy.render(replace(_request(worktree, "alpha"), temporary_source=temporary))
+        assert "alpha original source" not in result
+        if change == "rewrite":
+            assert "alpha changed source" in result
+        assert diagnostics[-1]["kind"] == "REPOSITORY_CONTEXT_FALLBACK"
+        with strategy._session() as client:
+            assert strategy._scroll_source_points(
+                client, models, canonical_path_identifier(worktree)
+            ) == []
+        assert strategy.inspect_index().point_count == baseline.point_count
+        assert strategy.inspect_indexed_commit() == baseline.last_indexed_commit
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
 def test_first_snapshot_retrieval_builds_durable_index_and_reports_progress(tmp_path: Path) -> None:
     from qdrant_client import models
 
@@ -393,6 +929,7 @@ def test_failed_snapshot_cleanup_preserves_cancellation_and_retries(
         _settings(tmp_path / "index"), "repo", root,
         embedding_provider=FakeEmbeddingProvider(), on_diagnostic=diagnostics.append,
     )
+    (snapshot / "source.py").write_text("beta changed snapshot source", encoding="utf-8")
     original_delete = strategy._delete_source_points
     attempts = 0
 
@@ -415,7 +952,7 @@ def test_failed_snapshot_cleanup_preserves_cancellation_and_retries(
         with strategy._session() as client:
             assert strategy._scroll_source_points(client, models, source_root_id)
             assert client.retrieve(
-                collection_name=strategy.collection_name,
+                collection_name=strategy._cleanup_collection_name,
                 ids=[strategy._cleanup_marker_id(source_root_id)],
                 with_payload=True,
                 with_vectors=False,
@@ -432,7 +969,7 @@ def test_failed_snapshot_cleanup_preserves_cancellation_and_retries(
         with recovered._session() as client:
             assert recovered._scroll_source_points(client, models, source_root_id) == []
             assert client.retrieve(
-                collection_name=recovered.collection_name,
+                collection_name=recovered._cleanup_collection_name,
                 ids=[recovered._cleanup_marker_id(source_root_id)],
                 with_payload=True,
                 with_vectors=False,
@@ -465,7 +1002,7 @@ def test_ready_retrieval_does_not_scan_index_for_lifecycle(
 
     monkeypatch.setattr(strategy, "_scroll_source_points", count_scans)
     assert "source.py" in strategy.render(_request(root))
-    assert scans == 1
+    assert scans == 0
 
 
 def test_embedding_progress_is_reported_after_each_batch(tmp_path: Path) -> None:
@@ -517,6 +1054,193 @@ def test_execution_worktree_reuses_retained_worktree_vectors(tmp_path: Path) -> 
                 check=True,
                 capture_output=True,
             )
+
+
+def test_content_cache_survives_snapshot_cleanup_and_reuses_across_path_and_ordinal(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repository"
+    snapshot = tmp_path / "planning"
+    execution = tmp_path / "execution"
+    _committed_repository(root, {"base.py": "alpha base source"})
+    embedding = FakeEmbeddingProvider()
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root, embedding_provider=embedding
+    )
+    strategy.build_index()
+    for worktree in (snapshot, execution):
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+            check=True, capture_output=True,
+        )
+    try:
+        (snapshot / "first.py").write_text("beta shared text", encoding="utf-8")
+        embedding.document_texts.clear()
+        assert "beta shared text" in strategy.render(
+            replace(_request(snapshot, "beta"), temporary_source=True)
+        )
+        assert embedding.document_texts == ["beta shared text"]
+        (execution / "other.py").write_text("x" * 255 + "\nbeta shared text", encoding="utf-8")
+        embedding.document_texts.clear()
+        assert "beta shared text" in strategy.render(_request(execution, "beta"))
+        assert "beta shared text" not in embedding.document_texts
+    finally:
+        for worktree in (snapshot, execution):
+            subprocess.run(
+                ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+                check=True, capture_output=True,
+            )
+
+
+def test_snapshot_then_changed_root_embeds_only_unseen_text(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    snapshot = tmp_path / "planning"
+    execution = tmp_path / "execution"
+    _committed_repository(root, {
+        "one.py": "alpha one source",
+        "two.py": "alpha two source",
+        "three.py": "beta old source",
+    })
+    embedding = FakeEmbeddingProvider()
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root, embedding_provider=embedding
+    )
+    strategy.build_index()
+    for worktree in (snapshot, execution):
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+            check=True, capture_output=True,
+        )
+    try:
+        embedding.document_texts.clear()
+        assert "one.py" in strategy.render(
+            replace(_request(snapshot, "alpha"), temporary_source=True)
+        )
+        assert embedding.document_texts == []
+        (execution / "three.py").write_text("beta new source", encoding="utf-8")
+        assert "beta new source" in strategy.render(_request(execution, "beta"))
+        assert embedding.document_texts == ["beta new source"]
+    finally:
+        for worktree in (snapshot, execution):
+            subprocess.run(
+                ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+                check=True, capture_output=True,
+            )
+
+
+@pytest.mark.parametrize(
+    "defect", ["missing", "wrong_text", "wrong_hash", "wrong_identity", "invalid_vector"]
+)
+def test_invalid_content_cache_candidate_is_embedded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str,
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    _committed_repository(root, {"source.py": "alpha shared source"})
+    embedding = FakeEmbeddingProvider()
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root, embedding_provider=embedding
+    )
+    strategy.build_index()
+    cache_id = strategy._content_id("alpha shared source")
+    with strategy._session() as client:
+        if defect == "missing":
+            client.delete(
+                collection_name=strategy.collection_name,
+                points_selector=models.PointIdsList(points=[cache_id]), wait=True,
+            )
+        elif defect != "invalid_vector":
+            changes: dict[str, Any] = {
+                "wrong_text": {"chunk_text": "different"},
+                "wrong_hash": {"text_hash": "different"},
+                "wrong_identity": {"embedding": {"provider": "different"}},
+            }
+            client.set_payload(
+                collection_name=strategy.collection_name,
+                payload=changes[defect], points=[cache_id], wait=True,
+            )
+    if defect == "invalid_vector":
+        original_validate = strategy._valid_dense_vector
+
+        def reject_cache(point: Any) -> bool:
+            return ((point.payload or {}).get("kind") != "content_cache"
+                    and original_validate(point))
+
+        monkeypatch.setattr(strategy, "_valid_dense_vector", reject_cache)
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        (worktree / "other.py").write_text("alpha shared source", encoding="utf-8")
+        embedding.document_texts.clear()
+        assert "other.py" in strategy.render(_request(worktree, "alpha"))
+        assert embedding.document_texts == ["alpha shared source"]
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "defect", [
+        "missing", "wrong_text", "wrong_hash", "wrong_identity", "wrong_schema",
+        "invalid_vector",
+    ],
+)
+def test_invalid_checkout_counterpart_is_not_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str,
+) -> None:
+    from qdrant_client import models
+
+    root = tmp_path / "repository"
+    _repository(root, {"source.py": "alpha source"})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    strategy.build_index()
+    source = RepositorySourcePipeline("repo", root).discover()[0]
+    chunks = chunk_source_file(
+        source, source_root_id="linked", chunk_size_chars=256, overlap_chars=32,
+    )
+    with strategy._session() as client:
+        client.delete(
+            collection_name=strategy.collection_name,
+            points_selector=models.PointIdsList(points=[strategy._content_id(chunks[0].text)]),
+            wait=True,
+        )
+        checkout_id = strategy._scroll_source_points(
+            client, models, canonical_path_identifier(root)
+        )[0].id
+        if defect == "missing":
+            client.delete(
+                collection_name=strategy.collection_name,
+                points_selector=models.PointIdsList(points=[checkout_id]), wait=True,
+            )
+        elif defect != "invalid_vector":
+            changes: dict[str, Any] = {
+                "wrong_text": {"chunk_text": "different"},
+                "wrong_hash": {"content_hash": "different"},
+                "wrong_identity": {"embedding": {"provider": "different"}},
+                "wrong_schema": {"index_schema_version": -1},
+            }
+            client.set_payload(
+                collection_name=strategy.collection_name,
+                points=[checkout_id], payload=changes[defect], wait=True,
+            )
+    if defect == "invalid_vector":
+        original_validate = strategy._valid_dense_vector
+        monkeypatch.setattr(
+            strategy, "_valid_dense_vector",
+            lambda point: (False if (point.payload or {}).get("kind") == "chunk"
+                           else original_validate(point)),
+        )
+    with strategy._session() as client:
+        assert strategy._reusable_vectors(client, models, chunks) == {}
 
 
 def test_cleanup_removes_execution_worktree_points_before_worktree(tmp_path: Path) -> None:
@@ -799,7 +1523,8 @@ def test_failed_partial_sync_is_not_queried_and_retry_is_idempotent(tmp_path: Pa
                 result = client.upsert(**kwargs)
                 points = kwargs.get("points", [])
                 if state["fail"] and any(
-                    (point.payload or {}).get("kind") == "chunk" for point in points  # type: ignore[union-attr]
+                    (point.payload or {}).get("kind") == "chunk"  # type: ignore[union-attr]
+                    for point in points
                 ):
                     state["fail"] = False
                     raise RuntimeError("injected partial failure")

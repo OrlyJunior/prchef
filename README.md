@@ -212,7 +212,9 @@ FastEmbed, incluidos na instalacao padrao. Para repositorios selecionados apenas
 orquestrador usa `heuristic` e informa como registrar o repositorio. Qdrant cria uma collection
 deterministica por chave/caminho configurado e separa o checkout de controle de cada worktree no
 payload. O orquestrador descobre, filtra, calcula hashes e divide os arquivos; arquivos inalterados
-nao sao re-embeddados, enquanto chunks alterados/removidos sao sincronizados sob demanda. Arquivos
+nao sao re-embeddados. Snapshots e worktrees guardam pontos apenas para arquivos diferentes do
+checkout configurado; a consulta combina esses pontos com os arquivos validos do indice persistente.
+Chunks alterados/removidos sao sincronizados sob demanda. Arquivos
 ignorados pelo Git, binarios, symlinks, artefatos gerados conhecidos, `PLANNER.md`,
 `IMPLEMENTER.md`, `REVIEWER.md` e `docs/PROJECT_CONTEXT.md` nao entram no indice.
 No primeiro uso, o indice persistente do repositorio registrado e construido automaticamente.
@@ -234,6 +236,7 @@ repository_context:
     model: BAAI/bge-small-en-v1.5
     version: "1"
     dimension: 384
+    cpu_threads: 2  # limite de threads para o modelo local
 ```
 
 O primeiro uso pode baixar o modelo e ter custo de inicializacao. O modo local persistente e para
