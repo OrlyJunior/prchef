@@ -41,6 +41,8 @@ def execution_status_label(execution: WorkflowExecution) -> str:
         return "QUEUED"
     if execution.status is WorkflowStatus.WAITING:
         return "WAITING FOR AGENT"
+    if execution.status is WorkflowStatus.INTERRUPTED:
+        return f"INTERRUPTED (resume {(execution.resume_stage or execution.current_stage).value})"
     return execution.status.value
 
 
@@ -65,6 +67,8 @@ class ExecutionHistoryScreen(Screen[None]):
             yield OrchestratorSelect([], prompt="Select an execution", id="execution-picker")
             with Horizontal(classes="screen-actions"):
                 yield Button("Inspect", variant="primary", id="inspect-execution")
+                yield Button("Resume interrupted", id="resume-interrupted")
+                yield Button("Cancel interrupted", variant="error", id="cancel-interrupted")
                 yield Button("Refresh", id="refresh-history")
             yield Static("", id="history-summary")
 
@@ -91,6 +95,10 @@ class ExecutionHistoryScreen(Screen[None]):
             self.refresh_history()
         elif event.button.id == "inspect-execution":
             self._inspect_selected()
+        elif event.button.id == "resume-interrupted":
+            self._act_on_interrupted(resume=True)
+        elif event.button.id == "cancel-interrupted":
+            self._act_on_interrupted(resume=False)
         elif event.button.id == "inspect-batch":
             self._inspect_batch()
 
@@ -191,6 +199,21 @@ class ExecutionHistoryScreen(Screen[None]):
         from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
 
         self.app.push_screen(ExecutionDetailScreen(execution_id))
+
+    def _act_on_interrupted(self, *, resume: bool) -> None:
+        execution_id = self.query_one("#execution-picker", OrchestratorSelect).value
+        if not isinstance(execution_id, str):
+            self.notify("Select an interrupted execution.", severity="warning")
+            return
+        try:
+            if resume:
+                self.controller.submit_interrupted(execution_id)
+            else:
+                if not self.controller.cancel_workflow(execution_id):
+                    raise ValueError("Execution is no longer cancellable")
+        except Exception as exc:
+            self.notify(f"Could not update execution: {exc}", severity="error")
+        self.refresh_history()
 
     def _inspect_batch(self) -> None:
         batch_id = self.query_one("#batch-picker", OrchestratorSelect).value

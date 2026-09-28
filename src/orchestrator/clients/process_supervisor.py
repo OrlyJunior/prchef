@@ -1,7 +1,7 @@
 """Linux process-tree supervisor that ``CommandClient`` runs each command under.
 
-Run as ``python -I -S process_supervisor.py STATUS_FD COMMAND...``. The orchestrator never imports
-this module, so it uses only the standard library.
+Run as ``python -I -S process_supervisor.py STATUS_FD PARENT_PID COMMAND...``.
+The orchestrator never imports this module, so it uses only the standard library.
 
 A process group cannot contain a command: any descendant can leave it with ``setsid``. The
 supervisor instead registers as a child subreaper, so every process the command launches remains
@@ -10,10 +10,9 @@ double fork. Having no children left therefore proves that no descendant survive
 
 The command's output is relayed through the supervisor's own pipes, and the supervisor exits with
 the command's own status once the command has exited and every holder of those pipes has closed
-them. A completed command therefore behaves as if it ran directly, including leaving running any
-background process that released its output. On SIGTERM the supervisor instead kills every
-descendant, relays the output already produced, and writes ``stopped`` to STATUS_FD only once no
-descendant remains.
+them. A completed command stops any background descendants before its supervisor exits.
+On SIGTERM the supervisor kills every descendant, relays output already produced,
+and writes ``stopped`` to STATUS_FD only once no descendant remains.
 """
 
 from __future__ import annotations
@@ -35,6 +34,7 @@ STOPPED = "stopped"
 SPAWN_ERROR = "spawn-error"
 
 _PR_SET_CHILD_SUBREAPER = 36
+_PR_SET_PDEATHSIG = 1
 # Stays below CommandClient's post-kill wait, so the outcome is reported before it stops waiting.
 _STOP_DEADLINE_SECONDS = 5.0
 _KILL_POLL_SECONDS = 0.01
@@ -74,6 +74,17 @@ def _become_subreaper() -> bool:
     except (AttributeError, ImportError, OSError):
         return False
     return int(result) == 0
+
+
+def _watch_parent(parent_pid: int) -> None:
+    """Stop owned descendants even if the app is killed without cleanup."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "Cannot configure parent-death signal")
+    if os.getppid() != parent_pid:
+        raise _StopRequested
 
 
 def _report(status_fd: int, message: str) -> None:
@@ -209,6 +220,8 @@ class _Supervisor:
         while True:
             self._reap()
             if self._returncode is not None and all(relay.closed for relay in self._relays):
+                if self._reap() and not self._kill_descendants():
+                    return 1
                 return self._returncode
             for key, _ in selector.select():
                 ready = key.data
@@ -282,9 +295,10 @@ def _exit_with(returncode: int) -> NoReturn:
 
 
 def main(argv: list[str]) -> NoReturn:
-    supervisor = _Supervisor(int(argv[1]), argv[2:])
+    supervisor = _Supervisor(int(argv[1]), argv[3:])
     try:
         signal.signal(signal.SIGTERM, _request_stop)
+        _watch_parent(int(argv[2]))
         returncode = supervisor.run()
         # A stop request arriving after completion has nothing left to stop.
         signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})

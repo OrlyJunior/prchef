@@ -15,6 +15,7 @@ from typing import TypeAlias
 
 from orchestrator.clients.exceptions import (
     CommandExecutionError,
+    CommandInterruptedError,
     CommandProcessTreeUnconfirmedError,
     CommandTimeoutError,
 )
@@ -33,6 +34,46 @@ _PROCESS_GROUP_POLL_SECONDS = 0.05
 _SUPERVISOR_SCRIPT = Path(__file__).with_name("process_supervisor.py")
 _SUPERVISOR_STOPPED = "stopped"
 _SUPERVISOR_SPAWN_ERROR = "spawn-error"
+_active_commands: dict[subprocess.Popen[str], _Containment | None] = {}
+_active_lock = threading.RLock()
+_stopping = False
+
+
+def interrupt_active_commands() -> None:
+    """Stop every in-flight command when the owning app exits."""
+    global _stopping
+    with _active_lock:
+        _stopping = True
+        active = tuple(_active_commands.items())
+    for process, containment in active:
+        _terminate_process_tree(process, containment)
+    deadline = time.monotonic() + _POST_KILL_DRAIN_SECONDS
+    for process, _ in active:
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(_PROCESS_GROUP_POLL_SECONDS)
+        if process.poll() is None:
+            logger.warning("[command] Command %s did not stop during app exit", process.pid)
+    if sys.platform == "win32":
+        WindowsJob.close_retained()
+
+
+def assert_worktree_idle(workspace: Path) -> None:
+    """Refuse Linux recovery while a prior command still occupies its worktree."""
+    if sys.platform != "linux" or not workspace.exists():
+        return
+    root = workspace.resolve()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            cwd = Path(os.readlink(entry / "cwd")).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if cwd == root or cwd.is_relative_to(root):
+            raise CommandExecutionError(
+                f"Process {entry.name} is still using the retained worktree; "
+                "wait for it to stop before retrying"
+            )
 
 
 def _is_windows() -> bool:
@@ -145,7 +186,8 @@ def _start_process(
     the command can launch one. Linux commands run under ``process_supervisor.py``, a child
     subreaper that keeps every descendant killable, even one that left the process group with
     ``setsid``. Other POSIX commands, such as on macOS, only lead their own session and process
-    group, whose members are killed and awaited as a group.
+    group, whose members are killed and awaited as a group while this process is alive.
+    Abrupt parent termination there cannot contain descendants that leave the group.
     """
     if sys.platform == "win32":
         return _start_in_job(command, cwd=cwd, input_text=input_text, env=env)
@@ -154,7 +196,8 @@ def _start_process(
     status_read, status_write = os.pipe()
     try:
         process = _popen(
-            [sys.executable, "-I", "-S", str(_SUPERVISOR_SCRIPT), str(status_write), *command],
+            [sys.executable, "-I", "-S", str(_SUPERVISOR_SCRIPT),
+             str(status_write), str(os.getpid()), *command],
             cwd=cwd,
             input_text=input_text,
             env=env,
@@ -177,6 +220,8 @@ def _start_in_job(
     env: Mapping[str, str] | None,
 ) -> tuple[subprocess.Popen[str], WindowsJob | None]:
     job = WindowsJob.create()
+    if job is None:
+        raise OSError("Windows process containment is unavailable")
     try:
         process = _popen(
             command,
@@ -193,9 +238,9 @@ def _start_in_job(
         created_job = job
         try:
             if not created_job.adopt_suspended(process.pid):
-                # Fall back to taskkill, which reaches descendants only through a live root.
                 created_job.close()
-                job = None
+                process.communicate()
+                raise OSError("Could not contain the launched process tree")
         except BaseException:
             created_job.close()
             # It never ran, so it launched nothing; closing the pipes needs only this process.
@@ -339,8 +384,18 @@ def _run_process(
     same working directory; otherwise ``_ProcessTreeSurvivedError`` is raised.
     """
     process, containment = _start_process(command, cwd=cwd, input_text=input_text, env=env)
+    with _active_lock:
+        if _stopping:
+            _terminate_process_tree(process, containment)
+            _reap_interrupted_process(process)
+            if containment is not None:
+                containment.close()
+            raise CommandInterruptedError("Application is closing")
+        _active_commands[process] = containment
     try:
         stdout, stderr = process.communicate(input_text, timeout=timeout_seconds)
+        if _stopping:
+            raise CommandInterruptedError("Application is closing")
         if isinstance(containment, _TreeSupervisor):
             containment.raise_spawn_error(process, command)
     except subprocess.TimeoutExpired:
@@ -356,6 +411,8 @@ def _run_process(
         _reap_interrupted_process(process)
         raise
     finally:
+        with _active_lock:
+            _active_commands.pop(process, None)
         if containment is not None:
             containment.close()
     return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)

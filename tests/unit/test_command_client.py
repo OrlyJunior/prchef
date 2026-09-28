@@ -822,10 +822,11 @@ def test_background_process_that_released_output_does_not_delay_completion(
     try:
         assert result.exit_code == 0
         assert ready == "ready"
-        # Like a build daemon, it is left running exactly as when the command ran directly.
-        assert _process_exists(background)
+        # The app owns descendants even when a launcher released its output.
+        assert not _process_exists(background)
     finally:
-        os.kill(background, signal.SIGKILL)
+        if _process_exists(background):
+            os.kill(background, signal.SIGKILL)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Job objects are Windows-specific")

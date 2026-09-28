@@ -6,10 +6,12 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.events import Resize
+from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Static
 
+from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.tui.bridge import WorkflowController
 from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
 from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
@@ -17,6 +19,84 @@ from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
 from orchestrator.tui.screens.repository_settings import RepositorySettingsScreen
 from orchestrator.tui.screens.workflow_runner import WorkflowRunnerScreen
+
+
+class QuitWithWorkConfirmation(ModalScreen[bool]):
+    CSS = """
+    QuitWithWorkConfirmation { align: center middle; }
+    #quit-work-dialog { width: 100%; max-width: 72; height: auto;
+                        max-height: 80%; padding: 1 2; border: round $warning; }
+    #quit-work-actions { height: auto; }
+    """
+
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self.count = count
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="quit-work-dialog"):
+            yield Static(f"Quit with {self.count} active execution(s)?", classes="screen-title")
+            yield Static(
+                "They will be interrupted and can be resumed when the app is reopened."
+            )
+            with Horizontal(id="quit-work-actions"):
+                yield Button("Quit and interrupt", variant="warning", id="quit-confirm")
+                yield Button("Keep running", id="quit-dismiss")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "quit-confirm")
+
+
+class InterruptedRecoveryChoice(ModalScreen[tuple[str, ...] | None]):
+    CSS = """
+    InterruptedRecoveryChoice { align: center middle; }
+    #recovery-dialog { width: 100%; max-width: 82; height: 80%;
+                       padding: 1 2; border: round $warning; }
+    #recovery-items { height: 1fr; overflow-y: auto; }
+    #recovery-actions { height: auto; }
+    """
+
+    def __init__(self, executions: list[WorkflowExecution]) -> None:
+        super().__init__()
+        self.executions = executions
+        self.selected: set[str] = set()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="recovery-dialog"):
+            yield Static(
+                f"{len(self.executions)} execution(s) were interrupted", classes="screen-title"
+            )
+            yield Static("Resume all, select executions, or leave them for later.")
+            with VerticalScroll(id="recovery-items"):
+                for index, execution in enumerate(self.executions):
+                    yield Button(
+                        f"[ ] {execution.task_source}:{execution.task_id} | "
+                        f"resume { (execution.resume_stage or execution.current_stage).value}",
+                        id=f"recovery-item-{index}",
+                    )
+            with Horizontal(id="recovery-actions"):
+                yield Button("Resume all", variant="primary", id="recovery-all")
+                yield Button("Resume selected", id="recovery-selected")
+                yield Button("Later", id="recovery-later")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id == "recovery-all":
+            self.dismiss(tuple(item.id for item in self.executions))
+        elif button_id == "recovery-selected":
+            self.dismiss(tuple(item.id for item in self.executions if item.id in self.selected))
+        elif button_id == "recovery-later":
+            self.dismiss(None)
+        elif button_id.startswith("recovery-item-"):
+            item = self.executions[int(button_id.removeprefix("recovery-item-"))]
+            if item.id in self.selected:
+                self.selected.remove(item.id)
+                mark = "[ ]"
+            else:
+                self.selected.add(item.id)
+                mark = "[x]"
+            event.button.label = f"{mark} {item.task_source}:{item.task_id} | " \
+                                 f"resume {(item.resume_stage or item.current_stage).value}"
 
 
 class OrchestratorApp(App[None]):
@@ -308,6 +388,28 @@ class OrchestratorApp(App[None]):
 
     def on_mount(self) -> None:
         self._set_home_layout_mode(self.size.width)
+        interrupted = self.controller.interrupted_executions()
+        if interrupted:
+            self.push_screen(InterruptedRecoveryChoice(interrupted), self._resume_choice)
+
+    def _resume_choice(self, execution_ids: tuple[str, ...] | None) -> None:
+        for execution_id in execution_ids or ():
+            try:
+                self.controller.submit_interrupted(execution_id)
+            except Exception as exc:
+                self.notify(f"Could not resume {execution_id}: {exc}", severity="error")
+
+    async def action_quit(self) -> None:
+        count = self.controller.active_execution_count()
+        if count:
+            self.push_screen(QuitWithWorkConfirmation(count), self._confirm_quit)
+        else:
+            self.exit()
+
+    def _confirm_quit(self, confirmed: bool | None) -> None:
+        if confirmed:
+            self.controller.shutdown_for_exit()
+            self.exit()
 
     def on_resize(self, event: Resize) -> None:
         self._set_home_layout_mode(event.size.width)

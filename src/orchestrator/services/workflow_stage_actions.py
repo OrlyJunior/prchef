@@ -33,6 +33,8 @@ class StageActions:
         task: DevelopmentTask,
         working_branch: str,
         config: ProjectConfig,
+        *,
+        reconcile: bool = False,
     ) -> None:
         with self._events._step(execution_id, WorkflowStage.COMMIT):
             execution = self._repository.get_execution(execution_id)
@@ -40,6 +42,20 @@ class StageActions:
             execution_clients.git.ensure_merge_base(
                 execution.base_commit or config.repository.base_branch
             )
+            if reconcile and not execution_clients.git.changed_files():
+                head = execution_clients.git.head_commit()
+                if execution.commit_sha == head or (
+                    execution.commit_sha is None
+                    and head != execution.base_commit
+                    and execution_clients.git.head_commit_message()
+                    == StageValues._commit_message(task)
+                ):
+                    self._repository.record_commit(execution_id, head)
+                    return
+                raise WorkflowError(
+                    "Cannot verify whether the interrupted commit completed; "
+                    "inspect the retained branch before retrying"
+                )
             commit_sha = execution_clients.git.commit_all(
                 StageValues._commit_message(task),
                 working_branch,
@@ -74,25 +90,39 @@ class StageActions:
         repository_slug: str,
         pull_request_number: int,
         review: CodeReview,
+        reconcile: bool = False,
     ) -> None:
         event = {
             ReviewDecision.APPROVED: "APPROVE",
             ReviewDecision.CHANGES_REQUESTED: "REQUEST_CHANGES",
             ReviewDecision.NEEDS_HUMAN: "COMMENT",
         }[review.result]
+        body = format_pull_request_review(review)
         try:
+            if reconcile and execution_clients.github.review_already_published(
+                repository_slug, pull_request_number, event, body
+            ):
+                self._repository.finish_review_publication(execution_id)
+                return
             execution_clients.github.submit_pull_request_review(
                 repository=repository_slug,
                 pull_request_number=pull_request_number,
                 event=event,
-                body=format_pull_request_review(review),
+                body=body,
             )
         except Exception as exc:
+            if reconcile:
+                raise WorkflowError(
+                    "Cannot verify review publication; inspect the pull request before retrying"
+                ) from exc
             message = f"GitHub review publication failed: {redact_text(str(exc))}"
             logger.warning("[github] %s", message)
             # Publication is an external side effect. Preserve the reviewer decision and let
             # the terminal workflow status reflect it even when GitHub is unavailable.
             self._repository.record_error(execution_id, message)
+        finish_publication = getattr(self._repository, "finish_review_publication", None)
+        if callable(finish_publication):
+            finish_publication(execution_id)
 
     @staticmethod
     def _assign_implementer(

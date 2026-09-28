@@ -15,6 +15,7 @@ from orchestrator.models.workflow_event import (
     WorkflowEventKind,
     WorkflowEventListener,
 )
+from orchestrator.models.workflow_interruption import WorkflowInterruptedError
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.repositories.workflow_repository import WorkflowRepository
 from orchestrator.runtime_logging import redact_payload, redact_text
@@ -108,6 +109,9 @@ class StageEvents:
         try:
             yield
             self._raise_if_cancellation_requested(execution_id)
+        except WorkflowInterruptedError:
+            self._repository.finish_step(step_id, StepStatus.INTERRUPTED)
+            raise
         except WorkflowCancelledError as exc:
             self._repository.finish_step(step_id, StepStatus.CANCELLED, str(exc))
             self._emit(

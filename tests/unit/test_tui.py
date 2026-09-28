@@ -3783,7 +3783,7 @@ def test_execution_detail_cancel_visibility(
             await settle_tui(pilot)
             cancel = application.screen.query_one("#execution-cancel", Button)
             assert cancel.display is (
-                status is WorkflowStatus.NEEDS_HUMAN
+                status in {WorkflowStatus.NEEDS_HUMAN, WorkflowStatus.INTERRUPTED}
                 or (
                     status in {
                         WorkflowStatus.PENDING, WorkflowStatus.WAITING, WorkflowStatus.RUNNING

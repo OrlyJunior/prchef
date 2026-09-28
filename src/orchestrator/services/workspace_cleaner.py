@@ -60,7 +60,7 @@ class WorkspaceCleanupService:
     }
     # WAITING work is queued for provider capacity, not finished: its worktree
     # is still needed as soon as a slot frees up.
-    _ACTIVE_STATUSES = ACTIVE_WORKFLOW_STATUSES
+    _ACTIVE_STATUSES = ACTIVE_WORKFLOW_STATUSES | {WorkflowStatus.INTERRUPTED}
 
     def __init__(
         self,

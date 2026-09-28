@@ -6,9 +6,8 @@ before it completes. Synchronous commands simply wait on the handle, while
 batches and future scheduling features submit through the same seam instead
 of adding their own concurrency handling.
 
-Queueing is in-memory and single-process by design. The execution row for
-queued work is already persisted as ``PENDING``, but automatic recovery of
-queued work after a restart is deliberately out of scope here.
+Queueing is in-memory and single-process by design. On the next startup,
+persisted orphaned work is offered for explicit resubmission through this seam.
 """
 
 from __future__ import annotations
@@ -181,11 +180,16 @@ class ExecutionDispatcher:
             job.outcome.fail(exc)
         return True
 
-    def shutdown(self, *, wait: bool = True, timeout: float | None = None) -> None:
+    def shutdown(
+        self, *, wait: bool = True, timeout: float | None = None,
+        interrupt: bool = False,
+    ) -> None:
         """Stop accepting work and let idle workers exit."""
 
         with self._condition:
             self._shutdown = True
+            if interrupt:
+                self._queue.clear()
             self._condition.notify_all()
             workers = list(self._workers)
         if not wait:

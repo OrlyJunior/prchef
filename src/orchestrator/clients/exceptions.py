@@ -1,9 +1,16 @@
+from orchestrator.models.workflow_interruption import WorkflowInterruptedError
+
+
 class ExternalClientError(RuntimeError):
     """Base error for an external integration."""
 
 
 class CommandExecutionError(ExternalClientError):
     pass
+
+
+class CommandInterruptedError(WorkflowInterruptedError, CommandExecutionError):
+    """The application is stopping an owned command tree."""
 
 
 class CommandProcessTreeUnconfirmedError(CommandExecutionError):

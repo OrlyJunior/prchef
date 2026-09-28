@@ -46,6 +46,7 @@ SUMMARY_CATEGORIES: tuple[str, ...] = (
     "QUEUED",
     "WAITING",
     "RUNNING",
+    "INTERRUPTED",
     "NEEDS_HUMAN",
     "APPROVED",
     "CHANGES_REQUESTED",
@@ -53,12 +54,15 @@ SUMMARY_CATEGORIES: tuple[str, ...] = (
     "CANCELLED",
 )
 
-CANCELLABLE_ROW_STATUSES = ACTIVE_WORKFLOW_STATUSES | {WorkflowStatus.NEEDS_HUMAN}
+CANCELLABLE_ROW_STATUSES = ACTIVE_WORKFLOW_STATUSES | {
+    WorkflowStatus.NEEDS_HUMAN, WorkflowStatus.INTERRUPTED
+}
 
 SUMMARY_LABELS: dict[str, str] = {
     "QUEUED": "Queued",
     "WAITING": "Waiting for provider",
     "RUNNING": "Running",
+    "INTERRUPTED": "Interrupted",
     "NEEDS_HUMAN": "Needs human",
     "APPROVED": "Approved",
     "CHANGES_REQUESTED": "Changes requested",
@@ -83,6 +87,7 @@ _CATEGORY_FOR_STATUS: dict[WorkflowStatus, str] = {
     WorkflowStatus.PENDING: "QUEUED",
     WorkflowStatus.WAITING: "WAITING",
     WorkflowStatus.RUNNING: "RUNNING",
+    WorkflowStatus.INTERRUPTED: "INTERRUPTED",
     WorkflowStatus.NEEDS_HUMAN: "NEEDS_HUMAN",
     WorkflowStatus.APPROVED: "APPROVED",
     WorkflowStatus.CHANGES_REQUESTED: "CHANGES_REQUESTED",
@@ -505,9 +510,7 @@ def persisted_row(
     """Build one row from durable storage: for history, restart, and refresh.
 
     An unlinked item is QUEUED. Provider capacity is transient and
-    process-local, so a persisted PENDING/WAITING row never claims an active
-    hold here: that would misrepresent work that will not resume on its own
-    after a restart.
+    process-local, so a persisted row never claims an active provider hold.
     """
 
     if item.execution_id is None:
@@ -570,7 +573,12 @@ def persisted_row(
         execution_id=item.execution_id,
         category=category_for_execution(execution),
         status_label=execution_status_label(execution),
-        stage_label=execution.current_stage.value.replace("_", " ").title(),
+        stage_label=(
+            "Resume from "
+            + (execution.resume_stage or execution.current_stage).value.replace("_", " ").title()
+            if execution.status is WorkflowStatus.INTERRUPTED
+            else execution.current_stage.value.replace("_", " ").title()
+        ),
         timeline=tuple(timeline),
         action=(
             "answer" if (

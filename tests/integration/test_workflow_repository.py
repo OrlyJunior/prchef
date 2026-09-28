@@ -29,6 +29,118 @@ from orchestrator.services.workflow_service import WorkflowService
 from orchestrator.workspace.manager import WorkspaceManager
 
 
+@pytest.mark.parametrize(
+    "prior_status", [WorkflowStatus.PENDING, WorkflowStatus.WAITING, WorkflowStatus.RUNNING]
+)
+def test_recover_interrupted_is_idempotent_and_cancellable(
+    tmp_path: Path, prior_status: WorkflowStatus
+) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'recovery.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    execution = repository.create_execution(f"task-{prior_status.value}")
+    completed = repository.start_step(execution.id, WorkflowStage.LOAD_TASK)
+    repository.finish_step(completed, StepStatus.SUCCEEDED)
+    repository.update_stage(execution.id, WorkflowStage.GENERATE_SPEC)
+    unfinished = repository.start_step(execution.id, WorkflowStage.GENERATE_SPEC)
+    repository.update_status(execution.id, prior_status)
+
+    recovered = repository.recover_interrupted()
+    assert [item.id for item in recovered] == [execution.id]
+    persisted = repository.get_execution(execution.id)
+    assert persisted.status is WorkflowStatus.INTERRUPTED
+    assert persisted.interrupted_from_status is prior_status
+    assert persisted.resume_stage is WorkflowStage.GENERATE_SPEC
+    assert repository.list_steps(execution.id)[-1].id == unfinished
+    assert repository.list_steps(execution.id)[-1].status is StepStatus.INTERRUPTED
+    assert repository.recover_interrupted() == []
+    assert repository.get_execution(execution.id).interrupted_from_status is prior_status
+
+    assert repository.request_cancellation(execution.id)
+    assert repository.get_execution(execution.id).status is WorkflowStatus.CANCELLED
+
+
+def test_recovery_uses_next_stage_after_completed_step(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'checkpoint.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    execution = repository.create_execution("queued-after-task")
+    repository.update_stage(execution.id, WorkflowStage.LOAD_TASK)
+    step = repository.start_step(execution.id, WorkflowStage.LOAD_TASK)
+    repository.finish_step(step, StepStatus.SUCCEEDED)
+    assert repository.get_execution(execution.id).resume_stage is WorkflowStage.LOAD_CONFIG
+    repository.recover_interrupted()
+    assert repository.get_execution(execution.id).resume_stage is WorkflowStage.LOAD_CONFIG
+
+
+def test_upgrade_recovers_legacy_active_execution(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'legacy-active.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "0010")
+    engine = build_engine(database_url)
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO workflow_executions "
+            "(id, task_source, task_id, task_url, trello_card_id, trello_card_url, "
+            "repository, repository_ref, base_branch, current_stage, status, "
+            "created_at, updated_at) VALUES "
+            "(:id, 'trello', 'legacy', '', 'legacy', '', '', '', '', "
+            "'LOAD_TASK', 'PENDING', :now, :now)"
+        ), {"id": "legacy-active", "now": now})
+    command.upgrade(alembic_config, "head")
+    repository = WorkflowRepository(build_session_factory(engine))
+    assert repository.recover_interrupted()[0].status is WorkflowStatus.INTERRUPTED
+    persisted = repository.get_execution("legacy-active")
+    assert persisted.interrupted_from_status is WorkflowStatus.PENDING
+    assert persisted.resume_stage is WorkflowStage.LOAD_TASK
+
+
+def test_interrupted_batch_link_keeps_its_position(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'batch-recovery.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    tasks = [DevelopmentTask(
+        id=str(index), source="trello", title=str(index), description="", url=""
+    )
+             for index in range(3)]
+    batch = repository.create_batch("repo", "trello", tasks)
+    execution = repository.create_execution("1")
+    repository.record_batch_item_execution(batch.id, 1, execution.id)
+    repository.recover_interrupted()
+    linked = repository.get_batch(batch.id)
+    assert [item.position for item in linked.items] == [0, 1, 2]
+    assert [item.execution_id for item in linked.items] == [None, execution.id, None]
+    repository.queue_interrupted(execution.id)
+    assert repository.get_batch(batch.id).items[1].execution_id == execution.id
+
+
 def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     tmp_path: Path,
 ) -> None:
