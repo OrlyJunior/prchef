@@ -633,7 +633,8 @@ class QdrantRepositoryContextStrategy:
                         ),
                         wait=True,
                     )
-            self._write_inventory(client, models, source_root_id, final_inventory)
+            if final_inventory != pending:
+                self._write_inventory(client, models, source_root_id, final_inventory)
             if record_success and source_root == self._configured_root:
                 self._check_cancellation()
                 self._record_success(client, models, source_root)
@@ -735,21 +736,24 @@ class QdrantRepositoryContextStrategy:
         if not expected:
             return {}, set()
         inventory = self._read_inventory(client, self._configured_path_id)
-        found = {
-            str(point.id): point for point in self._retrieve_ids(
-                client, (point_id for ids in expected.values() for point_id in ids),
-                with_vectors=True,
-            )
+        expected_fingerprints = {
+            point_id: fingerprint for ids in expected.values()
+            for point_id, fingerprint in ids.items()
         }
+        valid_ids: set[str] = set()
+        for point in self._retrieve_ids(client, expected_fingerprints, with_vectors=True):
+            point_id = str(point.id)
+            if (
+                self._valid_dense_vector(point)
+                and self._point_fingerprint(point_id, point.payload or {})
+                    == expected_fingerprints.get(point_id)
+            ):
+                valid_ids.add(point_id)
         valid_paths = {
             path for path, ids in expected.items()
             if set(inventory.get(path, [])) == set(ids)
             and all(
-                point_id in found
-                and self._valid_dense_vector(found[point_id])
-                and self._point_fingerprint(point_id, found[point_id].payload or {})
-                    == fingerprint
-                for point_id, fingerprint in ids.items()
+                point_id in valid_ids for point_id in ids
             )
         }
         return (
@@ -1132,12 +1136,18 @@ class QdrantRepositoryContextStrategy:
                         source_root, path, source_hashes[path]
                     ))
                 ids = {point_id for payloads in expected_payloads.values() for point_id in payloads}
-                found = {str(point.id): point for point in self._retrieve_ids(client, ids)}
-                if set(found) != ids or any(
-                    self._point_fingerprint(point_id, found[point_id].payload or {}) != fingerprint
-                    for payloads in expected_payloads.values()
+                fingerprints = {
+                    point_id: fingerprint for payloads in expected_payloads.values()
                     for point_id, fingerprint in payloads.items()
-                ):
+                }
+                verified: set[str] = set()
+                for point in self._retrieve_ids(client, ids):
+                    point_id = str(point.id)
+                    if self._point_fingerprint(point_id, point.payload or {}) == fingerprints.get(
+                        point_id
+                    ):
+                        verified.add(point_id)
+                if verified != ids:
                     raise RuntimeError("Checkout semantic index changed during retrieval")
             return sorted(
                 results,
@@ -1323,27 +1333,25 @@ class QdrantRepositoryContextStrategy:
 
     def _retrieve_ids(
         self, client: Any, ids: Iterable[str], *, with_vectors: bool = False
-    ) -> list[Any]:
+    ) -> Iterator[Any]:
         ordered = sorted(set(ids))
-        points: list[Any] = []
         for offset in range(0, len(ordered), _BATCH_SIZE):
             self._check_cancellation()
-            points.extend(client.retrieve(
+            yield from client.retrieve(
                 collection_name=self._collection_name,
                 ids=ordered[offset : offset + _BATCH_SIZE],
                 with_payload=True,
                 with_vectors=with_vectors,
-            ))
-        return points
+            )
 
     def _inventory_id(self, source_root_id: str) -> str:
         return str(uuid.uuid5(_INVENTORY_NAMESPACE, self._collection_name + source_root_id))
 
     def _read_inventory(self, client: Any, source_root_id: str) -> dict[str, list[str]]:
-        points = self._retrieve_ids(client, [self._inventory_id(source_root_id)])
-        if not points:
+        point = next(self._retrieve_ids(client, [self._inventory_id(source_root_id)]), None)
+        if point is None:
             return {}
-        payload = points[0].payload or {}
+        payload = point.payload or {}
         if (payload.get("kind") != "root_inventory"
             or payload.get("repository") != self._repository_key
             or payload.get("source_root_id") != source_root_id
@@ -1385,22 +1393,23 @@ class QdrantRepositoryContextStrategy:
     def _source_point_summaries(
         self, client: Any, inventory: dict[str, list[str]]
     ) -> dict[str, list[_PointSummary]]:
-        by_id = {
-            str(point.id): point for point in self._retrieve_ids(
-                client, (point_id for ids in inventory.values() for point_id in ids),
-                with_vectors=True,
+        by_id: dict[str, _PointSummary] = {}
+        for point in self._retrieve_ids(
+            client, (point_id for ids in inventory.values() for point_id in ids),
+            with_vectors=True,
+        ):
+            point_id = str(point.id)
+            by_id[point_id] = _PointSummary(
+                point_id,
+                self._point_fingerprint(point_id, point.payload or {}),
+                self._valid_dense_vector(point),
             )
-        }
         by_path: dict[str, list[_PointSummary]] = {}
         for path, ids in inventory.items():
             for point_id in ids:
                 point = by_id.get(point_id)
                 if point is not None:
-                    by_path.setdefault(path, []).append(_PointSummary(
-                        point_id,
-                        self._point_fingerprint(point_id, point.payload or {}),
-                        self._valid_dense_vector(point),
-                    ))
+                    by_path.setdefault(path, []).append(point)
         return by_path
 
     def _scroll_source_points(
@@ -1409,10 +1418,10 @@ class QdrantRepositoryContextStrategy:
         """Read inventoried source points by ID (name retained for callers)."""
 
         inventory = self._read_inventory(client, source_root_id)
-        return self._retrieve_ids(
+        return list(self._retrieve_ids(
             client, (point_id for ids in inventory.values() for point_id in ids),
             with_vectors=with_vectors,
-        )
+        ))
 
     def _scope_filter(
         self,

@@ -173,6 +173,24 @@ def test_local_index_persists_and_reuses_unchanged_files(tmp_path: Path) -> None
     assert reopened_embedding.document_texts == []
 
 
+def test_unchanged_index_does_not_rewrite_root_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    _repository(root, {"alpha.py": "alpha source"})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    strategy.build_index()
+    monkeypatch.setattr(
+        strategy, "_write_inventory",
+        lambda *args: pytest.fail("unchanged root inventory was rewritten"),
+    )
+
+    strategy.refresh_changed_files()
+
+
 def test_indexed_commit_inspection_does_not_scroll_points(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
