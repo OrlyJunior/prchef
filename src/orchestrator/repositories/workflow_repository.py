@@ -498,6 +498,21 @@ class WorkflowRepository:
             ).all()
             return [self._diagnostic_to_domain(entity) for entity in entities]
 
+    def list_diagnostics_after(
+        self, execution_id: str, after_id: int
+    ) -> list[ExecutionDiagnostic]:
+        """Read only diagnostics added after the displayed cursor."""
+        with self._sessions() as session:
+            entities = session.scalars(
+                select(ExecutionDiagnosticEntity)
+                .where(
+                    ExecutionDiagnosticEntity.workflow_execution_id == execution_id,
+                    ExecutionDiagnosticEntity.id > after_id,
+                )
+                .order_by(ExecutionDiagnosticEntity.id)
+            ).all()
+            return [self._diagnostic_to_domain(entity) for entity in entities]
+
     def request_human_input(
         self, execution_id: str, stage: WorkflowStage, prompt: str
     ) -> HumanInteraction:

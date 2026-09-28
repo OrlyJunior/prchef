@@ -158,6 +158,25 @@ class WorkflowController:
         self._execution_batches: dict[str, str] = {}
         self._index_operations: set[str] = set()
         self._index_operation_lock = threading.RLock()
+        self._detail_listeners: set[WorkflowEventListener] = set()
+        self._detail_listeners_lock = threading.RLock()
+
+    def subscribe_execution_events(self, listener: WorkflowEventListener) -> None:
+        with self._detail_listeners_lock:
+            self._detail_listeners.add(listener)
+
+    def unsubscribe_execution_events(self, listener: WorkflowEventListener) -> None:
+        with self._detail_listeners_lock:
+            self._detail_listeners.discard(listener)
+
+    def _notify_detail_listeners(self, event: WorkflowEvent) -> None:
+        with self._detail_listeners_lock:
+            listeners = tuple(self._detail_listeners)
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception:
+                logger.exception("Execution %s detail listener failed", event.execution_id)
 
     def repositories(self) -> list[ConfiguredRepository]:
         repositories = self._config_loader.list_repositories()
@@ -816,6 +835,7 @@ class WorkflowController:
                 self._active_services[event.execution_id] = service
             elif event.kind is WorkflowEventKind.WORKFLOW_FINISHED:
                 self._active_services.pop(event.execution_id, None)
+            self._notify_detail_listeners(event)
             if event_listener is not None:
                 event_listener(event)
 
@@ -975,6 +995,12 @@ class WorkflowController:
     def execution_diagnostics(self, execution_id: str) -> list[ExecutionDiagnostic]:
         method = getattr(self._repository, "list_diagnostics", None)
         return method(execution_id) if callable(method) else []
+
+    def execution_diagnostics_after(
+        self, execution_id: str, after_id: int
+    ) -> list[ExecutionDiagnostic]:
+        method = getattr(self._repository, "list_diagnostics_after", None)
+        return method(execution_id, after_id) if callable(method) else []
 
     def submit_response(
         self,
