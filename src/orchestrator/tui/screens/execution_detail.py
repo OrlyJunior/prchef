@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import webbrowser
 from dataclasses import asdict
 from typing import TYPE_CHECKING, cast
@@ -58,6 +59,8 @@ class ExecutionDetailScreen(Screen[None]):
         self._displayed_timeline: str | None = None
         self._interaction_id: int | None = None
         self._continuation_seeded = False
+        self._event_refresh_lock = threading.Lock()
+        self._event_refresh_queued = False
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="execution-detail"):
@@ -178,12 +181,25 @@ class ExecutionDetailScreen(Screen[None]):
             self.query_one(f"#{widget_id}").scroll_to(x=x, y=y, animate=False)
 
     def _observe_status(self, event: WorkflowEvent) -> None:
-        if event.execution_id == self.execution_id:
-            self.post_message(ExecutionDetailRefreshRequested())
+        if event.execution_id != self.execution_id:
+            return
+        with self._event_refresh_lock:
+            if self._event_refresh_queued:
+                return
+            self._event_refresh_queued = True
+        try:
+            if self.post_message(ExecutionDetailRefreshRequested()):
+                return
+        except Exception:
+            pass
+        with self._event_refresh_lock:
+            self._event_refresh_queued = False
 
     def on_execution_detail_refresh_requested(
         self, _event: ExecutionDetailRefreshRequested
     ) -> None:
+        with self._event_refresh_lock:
+            self._event_refresh_queued = False
         self._refresh_execution()
 
     def _append_diagnostics(self, diagnostics: list[ExecutionDiagnostic]) -> None:

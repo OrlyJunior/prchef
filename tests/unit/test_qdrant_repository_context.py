@@ -1080,16 +1080,71 @@ def test_content_cache_survives_snapshot_cleanup_and_reuses_across_path_and_ordi
             replace(_request(snapshot, "beta"), temporary_source=True)
         )
         assert embedding.document_texts == ["beta shared text"]
+        with strategy._session() as client:
+            cache = list(strategy._retrieve_ids(
+                client, [strategy._content_id("beta shared text")], with_vectors=True
+            ))
+            assert len(cache) == 1
+            assert "chunk_text" not in (cache[0].payload or {})
         (execution / "other.py").write_text("x" * 255 + "\nbeta shared text", encoding="utf-8")
         embedding.document_texts.clear()
         assert "beta shared text" in strategy.render(_request(execution, "beta"))
         assert "beta shared text" not in embedding.document_texts
+        strategy.delete_worktree_points(execution)
+        with strategy._session() as client:
+            cache = list(strategy._retrieve_ids(client, [
+                strategy._content_id("beta shared text")
+            ]))
+            assert len(cache) == 1
+            assert "chunk_text" not in (cache[0].payload or {})
     finally:
         for worktree in (snapshot, execution):
             subprocess.run(
                 ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
                 check=True, capture_output=True,
             )
+
+
+def test_worktree_cleanup_discards_legacy_text_bearing_cache(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    worktree = tmp_path / "execution"
+    _committed_repository(root, {"base.py": "alpha base source"})
+    strategy = QdrantRepositoryContextStrategy(
+        _settings(tmp_path / "index"), "repo", root,
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    strategy.build_index()
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+        check=True, capture_output=True,
+    )
+    try:
+        (worktree / "generated.py").write_text("beta generated source", encoding="utf-8")
+        assert "beta generated source" in strategy.render(_request(worktree, "beta"))
+        cache_id = strategy._content_id("beta generated source")
+        with strategy._session() as client:
+            client.set_payload(
+                collection_name=strategy.collection_name,
+                points=[cache_id],
+                payload={"chunk_text": "beta generated source"}, wait=True,
+            )
+            client.set_payload(
+                collection_name=strategy.collection_name,
+                points=["00000000-0000-0000-0000-000000000001"],
+                payload={"index_schema_version": 2}, wait=True,
+            )
+        strategy.delete_worktree_points(worktree)
+        with strategy._session() as client:
+            assert client.retrieve(
+                collection_name=strategy.collection_name, ids=[cache_id],
+                with_payload=True, with_vectors=False,
+            ) == []
+        assert strategy.build_index().state is IndexLifecycleState.READY
+    finally:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            check=True, capture_output=True,
+        )
 
 
 def test_snapshot_then_changed_root_embeds_only_unseen_text(tmp_path: Path) -> None:

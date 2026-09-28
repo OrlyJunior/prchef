@@ -56,8 +56,9 @@ and repository retrieval cover those.
   default for registered repositories, heuristic on semantic unavailability or explicit selection).
   Workflow services never import retrieval backends. Role files and this file are never indexed.
   Qdrant collections are repository-scoped; first retrieval builds the index. Linked roots never
-  update provenance. Exact text and embedding identity key reusable vectors across roots; root
-  inventories own source points, while vectors survive temporary cleanup. Schema changes rebuild.
+  update provenance. Text hashes and embedding identity key reusable vectors across roots; cache
+  vectors hold no source text and survive temporary cleanup. Root inventories own source points;
+  schema changes rebuild.
 - Every execution, response, and continuation enters through one submission seam. Scheduling
   features must use it rather than adding their own concurrency.
 - The TUI may launch one task or an ordered persisted batch. Batch policy, cancellation, and

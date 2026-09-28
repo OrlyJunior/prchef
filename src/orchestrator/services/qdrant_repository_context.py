@@ -45,7 +45,7 @@ from orchestrator.services.repository_documents import (
 )
 
 DENSE_VECTOR_NAME = "dense"
-INDEX_SCHEMA_VERSION = 2
+INDEX_SCHEMA_VERSION = 3
 _DISTANCE = "cosine"
 _METADATA_POINT_ID = "00000000-0000-0000-0000-000000000001"
 _CLEANUP_POINT_NAMESPACE = uuid.UUID("1c981b7d-98b6-4a2d-b995-3a271ac61d6c")
@@ -681,7 +681,6 @@ class QdrantRepositoryContextStrategy:
                 "embedding": self._embedding.identity.as_payload(),
                 "index_schema_version": INDEX_SCHEMA_VERSION,
                 "text_hash": hashlib.sha256(chunk_text.encode("utf-8")).hexdigest(),
-                "chunk_text": chunk_text,
             },
         ) for chunk_text in dict.fromkeys(chunk.text for chunk in chunks)]
         for offset in range(0, len(cache_points), _BATCH_SIZE):
@@ -848,7 +847,7 @@ class QdrantRepositoryContextStrategy:
                 and payload.get("index_schema_version") == INDEX_SCHEMA_VERSION
                 and payload.get("text_hash")
                     == hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
-                and payload.get("chunk_text") == chunk_text
+                and "chunk_text" not in payload
                 and self._valid_dense_vector(point)
             ):
                 found[chunk_text] = point.vector[DENSE_VECTOR_NAME]
@@ -875,6 +874,9 @@ class QdrantRepositoryContextStrategy:
         with self._session() as client:
             if not client.collection_exists(self._collection_name):
                 return
+            # Older cache points retained full source text outside root inventories.
+            # Rebuild an incompatible collection before a worktree can be removed.
+            self._ensure_compatible_collection(client, _qdrant_models())
             self._delete_source_points_with_client(client, source_root_id)
 
     def _delete_source_points_with_client(self, client: Any, source_root_id: str) -> None:

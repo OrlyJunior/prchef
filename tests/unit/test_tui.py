@@ -3592,6 +3592,11 @@ def test_execution_detail_matching_event_refreshes_durable_state(
             observe(WorkflowEvent("other", WorkflowEventKind.STATUS_CHANGED))
             await settle_tui(pilot)
             assert reads == []
+            for _ in range(8):
+                observe(WorkflowEvent(repository.execution.id, WorkflowEventKind.DIAGNOSTIC))
+            await settle_tui(pilot)
+            assert reads == [repository.execution.id]
+            reads.clear()
             repository.execution.status = WorkflowStatus.APPROVED
             observe(WorkflowEvent(repository.execution.id, WorkflowEventKind.WORKFLOW_FINISHED))
             await settle_tui(pilot)
