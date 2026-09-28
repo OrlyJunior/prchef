@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import EllipsisType
@@ -14,11 +15,12 @@ from typing import Any
 import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Button,
     Checkbox,
     Input,
+    Log,
     Select,
     SelectionList,
     Static,
@@ -331,7 +333,20 @@ class _Repository:
 
     def list_diagnostics(self, execution_id: str) -> list[ExecutionDiagnostic]:
         assert execution_id == self.execution.id
-        return self.diagnostics
+        return [
+            replace(diagnostic, id=diagnostic.id or index)
+            for index, diagnostic in enumerate(self.diagnostics, 1)
+        ]
+
+    def list_diagnostics_after(
+        self, execution_id: str, after_id: int
+    ) -> list[ExecutionDiagnostic]:
+        assert execution_id == self.execution.id
+        return [
+            replace(diagnostic, id=diagnostic.id or index)
+            for index, diagnostic in enumerate(self.diagnostics, 1)
+            if (diagnostic.id or index) > after_id
+        ]
 
     def request_cancellation(self, execution_id: str) -> bool:
         assert execution_id == self.execution.id
@@ -3499,6 +3514,154 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
     asyncio.run(drive())
 
 
+def test_execution_detail_reconciles_history_execution_and_new_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    execution = repository.execution
+    execution.status = WorkflowStatus.RUNNING
+    execution.current_stage = WorkflowStage.IMPLEMENT
+    steps = [WorkflowStep(
+        id=1,
+        workflow_execution_id=execution.id,
+        stage=WorkflowStage.IMPLEMENT,
+        status=StepStatus.RUNNING,
+        started_at=datetime.now(UTC),
+    )]
+    monkeypatch.setattr(repository, "list_steps", lambda _id: steps)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionHistoryScreen())
+            await settle_tui(pilot)
+            application.screen.query_one(
+                "#execution-picker", OrchestratorSelect
+            ).value = execution.id
+            application.screen.query_one("#inspect-execution", Button).press()
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ExecutionDetailScreen)
+            assert screen._reconcile_timer is not None
+            assert screen.query_one("#open-pr", Button).disabled
+            execution.current_stage = WorkflowStage.CREATE_PR
+            execution.pr_url = "https://example/pull/34"
+            steps[0].status = StepStatus.SUCCEEDED
+            steps[0].finished_at = datetime.now(UTC)
+            screen._refresh_execution()  # The same callback used by the two-second timer.
+            await settle_tui(pilot)
+            assert str(screen.query_one("#execution-stage", Static).renderable) == (
+                "Stage: CREATE_PR"
+            )
+            assert "Changes implemented" in str(
+                screen.query_one("#execution-timeline", Static).renderable
+            )
+            assert not screen.query_one("#open-pr", Button).disabled
+            assert screen._links["open-pr"] == execution.pr_url
+            execution.status = WorkflowStatus.APPROVED
+            screen._refresh_execution()
+            assert screen._reconcile_timer is None
+
+    asyncio.run(drive())
+
+
+def test_execution_detail_matching_event_refreshes_durable_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.RUNNING
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ExecutionDetailScreen)
+            assert screen._reconcile_timer is not None
+            screen._reconcile_timer.stop()  # Keep this event test independent of timer timing.
+            reads: list[str] = []
+            original = controller.execution_detail
+
+            def read(execution_id: str) -> tuple[WorkflowExecution, list[WorkflowStep]]:
+                reads.append(execution_id)
+                return original(execution_id)
+
+            monkeypatch.setattr(controller, "execution_detail", read)
+            observe = controller._tracking_listener(service, None)  # type: ignore[arg-type]
+            observe(WorkflowEvent("other", WorkflowEventKind.STATUS_CHANGED))
+            await settle_tui(pilot)
+            assert reads == []
+            repository.execution.status = WorkflowStatus.APPROVED
+            observe(WorkflowEvent(repository.execution.id, WorkflowEventKind.WORKFLOW_FINISHED))
+            await settle_tui(pilot)
+            assert reads == [repository.execution.id]
+            assert screen._reconcile_timer is None
+            assert str(screen.query_one("#execution-status", Static).renderable) == "APPROVED"
+
+    asyncio.run(drive())
+
+
+def test_execution_detail_observer_failure_does_not_affect_workflow(tmp_path: Path) -> None:
+    controller, service, _ = _controller(tmp_path)
+
+    def broken(_event: WorkflowEvent) -> None:
+        raise RuntimeError("detached UI callback")
+
+    controller.subscribe_execution_events(broken)
+    observed: list[WorkflowEventKind] = []
+    controller._tracking_listener(  # type: ignore[arg-type]
+        service, lambda event: observed.append(event.kind)
+    )(WorkflowEvent("execution-1", WorkflowEventKind.STATUS_CHANGED))
+    controller.unsubscribe_execution_events(broken)
+    assert observed == [WorkflowEventKind.STATUS_CHANGED]
+
+
+def test_execution_detail_reopens_persisted_waiting_and_human_timeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    execution = repository.execution
+    execution.status = WorkflowStatus.WAITING
+    execution.current_stage = WorkflowStage.GENERATE_SPEC
+    started = datetime.now(UTC)
+    steps = [WorkflowStep(
+        id=1,
+        workflow_execution_id=execution.id,
+        stage=WorkflowStage.GENERATE_SPEC,
+        status=StepStatus.RUNNING,
+        started_at=started,
+    )]
+    monkeypatch.setattr(repository, "list_steps", lambda _id: steps)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(execution.id))
+            await settle_tui(pilot)
+            timeline = str(application.screen.query_one("#execution-timeline", Static).renderable)
+            assert "Generating specification" in timeline
+            assert "Waiting for agent capacity" in timeline
+            await pilot.press("escape")
+            steps[0].status = StepStatus.SUCCEEDED
+            steps[0].finished_at = datetime.now(UTC)
+            execution.status = WorkflowStatus.NEEDS_HUMAN
+            execution.human_interactions = [HumanInteraction(
+                id=1,
+                workflow_execution_id=execution.id,
+                requesting_stage=WorkflowStage.GENERATE_SPEC,
+                prompt="Clarify the task",
+                requested_at=datetime.now(UTC),
+            )]
+            application.push_screen(ExecutionDetailScreen(execution.id))
+            await settle_tui(pilot)
+            timeline = str(application.screen.query_one("#execution-timeline", Static).renderable)
+            assert "Generating specification — waiting for human input" in timeline
+            assert "Waiting for human input" in timeline
+
+    asyncio.run(drive())
+
+
 @pytest.mark.parametrize(("width", "maximum_rows"), [(80, 2), (36, 6)])
 def test_execution_detail_actions_reflow_without_diagnostic_overflow(
     tmp_path: Path, width: int, maximum_rows: int, monkeypatch: pytest.MonkeyPatch
@@ -3539,7 +3702,7 @@ def test_execution_detail_actions_reflow_without_diagnostic_overflow(
             assert all(button.display and not button.disabled for button in buttons)
             assert len({button.virtual_region.y for button in buttons}) <= maximum_rows
             assert screen.query_one("#execution-detail", VerticalScroll).max_scroll_x == 0
-            content = screen.query_one("#execution-content-scroll", ScrollableContainer)
+            content = screen.query_one("#execution-detailed-logs", Log)
             assert content.max_scroll_x > 0
 
             for button in buttons:
@@ -3588,12 +3751,12 @@ def test_execution_detail_open_and_refresh_do_not_fetch_task_or_context(
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
             await settle_tui(pilot)
             screen = application.screen
-            content = screen.query_one("#execution-content", Static)
-            assert long_payload in str(content.renderable)
-            assert screen.query_one("#execution-content-scroll").max_scroll_x > 0
+            content = screen.query_one("#execution-detailed-logs", Log)
+            assert long_payload in str(content.lines)
+            assert content.max_scroll_x > 0
             screen._refresh_execution()
             await settle_tui(pilot)
-            assert long_payload in str(content.renderable)
+            assert long_payload in str(content.lines)
 
     asyncio.run(drive())
 
@@ -3670,7 +3833,7 @@ def test_execution_detail_cancel_is_visible_and_keyboard_reachable_with_long_dia
             assert 0 <= cancel.region.x < cancel.region.right <= application.size.width
             assert 0 <= cancel.region.y < cancel.region.bottom <= application.size.height
             assert screen.query_one("#execution-detail", VerticalScroll).max_scroll_x == 0
-            content = screen.query_one("#execution-content-scroll", ScrollableContainer)
+            content = screen.query_one("#execution-detailed-logs", Log)
             assert content.max_scroll_x > 0
 
             for _ in range(12):
@@ -3719,7 +3882,7 @@ def test_execution_detail_actions_and_diagnostics_stay_bounded_in_narrow_termina
             await settle_tui(pilot)
             screen = application.screen
             page = screen.query_one("#execution-detail", VerticalScroll)
-            content = screen.query_one("#execution-content-scroll", ScrollableContainer)
+            content = screen.query_one("#execution-detailed-logs", Log)
             assert page.max_scroll_x == 0
             assert page.max_scroll_y > 0
             assert content.max_scroll_x > 0
@@ -3805,9 +3968,9 @@ def test_execution_detail_confirms_durable_cancellation_and_refreshes(
             assert screen.query_one("#execution-cancel", Button).display is False
             if expected_status == "CANCELLATION REQUESTED":
                 repository.execution.status = WorkflowStatus.CANCELLED
-                screen._poll_cancellation()
+                screen._refresh_execution()
                 assert str(screen.query_one("#execution-status", Static).renderable) == "CANCELLED"
-                assert screen._cancellation_timer is None
+                assert screen._reconcile_timer is None
 
     asyncio.run(drive())
 
@@ -3826,15 +3989,15 @@ def test_execution_detail_observes_requested_cancellation_settling(
             await settle_tui(pilot)
             screen = application.screen
             assert isinstance(screen, ExecutionDetailScreen)
-            assert screen._cancellation_timer is not None
+            assert screen._reconcile_timer is not None
             assert str(screen.query_one("#execution-status", Static).renderable) == (
                 "CANCELLATION REQUESTED"
             )
 
             repository.execution.status = WorkflowStatus.CANCELLED
-            screen._poll_cancellation()
+            screen._refresh_execution()
             assert str(screen.query_one("#execution-status", Static).renderable) == "CANCELLED"
-            assert screen._cancellation_timer is None
+            assert screen._reconcile_timer is None
             assert not screen.query_one("#execution-cancel", Button).display
 
     asyncio.run(drive())
@@ -4032,7 +4195,7 @@ def test_execution_detail_continuation_feedback_is_readable_beside_long_details(
             assert 0 <= button.region.x < button.region.right <= application.size.width
             assert 0 <= button.region.y < button.region.bottom <= application.size.height
             assert screen.query_one("#execution-detail", VerticalScroll).max_scroll_x == 0
-            content = screen.query_one("#execution-content-scroll", ScrollableContainer)
+            content = screen.query_one("#execution-detailed-logs", Log)
             assert content.max_scroll_x > 0
 
     asyncio.run(drive())
@@ -4054,6 +4217,11 @@ def test_execution_detail_offers_editable_terminal_continuation(tmp_path: Path) 
             assert feedback.display is True
             assert feedback.text == "Persisted terminal feedback"
             feedback.text = "Edited continuation feedback"
+            feedback.focus()
+            screen._refresh_execution()
+            await settle_tui(pilot)
+            assert feedback.text == "Edited continuation feedback"
+            assert application.focused is feedback
             screen.query_one("#execution-continue", Button).press()
             await wait_for_tui(pilot, lambda: bool(service.continuations))
 
@@ -4158,6 +4326,8 @@ def test_execution_detail_refreshes_after_in_place_submission(
             expected = "QUEUED" if live_batch else "APPROVED"
             await wait_for_tui(pilot, lambda: str(status.renderable) == expected)
             assert application.screen is screen
+            if live_batch:
+                assert screen._reconcile_timer is not None
             if live_batch:
                 assert listeners
                 assert run.generations[0] == 1
@@ -4446,7 +4616,7 @@ def test_execution_detail_copies_all_persisted_detailed_logs(
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
             await settle_tui(pilot)
             screen = application.screen
-            detailed_logs = str(screen.query_one("#execution-content").renderable)
+            detailed_logs = str(screen.query_one("#execution-detailed-logs", Log).lines)
             assert detailed_logs.count("implement the requested change") == 1
             copy_button = screen.query_one("#copy-detailed-logs-button", Button)
             assert not copy_button.disabled
@@ -4455,11 +4625,87 @@ def test_execution_detail_copies_all_persisted_detailed_logs(
 
     asyncio.run(drive())
 
-    assert copied == [format_diagnostics_for_export(repository.diagnostics)]
+    assert copied == [
+        format_diagnostics_for_export(controller.execution_diagnostics(repository.execution.id))
+    ]
     assert "=== REQUEST ===" in copied[0]
     assert "=== RESPONSE ===" in copied[0]
     assert "response line 399" in copied[0]
     assert copied[0].count("implement the requested change") == 1
+
+
+def test_execution_detail_appends_only_new_diagnostics_and_preserves_ui_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    execution = repository.execution
+    execution.status = WorkflowStatus.NEEDS_HUMAN
+    execution.human_interactions = [HumanInteraction(
+        id=1,
+        workflow_execution_id=execution.id,
+        requesting_stage=WorkflowStage.GENERATE_SPEC,
+        prompt="Clarify the task",
+        requested_at=datetime.now(UTC),
+    )]
+    repository.diagnostics = [ExecutionDiagnostic(
+        execution_id=execution.id,
+        category=DiagnosticCategory.RESPONSE,
+        payload={"output": "old" * 200},
+    )]
+    application = OrchestratorApp(controller)
+    copied: list[str] = []
+    monkeypatch.setattr(application, "copy_to_clipboard", copied.append)
+
+    async def drive() -> None:
+        async with application.run_test(size=(36, 14)) as pilot:
+            application.push_screen(ExecutionDetailScreen(execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ExecutionDetailScreen)
+            response = screen.query_one("#execution-human-response", TextArea)
+            response.text = "My edited answer"
+            response.focus()
+            page = screen.query_one("#execution-detail", VerticalScroll)
+            log = screen.query_one("#execution-detailed-logs", Log)
+            page.scroll_to(y=page.max_scroll_y, animate=False)
+            log.scroll_to(x=log.max_scroll_x, animate=False)
+            await settle_tui(pilot)
+            page_y, log_x = page.scroll_y, log.scroll_x
+            lines_before = len(log.lines)
+
+            def no_full_read(_id: str) -> list[ExecutionDiagnostic]:
+                raise AssertionError("Periodic refresh must not read full diagnostics")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(repository, "list_diagnostics", no_full_read)
+                repository.diagnostics.append(ExecutionDiagnostic(
+                    execution_id=execution.id,
+                    category=DiagnosticCategory.RESPONSE,
+                    payload={"output": "new"},
+                ))
+                screen._refresh_execution()
+                await settle_tui(pilot)
+                assert len(log.lines) > lines_before
+                appended_lines = len(log.lines)
+                screen._refresh_execution()
+                await settle_tui(pilot)
+                assert len(log.lines) == appended_lines
+            assert response.text == "My edited answer"
+            assert application.focused is response
+            assert page.scroll_y == page_y
+            assert log.scroll_x == log_x
+            screen.query_one("#execution-toggle-logs", Button).press()
+            await settle_tui(pilot)
+            assert not log.display
+            screen._refresh_execution()
+            await settle_tui(pilot)
+            assert not log.display
+            screen.query_one("#copy-detailed-logs-button", Button).press()
+            await settle_tui(pilot)
+            assert "new" in copied[0]
+            assert "old" in copied[0]
+
+    asyncio.run(drive())
 
 
 def test_execution_detail_reports_clipboard_failures_without_crashing(

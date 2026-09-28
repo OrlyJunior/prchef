@@ -210,6 +210,48 @@ def test_execution_diagnostics_are_redacted_and_available_after_repository_resta
     assert diagnostics[0].payload["stderr"] == "Authorization=[REDACTED] [REDACTED]"
 
 
+def test_diagnostic_cursor_reads_new_rows_in_id_order_after_restart(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'cursor.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    first = repository.create_execution("first")
+    other = repository.create_execution("other")
+
+    def record(execution_id: str, number: int) -> ExecutionDiagnostic:
+        return repository.record_diagnostic(
+            ExecutionDiagnostic(
+                execution_id=execution_id,
+                category=DiagnosticCategory.WORKFLOW_EVENT,
+                payload={"number": number},
+            )
+        )
+
+    one = record(first.id, 1)
+    record(other.id, 99)
+    two = record(first.id, 2)
+    restarted = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    three = restarted.record_diagnostic(
+        ExecutionDiagnostic(
+            execution_id=first.id,
+            category=DiagnosticCategory.WORKFLOW_EVENT,
+            payload={"number": 3},
+        )
+    )
+    assert [item.id for item in restarted.list_diagnostics_after(first.id, 0)] == [
+        one.id, two.id, three.id
+    ]
+    assert [item.id for item in restarted.list_diagnostics_after(first.id, one.id or 0)] == [
+        two.id, three.id
+    ]
+    assert restarted.list_diagnostics_after(first.id, three.id or 0) == []
+
+
 def test_migration_backfills_common_identity_for_existing_trello_execution(
     tmp_path: Path,
 ) -> None:
