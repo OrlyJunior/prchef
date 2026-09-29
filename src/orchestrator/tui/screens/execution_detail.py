@@ -97,7 +97,7 @@ class ExecutionDetailScreen(Screen[None]):
                 )
             with ScrollableContainer(id="execution-content-scroll"):
                 yield Static("Loading execution…", id="execution-content", markup=False)
-            yield Button("Hide detailed logs", id="execution-toggle-logs")
+            yield Button("Show detailed logs", id="execution-toggle-logs")
             yield Log(id="execution-detailed-logs", auto_scroll=False)
 
     @property
@@ -155,6 +155,11 @@ class ExecutionDetailScreen(Screen[None]):
                 return
             steps = self._last_steps
         self._render_execution(execution, steps)
+        if log.display:
+            self._refresh_diagnostics()
+        self.call_after_refresh(self._restore_scroll, offsets)
+
+    def _refresh_diagnostics(self) -> None:
         try:
             diagnostics = (
                 self.controller.execution_diagnostics(self.execution_id)
@@ -167,7 +172,6 @@ class ExecutionDetailScreen(Screen[None]):
             self._diagnostics_loaded = True
         except Exception:
             pass  # A later tick retries the same cursor.
-        self.call_after_refresh(self._restore_scroll, offsets)
 
     def _restore_scroll(
         self, offsets: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
@@ -217,6 +221,8 @@ class ExecutionDetailScreen(Screen[None]):
             log.write_line(rendered)
             if diagnostic.id is not None:
                 self._diagnostic_cursor = diagnostic.id
+        if diagnostics:
+            log.refresh(layout=True)
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         self.query_one("#execution-detail", VerticalScroll).scroll_to_widget(
@@ -248,6 +254,8 @@ class ExecutionDetailScreen(Screen[None]):
             log = self.query_one("#execution-detailed-logs", Log)
             log.display = not log.display
             event.button.label = "Hide detailed logs" if log.display else "Show detailed logs"
+            if log.display:
+                self._refresh_diagnostics()
             return
         url = self._links.get(event.button.id or "")
         if not url:
@@ -428,7 +436,11 @@ class ExecutionDetailScreen(Screen[None]):
             feedback = self.query_one("#execution-continuation-feedback", TextArea)
             role = "planner" if continuation_stage is WorkflowStage.GENERATE_SPEC else "implementer"
             self.query_one("#execution-continuation-title", Static).update(
-                f"Edit the feedback sent to a fresh {role} invocation:"
+                f"Instructions for the {role} (sent when you click Continue Execution)."
+                + (
+                    " Work resumes in the existing worktree without repeating earlier steps."
+                    if continuation_stage is WorkflowStage.IMPLEMENT else ""
+                )
             )
             try:
                 feedback.text = self.controller.continuation_feedback(execution.id)

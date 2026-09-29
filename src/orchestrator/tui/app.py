@@ -143,16 +143,22 @@ class OrchestratorApp(App[None]):
     #execution-content-scroll {
         width: 100%;
         min-width: 0;
-        height: 12;
+        height: auto;
         overflow-x: auto;
-        overflow-y: auto;
+        overflow-y: hidden;
         margin-top: 1;
     }
     #execution-content { width: auto; height: auto; }
     #execution-timeline { width: 100%; height: auto; margin-top: 1; }
     #execution-stage { width: 100%; height: auto; }
     #execution-toggle-logs { width: auto; margin-top: 1; }
-    #execution-detailed-logs { width: 100%; height: 12; overflow-x: auto; }
+    #execution-detailed-logs {
+        display: none;
+        width: 100%;
+        height: auto;
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
     .navigation-actions {
         width: 100%;
         height: auto;
