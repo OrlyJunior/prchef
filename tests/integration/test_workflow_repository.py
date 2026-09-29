@@ -89,6 +89,72 @@ def test_recovery_uses_next_stage_after_completed_step(tmp_path: Path) -> None:
     assert repository.get_execution(execution.id).resume_stage is WorkflowStage.LOAD_CONFIG
 
 
+def test_legacy_polish_and_completed_polish_push_keep_recoverable_checkpoints(
+    tmp_path: Path,
+) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'polish-recovery.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+
+    legacy = repository.create_execution("legacy-polish")
+    repository.update_stage(legacy.id, WorkflowStage.POLISH)
+    repository.start_step(legacy.id, WorkflowStage.POLISH)
+    repository.update_status(legacy.id, WorkflowStatus.RUNNING)
+
+    between = repository.create_execution("legacy-before-polish")
+    review_step = repository.start_step(between.id, WorkflowStage.REVIEW)
+    repository.finish_step(review_step, StepStatus.SUCCEEDED)
+    repository.update_stage(between.id, WorkflowStage.POLISH)
+    repository.update_status(between.id, WorkflowStatus.RUNNING)
+
+    pushed = repository.create_execution("pushed-polish")
+    repository.set_resume_mode(pushed.id, "POLISH")
+    push_step = repository.start_step(pushed.id, WorkflowStage.PUSH)
+    repository.finish_step(push_step, StepStatus.SUCCEEDED)
+    repository.update_status(pushed.id, WorkflowStatus.RUNNING)
+    assert repository.get_execution(pushed.id).resume_stage is WorkflowStage.REVIEW
+
+    repository.recover_interrupted()
+    assert repository.get_execution(legacy.id).resume_mode == "POLISH"
+    assert repository.get_execution(legacy.id).resume_stage is WorkflowStage.POLISH
+    assert repository.get_execution(between.id).resume_stage is WorkflowStage.POLISH
+    assert repository.get_execution(between.id).resume_mode == "POLISH"
+    assert repository.get_execution(pushed.id).resume_stage is WorkflowStage.REVIEW
+
+
+def test_pending_execution_persists_selected_runtime_in_creation_transaction(
+    tmp_path: Path,
+) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'runtime-admission.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+
+    execution = repository.create_execution(
+        "selected-provider",
+        runtime_overrides={
+            "kind": "RUNTIME_OVERRIDES_APPLIED",
+            "provider_overrides": {"planner": "selected"},
+            "runtime_overrides": {"planner": {"model": "selected-model"}},
+        },
+    )
+    repository.recover_interrupted()
+    persisted = repository.list_diagnostics(execution.id)
+    assert len(persisted) == 1
+    assert persisted[0].payload["provider_overrides"] == {"planner": "selected"}
+
+
 def test_review_output_records_the_step_that_produced_it(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]
     database_url = f"sqlite:///{(tmp_path / 'review-provenance.db').as_posix()}"

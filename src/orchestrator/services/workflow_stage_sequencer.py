@@ -557,7 +557,9 @@ class StageSequencer:
                 return self._repository.reinterrupt(
                     execution.id, "Persisted human answer is missing"
                 )
-            return self._execute_response(execution, interaction, interaction.response)
+            return self._execute_response(
+                execution, interaction, interaction.response, recovering=True
+            )
         try:
             if stage is WorkflowStage.LOAD_TASK:
                 providers, options = self._lifecycle._runtime_overrides_for_execution(execution.id)
@@ -715,10 +717,12 @@ class StageSequencer:
                         before_push=lambda: self._actions._assert_pull_request_open(
                             execution_clients, repository_slug, pr.number
                         ),
-                        restart_stage=stage, recovering=True,
+                        restart_stage=(
+                            WorkflowStage.REVIEW if stage is WorkflowStage.CREATE_PR else stage
+                        ), recovering=True,
                     )
                     stage = WorkflowStage.REVIEW
-            if execution.resume_mode == "POLISH":
+            if execution.resume_mode == "POLISH" or stage is WorkflowStage.POLISH:
                 outcome = self._resume_optional_polish(
                     execution, stage, task, spec, config, clients,
                     repository_slug, workspace_path, branch,
@@ -820,6 +824,10 @@ class StageSequencer:
                 ),
             )
             return outcome
+        if stage is WorkflowStage.CREATE_PR:
+            # Older checkpoints used the ordinary PUSH successor even inside
+            # optional polish, which updates an existing PR.
+            stage = WorkflowStage.REVIEW
         if stage not in {
             WorkflowStage.VALIDATE, WorkflowStage.COMMIT,
             WorkflowStage.PUSH, WorkflowStage.REVIEW,
@@ -968,6 +976,7 @@ class StageSequencer:
                 "Cannot resume review: the persisted workspace or branch is missing"
             )
         workspace_path = Path(execution.workspace_path)
+        assert_worktree_idle(workspace_path)
         if not workspace_path.is_dir():
             raise WorkflowError(f"Cannot resume review: workspace is unavailable: {workspace_path}")
         if not execution.spec_snapshot or not execution.pull_request_snapshot:
@@ -1325,13 +1334,12 @@ class StageSequencer:
         execution: WorkflowExecution,
         interaction: HumanInteraction,
         response: str,
+        *,
+        recovering: bool = False,
     ) -> WorkflowExecution:
         execution_id = execution.id
         try:
             self._lifecycle._start_admitted(execution_id)
-            clear_mode = getattr(self._repository, "set_resume_mode", None)
-            if callable(clear_mode):
-                clear_mode(execution_id, None)
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, None)
         config: ProjectConfig | None = None
@@ -1360,6 +1368,9 @@ class StageSequencer:
                     (interaction.prompt, interaction.response or response.strip()),
                 ],
             )
+            clear_mode = getattr(self._repository, "set_resume_mode", None)
+            if callable(clear_mode):
+                clear_mode(execution_id, None)
             if interaction.requesting_stage is WorkflowStage.GENERATE_SPEC:
                 return self._resume_planning(
                     execution,
@@ -1368,6 +1379,7 @@ class StageSequencer:
                     clients,
                     repository_slug,
                     repository_context_strategy,
+                    recovering=recovering,
                 )
             if interaction.requesting_stage is WorkflowStage.REVIEW:
                 return self._resume_review(
@@ -1390,6 +1402,8 @@ class StageSequencer:
                 execution_id, interaction.requesting_stage, str(exc), config
             )
         except Exception as exc:
+            if recovering:
+                return self._repository.reinterrupt(execution_id, str(exc))
             self._repository.record_error(execution_id, str(exc))
             self._lifecycle._record_quota_failure(execution_id, exc)
             return self._lifecycle._finish(execution_id, WorkflowStatus.FAILED, config)

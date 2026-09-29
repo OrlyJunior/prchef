@@ -102,7 +102,15 @@ class StageActions:
             ReviewDecision.NEEDS_HUMAN: "COMMENT",
         }[review.result]
         body = format_pull_request_review(review)
+        review_step_id = self._repository.get_execution(execution_id).review_step_id
+        if review_step_id is not None:
+            body += f"\n\n<!-- orchestrator-review:{execution_id}:{review_step_id} -->"
         try:
+            if reconcile and review_step_id is None:
+                raise WorkflowError(
+                    "Cannot identify the interrupted review attempt; inspect the pull request "
+                    "before retrying"
+                )
             if reconcile and execution_clients.github.review_already_published(
                 repository_slug, pull_request_number, event, body
             ):

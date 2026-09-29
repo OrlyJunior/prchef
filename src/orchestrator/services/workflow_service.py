@@ -31,7 +31,10 @@ from orchestrator.services.repository_context import resolve_repository_context_
 from orchestrator.services.task_provider import TaskProvider
 from orchestrator.services.workflow_agent_runtime import WorkflowAgentRuntime
 from orchestrator.services.workflow_correction_policy import CorrectionPolicy
-from orchestrator.services.workflow_execution_lifecycle import ExecutionLifecycle
+from orchestrator.services.workflow_execution_lifecycle import (
+    _RUNTIME_OVERRIDES_DIAGNOSTIC_KIND,
+    ExecutionLifecycle,
+)
 from orchestrator.services.workflow_stage_actions import StageActions
 from orchestrator.services.workflow_stage_events import ExecutionRuntimes, StageEvents
 from orchestrator.services.workflow_stage_sequencer import StageSequencer
@@ -224,6 +227,12 @@ class WorkflowService:
                 repository_ref = self._repository.inferred_repository_for_task(
                     self._task_provider.source, task_id, historical_aliases
                 )
+        provider_overrides = {
+            role.value: provider for role, provider in (agent_providers or {}).items()
+        }
+        runtime_overrides = {
+            role.value: dict(options) for role, options in (agent_runtime_options or {}).items()
+        }
         if isinstance(self._repository, WorkflowRepository):
             aliases: tuple[str, ...] = ()
             if repository_ref and isinstance(self._config_loader, ProjectConfigLoader):
@@ -237,19 +246,20 @@ class WorkflowService:
                 task_source=self._task_provider.source,
                 repository_ref=repository_ref,
                 repository_aliases=aliases,
+                runtime_overrides={
+                    "kind": _RUNTIME_OVERRIDES_DIAGNOSTIC_KIND,
+                    "provider_overrides": provider_overrides,
+                    "runtime_overrides": runtime_overrides,
+                },
             )
         else:
             execution = self._repository.create_execution(
                 task_id, task_source=self._task_provider.source
             )
-        provider_overrides = {
-            role.value: provider for role, provider in (agent_providers or {}).items()
-        }
-        runtime_overrides = {
-            role.value: dict(options) for role, options in (agent_runtime_options or {}).items()
-        }
         override_error: WorkflowError | None = None
-        if provider_overrides or runtime_overrides:
+        if (provider_overrides or runtime_overrides) and not isinstance(
+            self._repository, WorkflowRepository
+        ):
             try:
                 self._lifecycle._record_runtime_overrides(
                     execution.id, provider_overrides, runtime_overrides

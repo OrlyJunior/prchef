@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import selectors
 import shutil
 import signal
 import subprocess
@@ -34,7 +35,9 @@ _PROCESS_GROUP_POLL_SECONDS = 0.05
 _SUPERVISOR_SCRIPT = Path(__file__).with_name("process_supervisor.py")
 _SUPERVISOR_STOPPED = "stopped"
 _SUPERVISOR_SPAWN_ERROR = "spawn-error"
+_SUPERVISOR_COMPLETED = "completed"
 _active_commands: dict[subprocess.Popen[str], _Containment | None] = {}
+_retained_supervisors: dict[subprocess.Popen[str], _TreeSupervisor] = {}
 _active_lock = threading.RLock()
 _stopping = False
 
@@ -44,24 +47,51 @@ def interrupt_active_commands() -> None:
     global _stopping
     with _active_lock:
         _stopping = True
-        active = tuple(_active_commands.items())
+        active = (*_active_commands.items(), *_retained_supervisors.items())
+        _retained_supervisors.clear()
     for process, containment in active:
         _terminate_process_tree(process, containment)
     deadline = time.monotonic() + _POST_KILL_DRAIN_SECONDS
-    for process, _ in active:
+    for process, containment in active:
         while process.poll() is None and time.monotonic() < deadline:
             time.sleep(_PROCESS_GROUP_POLL_SECONDS)
         if process.poll() is None:
             logger.warning("[command] Command %s did not stop during app exit", process.pid)
+        if isinstance(containment, _TreeSupervisor):
+            containment.close()
     if sys.platform == "win32":
         WindowsJob.close_retained()
 
 
 def assert_worktree_idle(workspace: Path) -> None:
-    """Refuse Linux recovery while a prior command still occupies its worktree."""
-    if sys.platform != "linux" or not workspace.exists():
+    """Refuse recovery while a prior command still occupies its worktree."""
+    if not workspace.exists():
         return
     root = workspace.resolve()
+    if sys.platform == "darwin":
+        try:
+            inspected = subprocess.run(
+                ["lsof", "-nP", "-t", "+D", str(root)],
+                capture_output=True, text=True, timeout=_TASKKILL_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CommandExecutionError(
+                "Cannot inspect retained worktree processes; retry after lsof is available"
+            ) from exc
+        if inspected.returncode not in (0, 1) or inspected.stderr.strip():
+            raise CommandExecutionError("Cannot verify retained worktree is idle")
+        active = {
+            int(line) for line in inspected.stdout.splitlines() if line.isdecimal()
+        } - {os.getpid()}
+        if active:
+            raise CommandExecutionError(
+                f"Process {min(active)} is still using the retained worktree; "
+                "wait for it to stop before retrying"
+            )
+        return
+    if sys.platform != "linux":
+        return
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
             continue
@@ -94,11 +124,96 @@ class _ProcessTreeSurvivedError(Exception):
 
 
 class _TreeSupervisor:
-    """The orchestrator's side of a Linux command launched under ``process_supervisor.py``."""
+    """The orchestrator's side of a POSIX command launched under ``process_supervisor.py``."""
 
     def __init__(self, status_fd: int) -> None:
         self._status_fd: int | None = status_fd
         self._status: list[str] | None = None
+        self._status_buffer = bytearray()
+        self._stdout = bytearray()
+        self._stderr = bytearray()
+        self._completed_code: int | None = None
+
+    @property
+    def completed_code(self) -> int | None:
+        return self._completed_code
+
+    def communicate(
+        self, process: subprocess.Popen[str], input_text: str | None, timeout: float,
+    ) -> tuple[str, str]:
+        """Collect output until the command completes, even if its supervisor stays alive."""
+        deadline = time.monotonic() + timeout
+        pending_input = memoryview(input_text.encode("utf-8") if input_text else b"")
+        with selectors.DefaultSelector() as selector:
+            streams = ((process.stdout, self._stdout), (process.stderr, self._stderr))
+            for stream, target in streams:
+                if stream is not None and not stream.closed:
+                    selector.register(stream, selectors.EVENT_READ, target)
+            if self._status_fd is not None:
+                selector.register(self._status_fd, selectors.EVENT_READ, "status")
+            if process.stdin is not None and not process.stdin.closed:
+                if pending_input:
+                    # Windows stubs omit this POSIX API; supervisors run only on POSIX.
+                    getattr(os, "set_blocking")(process.stdin.fileno(), False)  # noqa: B009
+                    selector.register(process.stdin, selectors.EVENT_WRITE, "input")
+                else:
+                    process.stdin.close()
+            while True:
+                process.poll()
+                outputs_closed = all(
+                    stream is None or stream.closed for stream, _ in streams
+                )
+                if outputs_closed and (
+                    self._completed_code is not None
+                    or process.returncode is not None
+                ):
+                    return (self._stdout.decode("utf-8", errors="replace"),
+                            self._stderr.decode("utf-8", errors="replace"))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(
+                        process.args, timeout, output=bytes(self._stdout),
+                        stderr=bytes(self._stderr),
+                    )
+                for key, _ in selector.select(min(remaining, _PROCESS_GROUP_POLL_SECONDS)):
+                    if key.data == "input":
+                        try:
+                            written = os.write(key.fd, pending_input[:65536])
+                        except BlockingIOError:
+                            continue
+                        except BrokenPipeError:
+                            written = len(pending_input)
+                        pending_input = pending_input[written:]
+                        if not pending_input:
+                            selector.unregister(key.fileobj)
+                            if process.stdin is not None:
+                                process.stdin.close()
+                    elif key.data == "status":
+                        chunk = os.read(key.fd, 4096)
+                        if not chunk:
+                            selector.unregister(key.fd)
+                            self.close()
+                        else:
+                            self._status_buffer.extend(chunk)
+                            while b"\n" in self._status_buffer:
+                                line, _, rest = self._status_buffer.partition(b"\n")
+                                self._status_buffer = bytearray(rest)
+                                decoded = line.decode("ascii", errors="replace")
+                                if self._status is None:
+                                    self._status = []
+                                self._status.append(decoded)
+                                prefix, _, value = decoded.partition(" ")
+                                if prefix == _SUPERVISOR_COMPLETED:
+                                    self._completed_code = int(value)
+                    else:
+                        chunk = os.read(key.fd, 65536)
+                        if chunk:
+                            key.data.extend(chunk)
+                        else:
+                            selector.unregister(key.fileobj)
+                            stream = process.stdout if key.data is self._stdout else process.stderr
+                            if stream is not None:
+                                stream.close()
 
     def request_stop(self, process: subprocess.Popen[str]) -> None:
         # Never kill the supervisor itself: that would release descendants it still contains.
@@ -166,7 +281,7 @@ def _popen(
 
 def _can_supervise(command: Sequence[str]) -> bool:
     return (
-        sys.platform == "linux"
+        sys.platform in {"linux", "darwin"}
         and bool(command)
         and bool(sys.executable)
         and _SUPERVISOR_SCRIPT.is_file()
@@ -182,12 +297,9 @@ def _start_process(
 ) -> tuple[subprocess.Popen[str], _Containment | None]:
     """Launch a command so that its whole process tree can later be killed.
 
-    Windows commands start suspended inside a job object, so every descendant is contained before
-    the command can launch one. Linux commands run under ``process_supervisor.py``, a child
-    subreaper that keeps every descendant killable, even one that left the process group with
-    ``setsid``. Other POSIX commands, such as on macOS, only lead their own session and process
-    group, whose members are killed and awaited as a group while this process is alive.
-    Abrupt parent termination there cannot contain descendants that leave the group.
+    Windows commands start suspended inside a job object. POSIX commands run under
+    ``process_supervisor.py``. Linux uses a child subreaper; macOS tracks descendants
+    and checks retained worktrees before recovery.
     """
     if sys.platform == "win32":
         return _start_in_job(command, cwd=cwd, input_text=input_text, env=env)
@@ -385,6 +497,10 @@ def _run_process(
     """
     process, containment = _start_process(command, cwd=cwd, input_text=input_text, env=env)
     with _active_lock:
+        for prior, supervisor in tuple(_retained_supervisors.items()):
+            if prior.poll() is not None:
+                supervisor.close()
+                _retained_supervisors.pop(prior)
         if _stopping:
             _terminate_process_tree(process, containment)
             _reap_interrupted_process(process)
@@ -393,14 +509,33 @@ def _run_process(
             raise CommandInterruptedError("Application is closing")
         _active_commands[process] = containment
     try:
-        stdout, stderr = process.communicate(input_text, timeout=timeout_seconds)
+        if isinstance(containment, _TreeSupervisor):
+            stdout, stderr = containment.communicate(process, input_text, timeout_seconds)
+        else:
+            stdout, stderr = process.communicate(input_text, timeout=timeout_seconds)
         if _stopping:
             raise CommandInterruptedError("Application is closing")
         if isinstance(containment, _TreeSupervisor):
             containment.raise_spawn_error(process, command)
+        command_returncode = (
+            containment.completed_code
+            if isinstance(containment, _TreeSupervisor)
+            and containment.completed_code is not None else process.returncode
+        )
     except subprocess.TimeoutExpired:
         stopped = _terminate_process_tree(process, containment)
-        partial_stdout, partial_stderr, drained = _drain_terminated_process(process)
+        partial_stdout: bytes | str | None
+        partial_stderr: bytes | str | None
+        if isinstance(containment, _TreeSupervisor):
+            try:
+                partial_stdout, partial_stderr = containment.communicate(
+                    process, None, _POST_KILL_DRAIN_SECONDS
+                )
+                drained = True
+            except subprocess.TimeoutExpired as exc:
+                partial_stdout, partial_stderr, drained = exc.stdout, exc.stderr, False
+        else:
+            partial_stdout, partial_stderr, drained = _drain_terminated_process(process)
         if not (stopped and drained and _stop_confirmed(process, containment)):
             raise _ProcessTreeSurvivedError from None
         raise subprocess.TimeoutExpired(
@@ -413,9 +548,17 @@ def _run_process(
     finally:
         with _active_lock:
             _active_commands.pop(process, None)
+            if (
+                isinstance(containment, _TreeSupervisor)
+                and containment.completed_code is not None
+                and process.poll() is None
+                and not _stopping
+            ):
+                _retained_supervisors[process] = containment
+                containment = None
         if containment is not None:
             containment.close()
-    return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)
+    return subprocess.CompletedProcess(list(command), command_returncode, stdout, stderr)
 
 
 def _reap_interrupted_process(process: subprocess.Popen[str]) -> None:

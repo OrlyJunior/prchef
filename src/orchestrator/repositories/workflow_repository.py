@@ -126,6 +126,7 @@ class WorkflowRepository:
         self, task_id: str, task_source: str = "trello", *,
         repository_ref: str | None = None,
         repository_aliases: Sequence[str] = (),
+        runtime_overrides: dict[str, Any] | None = None,
     ) -> WorkflowExecution:
         if repository_ref == "":
             raise ValueError("Repository reference must be non-empty when provided")
@@ -181,6 +182,20 @@ class WorkflowRepository:
                 updated_at=now,
             )
             session.add(entity)
+            if runtime_overrides is not None:
+                selected = json.loads(json.dumps(runtime_overrides, ensure_ascii=False,
+                                                 default=str))
+                redacted = json.loads(json.dumps(redact_payload(runtime_overrides),
+                                                 ensure_ascii=False, default=str))
+                if redacted != selected:
+                    raise ValueError("Selected agent runtime overrides cannot be stored losslessly")
+                session.add(ExecutionDiagnosticEntity(
+                    workflow_execution_id=entity.id,
+                    category=DiagnosticCategory.WORKFLOW_EVENT.value,
+                    stage=WorkflowStage.LOAD_CONFIG.value,
+                    payload_json=json.dumps(selected, ensure_ascii=False),
+                    occurred_at=now,
+                ))
             # Build the detached domain object while the session is still
             # available.  The execution's interactions relationship is lazy
             # loaded and a newly committed entity is expired on session exit.
@@ -419,6 +434,17 @@ class WorkflowRepository:
                         entity.resume_stage = (
                             latest_step.stage if latest_step is not None else entity.current_stage
                         )
+                if (entity.current_stage == WorkflowStage.POLISH.value
+                        and latest_step is not None
+                        and latest_step.stage == WorkflowStage.REVIEW.value
+                        and latest_step.status == StepStatus.SUCCEEDED.value):
+                    entity.resume_stage = WorkflowStage.POLISH.value
+                if (
+                    entity.resume_mode is None
+                    and (entity.resume_stage == WorkflowStage.POLISH.value
+                         or entity.current_stage == WorkflowStage.POLISH.value)
+                ):
+                    entity.resume_mode = "POLISH"
                 entity.status = WorkflowStatus.INTERRUPTED.value
                 entity.updated_at = now
                 for step in entity.steps:
@@ -815,8 +841,13 @@ class WorkflowRepository:
                 return
             if status is StepStatus.SUCCEEDED:
                 if execution is not None:
-                    execution.resume_stage = _NEXT_STAGE.get(WorkflowStage(entity.stage),
-                                                             WorkflowStage(entity.stage)).value
+                    if execution.resume_mode in {
+                        "POLISH", "REVIEW_CORRECTION", "REVIEW_VALIDATION_CORRECTION"
+                    } and entity.stage == WorkflowStage.PUSH.value:
+                        execution.resume_stage = WorkflowStage.REVIEW.value
+                    else:
+                        execution.resume_stage = _NEXT_STAGE.get(WorkflowStage(entity.stage),
+                                                                 WorkflowStage(entity.stage)).value
 
     def get_execution(self, execution_id: str) -> WorkflowExecution:
         with self._sessions() as session:
