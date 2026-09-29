@@ -22,6 +22,7 @@ from orchestrator.services.implementation_service import ImplementationService
 from orchestrator.services.validation_service import ValidationService
 from orchestrator.services.workflow_stage_actions import StageActions
 from orchestrator.services.workflow_stage_events import StageEvents
+from orchestrator.services.workflow_stage_values import StageValues
 
 logger = logging.getLogger("orchestrator.services.workflow_service")
 
@@ -41,6 +42,17 @@ class CorrectionPolicy:
         self._repository = repository
         self._events = events
         self._actions = actions
+
+    def _set_resume_mode(
+        self, execution_id: str, mode: str | None, attempt: int | None = None
+    ) -> None:
+        setter = getattr(self._repository, "set_resume_mode", None)
+        if callable(setter):
+            setter(execution_id, mode, attempt=attempt)
+
+    def _persisted_execution(self, execution_id: str) -> Any:
+        getter = getattr(self._repository, "get_execution", None)
+        return getter(execution_id) if callable(getter) else None
 
     @staticmethod
     def _review_retry_available(review: CodeReview, attempted: int, config: ProjectConfig) -> bool:
@@ -64,6 +76,8 @@ class CorrectionPolicy:
         attempt: int,
         log_retry: bool = False,
         before_push: Callable[[], None] | None = None,
+        restart_stage: WorkflowStage = WorkflowStage.IMPLEMENT,
+        recovering: bool = False,
     ) -> ValidationResult:
         if log_retry:
             logger.info(
@@ -71,33 +85,72 @@ class CorrectionPolicy:
                 attempt,
                 config.review.max_review_retries,
             )
-        with self._events._step(execution_id, WorkflowStage.IMPLEMENT):
-            implementation = implementation_service.correct_review_findings(
-                task,
-                spec,
-                review,
-                workspace_path,
-                instructions_repository_path=config.path,
+        mode = getattr(self._persisted_execution(execution_id), "resume_mode", None)
+        if mode != "REVIEW_VALIDATION_CORRECTION":
+            self._set_resume_mode(execution_id, "REVIEW_CORRECTION", attempt)
+        order = {
+            WorkflowStage.IMPLEMENT: 0, WorkflowStage.VALIDATE: 1,
+            WorkflowStage.COMMIT: 2, WorkflowStage.PUSH: 3,
+            WorkflowStage.REVIEW: 4,
+        }
+        offset = order[restart_stage]
+        if offset <= 0:
+            with self._events._step(execution_id, WorkflowStage.IMPLEMENT):
+                if mode == "REVIEW_VALIDATION_CORRECTION":
+                    validation_failed = StageValues._validation_from_snapshot(
+                        self._repository.get_execution(execution_id).validation_snapshot
+                    )
+                    implementation = implementation_service.correct_validation_failures(
+                        task, spec, validation_failed, workspace_path,
+                        instructions_repository_path=config.path,
+                    )
+                else:
+                    implementation = implementation_service.correct_review_findings(
+                        task, spec, review, workspace_path,
+                        instructions_repository_path=config.path,
+                    )
+                self._repository.record_implementation(execution_id, implementation)
+                if not implementation.success:
+                    raise WorkflowError(
+                        implementation.error_message or "Review correction provider failed"
+                    )
+        if offset <= 1:
+            validation = self._validate_with_corrections(
+                execution_id=execution_id,
+                execution_clients=execution_clients,
+                implementation_service=implementation_service,
+                task=task, spec=spec, workspace_path=workspace_path, config=config,
+                initial_attempt=(
+                    self._persisted_execution(execution_id).validation_retry_attempt
+                    if recovering else 0
+                ),
             )
-            self._repository.record_implementation(execution_id, implementation)
-            if not implementation.success:
-                raise WorkflowError(
-                    implementation.error_message or "Review correction provider failed"
+        else:
+            validation = StageValues._validation_from_snapshot(
+                self._repository.get_execution(execution_id).validation_snapshot
+            )
+        if offset <= 2:
+            if recovering:
+                self._actions._commit_changes(
+                    execution_id, execution_clients, task, working_branch, config,
+                    reconcile=True,
                 )
-        validation = self._validate_with_corrections(
-            execution_id=execution_id,
-            execution_clients=execution_clients,
-            implementation_service=implementation_service,
-            task=task,
-            spec=spec,
-            workspace_path=workspace_path,
-            config=config,
-        )
-        self._actions._commit_changes(execution_id, execution_clients, task, working_branch, config)
-        with self._events._step(execution_id, WorkflowStage.PUSH):
-            if before_push is not None:
-                before_push()
-            execution_clients.git.push(working_branch, config.repository.protected_branches)
+            else:
+                self._actions._commit_changes(
+                    execution_id, execution_clients, task, working_branch, config,
+                )
+        if offset <= 3:
+            with self._events._step(execution_id, WorkflowStage.PUSH):
+                if before_push is not None:
+                    before_push()
+                if not recovering or (
+                    execution_clients.git.remote_branch_commit(working_branch)
+                    != execution_clients.git.head_commit()
+                ):
+                    execution_clients.git.push(
+                        working_branch, config.repository.protected_branches
+                    )
+        self._set_resume_mode(execution_id, None)
         return validation
 
     def _validate_with_corrections(
@@ -110,8 +163,9 @@ class CorrectionPolicy:
         spec: RepositorySpec,
         workspace_path: Path,
         config: ProjectConfig,
+        initial_attempt: int = 0,
     ) -> ValidationResult:
-        validation_attempt = 0
+        validation_attempt = initial_attempt
         while True:
             try:
                 with self._events._step(execution_id, WorkflowStage.VALIDATE):
@@ -144,6 +198,16 @@ class CorrectionPolicy:
                 if validation_attempt >= config.validation.max_validation_retries:
                     raise WorkflowError(str(exc)) from exc
                 validation_attempt += 1
+                previous_mode = getattr(
+                    self._persisted_execution(execution_id), "resume_mode", None
+                )
+                self._set_resume_mode(
+                    execution_id,
+                    "REVIEW_VALIDATION_CORRECTION"
+                    if previous_mode in {"REVIEW_CORRECTION", "REVIEW_VALIDATION_CORRECTION"}
+                    else "VALIDATION_CORRECTION",
+                    validation_attempt,
+                )
                 logger.info(
                     "[workflow] Validation failed; requesting implementation correction %s/%s",
                     validation_attempt,
@@ -164,6 +228,11 @@ class CorrectionPolicy:
                             or "Implementation correction provider failed"
                         ) from exc
                 continue
+            current = self._persisted_execution(execution_id)
+            if getattr(current, "resume_mode", None) == "VALIDATION_CORRECTION":
+                self._set_resume_mode(execution_id, None)
+            elif getattr(current, "resume_mode", None) == "REVIEW_VALIDATION_CORRECTION":
+                self._set_resume_mode(execution_id, "REVIEW_CORRECTION")
             return validation
 
     def _validate_polish_changes(
@@ -232,6 +301,8 @@ class CorrectionPolicy:
         if persisted is not None and not force:
             return persisted, None
 
+        self._set_resume_mode(execution_id, "POLISH")
+
         with self._events._step(execution_id, WorkflowStage.POLISH):
             implementation = implementation_service.run_polish_pass(
                 task,
@@ -255,6 +326,7 @@ class CorrectionPolicy:
                     "The optional polish pass did not complete safely, so no changes were applied."
                 ),
             )
+            self._set_resume_mode(execution_id, None)
             return PolishOutcome.SKIPPED, None
 
         if not implementation.changed_files:
@@ -265,6 +337,7 @@ class CorrectionPolicy:
                 pull_request_number=pull_request.number,
                 implementation=implementation,
             )
+            self._set_resume_mode(execution_id, None)
             return PolishOutcome.SKIPPED, None
 
         validation = self._validate_polish_changes(
@@ -283,6 +356,7 @@ class CorrectionPolicy:
                     "The optional changes did not pass validation, so no changes were applied."
                 ),
             )
+            self._set_resume_mode(execution_id, None)
             return PolishOutcome.SKIPPED, None
 
         self._actions._commit_changes(execution_id, execution_clients, task, working_branch, config)
@@ -292,6 +366,7 @@ class CorrectionPolicy:
             execution_clients.git.push(working_branch, config.repository.protected_branches)
 
         self._repository.record_polish_outcome(execution_id, PolishOutcome.APPLIED)
+        self._set_resume_mode(execution_id, None)
         return PolishOutcome.APPLIED, validation
 
     @staticmethod

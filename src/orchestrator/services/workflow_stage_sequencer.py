@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from orchestrator.clients.command_client import assert_worktree_idle
 from orchestrator.clients.exceptions import (
     CommandExecutionError,
     CommandProcessTreeUnconfirmedError,
@@ -17,15 +18,19 @@ from orchestrator.config.project_config import (
     ProjectConfigLoader,
 )
 from orchestrator.models.agent import AgentRole
+from orchestrator.models.code_review import CodeReview
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.execution_diagnostic import DiagnosticCategory
 from orchestrator.models.human_interaction import HumanInteraction
+from orchestrator.models.implementation_result import ImplementationResult
 from orchestrator.models.pull_request import PullRequest
 from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.workflow_execution import WorkflowExecution
+from orchestrator.models.workflow_interruption import WorkflowInterruptedError
 from orchestrator.models.workflow_status import (
     PolishOutcome,
     ReviewDecision,
+    StepStatus,
     WorkflowStage,
     WorkflowStatus,
 )
@@ -227,6 +232,7 @@ class StageSequencer:
         runtime_overrides: Mapping[str, Mapping[str, object]],
         admission_task: DevelopmentTask | None = None,
         admission_error: Exception | None = None,
+        recovering: bool = False,
     ) -> WorkflowExecution:
         """Run a workflow using the same persisted transitions used by the CLI."""
 
@@ -245,7 +251,11 @@ class StageSequencer:
                 # the repository being executed.
                 if admission_error is not None:
                     raise admission_error
-                task = admission_task or self._task_provider.get_task(task_id)
+                task = (
+                    StageValues._task_from_snapshot(execution)
+                    if recovering and execution.task_snapshot
+                    else admission_task or self._task_provider.get_task(task_id)
+                )
                 self._repository.update_task(execution.id, task)
 
             with self._events._step(execution.id, WorkflowStage.LOAD_CONFIG):
@@ -254,9 +264,6 @@ class StageSequencer:
                     config = config.with_agent_runtime_overrides(
                         provider_overrides,
                         runtime_overrides,
-                    )
-                    self._lifecycle._record_runtime_overrides(
-                        execution.id, provider_overrides, runtime_overrides
                     )
                 self._repository.update_project(
                     execution.id,
@@ -271,8 +278,13 @@ class StageSequencer:
                 )
                 clients = self._client_factory.create(config)
                 repository_slug = clients.git.github_repository()
-                base_commit = clients.git.fetch_base(config.repository.base_branch)
-                self._repository.record_base_commit(execution.id, base_commit)
+                base_commit = (
+                    execution.base_commit
+                    if recovering and execution.base_commit
+                    else clients.git.fetch_base(config.repository.base_branch)
+                )
+                if base_commit != execution.base_commit:
+                    self._repository.record_base_commit(execution.id, base_commit)
                 repository_context_strategy = self._repository_context_strategy(
                     config, execution.id
                 )
@@ -491,6 +503,8 @@ class StageSequencer:
                     execution.id, WorkflowStage.REVIEW, StageValues._review_prompt(review)
                 )
             return self._lifecycle._finish(execution.id, final_status, config)
+        except WorkflowInterruptedError as exc:
+            return self._repository.reinterrupt(execution.id, str(exc))
         except WorkflowCancelledError:
             result = self._lifecycle._finish(execution.id, WorkflowStatus.CANCELLED, config)
             if workspace_path is not None:
@@ -500,6 +514,8 @@ class StageSequencer:
                 )
             return result
         except ConfigurationError as exc:
+            if recovering:
+                return self._repository.reinterrupt(execution.id, str(exc))
             return self._lifecycle._pause_for_human(
                 execution.id,
                 self._repository.get_execution(execution.id).current_stage,
@@ -507,6 +523,8 @@ class StageSequencer:
                 config,
             )
         except AgentNeedsHumanError as exc:
+            if recovering:
+                return self._repository.reinterrupt(execution.id, str(exc))
             stage = self._repository.get_execution(execution.id).current_stage
             result = self._lifecycle._pause_for_human(execution.id, stage, str(exc), config)
             if workspace_path is not None:
@@ -516,6 +534,8 @@ class StageSequencer:
                 )
             return result
         except Exception as exc:
+            if recovering:
+                return self._repository.reinterrupt(execution.id, str(exc))
             self._repository.record_error(execution.id, str(exc))
             self._lifecycle._record_quota_failure(execution.id, exc)
             result = self._lifecycle._finish(execution.id, WorkflowStatus.FAILED, config)
@@ -525,6 +545,352 @@ class StageSequencer:
                 )
             return result
 
+    def _execute_interrupted(self, execution: WorkflowExecution) -> WorkflowExecution:
+        """Restart at the persisted stage without creating a second execution."""
+        stage = execution.resume_stage or execution.current_stage
+        if execution.resume_mode == "HUMAN_RESPONSE":
+            interaction = next(
+                (item for item in reversed(execution.human_interactions) if item.response),
+                None,
+            )
+            if interaction is None or not interaction.response:
+                return self._repository.reinterrupt(
+                    execution.id, "Persisted human answer is missing"
+                )
+            return self._execute_response(
+                execution, interaction, interaction.response, recovering=True
+            )
+        try:
+            if stage is WorkflowStage.LOAD_TASK:
+                providers, options = self._lifecycle._runtime_overrides_for_execution(execution.id)
+                return self._execute_workflow(
+                    execution, execution.task_id, execution.repository_ref or None,
+                    providers, options,
+                    recovering=True,
+                )
+            self._lifecycle._start_admitted(execution.id)
+            task = StageValues._task_from_snapshot(execution)
+            answered = [(item.prompt, item.response) for item in execution.human_interactions
+                        if item.response]
+            if answered:
+                task = StageValues._task_with_responses(task, answered)
+            repository_ref = execution.repository_ref or execution.repository or None
+            config = self._config_loader.load(task, repository_ref)
+            providers, options = self._lifecycle._runtime_overrides_for_execution(execution.id)
+            if providers or options:
+                config = config.with_agent_runtime_overrides(providers, options)
+            clients = self._client_factory.create(config)
+            repository_slug = clients.git.github_repository()
+            context = self._repository_context_strategy(config, execution.id)
+            continuation_feedback: str | None = None
+            if execution.resume_mode == "MANUAL_CONTINUATION":
+                for diagnostic in reversed(self._repository.list_diagnostics(execution.id)):
+                    if diagnostic.payload.get("kind") == "MANUAL_CONTINUATION":
+                        value = diagnostic.payload.get("feedback")
+                        if isinstance(value, str) and value.strip():
+                            continuation_feedback = value
+                        break
+                if continuation_feedback is None:
+                    raise WorkflowError("Persisted continuation feedback is missing")
+            if stage is WorkflowStage.LOAD_CONFIG:
+                with self._events._step(execution.id, WorkflowStage.LOAD_CONFIG):
+                    self._repository.update_project(
+                        execution.id, str(config.path), config.repository.base_branch,
+                        repository_ref or str(config.path),
+                    )
+                    if not execution.base_commit:
+                        base_commit = clients.git.fetch_base(config.repository.base_branch)
+                        self._repository.record_base_commit(execution.id, base_commit)
+                execution = self._repository.get_execution(execution.id)
+                stage = WorkflowStage.GENERATE_SPEC
+            if stage is WorkflowStage.GENERATE_SPEC:
+                if not execution.base_commit:
+                    raise WorkflowError("Cannot resume planning: fetched base commit is missing")
+                if continuation_feedback is not None:
+                    task = StageValues._task_with_responses(
+                        task,
+                        [("Continuation feedback for repeating planning:",
+                          continuation_feedback)],
+                    )
+                return self._resume_planning(
+                    execution, task, config, clients, repository_slug, context,
+                    recovering=True,
+                )
+            if not execution.spec_snapshot:
+                raise WorkflowError("Cannot resume: persisted repository spec is missing")
+            spec = RepositorySpec(**execution.spec_snapshot)
+            if stage is WorkflowStage.PREPARE_BRANCH and spec.has_blocking_ambiguity:
+                return self._lifecycle._pause_for_human(
+                    execution.id, WorkflowStage.GENERATE_SPEC,
+                    StageValues._planner_prompt(spec), config,
+                )
+            if continuation_feedback is not None and stage is not WorkflowStage.IMPLEMENT:
+                self._repository.set_resume_mode(execution.id, None)
+                continuation_feedback = None
+            branch = execution.working_branch or StageValues._branch_name(
+                config.repository.branch_prefix, task.id, task.title, execution.id
+            )
+            manager = WorkspaceManager(clients.git, config.path, config.workspace)
+            workspace_path = manager.workspace_path(execution.id)
+            assert_worktree_idle(workspace_path)
+            if (
+                execution.workspace_path
+                and Path(execution.workspace_path).resolve() != workspace_path
+            ):
+                raise WorkflowError("Cannot resume: persisted workspace path changed")
+            if stage is WorkflowStage.PREPARE_BRANCH:
+                with self._events._step(execution.id, WorkflowStage.PREPARE_BRANCH):
+                    self._repository.record_workspace(execution.id, str(workspace_path))
+                    if not workspace_path.exists():
+                        if clients.git.branch_exists(branch):
+                            if not execution.base_commit:
+                                raise WorkflowError(
+                                    "Cannot verify retained branch without base commit"
+                                )
+                            clients.git.attach_existing_worktree(
+                                workspace_path, branch, execution.base_commit
+                            )
+                        else:
+                            manager.create(
+                                execution.id, config.repository.base_branch, branch,
+                                config.repository.protected_branches, execution.base_commit,
+                            )
+                    clients.git.at_path(workspace_path).verify_worktree_branch(branch, None)
+                    self._repository.record_branch(execution.id, branch)
+                stage = WorkflowStage.IMPLEMENT
+            else:
+                if not execution.workspace_path or not execution.working_branch:
+                    raise WorkflowError("Cannot resume: retained workspace or branch is missing")
+                if not workspace_path.is_dir():
+                    raise WorkflowError(
+                        f"Cannot resume: workspace is unavailable: {workspace_path}"
+                    )
+                clients.git.at_path(workspace_path).verify_worktree_branch(branch, None)
+            if execution.base_commit:
+                clients.git.at_path(workspace_path).ensure_merge_base(execution.base_commit)
+            if execution.resume_mode in {
+                "VALIDATION_CORRECTION", "REVIEW_CORRECTION",
+                "REVIEW_VALIDATION_CORRECTION",
+            }:
+                execution_clients = clients.at_path(workspace_path)
+                implementer = ImplementationService(
+                    self._agents._diagnostic_agent(
+                        execution_clients.agent(AgentRole.IMPLEMENTER),
+                        config, AgentRole.IMPLEMENTER, execution.id,
+                    ),
+                    execution_clients.git,
+                    self._context_truncation_callback(execution.id),
+                )
+                if execution.resume_mode == "VALIDATION_CORRECTION":
+                    if stage is WorkflowStage.IMPLEMENT:
+                        failed = StageValues._validation_from_snapshot(
+                            execution.validation_snapshot
+                        )
+                        with self._events._step(execution.id, WorkflowStage.IMPLEMENT):
+                            result = implementer.correct_validation_failures(
+                                task, spec, failed, workspace_path,
+                                instructions_repository_path=config.path,
+                            )
+                            self._repository.record_implementation(execution.id, result)
+                            if not result.success:
+                                raise WorkflowError(
+                                    result.error_message or "Validation correction failed"
+                                )
+                        stage = WorkflowStage.VALIDATE
+                else:
+                    if not execution.review_snapshot or not execution.pull_request_snapshot:
+                        raise WorkflowError(
+                            "Cannot resume review correction: review or PR is missing"
+                        )
+                    review = CodeReview(**{
+                        **execution.review_snapshot,
+                        "result": ReviewDecision(execution.review_snapshot["result"]),
+                    })
+                    pr = PullRequest(**execution.pull_request_snapshot)
+                    self._corrections._correct_review_findings(
+                        execution_id=execution.id,
+                        execution_clients=execution_clients,
+                        implementation_service=implementer,
+                        task=task, spec=spec, review=review,
+                        workspace_path=workspace_path, working_branch=branch,
+                        config=config, attempt=execution.review_retry_attempt,
+                        before_push=lambda: self._actions._assert_pull_request_open(
+                            execution_clients, repository_slug, pr.number
+                        ),
+                        restart_stage=(
+                            WorkflowStage.REVIEW if stage is WorkflowStage.CREATE_PR else stage
+                        ), recovering=True,
+                    )
+                    stage = WorkflowStage.REVIEW
+            if execution.resume_mode == "POLISH" or stage is WorkflowStage.POLISH:
+                outcome = self._resume_optional_polish(
+                    execution, stage, task, spec, config, clients,
+                    repository_slug, workspace_path, branch,
+                )
+                if outcome is PolishOutcome.SKIPPED:
+                    return self._lifecycle._finish(
+                        execution.id, WorkflowStatus.APPROVED, config
+                    )
+                stage = WorkflowStage.REVIEW
+            steps = self._repository.list_steps(execution.id)
+            last_step = steps[-1] if steps else None
+            interrupted_review = (
+                stage is WorkflowStage.REVIEW
+                and last_step is not None
+                and last_step.stage is WorkflowStage.REVIEW
+                and last_step.status is StepStatus.INTERRUPTED
+            )
+            if interrupted_review and last_step is not None and execution.review_snapshot:
+                if execution.review_step_id is not None:
+                    reuse_review = execution.review_step_id == last_step.id
+                elif execution.review_publication_pending:
+                    # Rows written before review provenance was added still
+                    # carry the durable publication checkpoint.
+                    reuse_review = True
+                elif any(
+                    item.stage is WorkflowStage.REVIEW
+                    and item.status is StepStatus.SUCCEEDED
+                    for item in steps[:-1]
+                ):
+                    reuse_review = False
+                else:
+                    raise WorkflowError(
+                        "Cannot verify which review output belongs to the interrupted "
+                        "review attempt; inspect the pull request before retrying"
+                    )
+            else:
+                reuse_review = (
+                    stage is WorkflowStage.REVIEW
+                    and last_step is not None
+                    and last_step.stage is WorkflowStage.REVIEW
+                    and last_step.status is StepStatus.SUCCEEDED
+                    and bool(execution.review_snapshot)
+                    and not any(
+                        item.response and item.requesting_stage is WorkflowStage.REVIEW
+                        and item.responded_at and item.responded_at >= last_step.started_at
+                        for item in execution.human_interactions
+                    )
+                )
+            return self._implement_and_review(
+                execution.id, task, spec, config, clients, repository_slug,
+                workspace_path, branch, context, restart_stage=stage, recovering=True,
+                reuse_review=reuse_review,
+                continuation_feedback=continuation_feedback,
+                force_polish=continuation_feedback is not None,
+            )
+        except WorkflowCancelledError:
+            return self._lifecycle._finish(execution.id, WorkflowStatus.CANCELLED, None)
+        except Exception as exc:
+            return self._repository.reinterrupt(execution.id, str(exc))
+
+    def _resume_optional_polish(
+        self, execution: WorkflowExecution, stage: WorkflowStage,
+        task: DevelopmentTask, spec: RepositorySpec, config: ProjectConfig,
+        clients: WorkflowClients, repository_slug: str, workspace_path: Path,
+        branch: str,
+    ) -> PolishOutcome:
+        if not execution.review_snapshot or not execution.pull_request_snapshot:
+            raise WorkflowError("Cannot resume polish: review or pull request is missing")
+        review = CodeReview(**{
+            **execution.review_snapshot,
+            "result": ReviewDecision(execution.review_snapshot["result"]),
+        })
+        if review.result is not ReviewDecision.APPROVED:
+            raise WorkflowError("Cannot resume polish: retained review was not approved")
+        pull_request = PullRequest(**execution.pull_request_snapshot)
+        execution_clients = clients.at_path(workspace_path)
+        self._actions._assert_pull_request_open(
+            execution_clients, repository_slug, pull_request.number
+        )
+        implementation_service = ImplementationService(
+            self._agents._diagnostic_agent(
+                execution_clients.agent(AgentRole.IMPLEMENTER),
+                config, AgentRole.IMPLEMENTER, execution.id,
+            ), execution_clients.git, self._context_truncation_callback(execution.id),
+        )
+        if execution.polish_outcome is not None:
+            self._repository.set_resume_mode(execution.id, None)
+            return execution.polish_outcome
+        if stage is WorkflowStage.POLISH:
+            outcome, _ = self._corrections._evaluate_optional_polish(
+                execution_id=execution.id,
+                execution_clients=execution_clients,
+                implementation_service=implementation_service,
+                task=task, spec=spec, suggestions=review.suggestions,
+                workspace_path=workspace_path, pull_request=pull_request,
+                working_branch=branch, config=config,
+                before_push=lambda: self._actions._assert_pull_request_open(
+                    execution_clients, repository_slug, pull_request.number
+                ),
+            )
+            return outcome
+        if stage is WorkflowStage.CREATE_PR:
+            # Older checkpoints used the ordinary PUSH successor even inside
+            # optional polish, which updates an existing PR.
+            stage = WorkflowStage.REVIEW
+        if stage not in {
+            WorkflowStage.VALIDATE, WorkflowStage.COMMIT,
+            WorkflowStage.PUSH, WorkflowStage.REVIEW,
+        }:
+            raise WorkflowError(f"Cannot resume polish from {stage.value}")
+        if stage is WorkflowStage.REVIEW:
+            if not StageValues._validation_from_snapshot(
+                execution.validation_snapshot
+            ).success:
+                raise WorkflowError("Polish validation did not succeed")
+            if (
+                execution.commit_sha
+                and execution_clients.git.remote_branch_commit(branch)
+                == execution_clients.git.head_commit()
+            ):
+                self._repository.record_polish_outcome(execution.id, PolishOutcome.APPLIED)
+                self._repository.set_resume_mode(execution.id, None)
+                return PolishOutcome.APPLIED
+            raise WorkflowError("Cannot verify polish push before resuming review")
+        if not execution.implementation_snapshot:
+            raise WorkflowError("Cannot resume polish: implementation output is missing")
+        implementation = ImplementationResult(**execution.implementation_snapshot)
+        if not implementation.success or not implementation.changed_files:
+            self._corrections._record_skipped_polish(
+                execution_id=execution.id, execution_clients=execution_clients,
+                pull_request_number=pull_request.number, implementation=implementation,
+            )
+            self._repository.set_resume_mode(execution.id, None)
+            return PolishOutcome.SKIPPED
+        if stage is WorkflowStage.VALIDATE:
+            validation = self._corrections._validate_polish_changes(
+                execution_id=execution.id, execution_clients=execution_clients,
+                workspace_path=workspace_path, config=config,
+            )
+            if validation is None:
+                self._corrections._record_skipped_polish(
+                    execution_id=execution.id, execution_clients=execution_clients,
+                    pull_request_number=pull_request.number, implementation=implementation,
+                )
+                self._repository.set_resume_mode(execution.id, None)
+                return PolishOutcome.SKIPPED
+            stage = WorkflowStage.COMMIT
+        if stage is WorkflowStage.COMMIT:
+            if not StageValues._validation_from_snapshot(
+                self._repository.get_execution(execution.id).validation_snapshot
+            ).success:
+                raise WorkflowError("Polish validation did not succeed")
+            self._actions._commit_changes(
+                execution.id, execution_clients, task, branch, config, reconcile=True
+            )
+            stage = WorkflowStage.PUSH
+        if stage is WorkflowStage.PUSH:
+            with self._events._step(execution.id, WorkflowStage.PUSH):
+                if execution_clients.git.remote_branch_commit(branch) != \
+                        execution_clients.git.head_commit():
+                    execution_clients.git.push(
+                        branch, config.repository.protected_branches
+                    )
+            self._repository.record_polish_outcome(execution.id, PolishOutcome.APPLIED)
+            self._repository.set_resume_mode(execution.id, None)
+            return PolishOutcome.APPLIED
+        raise WorkflowError("Cannot resume optional polish")
+
     def _resume_planning(
         self,
         execution: WorkflowExecution,
@@ -533,6 +899,8 @@ class StageSequencer:
         clients: WorkflowClients,
         repository_slug: str,
         repository_context_strategy: RepositoryContextStrategy,
+        *,
+        recovering: bool = False,
     ) -> WorkflowExecution:
         """Repeat only planning, then continue through a newly safe workspace."""
         base_ref = execution.base_commit or config.repository.base_branch
@@ -564,6 +932,9 @@ class StageSequencer:
                 config,
             )
 
+        if recovering and execution.resume_mode == "MANUAL_CONTINUATION":
+            self._repository.set_resume_mode(execution.id, None)
+
         working_branch = StageValues._branch_name(
             config.repository.branch_prefix, task.id, task.title, execution.id
         )
@@ -580,16 +951,15 @@ class StageSequencer:
             )
             self._repository.record_branch(execution.id, working_branch)
             clients.git.at_path(workspace_path).ensure_merge_base(base_ref)
+        if recovering:
+            return self._implement_and_review(
+                execution.id, task, spec, config, clients, repository_slug,
+                workspace_path, working_branch, repository_context_strategy,
+                recovering=True,
+            )
         return self._implement_and_review(
-            execution.id,
-            task,
-            spec,
-            config,
-            clients,
-            repository_slug,
-            workspace_path,
-            working_branch,
-            repository_context_strategy,
+            execution.id, task, spec, config, clients, repository_slug,
+            workspace_path, working_branch, repository_context_strategy,
         )
 
     def _resume_review(
@@ -606,6 +976,7 @@ class StageSequencer:
                 "Cannot resume review: the persisted workspace or branch is missing"
             )
         workspace_path = Path(execution.workspace_path)
+        assert_worktree_idle(workspace_path)
         if not workspace_path.is_dir():
             raise WorkflowError(f"Cannot resume review: workspace is unavailable: {workspace_path}")
         if not execution.spec_snapshot or not execution.pull_request_snapshot:
@@ -711,6 +1082,9 @@ class StageSequencer:
         repository_context_strategy: RepositoryContextStrategy,
         continuation_feedback: str | None = None,
         force_polish: bool = False,
+        restart_stage: WorkflowStage = WorkflowStage.IMPLEMENT,
+        recovering: bool = False,
+        reuse_review: bool = False,
     ) -> WorkflowExecution:
         """Continue a resumed planning execution without creating another execution."""
         execution_clients = clients.at_path(workspace_path)
@@ -725,46 +1099,88 @@ class StageSequencer:
             self._context_truncation_callback(execution_id),
         )
         try:
-            with self._events._step(execution_id, WorkflowStage.IMPLEMENT):
-                if continuation_feedback is None:
-                    implementation = implementation_service.implement(
-                        task, spec, workspace_path, instructions_repository_path=config.path
-                    )
-                else:
-                    implementation = implementation_service.continue_implementation(
-                        task,
-                        spec,
-                        continuation_feedback,
-                        workspace_path,
-                        instructions_repository_path=config.path,
-                    )
-                self._repository.record_implementation(execution_id, implementation)
-                if not implementation.success:
-                    raise WorkflowError(
-                        implementation.error_message or "Implementation provider failed"
-                    )
-            validation = self._corrections._validate_with_corrections(
-                execution_id=execution_id,
-                execution_clients=execution_clients,
-                implementation_service=implementation_service,
-                task=task,
-                spec=spec,
-                workspace_path=workspace_path,
-                config=config,
-            )
-            self._actions._commit_changes(
-                execution_id, execution_clients, task, working_branch, config
-            )
-            with self._events._step(execution_id, WorkflowStage.PUSH):
+            downstream = {
+                WorkflowStage.IMPLEMENT: 0, WorkflowStage.VALIDATE: 1,
+                WorkflowStage.COMMIT: 2, WorkflowStage.PUSH: 3,
+                WorkflowStage.CREATE_PR: 4, WorkflowStage.REVIEW: 5,
+            }
+            if restart_stage not in downstream:
+                raise WorkflowError(f"Cannot resume from {restart_stage.value}")
+            offset = downstream[restart_stage]
+            if offset <= 0:
+                with self._events._step(execution_id, WorkflowStage.IMPLEMENT):
+                    if continuation_feedback is None:
+                        implementation = implementation_service.implement(
+                            task, spec, workspace_path, instructions_repository_path=config.path
+                        )
+                    else:
+                        implementation = implementation_service.continue_implementation(
+                            task, spec, continuation_feedback, workspace_path,
+                            instructions_repository_path=config.path,
+                        )
+                    self._repository.record_implementation(execution_id, implementation)
+                    if not implementation.success:
+                        raise WorkflowError(
+                            implementation.error_message or "Implementation provider failed"
+                        )
+            if offset <= 1:
+                validation = self._corrections._validate_with_corrections(
+                    execution_id=execution_id,
+                    execution_clients=execution_clients,
+                    implementation_service=implementation_service,
+                    task=task, spec=spec, workspace_path=workspace_path, config=config,
+                    initial_attempt=(
+                        self._repository.get_execution(execution_id).validation_retry_attempt
+                        if recovering else 0
+                    ),
+                )
+            else:
+                validation = StageValues._validation_from_snapshot(
+                    self._repository.get_execution(execution_id).validation_snapshot
+                )
+            if offset <= 2:
+                self._actions._commit_changes(
+                    execution_id, execution_clients, task, working_branch, config,
+                    reconcile=recovering,
+                )
+            if offset <= 3:
+                with self._events._step(execution_id, WorkflowStage.PUSH):
+                    pull_request_snapshot = self._repository.get_execution(
+                        execution_id
+                    ).pull_request_snapshot
+                    if pull_request_snapshot:
+                        existing_pr = PullRequest(**pull_request_snapshot)
+                        self._actions._assert_pull_request_open(
+                            execution_clients, repository_slug, existing_pr.number
+                        )
+                    if recovering:
+                        remote = execution_clients.git.remote_branch_commit(working_branch)
+                        local = execution_clients.git.head_commit()
+                        if remote != local:
+                            execution_clients.git.push(
+                                working_branch, config.repository.protected_branches
+                            )
+                    else:
+                        execution_clients.git.push(
+                            working_branch, config.repository.protected_branches
+                        )
+            else:
                 pull_request_snapshot = self._repository.get_execution(
                     execution_id
                 ).pull_request_snapshot
-                if pull_request_snapshot:
-                    existing_pr = PullRequest(**pull_request_snapshot)
-                    self._actions._assert_pull_request_open(
-                        execution_clients, repository_slug, existing_pr.number
+            if recovering and not pull_request_snapshot:
+                found = execution_clients.github.find_pull_request(
+                    working_branch, config.repository.base_branch
+                )
+                if found is not None:
+                    self._repository.record_pull_request(execution_id, found)
+                    pull_request_snapshot = self._repository.get_execution(
+                        execution_id
+                    ).pull_request_snapshot
+                elif offset > 4:
+                    raise WorkflowError(
+                        "Persisted pull request is missing at the review checkpoint"
                     )
-                execution_clients.git.push(working_branch, config.repository.protected_branches)
             if pull_request_snapshot:
                 pull_request = PullRequest(**pull_request_snapshot)
             else:
@@ -788,49 +1204,58 @@ class StageSequencer:
             polish_attempted = not force_polish and (
                 self._repository.get_execution(execution_id).polish_outcome is not None
             )
-            review_attempt = 0
+            review_attempt = (
+                self._repository.get_execution(execution_id).review_retry_attempt
+                if recovering else 0
+            )
             while True:
                 with self._events._step(execution_id, WorkflowStage.REVIEW):
-                    review = ReviewService(
-                        self._agents._diagnostic_agent(
-                            clients.agent(AgentRole.REVIEWER),
-                            config,
-                            AgentRole.REVIEWER,
-                            execution_id,
-                        ),
-                        repository_context_strategy,
-                        self._context_truncation_callback(execution_id),
-                    ).review(
-                        task=task,
-                        spec=spec,
-                        pull_request=pull_request,
-                        diff=execution_clients.git.diff(
-                            self._repository.get_execution(execution_id).base_commit
-                            or config.repository.base_branch
-                        ),
-                        pull_request_description=self._pull_request_description(
-                            execution_id, execution_clients, repository_slug, pull_request
-                        ),
-                        validation=validation,
-                        repository_path=workspace_path,
-                        instructions_repository_path=config.path,
-                        repository_slug=repository_slug,
-                        base_branch=config.repository.base_branch,
-                        feature_branch=working_branch,
-                        on_execution_started=lambda reference: (
-                            self._repository.record_review_jules_session(
-                                execution_id, reference.external_id, reference.url
-                            )
-                        ),
-                    )
-                    self._repository.record_review(execution_id, review)
-                    self._actions._publish_review(
-                        execution_id=execution_id,
-                        execution_clients=execution_clients,
-                        repository_slug=repository_slug,
-                        pull_request_number=pull_request.number,
-                        review=review,
-                    )
+                    pending = self._repository.get_execution(execution_id)
+                    if recovering and (pending.review_publication_pending or reuse_review):
+                        if not pending.review_snapshot:
+                            raise WorkflowError("Persisted reviewer output is missing")
+                        review = CodeReview(**{
+                            **pending.review_snapshot,
+                            "result": ReviewDecision(pending.review_snapshot["result"]),
+                        })
+                    else:
+                        review = ReviewService(
+                            self._agents._diagnostic_agent(
+                                clients.agent(AgentRole.REVIEWER),
+                                config, AgentRole.REVIEWER, execution_id,
+                            ),
+                            repository_context_strategy,
+                            self._context_truncation_callback(execution_id),
+                        ).review(
+                            task=task, spec=spec, pull_request=pull_request,
+                            diff=execution_clients.git.diff(
+                                pending.base_commit or config.repository.base_branch
+                            ),
+                            pull_request_description=self._pull_request_description(
+                                execution_id, execution_clients, repository_slug, pull_request
+                            ),
+                            validation=validation, repository_path=workspace_path,
+                            instructions_repository_path=config.path,
+                            repository_slug=repository_slug,
+                            base_branch=config.repository.base_branch,
+                            feature_branch=working_branch,
+                            on_execution_started=lambda reference: (
+                                self._repository.record_review_jules_session(
+                                    execution_id, reference.external_id, reference.url
+                                )
+                            ),
+                        )
+                        self._repository.record_review(execution_id, review)
+                    if pending.review_publication_pending or not reuse_review:
+                        self._actions._publish_review(
+                            execution_id=execution_id,
+                            execution_clients=execution_clients,
+                            repository_slug=repository_slug,
+                            pull_request_number=pull_request.number,
+                            review=review,
+                            reconcile=recovering and pending.review_publication_pending,
+                        )
+                    reuse_review = False
                 if (
                     review.result is ReviewDecision.APPROVED
                     and review.suggestions
@@ -889,6 +1314,8 @@ class StageSequencer:
                     execution_id, WorkflowStage.REVIEW, StageValues._review_prompt(review)
                 )
             return self._lifecycle._finish(execution_id, status, config)
+        except WorkflowInterruptedError as exc:
+            return self._repository.reinterrupt(execution_id, str(exc))
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         except AgentNeedsHumanError as exc:
@@ -896,6 +1323,8 @@ class StageSequencer:
                 execution_id, WorkflowStage.IMPLEMENT, str(exc), config
             )
         except Exception as exc:
+            if recovering:
+                return self._repository.reinterrupt(execution_id, str(exc))
             self._repository.record_error(execution_id, str(exc))
             self._lifecycle._record_quota_failure(execution_id, exc)
             return self._lifecycle._finish(execution_id, WorkflowStatus.FAILED, config)
@@ -905,6 +1334,8 @@ class StageSequencer:
         execution: WorkflowExecution,
         interaction: HumanInteraction,
         response: str,
+        *,
+        recovering: bool = False,
     ) -> WorkflowExecution:
         execution_id = execution.id
         try:
@@ -937,6 +1368,9 @@ class StageSequencer:
                     (interaction.prompt, interaction.response or response.strip()),
                 ],
             )
+            clear_mode = getattr(self._repository, "set_resume_mode", None)
+            if callable(clear_mode):
+                clear_mode(execution_id, None)
             if interaction.requesting_stage is WorkflowStage.GENERATE_SPEC:
                 return self._resume_planning(
                     execution,
@@ -945,6 +1379,7 @@ class StageSequencer:
                     clients,
                     repository_slug,
                     repository_context_strategy,
+                    recovering=recovering,
                 )
             if interaction.requesting_stage is WorkflowStage.REVIEW:
                 return self._resume_review(
@@ -958,6 +1393,8 @@ class StageSequencer:
             raise WorkflowError(
                 f"Cannot resume human input requested during {interaction.requesting_stage.value}"
             )
+        except WorkflowInterruptedError as exc:
+            return self._repository.reinterrupt(execution_id, str(exc))
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         except AgentNeedsHumanError as exc:
@@ -965,6 +1402,8 @@ class StageSequencer:
                 execution_id, interaction.requesting_stage, str(exc), config
             )
         except Exception as exc:
+            if recovering:
+                return self._repository.reinterrupt(execution_id, str(exc))
             self._repository.record_error(execution_id, str(exc))
             self._lifecycle._record_quota_failure(execution_id, exc)
             return self._lifecycle._finish(execution_id, WorkflowStatus.FAILED, config)
@@ -1036,6 +1475,8 @@ class StageSequencer:
                 repository_slug,
                 repository_context_strategy,
             )
+        except WorkflowInterruptedError as exc:
+            return self._repository.reinterrupt(execution_id, str(exc))
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         except AgentNeedsHumanError as exc:

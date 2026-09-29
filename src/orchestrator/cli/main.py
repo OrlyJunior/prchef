@@ -155,7 +155,11 @@ def _migrated_repository(settings: Settings) -> WorkflowRepository:
     except MigrationError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
-    return _repository(settings)
+    repository = _repository(settings)
+    recover = getattr(repository, "recover_interrupted", None)
+    if callable(recover):
+        recover()
+    return repository
 
 
 def _provider_coordinator(
@@ -476,7 +480,7 @@ def tui(
     try:
         application_type(controller).run()
     finally:
-        dispatcher.shutdown(wait=False)
+        controller.shutdown_for_exit()
         index_clients.close()
 
 

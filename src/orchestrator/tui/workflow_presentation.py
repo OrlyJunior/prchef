@@ -137,6 +137,7 @@ def status_message(status: WorkflowStatus | None, payload: dict[str, Any] | None
         WorkflowStatus.PENDING: "Queued for an execution slot…",
         WorkflowStatus.RUNNING: "Workflow running…",
         WorkflowStatus.WAITING: "Waiting for agent capacity…",
+        WorkflowStatus.INTERRUPTED: "Workflow interrupted; choose when to resume",
         WorkflowStatus.APPROVED: "✓ Workflow approved",
         WorkflowStatus.CHANGES_REQUESTED: "• Review changes requested",
         WorkflowStatus.NEEDS_HUMAN: "! Waiting for human input",
@@ -251,6 +252,8 @@ def step_timeline_lines(
                 lines.append(f"✓ {stage_complete(step.stage)}")
         elif step.status is StepStatus.CANCELLED:
             lines.append(f"! {stage_activity(step.stage, attempt)} cancelled")
+        elif step.status is StepStatus.INTERRUPTED:
+            lines.append(f"! {stage_activity(step.stage, attempt)} interrupted")
         elif step.status is StepStatus.FAILED:
             detail = f": {step.error_message}" if step.error_message else ""
             lines.append(f"✗ {stage_activity(step.stage, attempt)} failed{detail}")

@@ -70,6 +70,7 @@ class ExecutionDetailScreen(Screen[None]):
             yield Static("", id="execution-timeline", markup=False)
             with Grid(id="execution-detail-actions"):
                 yield Button("Cancel", variant="error", id="execution-cancel")
+                yield Button("Resume interrupted", variant="primary", id="execution-restart")
                 yield Button("Open task", id="open-task")
                 yield Button("Open PR", id="open-pr")
                 yield Button("Copy detailed logs", id="copy-detailed-logs-button")
@@ -232,6 +233,13 @@ class ExecutionDetailScreen(Screen[None]):
 
             self.app.push_screen(StopWorkflowConfirmation(), self._confirm_cancellation)
             return
+        if event.button.id == "execution-restart":
+            try:
+                self.controller.submit_interrupted(self.execution_id)
+            except Exception as exc:
+                self.notify(f"Could not resume workflow: {exc}", severity="error")
+            self._refresh_execution()
+            return
         if event.button.id == "execution-resume":
             response = self.query_one("#execution-human-response", TextArea).text.strip()
             if response:
@@ -345,6 +353,9 @@ class ExecutionDetailScreen(Screen[None]):
             f"Stage: {execution.current_stage.value}"
             if execution.current_stage is not None else "Stage: Not started"
         )
+        if execution.status is WorkflowStatus.INTERRUPTED:
+            resume_stage = execution.resume_stage or execution.current_stage
+            stage_label += f" | Resume from: {resume_stage.value}"
         stage_widget = self.query_one("#execution-stage", Static)
         if str(stage_widget.renderable) != stage_label:
             stage_widget.update(stage_label)
@@ -372,9 +383,13 @@ class ExecutionDetailScreen(Screen[None]):
         cancel = self.query_one("#execution-cancel", Button)
         cancel.display = (
             execution.status is WorkflowStatus.NEEDS_HUMAN
+            or execution.status is WorkflowStatus.INTERRUPTED
             or (execution.status in ACTIVE_WORKFLOW_STATUSES and not cancellation_pending)
         )
         cancel.disabled = False
+        restart = self.query_one("#execution-restart", Button)
+        restart.display = execution.status is WorkflowStatus.INTERRUPTED
+        restart.disabled = False
         self.query_one("#execution-detail-actions", Grid).set_class(
             not cancel.display, "-without-cancel"
         )
