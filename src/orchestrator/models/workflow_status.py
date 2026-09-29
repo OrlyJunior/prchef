@@ -8,6 +8,7 @@ class WorkflowStatus(StrEnum):
     # slot. It is deliberately distinct from PENDING (never started) so history
     # can tell "waiting to begin" from "waiting for shared provider capacity".
     WAITING = "WAITING"
+    INTERRUPTED = "INTERRUPTED"
     APPROVED = "APPROVED"
     CHANGES_REQUESTED = "CHANGES_REQUESTED"
     NEEDS_HUMAN = "NEEDS_HUMAN"
@@ -15,10 +16,9 @@ class WorkflowStatus(StrEnum):
     FAILED = "FAILED"
 
 
-# Non-terminal statuses: queued for a worker, queued for shared provider
-# capacity, or genuinely running. All of them remain cancellable and keep their
-# workspace. Defined once so presentation, cleanup, and persistence cannot
-# disagree about what "active" means.
+# Work admitted to this session: queued for a worker, queued for shared
+# provider capacity, or genuinely running. INTERRUPTED is recoverable but has
+# no worker in this session.
 ACTIVE_WORKFLOW_STATUSES = frozenset(
     {WorkflowStatus.PENDING, WorkflowStatus.WAITING, WorkflowStatus.RUNNING}
 )
@@ -58,6 +58,7 @@ class StepStatus(StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    INTERRUPTED = "INTERRUPTED"
     SKIPPED = "SKIPPED"
 
 

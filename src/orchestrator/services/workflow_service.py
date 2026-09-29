@@ -31,7 +31,10 @@ from orchestrator.services.repository_context import resolve_repository_context_
 from orchestrator.services.task_provider import TaskProvider
 from orchestrator.services.workflow_agent_runtime import WorkflowAgentRuntime
 from orchestrator.services.workflow_correction_policy import CorrectionPolicy
-from orchestrator.services.workflow_execution_lifecycle import ExecutionLifecycle
+from orchestrator.services.workflow_execution_lifecycle import (
+    _RUNTIME_OVERRIDES_DIAGNOSTIC_KIND,
+    ExecutionLifecycle,
+)
 from orchestrator.services.workflow_stage_actions import StageActions
 from orchestrator.services.workflow_stage_events import ExecutionRuntimes, StageEvents
 from orchestrator.services.workflow_stage_sequencer import StageSequencer
@@ -142,6 +145,30 @@ class WorkflowService:
         self._dispatcher.cancel(execution_id)
         return True
 
+    def submit_interrupted(
+        self,
+        execution_id: str,
+        *,
+        event_listener: WorkflowEventListener | None = None,
+        admission_gate: Callable[[], bool] | None = None,
+    ) -> ExecutionHandle:
+        """Queue the same execution through ordinary dispatcher admission."""
+        execution = self._repository.get_execution(execution_id)
+        if execution.status is not WorkflowStatus.INTERRUPTED:
+            raise ValueError(f"Execution {execution_id} is not interrupted")
+        if execution.resume_stage is None:
+            raise WorkflowError("Interrupted execution has no restart checkpoint")
+        self._repository.queue_interrupted(execution_id)
+        self._runtimes.begin(execution_id, event_listener)
+        self._stage_events._emit(
+            execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.PENDING
+        )
+        return self._submit(
+            execution_id,
+            lambda: self._sequencer._execute_interrupted(execution),
+            admission_gate=admission_gate,
+        )
+
     def submit_execution(
         self,
         task_id: str,
@@ -158,8 +185,8 @@ class WorkflowService:
         exists (as ``PENDING``) and its ID is available before any work starts,
         so batch, scheduling, continuous-execution, and label-selection
         features submit here instead of adding their own concurrency handling.
-        Queued work is in-memory only; recovering it after a restart is
-        deliberately out of scope.
+        Queued work is in-memory; startup recovery offers its persisted row
+        for explicit resubmission through the same dispatcher.
 
         ``event_listener`` is an observational hook for interactive clients. It
         is called after the corresponding repository update and failures in the
@@ -200,6 +227,12 @@ class WorkflowService:
                 repository_ref = self._repository.inferred_repository_for_task(
                     self._task_provider.source, task_id, historical_aliases
                 )
+        provider_overrides = {
+            role.value: provider for role, provider in (agent_providers or {}).items()
+        }
+        runtime_overrides = {
+            role.value: dict(options) for role, options in (agent_runtime_options or {}).items()
+        }
         if isinstance(self._repository, WorkflowRepository):
             aliases: tuple[str, ...] = ()
             if repository_ref and isinstance(self._config_loader, ProjectConfigLoader):
@@ -213,11 +246,26 @@ class WorkflowService:
                 task_source=self._task_provider.source,
                 repository_ref=repository_ref,
                 repository_aliases=aliases,
+                runtime_overrides={
+                    "kind": _RUNTIME_OVERRIDES_DIAGNOSTIC_KIND,
+                    "provider_overrides": provider_overrides,
+                    "runtime_overrides": runtime_overrides,
+                },
             )
         else:
             execution = self._repository.create_execution(
                 task_id, task_source=self._task_provider.source
             )
+        override_error: WorkflowError | None = None
+        if (provider_overrides or runtime_overrides) and not isinstance(
+            self._repository, WorkflowRepository
+        ):
+            try:
+                self._lifecycle._record_runtime_overrides(
+                    execution.id, provider_overrides, runtime_overrides
+                )
+            except WorkflowError as exc:
+                override_error = exc
         self._runtimes.begin(execution.id, event_listener)
         self._stage_events._emit(
             execution.id,
@@ -225,12 +273,13 @@ class WorkflowService:
             stage=execution.current_stage,
             status=execution.status,
         )
-        provider_overrides = {
-            role.value: provider for role, provider in (agent_providers or {}).items()
-        }
-        runtime_overrides = {
-            role.value: dict(options) for role, options in (agent_runtime_options or {}).items()
-        }
+        if override_error is not None:
+            try:
+                self._repository.record_error(execution.id, str(override_error))
+                result = self._lifecycle._finish(execution.id, WorkflowStatus.FAILED, None)
+                return ExecutionHandle.completed(result)
+            finally:
+                self._runtimes.end(execution.id)
         return self._submit(
             execution.id,
             lambda: self._sequencer._execute_workflow(
@@ -275,7 +324,15 @@ class WorkflowService:
 
         def run_job() -> WorkflowExecution:
             try:
-                return work()
+                result = work()
+                if result.status is WorkflowStatus.INTERRUPTED:
+                    self._stage_events._emit(
+                        execution_id, WorkflowEventKind.STATUS_CHANGED,
+                        stage=result.resume_stage or result.current_stage,
+                        status=WorkflowStatus.INTERRUPTED,
+                        message=result.error_message,
+                    )
+                return result
             finally:
                 self._runtimes.end(execution_id)
 
@@ -406,6 +463,9 @@ class WorkflowService:
                 {"kind": _MANUAL_CONTINUATION_DIAGNOSTIC_KIND, "feedback": feedback},
                 stage=WorkflowStage.GENERATE_SPEC,
             )
+            if isinstance(self._repository, WorkflowRepository):
+                self._repository.set_resume_mode(execution_id, "MANUAL_CONTINUATION")
+                self._repository.set_resume_stage(execution_id, stage)
             self._queue_resumed(execution_id)
             return self._submit(
                 execution_id,
@@ -429,6 +489,9 @@ class WorkflowService:
             {"kind": _MANUAL_CONTINUATION_DIAGNOSTIC_KIND, "feedback": feedback},
             stage=WorkflowStage.IMPLEMENT,
         )
+        if isinstance(self._repository, WorkflowRepository):
+            self._repository.set_resume_mode(execution_id, "MANUAL_CONTINUATION")
+            self._repository.set_resume_stage(execution_id, stage)
         self._queue_resumed(execution_id)
         spec = RepositorySpec(**execution.spec_snapshot)
         return self._submit(

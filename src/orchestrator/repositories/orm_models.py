@@ -25,6 +25,15 @@ class WorkflowExecutionEntity(Base):
     pr_url: Mapped[str | None] = mapped_column(Text)
     current_stage: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    interrupted_from_status: Mapped[str | None] = mapped_column(String(32))
+    resume_stage: Mapped[str | None] = mapped_column(String(32))
+    resume_mode: Mapped[str | None] = mapped_column(String(32))
+    review_retry_attempt: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    validation_retry_attempt: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     error_message: Mapped[str | None] = mapped_column(Text)
     task_snapshot_json: Mapped[str | None] = mapped_column(Text)
     spec_snapshot_json: Mapped[str | None] = mapped_column(Text)
@@ -36,6 +45,10 @@ class WorkflowExecutionEntity(Base):
     review_jules_session_id: Mapped[str | None] = mapped_column(String(255))
     review_jules_session_url: Mapped[str | None] = mapped_column(Text)
     review_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    review_step_id: Mapped[int | None] = mapped_column(Integer)
+    review_publication_pending: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="0"
+    )
     polish_outcome: Mapped[str | None] = mapped_column(String(32))
     polish_skip_comment_attempted: Mapped[bool] = mapped_column(
         nullable=False, default=False, server_default="0"

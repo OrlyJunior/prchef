@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -814,6 +815,7 @@ def test_background_process_that_released_output_does_not_delay_completion(
 ) -> None:
     launcher = tmp_path / "launcher.py"
     launcher.write_text(_DETACHING_LAUNCHER_SCRIPT, encoding="utf-8")
+    retained_before = set(command_client._retained_supervisors)
 
     result = CommandClient().run([sys.executable, str(launcher)], cwd=tmp_path, timeout_seconds=60)
 
@@ -822,10 +824,82 @@ def test_background_process_that_released_output_does_not_delay_completion(
     try:
         assert result.exit_code == 0
         assert ready == "ready"
-        # Like a build daemon, it is left running exactly as when the command ran directly.
+        # A later validation command may need the service until app shutdown.
         assert _process_exists(background)
     finally:
-        os.kill(background, signal.SIGKILL)
+        for process, containment in tuple(command_client._retained_supervisors.items()):
+            if process in retained_before:
+                continue
+            command_client._retained_supervisors.pop(process)
+            command_client._terminate_process_tree(process, containment)
+            process.wait(timeout=10)
+            containment.close()
+        if _process_exists(background):
+            os.kill(background, signal.SIGKILL)
+
+
+def test_macos_recovery_refuses_a_busy_retained_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(command_client.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        command_client.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout="31415\n", stderr=""
+        ),
+    )
+
+    with pytest.raises(CommandExecutionError, match="still using the retained worktree"):
+        command_client.assert_worktree_idle(tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux parent-death containment")
+@pytest.mark.parametrize("abrupt", [False, True], ids=["normal-exit", "abrupt-exit"])
+def test_detached_service_stops_when_owning_app_exits(
+    tmp_path: Path, abrupt: bool,
+) -> None:
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(_DETACHING_LAUNCHER_SCRIPT, encoding="utf-8")
+    owner_script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from orchestrator.clients.command_client import CommandClient, interrupt_active_commands\n"
+        "result = CommandClient().run([sys.executable, sys.argv[1]], cwd=Path(sys.argv[2]))\n"
+        "print(result.stdout.split()[-1], flush=True)\n"
+        "sys.stdin.readline()\n"
+        "interrupt_active_commands()\n"
+    )
+    environment = os.environ.copy()
+    source_root = Path(__file__).parents[2] / "src"
+    environment["PYTHONPATH"] = str(source_root)
+    owner = subprocess.Popen(
+        [sys.executable, "-c", owner_script, str(launcher), str(tmp_path)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=environment,
+    )
+    background: int | None = None
+    try:
+        assert owner.stdout is not None
+        assert select.select([owner.stdout], [], [], 15)[0], "owner did not report service PID"
+        background = int(owner.stdout.readline().strip())
+        assert _process_exists(background)
+        if abrupt:
+            owner.kill()
+        else:
+            assert owner.stdin is not None
+            owner.stdin.write("exit\n")
+            owner.stdin.flush()
+        owner.wait(timeout=15)
+        deadline = time.monotonic() + 15
+        while _process_exists(background):
+            assert time.monotonic() < deadline, "detached service survived app exit"
+            time.sleep(0.01)
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait(timeout=15)
+        if background is not None and _process_exists(background):
+            os.kill(background, signal.SIGKILL)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Job objects are Windows-specific")

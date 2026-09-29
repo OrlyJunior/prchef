@@ -22,7 +22,42 @@ _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_SUSPEND_RESUME = 0x0800
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 _EXIT_POLL_SECONDS = 0.05
+_retained_jobs: list[WindowsJob] = []
+
+
+class _BasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint64) for name in (
+        "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+        "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+    )]
+
+
+class _ExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _BasicLimitInformation),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
 
 
 class _BasicAccountingInformation(ctypes.Structure):
@@ -61,6 +96,10 @@ def _load_api() -> tuple[Any, Any]:
         wintypes.LPDWORD,
     )
     kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+    kernel32.SetInformationJobObject.argtypes = (
+        wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD
+    )
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel32.CloseHandle.restype = wintypes.BOOL
     ntdll = ctypes.WinDLL("ntdll")
@@ -80,8 +119,8 @@ def _last_error() -> str:
 class WindowsJob:
     """A job object holding one launched command and every process it starts.
 
-    The job deliberately has no kill-on-close limit: processes a command leaves running after it
-    completes normally (such as a build daemon) keep today's behavior. Only ``terminate`` kills.
+    Closing its retained handle ends descendants, including those left by a
+    command that already returned. Handles remain owned until app shutdown.
     """
 
     def __init__(self, kernel32: Any, ntdll: Any, handle: int) -> None:
@@ -101,14 +140,23 @@ class WindowsJob:
         if not handle:
             logger.warning("[command] Could not create a job object: %s", _last_error())
             return None
+        limits = _ExtendedLimitInformation()
+        limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits), ctypes.sizeof(limits),
+        ):
+            kernel32.CloseHandle(handle)
+            logger.warning("[command] Could not configure job close containment: %s", _last_error())
+            return None
         return cls(kernel32, ntdll, handle)
 
     def adopt_suspended(self, pid: int) -> bool:
         """Place a process started with ``CREATE_SUSPENDED`` in this job, then let it run.
 
         Assigning before the process runs guarantees nothing it launches escapes the job. Returns
-        whether it was assigned; the process is resumed either way. Raises OSError, after
-        terminating the process, if it cannot be resumed.
+        whether it was assigned; an unassigned process is stopped before it runs.
+        Raises OSError after terminating a process that cannot be resumed.
         """
         access = _PROCESS_TERMINATE | _PROCESS_SET_QUOTA | _PROCESS_SUSPEND_RESUME
         process_handle = self._kernel32.OpenProcess(access, False, pid)
@@ -122,6 +170,8 @@ class WindowsJob:
                     pid,
                     _last_error(),
                 )
+                self._kernel32.TerminateProcess(process_handle, 1)
+                return False
             status = self._ntdll.NtResumeProcess(process_handle)
             if status != 0:
                 self._kernel32.TerminateProcess(process_handle, 1)
@@ -155,8 +205,23 @@ class WindowsJob:
 
     def close(self) -> None:
         if self._handle is not None:
-            self._kernel32.CloseHandle(self._handle)
-            self._handle = None
+            # Retain only jobs that still own a background process. Closing an
+            # empty job now avoids one handle per completed command.
+            if self._active_processes() == 0:
+                self._kernel32.CloseHandle(self._handle)
+                self._handle = None
+            elif self not in _retained_jobs:
+                _retained_jobs.append(self)
+
+    @staticmethod
+    def close_retained() -> None:
+        while _retained_jobs:
+            job = _retained_jobs.pop()
+            if job._handle is not None:
+                if job._active_processes() != 0:
+                    job.terminate(wait_seconds=10.0)
+                job._kernel32.CloseHandle(job._handle)
+                job._handle = None
 
     def _active_processes(self) -> int | None:
         info = _BasicAccountingInformation()

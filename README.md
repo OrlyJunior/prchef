@@ -10,7 +10,8 @@ This is an early v0.1.0 release, designed for one user running one process.
 
 Known limitations:
 
-- Work runs inside the app's process, so active work stops when the app closes. Pending and waiting executions are not recovered automatically at startup.
+- Work runs inside the app's process. Closing the app interrupts active executions; on reopening, you can choose which interrupted executions to resume.
+- On macOS, recovery checks retained worktrees for surviving processes and leaves an execution interrupted until its worktree is idle.
 - SQLite is the default database, local Qdrant is single-process, and provider concurrency limits don't coordinate across processes.
 - Nothing is rolled back after a failure: a pushed branch or open pull request stays in place. Inspect the saved execution and its worktree before continuing.
 

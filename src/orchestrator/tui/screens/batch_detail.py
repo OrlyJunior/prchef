@@ -4,9 +4,7 @@ Every batch item renders as an expandable row using the same
 ``BatchProgressView`` projection the active launcher uses, so a persisted or
 restarted batch reads identically to one still running. Unlike the live
 view, linked executions are reconciled from durable storage while visible. A persisted
-``PENDING``/``WAITING`` item does not imply the original in-memory provider
-queue resumed, since provider concurrency state is process-local and does not
-survive a restart.
+``INTERRUPTED`` item retains its batch position and resumes only when selected.
 """
 
 from __future__ import annotations

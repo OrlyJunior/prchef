@@ -1,19 +1,17 @@
-"""Linux process-tree supervisor that ``CommandClient`` runs each command under.
+"""POSIX process-tree supervisor that ``CommandClient`` runs each command under.
 
-Run as ``python -I -S process_supervisor.py STATUS_FD COMMAND...``. The orchestrator never imports
-this module, so it uses only the standard library.
+Run as ``python -I -S process_supervisor.py STATUS_FD PARENT_PID COMMAND...``.
+The orchestrator never imports this module, so it uses only the standard library.
 
-A process group cannot contain a command: any descendant can leave it with ``setsid``. The
-supervisor instead registers as a child subreaper, so every process the command launches remains
-its descendant; orphans are reparented to it rather than to init, even after ``setsid`` or a
-double fork. Having no children left therefore proves that no descendant survived.
+A process group cannot contain a command: any descendant can leave it with ``setsid``. On Linux
+the supervisor registers as a child subreaper, so orphans remain its descendants. On macOS it
+tracks observed descendant PIDs and checks for processes still using the worktree on recovery.
 
-The command's output is relayed through the supervisor's own pipes, and the supervisor exits with
-the command's own status once the command has exited and every holder of those pipes has closed
-them. A completed command therefore behaves as if it ran directly, including leaving running any
-background process that released its output. On SIGTERM the supervisor instead kills every
-descendant, relays the output already produced, and writes ``stopped`` to STATUS_FD only once no
-descendant remains.
+The command's output is relayed through the supervisor's own pipes. Once the command has exited
+and every holder of its pipes has closed them, the supervisor reports the command's status and
+closes its output. It keeps background descendants owned until the app exits.
+On SIGTERM the supervisor kills every descendant, relays output already produced,
+and writes ``stopped`` to STATUS_FD only once no descendant remains.
 """
 
 from __future__ import annotations
@@ -28,13 +26,18 @@ import time
 from types import FrameType
 from typing import NoReturn
 
-assert sys.platform == "linux"  # Child subreapers are Linux-only; this also scopes type checks.
+# Windows type stubs omit POSIX APIs used by this standalone POSIX-only script.
+# ruff: noqa: B009
+
+assert sys.platform in {"linux", "darwin"}
 
 # Status lines written to STATUS_FD; CommandClient reads them after the supervisor exits.
 STOPPED = "stopped"
 SPAWN_ERROR = "spawn-error"
+COMPLETED = "completed"
 
 _PR_SET_CHILD_SUBREAPER = 36
+_PR_SET_PDEATHSIG = 1
 # Stays below CommandClient's post-kill wait, so the outcome is reported before it stops waiting.
 _STOP_DEADLINE_SECONDS = 5.0
 _KILL_POLL_SECONDS = 0.01
@@ -60,6 +63,8 @@ def _wake(signum: int, frame: FrameType | None) -> None:
 
 
 def _become_subreaper() -> bool:
+    if sys.platform != "linux":
+        return False
     try:
         import ctypes
 
@@ -76,6 +81,21 @@ def _become_subreaper() -> bool:
     return int(result) == 0
 
 
+def _watch_parent(parent_pid: int) -> None:
+    """Stop owned descendants even if the app is killed without cleanup."""
+    if sys.platform == "darwin":
+        if os.getppid() != parent_pid:
+            raise _StopRequested
+        return
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "Cannot configure parent-death signal")
+    if os.getppid() != parent_pid:
+        raise _StopRequested
+
+
 def _report(status_fd: int, message: str) -> None:
     try:
         os.write(status_fd, f"{message}\n".encode("ascii"))
@@ -84,25 +104,36 @@ def _report(status_fd: int, message: str) -> None:
 
 
 def _descendants(root: int) -> list[int]:
-    """Every process descending from ``root``, found through /proc parent links."""
+    """Every process currently descending from ``root``."""
     children: dict[int, list[int]] = {}
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return []
-    for entry in entries:
-        if not entry.isdigit():
-            continue
+    if sys.platform == "darwin":
+        listed = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, check=False
+        )
+        if listed.returncode != 0:
+            return []
+        for line in listed.stdout.splitlines():
+            fields = line.split()
+            if len(fields) == 2 and all(field.isdecimal() for field in fields):
+                children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    else:
         try:
-            with open(f"/proc/{entry}/stat", "rb") as stat_file:
-                stat = stat_file.read()
+            entries = os.listdir("/proc")
         except OSError:
-            continue
-        # The command name is parenthesized and may itself contain spaces or parentheses.
-        fields = stat[stat.rfind(b")") + 2 :].split()
-        if len(fields) < 2:
-            continue
-        children.setdefault(int(fields[1]), []).append(int(entry))
+            return []
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", "rb") as stat_file:
+                    stat = stat_file.read()
+            except OSError:
+                continue
+            # The command name is parenthesized and may itself contain spaces or parentheses.
+            fields = stat[stat.rfind(b")") + 2 :].split()
+            if len(fields) < 2:
+                continue
+            children.setdefault(int(fields[1]), []).append(int(entry))
     found: list[int] = []
     pending = [root]
     while pending:
@@ -145,7 +176,7 @@ class _Relay:
         """Relay what the stopped command already wrote, without waiting for more."""
         if self.closed:
             return
-        os.set_blocking(self.source, False)
+        getattr(os, "set_blocking")(self.source, False)
         try:
             while self.flush() and self.pump():
                 pass
@@ -167,6 +198,8 @@ class _Supervisor:
         self._command_pid: int | None = None
         self._returncode: int | None = None
         self._relays: list[_Relay] = []
+        self._parent_pid: int | None = None
+        self._known_descendants: set[int] = set()
 
     def run(self) -> int:
         """Run the command to completion and return its status, in ``Popen.returncode`` form."""
@@ -179,9 +212,9 @@ class _Supervisor:
             os.open(os.devnull, os.O_RDONLY)
         self._contained = _become_subreaper()
         wake_read, wake_write = os.pipe()
-        os.set_blocking(wake_write, False)
+        getattr(os, "set_blocking")(wake_write, False)
         signal.set_wakeup_fd(wake_write, warn_on_full_buffer=False)
-        signal.signal(signal.SIGCHLD, _wake)
+        signal.signal(getattr(signal, "SIGCHLD"), _wake)
 
         out_read, out_write = os.pipe()
         err_read, err_write = os.pipe()
@@ -208,9 +241,28 @@ class _Supervisor:
             selector.register(relay.source, selectors.EVENT_READ, relay)
         while True:
             self._reap()
+            if sys.platform == "darwin":
+                if os.getppid() != self._parent_pid:
+                    raise _StopRequested
+                self._known_descendants.update(_descendants(os.getpid()))
+                self._live_known_descendants()
             if self._returncode is not None and all(relay.closed for relay in self._relays):
-                return self._returncode
-            for key, _ in selector.select():
+                _report(self._status_fd, f"{COMPLETED} {self._returncode}")
+                if not self._reap() and not self._live_known_descendants():
+                    return self._returncode
+                # The command has finished, but detached services remain in this
+                # subreaper. Keep owning them until the application exits.
+                # CommandClient needs EOF on both streams as well as the completion
+                # report to return; our lifetime must not keep those pipes open.
+                os.close(1)
+                os.close(2)
+                while True:
+                    if not self._reap() and not self._live_known_descendants():
+                        return self._returncode
+                    if os.getppid() != self._parent_pid:
+                        raise _StopRequested
+                    time.sleep(_KILL_POLL_SECONDS)
+            for key, _ in selector.select(timeout=0.05 if sys.platform == "darwin" else None):
                 ready = key.data
                 if ready is None:
                     os.read(wake_read, 4096)
@@ -225,34 +277,52 @@ class _Supervisor:
             _report(self._status_fd, STOPPED)
         for relay in self._relays:
             relay.drain()
-        return -signal.SIGKILL
+        return -int(getattr(signal, "SIGKILL"))
 
     def _kill_descendants(self) -> bool:
         """SIGKILL every descendant; return True once no child, and so no descendant, remains."""
         if self._command_pid is not None and self._returncode is None:
             # Fast path for the command's own group, whose id is pinned while it is unreaped.
             try:
-                os.killpg(self._command_pid, signal.SIGKILL)
+                getattr(os, "killpg")(
+                    self._command_pid, getattr(signal, "SIGKILL")
+                )
             except OSError:
                 pass
         deadline = time.monotonic() + _STOP_DEADLINE_SECONDS
         while True:
-            for pid in _descendants(os.getpid()):
+            self._known_descendants.update(_descendants(os.getpid()))
+            for pid in self._known_descendants:
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, getattr(signal, "SIGKILL"))
                 except OSError:
                     pass
-            if not self._reap():
+            if not self._reap() and not self._live_known_descendants():
                 return True
             if time.monotonic() >= deadline:
                 return False
             time.sleep(_KILL_POLL_SECONDS)
 
+    def _live_known_descendants(self) -> bool:
+        if sys.platform != "darwin":
+            return False
+        living: set[int] = set()
+        for pid in self._known_descendants:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                pass
+            living.add(pid)
+        self._known_descendants = living
+        return bool(living)
+
     def _reap(self) -> bool:
         """Reap exited children, including reparented orphans; return whether any remain."""
         while True:
             try:
-                pid, status = os.waitpid(-1, os.WNOHANG)
+                pid, status = os.waitpid(-1, getattr(os, "WNOHANG"))
             except ChildProcessError:
                 return False
             if pid == 0:
@@ -267,27 +337,37 @@ def _exit_with(returncode: int) -> NoReturn:
         signum = -returncode
         try:
             # The command's crash must not also leave a core dump of the supervisor.
-            _, hard_limit = resource.getrlimit(resource.RLIMIT_CORE)
-            resource.setrlimit(resource.RLIMIT_CORE, (0, hard_limit))
+            _, hard_limit = getattr(resource, "getrlimit")(
+                getattr(resource, "RLIMIT_CORE")
+            )
+            getattr(resource, "setrlimit")(
+                getattr(resource, "RLIMIT_CORE"), (0, hard_limit)
+            )
         except (OSError, ValueError):
             pass
         try:
             signal.signal(signum, signal.SIG_DFL)
         except (OSError, ValueError):
             pass  # SIGKILL and SIGSTOP always keep their default action.
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signum})
+        getattr(signal, "pthread_sigmask")(
+            getattr(signal, "SIG_UNBLOCK"), {signum}
+        )
         os.kill(os.getpid(), signum)
         returncode = 128 + signum  # Only reached when the signal's default action is to ignore.
     os._exit(returncode)
 
 
 def main(argv: list[str]) -> NoReturn:
-    supervisor = _Supervisor(int(argv[1]), argv[2:])
+    supervisor = _Supervisor(int(argv[1]), argv[3:])
+    supervisor._parent_pid = int(argv[2])
     try:
         signal.signal(signal.SIGTERM, _request_stop)
+        _watch_parent(int(argv[2]))
         returncode = supervisor.run()
         # A stop request arriving after completion has nothing left to stop.
-        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        getattr(signal, "pthread_sigmask")(
+            getattr(signal, "SIG_BLOCK"), {signal.SIGTERM}
+        )
     except _StopRequested:
         returncode = supervisor.stop()
     _exit_with(returncode)

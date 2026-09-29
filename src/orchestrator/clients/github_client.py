@@ -269,6 +269,57 @@ class GitHubClient:
         except (ValueError, KeyError, TypeError) as exc:
             raise GitHubClientError(f"Invalid GitHub CLI response: {viewed.stdout}") from exc
 
+    def find_pull_request(self, head_branch: str, base_branch: str) -> PullRequest | None:
+        """Find the unique PR for a workflow branch before creating another one."""
+        listed = self._run(
+            "pr", "list", "--head", head_branch, "--state", "all", "--limit", "1000",
+            "--json", "number,url,title,baseRefName,headRefName,state",
+            env=self._implementer_auth_environment(),
+        )
+        try:
+            rows = json.loads(listed.stdout)
+            matches = [row for row in rows if row["headRefName"] == head_branch
+                       and row["baseRefName"] == base_branch]
+            if len(matches) > 1:
+                raise GitHubClientError(
+                    "Several pull requests use the retained branch; inspect them before retrying"
+                )
+            if not matches:
+                return None
+            row = matches[0]
+            if row["state"] != "OPEN":
+                raise GitHubClientError(
+                    "Retained pull request is closed; inspect it before retrying"
+                )
+            return PullRequest(
+                number=int(row["number"]), url=str(row["url"]),
+                title=str(row["title"]), base_branch=base_branch, head_branch=head_branch,
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise GitHubClientError("Cannot verify retained pull request") from exc
+
+    def review_already_published(
+        self, repository: str, pull_request_number: int, event: str, body: str
+    ) -> bool:
+        viewed = self._run(
+            "api", f"repos/{repository}/pulls/{pull_request_number}/reviews",
+            "--paginate", "--slurp",
+            env=self._review_auth_environment(),
+        )
+        try:
+            pages = json.loads(viewed.stdout)
+            reviews = [review for page in pages for review in page]
+            state = {
+                "APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED",
+                "COMMENT": "COMMENTED",
+            }[event]
+            normalized = body.replace("\r\n", "\n").strip()
+            return any(review.get("state") == state and
+                       str(review.get("body", "")).replace("\r\n", "\n").strip() == normalized
+                       for review in reviews)
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise GitHubClientError("Cannot verify retained review publication") from exc
+
     def is_pull_request_open(self, repository: str, pull_request_number: int) -> bool:
         """Return whether a persisted pull request can still receive branch updates."""
         if pull_request_number <= 0:
