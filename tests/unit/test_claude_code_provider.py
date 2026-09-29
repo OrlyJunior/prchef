@@ -65,7 +65,6 @@ def test_claude_code_client_uses_only_safe_print_mode_arguments_and_workspace(
         "acceptEdits",
         "--permission-prompts",
         "none",
-        "--bare",
         "--model",
         "claude-test",
         "--effort",
@@ -187,6 +186,81 @@ def test_claude_code_client_preserves_terminal_failure_details_from_stdout_and_s
     assert result.metadata["terminal_reason"] == "rate_limit"
     assert result.metadata["api_error_status"] == 429
     assert result.metadata["errors"] == [{"code": "rate_limit", "api_key": "[REDACTED]"}]
+
+
+@pytest.mark.parametrize("bare_mode", [False, True])
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [
+        (_envelope(subtype="error", result="Authentication failed"), ""),
+        (_envelope(subtype="error", result="Invalid API key"), ""),
+        (_envelope(subtype="error", result="Request rejected", api_error_status=401), ""),
+        (_envelope(subtype="error", errors=["authentication_failed"]), ""),
+        ("", "Unauthorized"),
+        ("Not logged in · Please run /login", ""),
+        ("No API key provided", ""),
+        (json.dumps({"error": "Missing API key"}), ""),
+    ],
+)
+def test_claude_provider_explains_bare_mode_authentication_failures(
+    tmp_path: Path, bare_mode: bool, stdout: str, stderr: str
+) -> None:
+    provider = ClaudeCodeAgentProvider(
+        "claude",
+        ClaudeCodeClient(
+            RecordingCommandClient(exit_code=1, stdout=stdout, stderr=stderr),
+            "claude",
+            30,  # type: ignore[arg-type]
+            bare_mode=bare_mode,
+        ),
+    )
+
+    result = provider.execute(
+        AgentRequest(instructions="work", title="work", workspace_path=tmp_path)
+    )
+
+    assert not result.success
+    diagnostic = result.error_message or ""
+    assert ("bare mode requires an API key" in diagnostic) is bare_mode
+    if bare_mode:
+        assert "cloud credentials" in diagnostic
+        assert "subscription login" in diagnostic
+        assert "bare_mode: false or omit bare_mode" in diagnostic
+
+
+@pytest.mark.parametrize("bare_mode", [False, True])
+def test_claude_code_client_explains_bare_mode_authentication_command_errors(
+    tmp_path: Path, bare_mode: bool
+) -> None:
+    class UnauthenticatedCommandClient:
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            del command, kwargs
+            raise CommandExecutionError("Authentication failed")
+
+    result = ClaudeCodeClient(
+        UnauthenticatedCommandClient(),  # type: ignore[arg-type]
+        "claude",
+        30,
+        bare_mode=bare_mode,
+    ).execute("work", tmp_path)
+
+    assert not result.success
+    assert "Authentication failed" in (result.error_message or "")
+    assert ("bare mode requires an API key" in (result.error_message or "")) is bare_mode
+
+
+def test_claude_code_client_does_not_add_authentication_advice_to_other_bare_mode_failures(
+    tmp_path: Path,
+) -> None:
+    result = ClaudeCodeClient(
+        RecordingCommandClient(exit_code=1, stdout=_envelope(subtype="error", result="quota")),
+        "claude",
+        30,  # type: ignore[arg-type]
+        bare_mode=True,
+    ).execute("work", tmp_path)
+
+    assert not result.success
+    assert result.error_message == "Claude Code failed: subtype=error; result=quota"
 
 
 def test_claude_code_client_marks_a_timeout_as_a_possible_workspace_change(tmp_path: Path) -> None:
@@ -317,6 +391,18 @@ def test_claude_settings_reject_arbitrary_command_configuration() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("options", "expected_bare_mode"),
+    [({}, False), ({"bare_mode": False}, False), ({"bare_mode": True}, True)],
+)
+def test_claude_settings_make_bare_mode_opt_in(
+    options: dict[str, bool], expected_bare_mode: bool
+) -> None:
+    settings = ClaudeCodeProviderSettings.model_validate({"type": "claude-code", **options})
+
+    assert settings.bare_mode is expected_bare_mode
+
+
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
 def test_claude_settings_accept_documented_effort_values(effort: str) -> None:
     settings = ClaudeCodeProviderSettings.model_validate(
@@ -332,10 +418,13 @@ def test_claude_settings_reject_unsupported_effort_values(effort: object) -> Non
         ClaudeCodeProviderSettings.model_validate({"type": "claude-code", "effort": effort})
 
 
-def test_claude_code_is_restricted_even_when_bare_mode_is_disabled(tmp_path: Path) -> None:
+@pytest.mark.parametrize("bare_mode", [False, True])
+def test_claude_code_is_restricted_with_or_without_bare_mode(
+    tmp_path: Path, bare_mode: bool
+) -> None:
     commands = RecordingCommandClient(stdout=_envelope(result="done"))
     client = ClaudeCodeClient(
-        commands, "claude", 30, bare_mode=False  # type: ignore[arg-type]
+        commands, "claude", 30, bare_mode=bare_mode  # type: ignore[arg-type]
     )
 
     result = client.execute("work", tmp_path)
@@ -343,7 +432,7 @@ def test_claude_code_is_restricted_even_when_bare_mode_is_disabled(tmp_path: Pat
     assert result.success
     command, _ = commands.calls[0]
     assert "--restricted" in command
-    assert "--bare" not in command
+    assert ("--bare" in command) is bare_mode
     assert command[command.index("--tools") + 1] == "Read,Edit,Write,Glob,Grep"
 
 

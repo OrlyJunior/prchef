@@ -44,7 +44,7 @@ class ClaudeCodeClient:
         permission_mode: Literal["dontAsk", "acceptEdits", "auto"] = "dontAsk",
         max_turns: int | None = None,
         max_budget_usd: float | None = None,
-        bare_mode: bool = True,
+        bare_mode: bool = False,
         provider_name: str = "claude-code",
     ) -> None:
         self._commands = command_client
@@ -89,7 +89,7 @@ class ClaudeCodeClient:
             message = summarize_text(str(exc), limit=2_000)
             return ClaudeCodeResult(
                 success=False,
-                error_message=message,
+                error_message=self._with_details(message, None),
                 workspace_changes_may_exist="timed out" in message.casefold(),
             )
 
@@ -244,11 +244,32 @@ class ClaudeCodeClient:
             return None, "Claude Code returned a JSON envelope that was not an object"
         return parsed, None
 
-    @staticmethod
-    def _with_details(message: str, details: str | None) -> str:
-        if not details:
-            return message
-        return f"{message}: {details}"
+    def _with_details(self, message: str, details: str | None) -> str:
+        diagnostic = f"{message}: {details}" if details else message
+        if self._bare_mode and any(
+            marker in diagnostic.casefold()
+            for marker in (
+                "authentication",
+                "unauthorized",
+                "invalid api key",
+                "invalid_api_key",
+                "missing api key",
+                "api key is required",
+                "no api key",
+                "not logged in",
+                "not authenticated",
+                "please run /login",
+                "api_error_status=401",
+                "api error: 401",
+                "http 401",
+            )
+        ):
+            diagnostic += (
+                ". Claude Code bare mode requires an API key (ANTHROPIC_API_KEY) or "
+                "cloud credentials; it does not use subscription login credentials. "
+                "For a Claude subscription, set bare_mode: false or omit bare_mode."
+            )
+        return diagnostic
 
     @classmethod
     def _terminal_details(cls, envelope: Mapping[str, Any], stderr: str) -> str | None:
