@@ -7,9 +7,9 @@ A process group cannot contain a command: any descendant can leave it with ``set
 the supervisor registers as a child subreaper, so orphans remain its descendants. On macOS it
 tracks observed descendant PIDs and checks for processes still using the worktree on recovery.
 
-The command's output is relayed through the supervisor's own pipes, and the supervisor exits with
-the command's own status once the command has exited and every holder of those pipes has closed
-them. A completed command keeps background descendants owned until the app exits.
+The command's output is relayed through the supervisor's own pipes. Once the command has exited
+and every holder of its pipes has closed them, the supervisor reports the command's status and
+closes its output. It keeps background descendants owned until the app exits.
 On SIGTERM the supervisor kills every descendant, relays output already produced,
 and writes ``stopped`` to STATUS_FD only once no descendant remains.
 """
@@ -252,6 +252,10 @@ class _Supervisor:
                     return self._returncode
                 # The command has finished, but detached services remain in this
                 # subreaper. Keep owning them until the application exits.
+                # CommandClient needs EOF on both streams as well as the completion
+                # report to return; our lifetime must not keep those pipes open.
+                os.close(1)
+                os.close(2)
                 while True:
                     if not self._reap() and not self._live_known_descendants():
                         return self._returncode

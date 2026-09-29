@@ -131,7 +131,7 @@ def test_snapshot_ignores_self_and_closes_handle_even_on_enumeration_failure(
     )
     monkeypatch.setattr(windows_processes, "_load_api", lambda: (kernel32, None))
     monkeypatch.setattr(windows_processes, "_inspect_process", inspect)
-    monkeypatch.setattr(ctypes, "get_last_error", lambda: enumeration_error, raising=False)
+    monkeypatch.setattr(windows_processes, "_last_error", lambda: enumeration_error)
     if enumeration_error == 18:
         assert windows_processes.process_locations() == [
             ProcessLocation(7, "agent.exe", "C:\\repo", None),

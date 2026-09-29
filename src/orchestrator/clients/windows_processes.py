@@ -74,6 +74,12 @@ def _load_api() -> tuple[Any, Any]:
     return kernel32, ntdll
 
 
+def _last_error() -> int:
+    if sys.platform != "win32":
+        return 0
+    return ctypes.get_last_error()
+
+
 def _read_memory(
     kernel32: Any, ntdll: Any, handle: int, address: int, size: int, *, wow64: bool,
 ) -> bytes:
@@ -208,7 +214,7 @@ def process_locations() -> list[ProcessLocation]:
             if pid and pid != os.getpid():
                 locations.append(_inspect_process(kernel32, ntdll, pid, entry.szExeFile))
             found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-        if ctypes.get_last_error() != _ERROR_NO_MORE_FILES:
+        if _last_error() != _ERROR_NO_MORE_FILES:
             raise OSError("Cannot enumerate Windows processes")
         return locations
     finally:
