@@ -44,6 +44,7 @@ class WorkflowExecution:
     review_jules_session_id: str | None = None
     review_jules_session_url: str | None = None
     review_snapshot: dict[str, Any] | None = None
+    review_step_id: int | None = None
     review_publication_pending: bool = False
     polish_outcome: PolishOutcome | None = None
     polish_skip_comment_attempted: bool = False

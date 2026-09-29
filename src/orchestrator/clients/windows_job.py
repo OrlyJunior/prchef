@@ -205,9 +205,12 @@ class WindowsJob:
 
     def close(self) -> None:
         if self._handle is not None:
-            # Keep the handle alive after the immediate command ends: a daemon
-            # it launched still belongs to this app until the app exits.
-            if self not in _retained_jobs:
+            # Retain only jobs that still own a background process. Closing an
+            # empty job now avoids one handle per completed command.
+            if self._active_processes() == 0:
+                self._kernel32.CloseHandle(self._handle)
+                self._handle = None
+            elif self not in _retained_jobs:
                 _retained_jobs.append(self)
 
     @staticmethod

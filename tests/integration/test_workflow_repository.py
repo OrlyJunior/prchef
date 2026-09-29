@@ -13,10 +13,12 @@ import orchestrator.repositories.workflow_repository as workflow_repository_modu
 from orchestrator.config.database import build_engine, build_session_factory
 from orchestrator.config.project_config import ProjectConfigLoader, WorkspaceSettings
 from orchestrator.models import (
+    CodeReview,
     DevelopmentTask,
     DiagnosticCategory,
     ExecutionDiagnostic,
     PolishOutcome,
+    ReviewDecision,
     StepStatus,
     WorkflowStage,
     WorkflowStatus,
@@ -85,6 +87,29 @@ def test_recovery_uses_next_stage_after_completed_step(tmp_path: Path) -> None:
     assert repository.get_execution(execution.id).resume_stage is WorkflowStage.LOAD_CONFIG
     repository.recover_interrupted()
     assert repository.get_execution(execution.id).resume_stage is WorkflowStage.LOAD_CONFIG
+
+
+def test_review_output_records_the_step_that_produced_it(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'review-provenance.db').as_posix()}"
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option(
+        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+    )
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(alembic_config, "head")
+
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    execution = repository.create_execution("review-provenance")
+    first_step = repository.start_step(execution.id, WorkflowStage.REVIEW)
+    repository.record_review(execution.id, CodeReview(result=ReviewDecision.APPROVED))
+    assert repository.get_execution(execution.id).review_step_id == first_step
+    repository.finish_step(first_step, StepStatus.SUCCEEDED)
+
+    second_step = repository.start_step(execution.id, WorkflowStage.REVIEW)
+    assert repository.get_execution(execution.id).review_step_id == first_step
+    repository.record_review(execution.id, CodeReview(result=ReviewDecision.CHANGES_REQUESTED))
+    assert repository.get_execution(execution.id).review_step_id == second_step
 
 
 def test_upgrade_recovers_legacy_active_execution(tmp_path: Path) -> None:

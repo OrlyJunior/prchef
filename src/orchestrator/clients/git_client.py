@@ -166,6 +166,11 @@ class GitClient:
     def head_commit_message(self) -> str:
         return self._git("log", "-1", "--format=%s").stdout.strip()
 
+    def head_parent_commit(self) -> str | None:
+        """Return HEAD's first parent, if it has one."""
+        result = self._git("rev-parse", "HEAD^", check=False)
+        return result.stdout.strip() if result.success else None
+
     def remote_branch_commit(self, branch: str) -> str | None:
         result = self._git("ls-remote", "--heads", "origin", branch)
         line = result.stdout.strip()

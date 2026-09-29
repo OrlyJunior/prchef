@@ -61,6 +61,14 @@ class ExecutionHandle:
         self._execution_id = execution_id
         self._outcome = outcome
 
+    @classmethod
+    def completed(cls, execution: WorkflowExecution) -> ExecutionHandle:
+        """Return a handle for an execution settled before it could be queued."""
+
+        outcome = _Outcome()
+        outcome.set(execution)
+        return cls(execution.id, outcome)
+
     @property
     def execution_id(self) -> str:
         """The persisted execution ID, available before the work completes."""

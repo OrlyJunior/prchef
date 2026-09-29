@@ -251,7 +251,11 @@ class StageSequencer:
                 # the repository being executed.
                 if admission_error is not None:
                     raise admission_error
-                task = admission_task or self._task_provider.get_task(task_id)
+                task = (
+                    StageValues._task_from_snapshot(execution)
+                    if recovering and execution.task_snapshot
+                    else admission_task or self._task_provider.get_task(task_id)
+                )
                 self._repository.update_task(execution.id, task)
 
             with self._events._step(execution.id, WorkflowStage.LOAD_CONFIG):
@@ -260,9 +264,6 @@ class StageSequencer:
                     config = config.with_agent_runtime_overrides(
                         provider_overrides,
                         runtime_overrides,
-                    )
-                    self._lifecycle._record_runtime_overrides(
-                        execution.id, provider_overrides, runtime_overrides
                     )
                 self._repository.update_project(
                     execution.id,
@@ -277,8 +278,13 @@ class StageSequencer:
                 )
                 clients = self._client_factory.create(config)
                 repository_slug = clients.git.github_repository()
-                base_commit = clients.git.fetch_base(config.repository.base_branch)
-                self._repository.record_base_commit(execution.id, base_commit)
+                base_commit = (
+                    execution.base_commit
+                    if recovering and execution.base_commit
+                    else clients.git.fetch_base(config.repository.base_branch)
+                )
+                if base_commit != execution.base_commit:
+                    self._repository.record_base_commit(execution.id, base_commit)
                 repository_context_strategy = self._repository_context_strategy(
                     config, execution.id
                 )
@@ -552,12 +558,14 @@ class StageSequencer:
                     execution.id, "Persisted human answer is missing"
                 )
             return self._execute_response(execution, interaction, interaction.response)
-        if stage is WorkflowStage.LOAD_TASK:
-            return self._execute_workflow(
-                execution, execution.task_id, execution.repository_ref or None, {}, {},
-                recovering=True,
-            )
         try:
+            if stage is WorkflowStage.LOAD_TASK:
+                providers, options = self._lifecycle._runtime_overrides_for_execution(execution.id)
+                return self._execute_workflow(
+                    execution, execution.task_id, execution.repository_ref or None,
+                    providers, options,
+                    recovering=True,
+                )
             self._lifecycle._start_admitted(execution.id)
             task = StageValues._task_from_snapshot(execution)
             answered = [(item.prompt, item.response) for item in execution.human_interactions
@@ -722,30 +730,43 @@ class StageSequencer:
                 stage = WorkflowStage.REVIEW
             steps = self._repository.list_steps(execution.id)
             last_step = steps[-1] if steps else None
-            if (
+            interrupted_review = (
                 stage is WorkflowStage.REVIEW
                 and last_step is not None
                 and last_step.stage is WorkflowStage.REVIEW
                 and last_step.status is StepStatus.INTERRUPTED
-                and execution.review_snapshot
-                and not execution.review_publication_pending
-            ):
-                raise WorkflowError(
-                    "Cannot verify which review output belongs to the interrupted "
-                    "review attempt; inspect the pull request before retrying"
-                )
-            reuse_review = (
-                stage is WorkflowStage.REVIEW
-                and last_step is not None
-                and last_step.stage is WorkflowStage.REVIEW
-                and last_step.status is StepStatus.SUCCEEDED
-                and bool(execution.review_snapshot)
-                and not any(
-                    item.response and item.requesting_stage is WorkflowStage.REVIEW
-                    and item.responded_at and item.responded_at >= last_step.started_at
-                    for item in execution.human_interactions
-                )
             )
+            if interrupted_review and last_step is not None and execution.review_snapshot:
+                if execution.review_step_id is not None:
+                    reuse_review = execution.review_step_id == last_step.id
+                elif execution.review_publication_pending:
+                    # Rows written before review provenance was added still
+                    # carry the durable publication checkpoint.
+                    reuse_review = True
+                elif any(
+                    item.stage is WorkflowStage.REVIEW
+                    and item.status is StepStatus.SUCCEEDED
+                    for item in steps[:-1]
+                ):
+                    reuse_review = False
+                else:
+                    raise WorkflowError(
+                        "Cannot verify which review output belongs to the interrupted "
+                        "review attempt; inspect the pull request before retrying"
+                    )
+            else:
+                reuse_review = (
+                    stage is WorkflowStage.REVIEW
+                    and last_step is not None
+                    and last_step.stage is WorkflowStage.REVIEW
+                    and last_step.status is StepStatus.SUCCEEDED
+                    and bool(execution.review_snapshot)
+                    and not any(
+                        item.response and item.requesting_stage is WorkflowStage.REVIEW
+                        and item.responded_at and item.responded_at >= last_step.started_at
+                        for item in execution.human_interactions
+                    )
+                )
             return self._implement_and_review(
                 execution.id, task, spec, config, clients, repository_slug,
                 workspace_path, branch, context, restart_stage=stage, recovering=True,

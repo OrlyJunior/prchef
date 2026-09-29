@@ -574,6 +574,15 @@ class WorkflowRepository:
         def mutate(entity: WorkflowExecutionEntity) -> None:
             entity.review_snapshot_json = _dump(review)
             entity.review_publication_pending = True
+            entity.review_step_id = max(
+                (
+                    step.id for step in entity.steps
+                    if step.id is not None
+                    and step.stage == WorkflowStage.REVIEW.value
+                    and step.status == StepStatus.RUNNING.value
+                ),
+                default=None,
+            )
         self._mutate(execution_id, mutate)
 
     def finish_review_publication(self, execution_id: str) -> None:
@@ -914,6 +923,7 @@ class WorkflowRepository:
             review_jules_session_url=entity.review_jules_session_url,
             review_snapshot=_load(entity.review_snapshot_json),
             review_publication_pending=entity.review_publication_pending,
+            review_step_id=entity.review_step_id,
             polish_outcome=(
                 PolishOutcome(entity.polish_outcome) if entity.polish_outcome is not None else None
             ),

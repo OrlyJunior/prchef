@@ -45,10 +45,14 @@ class StageActions:
             if reconcile and not execution_clients.git.changed_files():
                 head = execution_clients.git.head_commit()
                 if execution.commit_sha == head or (
-                    execution.commit_sha is None
-                    and head != execution.base_commit
+                    head != (execution.commit_sha or execution.base_commit)
                     and execution_clients.git.head_commit_message()
                     == StageValues._commit_message(task)
+                    and (
+                        (execution.commit_sha or execution.base_commit) is None
+                        or execution_clients.git.head_parent_commit()
+                        == (execution.commit_sha or execution.base_commit)
+                    )
                 ):
                     self._repository.record_commit(execution_id, head)
                     return

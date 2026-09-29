@@ -206,6 +206,13 @@ class ExecutionHistoryScreen(Screen[None]):
             self.notify("Select an interrupted execution.", severity="warning")
             return
         try:
+            execution = next(
+                (item for item in self.controller.executions() if item.id == execution_id), None
+            )
+            if execution is None or execution.status is not WorkflowStatus.INTERRUPTED:
+                self.notify("Select an interrupted execution.", severity="warning")
+                self.refresh_history()
+                return
             if resume:
                 self.controller.submit_interrupted(execution_id)
             else:

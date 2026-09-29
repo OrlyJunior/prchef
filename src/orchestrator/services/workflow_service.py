@@ -242,6 +242,20 @@ class WorkflowService:
             execution = self._repository.create_execution(
                 task_id, task_source=self._task_provider.source
             )
+        provider_overrides = {
+            role.value: provider for role, provider in (agent_providers or {}).items()
+        }
+        runtime_overrides = {
+            role.value: dict(options) for role, options in (agent_runtime_options or {}).items()
+        }
+        override_error: WorkflowError | None = None
+        if provider_overrides or runtime_overrides:
+            try:
+                self._lifecycle._record_runtime_overrides(
+                    execution.id, provider_overrides, runtime_overrides
+                )
+            except WorkflowError as exc:
+                override_error = exc
         self._runtimes.begin(execution.id, event_listener)
         self._stage_events._emit(
             execution.id,
@@ -249,12 +263,13 @@ class WorkflowService:
             stage=execution.current_stage,
             status=execution.status,
         )
-        provider_overrides = {
-            role.value: provider for role, provider in (agent_providers or {}).items()
-        }
-        runtime_overrides = {
-            role.value: dict(options) for role, options in (agent_runtime_options or {}).items()
-        }
+        if override_error is not None:
+            try:
+                self._repository.record_error(execution.id, str(override_error))
+                result = self._lifecycle._finish(execution.id, WorkflowStatus.FAILED, None)
+                return ExecutionHandle.completed(result)
+            finally:
+                self._runtimes.end(execution.id)
         return self._submit(
             execution.id,
             lambda: self._sequencer._execute_workflow(

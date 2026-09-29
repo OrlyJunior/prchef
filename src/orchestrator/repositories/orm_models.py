@@ -45,6 +45,7 @@ class WorkflowExecutionEntity(Base):
     review_jules_session_id: Mapped[str | None] = mapped_column(String(255))
     review_jules_session_url: Mapped[str | None] = mapped_column(Text)
     review_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    review_step_id: Mapped[int | None] = mapped_column(Integer)
     review_publication_pending: Mapped[bool] = mapped_column(
         nullable=False, default=False, server_default="0"
     )
