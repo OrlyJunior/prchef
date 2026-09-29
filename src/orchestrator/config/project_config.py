@@ -615,7 +615,7 @@ class ClaudeCodeProviderSettings(BaseModel):
     permission_mode: Literal["dontAsk", "acceptEdits", "auto"] = "dontAsk"
     max_turns: int | None = Field(default=None, gt=0, le=100)
     max_budget_usd: float | None = Field(default=None, gt=0, le=10_000)
-    bare_mode: bool = True
+    bare_mode: bool = False
 
     @field_validator("executable", "model")
     @classmethod

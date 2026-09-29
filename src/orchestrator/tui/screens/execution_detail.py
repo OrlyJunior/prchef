@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import threading
 import webbrowser
-from dataclasses import asdict
 from typing import TYPE_CHECKING, cast
 
 from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
-from textual.containers import Grid, Horizontal, ScrollableContainer, VerticalScroll
+from textual.containers import Grid, Horizontal, VerticalScroll
 from textual.events import DescendantFocus, Resize
 from textual.message import Message
 from textual.screen import Screen
@@ -27,7 +26,7 @@ from orchestrator.models.workflow_status import (
     WorkflowStatus,
 )
 from orchestrator.models.workflow_step import WorkflowStep
-from orchestrator.runtime_logging import redact_payload
+from orchestrator.runtime_logging import redact_payload, redact_text
 from orchestrator.tui.bridge import WorkflowController
 from orchestrator.tui.diagnostics import diagnostic_for_display, format_diagnostics_for_export
 from orchestrator.tui.screens.execution_history import execution_status_label
@@ -54,7 +53,7 @@ class ExecutionDetailScreen(Screen[None]):
         self._reconcile_timer: Timer | None = None
         self._diagnostics_loaded = False
         self._diagnostic_cursor = 0
-        self._displayed_details: str | None = None
+        self._displayed_summary: str | None = None
         self._displayed_timeline: str | None = None
         self._interaction_id: int | None = None
         self._continuation_seeded = False
@@ -74,8 +73,6 @@ class ExecutionDetailScreen(Screen[None]):
                 yield Button("Resume interrupted", variant="primary", id="execution-restart")
                 yield Button("Open task", id="open-task")
                 yield Button("Open PR", id="open-pr")
-                yield Button("Open planner session", id="open-spec-session")
-                yield Button("Open review session", id="open-review-session")
                 yield Button("Copy detailed logs", id="copy-detailed-logs-button")
             yield Static("", id="execution-continuation-title")
             yield TextArea("", id="execution-continuation-feedback")
@@ -96,10 +93,9 @@ class ExecutionDetailScreen(Screen[None]):
                     id="execution-resume",
                     disabled=True,
                 )
-            with ScrollableContainer(id="execution-content-scroll"):
-                yield Static("Loading execution…", id="execution-content", markup=False)
-            yield Button("Hide detailed logs", id="execution-toggle-logs")
+            yield Button("Show detailed logs", id="execution-toggle-logs")
             yield Log(id="execution-detailed-logs", auto_scroll=False)
+            yield Static("", id="execution-summary", markup=False)
 
     @property
     def controller(self) -> WorkflowController:
@@ -137,11 +133,9 @@ class ExecutionDetailScreen(Screen[None]):
         if self.app.screen is not self:
             return
         page = self.query_one("#execution-detail", VerticalScroll)
-        details_scroll = self.query_one("#execution-content-scroll", ScrollableContainer)
         log = self.query_one("#execution-detailed-logs", Log)
         offsets = (
             (page.scroll_x, page.scroll_y),
-            (details_scroll.scroll_x, details_scroll.scroll_y),
             (log.scroll_x, log.scroll_y),
         )
         try:
@@ -150,12 +144,20 @@ class ExecutionDetailScreen(Screen[None]):
             try:
                 execution = self.controller.execution_snapshot(self.execution_id)
             except Exception:
-                self.query_one("#execution-content", Static).update(
+                summary = self.query_one("#execution-summary", Static)
+                summary.display = True
+                summary.update(
                     f"Could not load execution {self.execution_id}: {exc}"
                 )
+                self._displayed_summary = None
                 return
             steps = self._last_steps
         self._render_execution(execution, steps)
+        if log.display:
+            self._refresh_diagnostics()
+        self.call_after_refresh(self._restore_scroll, offsets)
+
+    def _refresh_diagnostics(self) -> None:
         try:
             diagnostics = (
                 self.controller.execution_diagnostics(self.execution_id)
@@ -168,15 +170,14 @@ class ExecutionDetailScreen(Screen[None]):
             self._diagnostics_loaded = True
         except Exception:
             pass  # A later tick retries the same cursor.
-        self.call_after_refresh(self._restore_scroll, offsets)
 
     def _restore_scroll(
-        self, offsets: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+        self, offsets: tuple[tuple[float, float], tuple[float, float]]
     ) -> None:
         if self.app.screen is not self:
             return
         for widget_id, (x, y) in zip(
-            ("execution-detail", "execution-content-scroll", "execution-detailed-logs"),
+            ("execution-detail", "execution-detailed-logs"),
             offsets,
             strict=True,
         ):
@@ -218,6 +219,8 @@ class ExecutionDetailScreen(Screen[None]):
             log.write_line(rendered)
             if diagnostic.id is not None:
                 self._diagnostic_cursor = diagnostic.id
+        if diagnostics:
+            log.refresh(layout=True)
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         self.query_one("#execution-detail", VerticalScroll).scroll_to_widget(
@@ -256,6 +259,8 @@ class ExecutionDetailScreen(Screen[None]):
             log = self.query_one("#execution-detailed-logs", Log)
             log.display = not log.display
             event.button.label = "Hide detailed logs" if log.display else "Show detailed logs"
+            if log.display:
+                self._refresh_diagnostics()
             return
         url = self._links.get(event.button.id or "")
         if not url:
@@ -385,11 +390,12 @@ class ExecutionDetailScreen(Screen[None]):
         restart = self.query_one("#execution-restart", Button)
         restart.display = execution.status is WorkflowStatus.INTERRUPTED
         restart.disabled = False
+        self.query_one("#execution-detail-actions", Grid).set_class(
+            not cancel.display, "-without-cancel"
+        )
         self._links = {
             "open-task": execution.task_url,
             "open-pr": execution.pr_url or "",
-            "open-spec-session": execution.spec_jules_session_url or "",
-            "open-review-session": execution.review_jules_session_url or "",
         }
         for button_id, url in self._links.items():
             self.query_one(f"#{button_id}", Button).disabled = not bool(url)
@@ -443,7 +449,11 @@ class ExecutionDetailScreen(Screen[None]):
             feedback = self.query_one("#execution-continuation-feedback", TextArea)
             role = "planner" if continuation_stage is WorkflowStage.GENERATE_SPEC else "implementer"
             self.query_one("#execution-continuation-title", Static).update(
-                f"Edit the feedback sent to a fresh {role} invocation:"
+                f"Instructions for the {role} (sent when you click Continue Execution)."
+                + (
+                    " Work resumes in the existing worktree without repeating earlier steps."
+                    if continuation_stage is WorkflowStage.IMPLEMENT else ""
+                )
             )
             try:
                 feedback.text = self.controller.continuation_feedback(execution.id)
@@ -454,19 +464,22 @@ class ExecutionDetailScreen(Screen[None]):
                 self.notify(f"Could not prepare continuation feedback: {exc}", severity="error")
             self._continuation_seeded = True
 
-        details = {
-            "execution": asdict(execution),
-            "steps": [asdict(step) for step in steps],
-            "links": {
-                key.removeprefix("open-"): value for key, value in self._links.items() if value
-            },
+        summary_fields = {
+            "Workspace path": execution.workspace_path,
+            "Working branch": execution.working_branch,
+            "Commit SHA": execution.commit_sha,
+            "PR": execution.pr_url,
         }
-        rendered = json.dumps(redact_payload(details), ensure_ascii=False, indent=2, default=str)
-        if rendered != self._displayed_details:
-            self.query_one("#execution-content", Static).update(
-                Text(rendered, no_wrap=True, overflow="ignore")
+        rendered = "\n".join(
+            f"{label}: {redact_text(value)}" for label, value in summary_fields.items() if value
+        )
+        if rendered != self._displayed_summary:
+            summary = self.query_one("#execution-summary", Static)
+            summary.display = bool(rendered)
+            summary.update(
+                Text(rendered, no_wrap=True, overflow="ellipsis")
             )
-            self._displayed_details = rendered
+            self._displayed_summary = rendered
 
     def _copy_detailed_logs(self) -> None:
         try:

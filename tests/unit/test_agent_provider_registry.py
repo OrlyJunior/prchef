@@ -56,7 +56,13 @@ def test_resolves_named_provider_types_and_reuses_shared_instances(tmp_path: Pat
     assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.REVIEWER)
 
 
-def test_resolves_and_reuses_a_named_claude_code_provider(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("bare_options", "expected_bare_mode"),
+    [({}, False), ({"bare_mode": False}, False), ({"bare_mode": True}, True)],
+)
+def test_resolves_and_reuses_a_named_claude_code_provider(
+    tmp_path: Path, bare_options: dict[str, bool], expected_bare_mode: bool
+) -> None:
     config = _config(
         tmp_path,
         agents={
@@ -65,7 +71,12 @@ def test_resolves_and_reuses_a_named_claude_code_provider(tmp_path: Path) -> Non
             "reviewer": {"provider": "codex"},
         },
         providers={
-            "claude": {"type": "claude-code", "executable": "claude", "effort": "xhigh"},
+            "claude": {
+                "type": "claude-code",
+                "executable": "claude",
+                "effort": "xhigh",
+                **bare_options,
+            },
             "codex": {"type": "codex-cli", "command": ["codex", "exec", "-"]},
         },
     )
@@ -76,6 +87,7 @@ def test_resolves_and_reuses_a_named_claude_code_provider(tmp_path: Path) -> Non
     assert isinstance(planner, ClaudeCodeAgentProvider)
     assert planner is clients.agent(AgentRole.IMPLEMENTER)
     assert planner._client._effort == "xhigh"
+    assert planner._client._bare_mode is expected_bare_mode
 
 
 def test_different_roles_can_reference_different_named_instances(tmp_path: Path) -> None:

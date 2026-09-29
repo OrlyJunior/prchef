@@ -83,6 +83,10 @@ For unattended Codex runs, we recommend `approval_policy: approve-for-me` as sho
 
 Each provider runs one agent call at a time by default. To allow more, set `max_concurrency` on the provider under `defaults.providers`.
 
+For the `claude-code` provider, `bare_mode` defaults to `false`. Claude subscription users should leave it off (omit it or set `bare_mode: false`) and authenticate with Claude Code outside the orchestrator.
+
+Optionally set `bare_mode: true` for reproducible runs that skip user hooks, plugins, skills, and MCP auto-discovery. [Bare mode requires an API key (`ANTHROPIC_API_KEY`) or supported cloud credentials](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode); it does not use subscription login credentials. The provider always passes [`--restricted`](https://code.claude.com/docs/en/cli-reference#cli-flags), which confines Claude Code's file tools to the supplied worktree with or without bare mode. See [orchestrator.example.yml](orchestrator.example.yml) for provider options.
+
 Credentials belong in environment variables or ambient `gh` authentication, never in YAML. For Trello, set `ORCHESTRATOR_TRELLO_API_KEY` and `ORCHESTRATOR_TRELLO_TOKEN`. Optional GitHub App identities are described in [GitHub App setup](docs/github_app.md).
 
 ## First run
@@ -139,6 +143,7 @@ Optional local `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` files in your r
 
 - **`GitHub CLI failed`:** check that `gh` is authenticated and has access to the target repository.
 - **`Executable not found: codex`, `claude`, or `gh`:** install the CLI and make sure it's on your `PATH`, or select a provider you have installed.
+- **Claude Code authentication fails with `bare_mode: true`:** bare mode requires an API key or supported cloud credentials. For a Claude subscription, omit `bare_mode` or set it to `false` and authenticate with Claude Code outside the orchestrator.
 - **`Global configuration not found. Searched:`:** put `orchestrator.yml` in one of the locations listed under Configuration, or pass `--config` with an existing file.
 - **A local Qdrant index lock error:** another process is using the index. Close it, or configure Qdrant server mode.
 

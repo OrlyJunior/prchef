@@ -3487,13 +3487,18 @@ def test_execution_history_filters_execution_without_repository(tmp_path: Path) 
     asyncio.run(drive())
 
 
-def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) -> None:
+@pytest.mark.parametrize("width", [80, 36])
+def test_execution_detail_replaces_raw_json_with_compact_summary(
+    tmp_path: Path, width: int
+) -> None:
     controller, _, repository = _controller(tmp_path)
     execution = repository.execution
     execution.repository = "example"
     execution.task_url = "https://example/tasks/12"
     execution.pr_url = "https://example/pull/34"
+    execution.workspace_path = str(tmp_path / "worktree")
     execution.working_branch = "workflow/12"
+    execution.commit_sha = "a" * 40
     execution.validation_snapshot = {"passed": True}
     execution.review_snapshot = {"decision": "APPROVED", "findings": []}
     execution.spec_jules_session_url = "https://example/sessions/planner"
@@ -3501,15 +3506,68 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
-        async with application.run_test() as pilot:
+        async with application.run_test(size=(width, 24)) as pilot:
             application.push_screen(ExecutionDetailScreen(execution.id))
             await settle_tui(pilot)
             assert isinstance(application.screen, ExecutionDetailScreen)
-            rendered = str(application.screen.query_one("#execution-content").renderable)
-            assert '"validation_snapshot": {' in rendered
-            assert '"review_snapshot": {' in rendered
-            assert '"pr": "https://example/pull/34"' in rendered
-            assert '"spec-session": "https://example/sessions/planner"' in rendered
+            summary = application.screen.query_one("#execution-summary", Static)
+            assert str(summary.renderable).splitlines() == [
+                f"Workspace path: {execution.workspace_path}",
+                "Working branch: workflow/12",
+                f"Commit SHA: {execution.commit_sha}",
+                "PR: https://example/pull/34",
+            ]
+            assert summary.parent is application.screen.query_one("#execution-detail")
+            assert summary.size.height == 4
+            assert not summary.show_vertical_scrollbar
+            assert not application.screen.query("#execution-content")
+            assert not application.screen.query("#execution-content-scroll")
+            assert not application.screen.query("#open-spec-session")
+            assert not application.screen.query("#open-review-session")
+            assert application.screen._links == {
+                "open-task": execution.task_url, "open-pr": execution.pr_url,
+            }
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("workspace_path", r"C:\worktree [project]", r"Workspace path: C:\worktree [project]"),
+        ("working_branch", "workflow/12", "Working branch: workflow/12"),
+        ("commit_sha", "abc123", "Commit SHA: abc123"),
+        ("pr_url", "https://example/pull/34", "PR: https://example/pull/34"),
+    ],
+)
+def test_execution_detail_summary_shows_only_existing_values_and_refreshes(
+    tmp_path: Path, field: str, value: str, expected: str
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            summary = screen.query_one("#execution-summary", Static)
+            assert not summary.display
+            assert str(summary.renderable) == ""
+
+            setattr(repository.execution, field, value)
+            screen._refresh_execution()
+            await settle_tui(pilot)
+            assert summary.display
+            assert str(summary.renderable) == expected
+            assert summary.size.height == 1
+
+            for missing in ("", None):
+                setattr(repository.execution, field, missing)
+                screen._refresh_execution()
+                await settle_tui(pilot)
+                assert not summary.display
+                assert str(summary.renderable) == ""
 
     asyncio.run(drive())
 
@@ -3557,6 +3615,9 @@ def test_execution_detail_reconciles_history_execution_and_new_pr(
                 screen.query_one("#execution-timeline", Static).renderable
             )
             assert not screen.query_one("#open-pr", Button).disabled
+            assert "PR: https://example/pull/34" in str(
+                screen.query_one("#execution-summary", Static).renderable
+            )
             assert screen._links["open-pr"] == execution.pr_url
             execution.status = WorkflowStatus.APPROVED
             screen._refresh_execution()
@@ -3667,17 +3728,17 @@ def test_execution_detail_reopens_persisted_waiting_and_human_timeline(
     asyncio.run(drive())
 
 
-@pytest.mark.parametrize(("width", "maximum_rows"), [(80, 2), (36, 6)])
+@pytest.mark.parametrize(("width", "maximum_rows"), [(80, 2), (64, 2), (36, 4)])
+@pytest.mark.parametrize("status", [WorkflowStatus.RUNNING, WorkflowStatus.APPROVED])
 def test_execution_detail_actions_reflow_without_diagnostic_overflow(
-    tmp_path: Path, width: int, maximum_rows: int, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, width: int, maximum_rows: int, status: WorkflowStatus,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller, _, repository = _controller(tmp_path)
     execution = repository.execution
-    execution.status = WorkflowStatus.RUNNING
+    execution.status = status
     execution.task_url = "https://example/tasks/12"
     execution.pr_url = "https://example/pull/34"
-    execution.spec_jules_session_url = "https://example/sessions/planner"
-    execution.review_jules_session_url = "https://example/sessions/reviewer"
     long_diagnostics = [ExecutionDiagnostic(
         execution_id=execution.id,
         category=DiagnosticCategory.RESPONSE,
@@ -3692,20 +3753,35 @@ def test_execution_detail_actions_reflow_without_diagnostic_overflow(
             application.push_screen(ExecutionDetailScreen(execution.id))
             await settle_tui(pilot)
             screen = application.screen
-            action_ids = (
-                "execution-cancel", "open-task", "open-pr", "open-spec-session",
-                "open-review-session", "copy-detailed-logs-button",
-            )
+            action_ids = ("open-task", "open-pr", "copy-detailed-logs-button")
+            if status is WorkflowStatus.RUNNING:
+                action_ids = ("execution-cancel", *action_ids)
             buttons = [screen.query_one(f"#{button_id}", Button) for button_id in action_ids]
+            assert not screen.query("#open-spec-session")
+            assert not screen.query("#open-review-session")
+            actions = screen.query_one("#execution-detail-actions")
+            assert [
+                button.id for button in actions.query(Button) if button.display
+            ] == list(action_ids)
             positions = [(button.virtual_region.x, button.virtual_region.y) for button in buttons]
             repository.diagnostics = long_diagnostics
             screen._refresh_execution()
+            screen.query_one("#execution-toggle-logs", Button).press()
             await settle_tui(pilot)
             assert positions == [
                 (button.virtual_region.x, button.virtual_region.y) for button in buttons
             ]
             assert all(button.display and not button.disabled for button in buttons)
             assert len({button.virtual_region.y for button in buttons}) <= maximum_rows
+            # Every occupied row fills the grid, with only the configured gutter between buttons.
+            for row_y in {button.region.y for button in buttons}:
+                row = [button for button in buttons if button.region.y == row_y]
+                assert row[0].region.x == actions.region.x
+                assert row[-1].region.right == actions.region.right
+                assert all(
+                    right.region.x - left.region.right == 1
+                    for left, right in zip(row, row[1:], strict=False)
+                )
             assert screen.query_one("#execution-detail", VerticalScroll).max_scroll_x == 0
             content = screen.query_one("#execution-detailed-logs", Log)
             assert content.max_scroll_x > 0
@@ -3725,6 +3801,136 @@ def test_execution_detail_actions_reflow_without_diagnostic_overflow(
             assert await pilot.click("#open-task")
             await settle_tui(pilot)
             assert opened == [execution.task_url]
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
+    "status", [WorkflowStatus.RUNNING, WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED]
+)
+def test_execution_detail_loads_logs_only_when_expanded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: WorkflowStatus
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = status
+    repository.diagnostics = [ExecutionDiagnostic(
+        execution_id=repository.execution.id,
+        category=DiagnosticCategory.RESPONSE,
+        payload={"output": "first diagnostic"},
+    )]
+    reads: list[int | None] = []
+    original_list = repository.list_diagnostics
+    original_after = repository.list_diagnostics_after
+
+    def full_read(execution_id: str) -> list[ExecutionDiagnostic]:
+        reads.append(None)
+        return original_list(execution_id)
+
+    def incremental_read(execution_id: str, after_id: int) -> list[ExecutionDiagnostic]:
+        reads.append(after_id)
+        return original_after(execution_id, after_id)
+
+    monkeypatch.setattr(repository, "list_diagnostics", full_read)
+    monkeypatch.setattr(repository, "list_diagnostics_after", incremental_read)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 24)) as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            log = screen.query_one("#execution-detailed-logs", Log)
+            toggle = screen.query_one("#execution-toggle-logs", Button)
+            assert not log.display
+            assert not log.lines
+            assert str(toggle.label) == "Show detailed logs"
+            screen._refresh_execution()
+            await settle_tui(pilot)
+            assert reads == []
+            assert not log.lines
+
+            toggle.focus()
+            await settle_tui(pilot)
+            assert await pilot.click("#execution-toggle-logs")
+            await settle_tui(pilot)
+            assert log.display
+            assert str(toggle.label) == "Hide detailed logs"
+            assert "first diagnostic" in str(log.lines)
+            assert reads == [None]
+
+            toggle.press()
+            await settle_tui(pilot)
+            assert not log.display
+            assert str(toggle.label) == "Show detailed logs"
+            lines_before = list(log.lines)
+            repository.diagnostics.append(ExecutionDiagnostic(
+                execution_id=repository.execution.id,
+                category=DiagnosticCategory.RESPONSE,
+                payload={"output": "diagnostic while collapsed"},
+            ))
+            screen._refresh_execution()
+            await settle_tui(pilot)
+            assert reads == [None]
+            assert list(log.lines) == lines_before
+
+            toggle.press()
+            await settle_tui(pilot)
+            assert log.display
+            assert reads == [None, 1]
+            assert str(log.lines).count("first diagnostic") == 1
+            assert "diagnostic while collapsed" in str(log.lines)
+            assert log.max_scroll_y == 0
+
+    asyncio.run(drive())
+
+
+def test_execution_detail_log_toggle_stays_visible_above_compact_summary(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.validation_snapshot = {
+        f"check_{number}": "passed" for number in range(400)
+    }
+    repository.execution.working_branch = "workflow/12"
+    repository.diagnostics = [ExecutionDiagnostic(
+        execution_id=repository.execution.id,
+        category=DiagnosticCategory.RESPONSE,
+        payload={"output": "expanded diagnostic"},
+    )]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 24)) as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            toggle = screen.query_one("#execution-toggle-logs", Button)
+            log = screen.query_one("#execution-detailed-logs", Log)
+            summary = screen.query_one("#execution-summary", Static)
+            actions = screen.query_one("#execution-detail-actions")
+            action_region = actions.region
+            toggle_region = toggle.region
+            toggle.active_effect_duration = 0
+            assert toggle.display
+            assert 0 <= toggle.region.y < toggle.region.bottom <= application.size.height
+            assert summary.size.height == 1
+            assert toggle.region.bottom <= summary.region.y
+            assert not log.display
+            assert not log.lines
+
+            assert await pilot.click("#execution-toggle-logs")
+            await settle_tui(pilot)
+            assert str(toggle.label) == "Hide detailed logs"
+            assert log.display
+            assert "expanded diagnostic" in str(log.lines)
+            assert actions.region == action_region
+            assert toggle.region == toggle_region
+            assert toggle.region.bottom <= log.region.y < summary.region.y
+
+            assert await pilot.click("#execution-toggle-logs")
+            await settle_tui(pilot)
+            assert str(toggle.label) == "Show detailed logs"
+            assert not log.display
+            assert actions.region == action_region
+            assert toggle.region == toggle_region
 
     asyncio.run(drive())
 
@@ -3757,6 +3963,10 @@ def test_execution_detail_open_and_refresh_do_not_fetch_task_or_context(
             await settle_tui(pilot)
             screen = application.screen
             content = screen.query_one("#execution-detailed-logs", Log)
+            assert not content.display
+            assert not content.lines
+            screen.query_one("#execution-toggle-logs", Button).press()
+            await settle_tui(pilot)
             assert long_payload in str(content.lines)
             assert content.max_scroll_x > 0
             screen._refresh_execution()
@@ -3839,7 +4049,8 @@ def test_execution_detail_cancel_is_visible_and_keyboard_reachable_with_long_dia
             assert 0 <= cancel.region.y < cancel.region.bottom <= application.size.height
             assert screen.query_one("#execution-detail", VerticalScroll).max_scroll_x == 0
             content = screen.query_one("#execution-detailed-logs", Log)
-            assert content.max_scroll_x > 0
+            assert not content.display
+            assert not content.lines
 
             for _ in range(12):
                 if application.focused is cancel:
@@ -3888,10 +4099,15 @@ def test_execution_detail_actions_and_diagnostics_stay_bounded_in_narrow_termina
             screen = application.screen
             page = screen.query_one("#execution-detail", VerticalScroll)
             content = screen.query_one("#execution-detailed-logs", Log)
+            screen.query_one("#execution-toggle-logs", Button).press()
+            await settle_tui(pilot)
             assert page.max_scroll_x == 0
             assert page.max_scroll_y > 0
             assert content.max_scroll_x > 0
-            assert content.max_scroll_y > 0
+            assert content.max_scroll_y == 0
+            assert not content.show_vertical_scrollbar
+            assert content.scrollable_content_region.height == content.line_count
+            assert not screen.query("#execution-content-scroll")
             assert content.region.right <= application.size.width
 
             screen.query_one("#execution-human-response", TextArea).text = "Answer"
@@ -4157,9 +4373,9 @@ def test_execution_detail_offers_planner_continuation_after_planning_quota_failu
             await settle_tui(pilot)
             screen = application.screen
             assert screen.query_one("#execution-continuation-feedback").display is True
-            assert "planner" in str(
+            assert str(
                 screen.query_one("#execution-continuation-title", Static).renderable
-            )
+            ) == "Instructions for the planner (sent when you click Continue Execution)."
 
     asyncio.run(drive())
 
@@ -4189,6 +4405,8 @@ def test_execution_detail_continuation_feedback_is_readable_beside_long_details(
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
             await settle_tui(pilot)
             screen = application.screen
+            screen.query_one("#execution-toggle-logs", Button).press()
+            await settle_tui(pilot)
             feedback = screen.query_one("#execution-continuation-feedback", TextArea)
             assert feedback.text == "Persisted terminal feedback"
             assert feedback.size.height > 0
@@ -4219,6 +4437,10 @@ def test_execution_detail_offers_editable_terminal_continuation(tmp_path: Path) 
             await settle_tui(pilot)
             screen = application.screen
             feedback = screen.query_one("#execution-continuation-feedback", TextArea)
+            assert str(screen.query_one("#execution-continuation-title", Static).renderable) == (
+                "Instructions for the implementer (sent when you click Continue Execution)."
+                " Work resumes in the existing worktree without repeating earlier steps."
+            )
             assert feedback.display is True
             assert feedback.text == "Persisted terminal feedback"
             feedback.text = "Edited continuation feedback"
@@ -4611,17 +4833,17 @@ def test_execution_detail_checks_continuation_eligibility_once_per_status(
             await settle_tui(pilot)
             screen = application.screen
             assert isinstance(screen, ExecutionDetailScreen)
-            assert reads == 2  # Initial log load and eligibility check.
+            assert reads == 1  # Continuation eligibility check only.
 
             screen._refresh_execution()
             screen._refresh_execution()
-            assert reads == 2
+            assert reads == 1
 
             repository.execution.status = WorkflowStatus.RUNNING
             screen._refresh_execution()
             repository.execution.status = WorkflowStatus.FAILED
             screen._refresh_execution()
-            assert reads == 3
+            assert reads == 2
 
     asyncio.run(drive())
 
@@ -4658,6 +4880,8 @@ def test_execution_detail_copies_all_persisted_detailed_logs(
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
             await settle_tui(pilot)
             screen = application.screen
+            screen.query_one("#execution-toggle-logs", Button).press()
+            await settle_tui(pilot)
             detailed_logs = str(screen.query_one("#execution-detailed-logs", Log).lines)
             assert detailed_logs.count("implement the requested change") == 1
             copy_button = screen.query_one("#copy-detailed-logs-button", Button)
@@ -4708,14 +4932,16 @@ def test_execution_detail_can_copy_after_terminal_initial_diagnostic_read_fails(
             assert isinstance(screen, ExecutionDetailScreen)
             assert screen._reconcile_timer is None
             assert not screen.query_one("#copy-detailed-logs-button", Button).disabled
+            screen.query_one("#execution-toggle-logs", Button).press()
+            await settle_tui(pilot)
+            assert not screen._diagnostics_loaded
             screen.query_one("#copy-detailed-logs-button", Button).press()
             await settle_tui(pilot)
 
     asyncio.run(drive())
 
-    # The terminal continuation check retries after the initial log read fails;
-    # copying then makes a fresh read to export the complete persisted history.
-    assert reads == 3
+    # Copying makes a fresh read even after expanding the logs failed.
+    assert reads == 2
     assert copied == [format_diagnostics_for_export(original_list(repository.execution.id))]
 
 
@@ -4747,6 +4973,8 @@ def test_execution_detail_appends_only_new_diagnostics_and_preserves_ui_state(
             await settle_tui(pilot)
             screen = application.screen
             assert isinstance(screen, ExecutionDetailScreen)
+            screen.query_one("#execution-toggle-logs", Button).press()
+            await settle_tui(pilot)
             response = screen.query_one("#execution-human-response", TextArea)
             response.text = "My edited answer"
             response.focus()
@@ -7446,9 +7674,11 @@ def test_secondary_screens_keep_content_in_scrollable_regions_in_small_terminals
     tmp_path: Path,
 ) -> None:
     controller, _, repository = _controller(tmp_path)
-    repository.execution.validation_snapshot = {
-        f"check_{number}": "passed" for number in range(40)
-    }
+    repository.diagnostics = [ExecutionDiagnostic(
+        execution_id=repository.execution.id,
+        category=DiagnosticCategory.RESPONSE,
+        payload={"output": f"response {number}"},
+    ) for number in range(40)]
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
@@ -7460,7 +7690,9 @@ def test_secondary_screens_keep_content_in_scrollable_regions_in_small_terminals
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
             await settle_tui(pilot)
             detail = application.screen.query_one("#execution-detail", VerticalScroll)
-            detail_content = application.screen.query_one("#execution-content", Static)
+            application.screen.query_one("#execution-toggle-logs", Button).press()
+            await settle_tui(pilot)
+            detail_content = application.screen.query_one("#execution-detailed-logs", Log)
             assert detail.max_scroll_y > 0
             assert detail_content.size.height > 20
             detail.scroll_end(animate=False)
