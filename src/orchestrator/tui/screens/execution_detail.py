@@ -73,8 +73,6 @@ class ExecutionDetailScreen(Screen[None]):
                 yield Button("Cancel", variant="error", id="execution-cancel")
                 yield Button("Open task", id="open-task")
                 yield Button("Open PR", id="open-pr")
-                yield Button("Open planner session", id="open-spec-session")
-                yield Button("Open review session", id="open-review-session")
                 yield Button("Copy detailed logs", id="copy-detailed-logs-button")
             yield Static("", id="execution-continuation-title")
             yield TextArea("", id="execution-continuation-feedback")
@@ -378,11 +376,12 @@ class ExecutionDetailScreen(Screen[None]):
             or (execution.status in ACTIVE_WORKFLOW_STATUSES and not cancellation_pending)
         )
         cancel.disabled = False
+        self.query_one("#execution-detail-actions", Grid).set_class(
+            not cancel.display, "-without-cancel"
+        )
         self._links = {
             "open-task": execution.task_url,
             "open-pr": execution.pr_url or "",
-            "open-spec-session": execution.spec_jules_session_url or "",
-            "open-review-session": execution.review_jules_session_url or "",
         }
         for button_id, url in self._links.items():
             self.query_one(f"#{button_id}", Button).disabled = not bool(url)

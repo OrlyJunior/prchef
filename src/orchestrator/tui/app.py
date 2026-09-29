@@ -119,21 +119,29 @@ class OrchestratorApp(App[None]):
         width: 100%;
         min-width: 0;
         height: auto;
-        grid-size: 3;
-        grid-columns: 1fr 1fr 1fr;
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
         grid-rows: auto;
         grid-gutter: 0 1;
         margin-top: 1;
     }
     #execution-detail-actions Button { width: 100%; min-width: 0; max-width: 100%; }
+    #execution-detail-actions.-without-cancel {
+        grid-size: 3;
+        grid-columns: 1fr 1fr 1fr;
+    }
     ExecutionDetailScreen.-medium-actions #execution-detail-actions {
         grid-size: 2;
         grid-columns: 1fr 1fr;
     }
+    ExecutionDetailScreen.-medium-actions #execution-detail-actions.-without-cancel
+    #copy-detailed-logs-button { column-span: 2; }
     ExecutionDetailScreen.-narrow-actions #execution-detail-actions {
         grid-size: 1;
         grid-columns: 1fr;
     }
+    ExecutionDetailScreen.-narrow-actions #execution-detail-actions.-without-cancel
+    #copy-detailed-logs-button { column-span: 1; }
     #execution-detail .screen-actions { width: 100%; min-width: 0; }
     #execution-detail .screen-actions Button {
         min-width: 0;

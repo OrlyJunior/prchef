@@ -3509,7 +3509,13 @@ def test_execution_detail_renders_persisted_snapshots_and_links(tmp_path: Path) 
             assert '"validation_snapshot": {' in rendered
             assert '"review_snapshot": {' in rendered
             assert '"pr": "https://example/pull/34"' in rendered
-            assert '"spec-session": "https://example/sessions/planner"' in rendered
+            assert '"spec_jules_session_url": "https://example/sessions/planner"' in rendered
+            assert '"review_jules_session_url": "https://example/sessions/reviewer"' in rendered
+            assert not application.screen.query("#open-spec-session")
+            assert not application.screen.query("#open-review-session")
+            assert application.screen._links == {
+                "open-task": execution.task_url, "open-pr": execution.pr_url,
+            }
 
     asyncio.run(drive())
 
@@ -3667,17 +3673,17 @@ def test_execution_detail_reopens_persisted_waiting_and_human_timeline(
     asyncio.run(drive())
 
 
-@pytest.mark.parametrize(("width", "maximum_rows"), [(80, 2), (36, 6)])
+@pytest.mark.parametrize(("width", "maximum_rows"), [(80, 2), (64, 2), (36, 4)])
+@pytest.mark.parametrize("status", [WorkflowStatus.RUNNING, WorkflowStatus.APPROVED])
 def test_execution_detail_actions_reflow_without_diagnostic_overflow(
-    tmp_path: Path, width: int, maximum_rows: int, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, width: int, maximum_rows: int, status: WorkflowStatus,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller, _, repository = _controller(tmp_path)
     execution = repository.execution
-    execution.status = WorkflowStatus.RUNNING
+    execution.status = status
     execution.task_url = "https://example/tasks/12"
     execution.pr_url = "https://example/pull/34"
-    execution.spec_jules_session_url = "https://example/sessions/planner"
-    execution.review_jules_session_url = "https://example/sessions/reviewer"
     long_diagnostics = [ExecutionDiagnostic(
         execution_id=execution.id,
         category=DiagnosticCategory.RESPONSE,
@@ -3692,11 +3698,16 @@ def test_execution_detail_actions_reflow_without_diagnostic_overflow(
             application.push_screen(ExecutionDetailScreen(execution.id))
             await settle_tui(pilot)
             screen = application.screen
-            action_ids = (
-                "execution-cancel", "open-task", "open-pr", "open-spec-session",
-                "open-review-session", "copy-detailed-logs-button",
-            )
+            action_ids = ("open-task", "open-pr", "copy-detailed-logs-button")
+            if status is WorkflowStatus.RUNNING:
+                action_ids = ("execution-cancel", *action_ids)
             buttons = [screen.query_one(f"#{button_id}", Button) for button_id in action_ids]
+            assert not screen.query("#open-spec-session")
+            assert not screen.query("#open-review-session")
+            actions = screen.query_one("#execution-detail-actions")
+            assert [
+                button.id for button in actions.query(Button) if button.display
+            ] == list(action_ids)
             positions = [(button.virtual_region.x, button.virtual_region.y) for button in buttons]
             repository.diagnostics = long_diagnostics
             screen._refresh_execution()
@@ -3707,6 +3718,15 @@ def test_execution_detail_actions_reflow_without_diagnostic_overflow(
             ]
             assert all(button.display and not button.disabled for button in buttons)
             assert len({button.virtual_region.y for button in buttons}) <= maximum_rows
+            # Every occupied row fills the grid, with only the configured gutter between buttons.
+            for row_y in {button.region.y for button in buttons}:
+                row = [button for button in buttons if button.region.y == row_y]
+                assert row[0].region.x == actions.region.x
+                assert row[-1].region.right == actions.region.right
+                assert all(
+                    right.region.x - left.region.right == 1
+                    for left, right in zip(row, row[1:], strict=False)
+                )
             assert screen.query_one("#execution-detail", VerticalScroll).max_scroll_x == 0
             content = screen.query_one("#execution-detailed-logs", Log)
             assert content.max_scroll_x > 0
