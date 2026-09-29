@@ -30,6 +30,34 @@ from orchestrator.services.workspace_cleaner import (
 runner = CliRunner()
 
 
+def test_show_keeps_full_execution_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    execution = WorkflowExecution(
+        id="execution-1",
+        workspace_path=r"C:\worktree",
+        working_branch="workflow/12",
+        commit_sha="abc123",
+        pr_url="https://example/pull/34",
+        spec_snapshot={"proposal": "Implement the change"},
+        validation_snapshot={"passed": True},
+        review_snapshot={"decision": "APPROVED"},
+        spec_jules_session_url="https://example/sessions/planner",
+    )
+    repository = SimpleNamespace(get_execution=lambda _id: execution)
+    monkeypatch.setattr(main, "_migrated_repository", lambda _settings: repository)
+
+    result = runner.invoke(main.app, ["show", execution.id])
+
+    assert result.exit_code == 0
+    rendered = json.loads(result.stdout)
+    for field in execution.__dataclass_fields__:
+        assert field in rendered
+    for field in (
+        "workspace_path", "working_branch", "commit_sha", "pr_url", "spec_snapshot",
+        "validation_snapshot", "review_snapshot", "spec_jules_session_url",
+    ):
+        assert rendered[field] == getattr(execution, field)
+
+
 def test_cli_and_tui_select_only_the_matching_planner_app(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
