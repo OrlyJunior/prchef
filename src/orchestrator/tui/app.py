@@ -113,46 +113,52 @@ class OrchestratorApp(App[None]):
     .github-app-role { width: 100%; height: auto; margin-bottom: 1; }
     .screen-actions { margin-top: 1; height: auto; }
     .screen-actions Button { margin-right: 1; }
-    #execution-detail { min-width: 0; overflow-x: hidden; }
+    #execution-detail { min-width: 0; overflow-x: hidden; scrollbar-gutter: stable; }
     #execution-status { width: 100%; height: auto; }
     #execution-detail-actions {
         width: 100%;
         min-width: 0;
         height: auto;
-        grid-size: 3;
-        grid-columns: 1fr 1fr 1fr;
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
         grid-rows: auto;
         grid-gutter: 0 1;
         margin-top: 1;
     }
     #execution-detail-actions Button { width: 100%; min-width: 0; max-width: 100%; }
+    #execution-detail-actions.-without-cancel {
+        grid-size: 3;
+        grid-columns: 1fr 1fr 1fr;
+    }
     ExecutionDetailScreen.-medium-actions #execution-detail-actions {
         grid-size: 2;
         grid-columns: 1fr 1fr;
     }
+    ExecutionDetailScreen.-medium-actions #execution-detail-actions.-without-cancel
+    #copy-detailed-logs-button { column-span: 2; }
     ExecutionDetailScreen.-narrow-actions #execution-detail-actions {
         grid-size: 1;
         grid-columns: 1fr;
     }
+    ExecutionDetailScreen.-narrow-actions #execution-detail-actions.-without-cancel
+    #copy-detailed-logs-button { column-span: 1; }
     #execution-detail .screen-actions { width: 100%; min-width: 0; }
     #execution-detail .screen-actions Button {
         min-width: 0;
         max-width: 100%;
         margin-right: 0;
     }
-    #execution-content-scroll {
-        width: 100%;
-        min-width: 0;
-        height: 12;
-        overflow-x: auto;
-        overflow-y: auto;
-        margin-top: 1;
-    }
-    #execution-content { width: auto; height: auto; }
+    #execution-summary { width: 100%; height: auto; margin-top: 1; }
     #execution-timeline { width: 100%; height: auto; margin-top: 1; }
     #execution-stage { width: 100%; height: auto; }
     #execution-toggle-logs { width: auto; margin-top: 1; }
-    #execution-detailed-logs { width: 100%; height: 12; overflow-x: auto; }
+    #execution-detailed-logs {
+        display: none;
+        width: 100%;
+        height: auto;
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
     .navigation-actions {
         width: 100%;
         height: auto;
