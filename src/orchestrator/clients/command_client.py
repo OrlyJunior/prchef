@@ -21,6 +21,7 @@ from orchestrator.clients.exceptions import (
     CommandTimeoutError,
 )
 from orchestrator.clients.windows_job import CREATE_SUSPENDED, WindowsJob
+from orchestrator.clients.windows_processes import process_locations
 from orchestrator.runtime_logging import format_command
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,31 @@ def assert_worktree_idle(workspace: Path) -> None:
     if not workspace.exists():
         return
     root = workspace.resolve()
+    if sys.platform == "win32":
+        try:
+            locations = process_locations()
+        except (AttributeError, OSError) as exc:
+            raise CommandExecutionError(
+                "Cannot inspect retained worktree processes on Windows; "
+                "check process inspection permissions and retry"
+            ) from exc
+        for process in locations:
+            if process.pid == os.getpid():
+                continue
+            location = process.cwd if process.cwd is not None else process.executable
+            if location is None:
+                continue
+            try:
+                path = Path(location).resolve()
+            except (OSError, RuntimeError):
+                continue
+            if path == root or path.is_relative_to(root):
+                raise CommandExecutionError(
+                    f"Process {process.pid} ({process.name}) is still using the retained "
+                    f"worktree {root}; stop it in Task Manager or with "
+                    f"'taskkill /PID {process.pid} /T /F' before retrying resume"
+                )
+        return
     if sys.platform == "darwin":
         try:
             inspected = subprocess.run(
