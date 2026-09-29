@@ -130,7 +130,13 @@ If semantic retrieval is unavailable, a simpler heuristic retrieval is used inst
 
 Optional local `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` files in your repository give each role its own extra instructions. They're ignored by Git by default, and each role sees only its own file. You can edit them from the TUI.
 
-[docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) is versioned context shared by all three roles. It records durable project boundaries and invariants, while the task and repository state provide the details of each change.
+We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) to every repository the orchestrator works on. It is shared by the planner, implementer, and reviewer; the orchestrator reads it when present but does not scaffold it. Without it, each run has to rediscover project boundaries and design rules from the task and retrieved code. A brand-new repository can start without it and add it once there is real code to describe.
+
+- Keep it short and durable: purpose and boundaries, layering rules, invariants, design decisions (including things deliberately not done), and where secrets and configuration come from.
+- Leave out feature descriptions, UI details, and per-change notes. The code, tests, and repository retrieval already cover those.
+- It is supplementary: the task, repository state, and the orchestrator's own invariants remain authoritative.
+- The prompt includes at most 12,000 characters of stripped content. Longer content is truncated with a notice and a workflow warning; the file stays intact.
+- The implementer is instructed to update it only when a change alters an architecture-level decision, keeping it within the cap by condensing or replacing existing content.
 
 ## Safety model
 
