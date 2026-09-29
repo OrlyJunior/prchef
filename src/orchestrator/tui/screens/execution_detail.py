@@ -95,10 +95,10 @@ class ExecutionDetailScreen(Screen[None]):
                     id="execution-resume",
                     disabled=True,
                 )
-            with ScrollableContainer(id="execution-content-scroll"):
-                yield Static("Loading execution…", id="execution-content", markup=False)
             yield Button("Show detailed logs", id="execution-toggle-logs")
             yield Log(id="execution-detailed-logs", auto_scroll=False)
+            with ScrollableContainer(id="execution-content-scroll"):
+                yield Static("Loading execution…", id="execution-content", markup=False)
 
     @property
     def controller(self) -> WorkflowController:

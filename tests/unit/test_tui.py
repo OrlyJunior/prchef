@@ -3809,6 +3809,55 @@ def test_execution_detail_loads_logs_only_when_expanded(
     asyncio.run(drive())
 
 
+def test_execution_detail_log_toggle_stays_visible_above_long_details(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.validation_snapshot = {
+        f"check_{number}": "passed" for number in range(400)
+    }
+    repository.diagnostics = [ExecutionDiagnostic(
+        execution_id=repository.execution.id,
+        category=DiagnosticCategory.RESPONSE,
+        payload={"output": "expanded diagnostic"},
+    )]
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 24)) as pilot:
+            application.push_screen(ExecutionDetailScreen(repository.execution.id))
+            await settle_tui(pilot)
+            screen = application.screen
+            toggle = screen.query_one("#execution-toggle-logs", Button)
+            log = screen.query_one("#execution-detailed-logs", Log)
+            details = screen.query_one("#execution-content-scroll")
+            actions = screen.query_one("#execution-detail-actions")
+            action_region = actions.region
+            toggle_region = toggle.region
+            toggle.active_effect_duration = 0
+            assert toggle.display
+            assert 0 <= toggle.region.y < toggle.region.bottom <= application.size.height
+            assert toggle.region.bottom <= details.region.y
+            assert not log.display
+            assert not log.lines
+
+            assert await pilot.click("#execution-toggle-logs")
+            await settle_tui(pilot)
+            assert str(toggle.label) == "Hide detailed logs"
+            assert log.display
+            assert "expanded diagnostic" in str(log.lines)
+            assert actions.region == action_region
+            assert toggle.region == toggle_region
+            assert toggle.region.bottom <= log.region.y < details.region.y
+
+            assert await pilot.click("#execution-toggle-logs")
+            await settle_tui(pilot)
+            assert str(toggle.label) == "Show detailed logs"
+            assert not log.display
+            assert actions.region == action_region
+            assert toggle.region == toggle_region
+
+    asyncio.run(drive())
+
+
 def test_execution_detail_open_and_refresh_do_not_fetch_task_or_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
