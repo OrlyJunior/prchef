@@ -155,6 +155,8 @@ We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.m
 
 ## Contributing
 
+Label pull requests Feature, Improvement or Bug (or skip-changelog for internal changes) so the generated release notes group them correctly.
+
 Install the development dependencies above, then run:
 
 ```sh
@@ -164,6 +166,10 @@ python -m mypy src/orchestrator
 ```
 
 Database schema changes use versioned Alembic migrations in `src/orchestrator/migrations/versions`. From the repository root, create one with `alembic revision --autogenerate -m "describe change"` and apply it with `alembic upgrade head`. Normal CLI startup applies pending migrations automatically.
+
+## Changelog
+
+Release notes live on the [GitHub Releases page](https://github.com/OrlyJunior/autonomous-development-orchestrator/releases).
 
 ## License
 
