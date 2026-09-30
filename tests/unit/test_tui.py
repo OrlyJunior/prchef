@@ -4099,6 +4099,9 @@ def test_execution_detail_actions_and_diagnostics_stay_bounded_in_narrow_termina
             screen = application.screen
             page = screen.query_one("#execution-detail", VerticalScroll)
             content = screen.query_one("#execution-detailed-logs", Log)
+            assert isinstance(screen, ExecutionDetailScreen)
+            assert screen._reconcile_timer is not None
+            screen._reconcile_timer.stop()  # Exercise the refresh race explicitly, without timing.
             screen.query_one("#execution-toggle-logs", Button).press()
             await settle_tui(pilot)
             assert page.max_scroll_x == 0
@@ -4117,13 +4120,35 @@ def test_execution_detail_actions_and_diagnostics_stay_bounded_in_narrow_termina
                 assert not button.disabled
                 button.focus()
                 await settle_tui(pilot)
+                await pilot.wait_for_scheduled_animations()
                 assert application.focused is button
                 assert 0 <= button.region.x < button.region.right <= application.size.width
                 assert 0 <= button.region.y < button.region.bottom <= application.size.height
 
-            screen.query_one("#execution-cancel", Button).focus()
+            stale_offsets = (
+                (page.scroll_target_x, page.scroll_target_y),
+                (content.scroll_target_x, content.scroll_target_y),
+            )
+            cancel = screen.query_one("#execution-cancel", Button)
+            cancel.focus()
             await settle_tui(pilot)
-            assert await pilot.click("#execution-cancel")
+            # Draining messages does not finish focus-triggered scrolling. Click
+            # the button's interior only after its rendered position has settled.
+            await pilot.wait_for_scheduled_animations()
+            assert application.focused is cancel
+            assert screen.can_view_entire(cancel)
+            content.scroll_to(x=4, animate=False)
+            await settle_tui(pilot)
+            assert content.scroll_target_x == 4
+            # A refresh can have captured the previous viewport before focus
+            # scrolled Cancel into view. Its delayed callback must not undo that.
+            screen._restore_scroll(stale_offsets)
+            await settle_tui(pilot)
+            assert screen.can_view_entire(cancel)
+            assert content.scroll_target_x == 4
+            assert await pilot.click(
+                cancel, offset=(cancel.size.width // 2, cancel.size.height // 2)
+            )
             await settle_tui(pilot)
             assert isinstance(application.screen, StopWorkflowConfirmation)
             assert repository.cancellation_requests == []

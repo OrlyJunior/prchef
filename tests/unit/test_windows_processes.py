@@ -189,7 +189,10 @@ def test_native_executable_path_is_available_with_limited_query_rights() -> None
     try:
         executable = windows_processes._read_process_image(kernel32, handle)
         assert executable is not None
-        assert Path(executable).resolve() == Path(sys.executable).resolve()
+        # Windows venv launchers retain sys.executable while the process runs
+        # the base interpreter's image. Outside a venv, these paths are the same.
+        expected_image = getattr(sys, "_base_executable", sys.executable)
+        assert Path(executable).resolve() == Path(expected_image).resolve()
     finally:
         kernel32.CloseHandle(handle)
 

@@ -19,6 +19,7 @@ from orchestrator.config.project_config import (
 )
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.services.repository_context import repository_context_strategy_names
+from orchestrator.workspace.manager import WorkspaceManager
 
 
 def _validated_config(values: dict[str, object]) -> ProjectConfig:
@@ -116,6 +117,36 @@ def test_loader_resolves_default_local_index_for_registered_repository(tmp_path:
     assert config.repository_context.qdrant.path == (
         Path.home() / ".orchestrator" / "qdrant"
     ).resolve()
+
+    manager = WorkspaceManager(ClientFactory().create(config).git, repository, config.workspace)
+    assert manager.workspace_root() == (Path.home() / ".orchestrator" / "workspaces").resolve()
+    assert not config.repository_context.qdrant.path.is_relative_to(manager.workspace_root())
+
+
+@pytest.mark.parametrize("repository_override", [False, True])
+def test_loader_preserves_workspace_root_override_precedence(
+    tmp_path: Path, repository_override: bool,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    entry: dict[str, object] = {"path": str(repository)}
+    if repository_override:
+        entry["workspace"] = {"root": "repository-workspaces"}
+    config_file = tmp_path / "orchestrator.yml"
+    config_file.write_text(yaml.safe_dump({
+        "defaults": {"roles": {"spec": "codex", "review": "codex"},
+                     "workspace": {"root": "default-workspaces"}},
+        "repositories": {"example": entry},
+    }), encoding="utf-8")
+    task = DevelopmentTask("one", "test", "Task", "", "", repository="example")
+
+    config = ProjectConfigLoader(config_file).load(task)
+
+    expected = "repository-workspaces" if repository_override else "default-workspaces"
+    assert config.workspace.root == Path(expected)
+    manager = WorkspaceManager(ClientFactory().create(config).git, repository, config.workspace)
+    assert manager.workspace_root() == (repository.parent / expected).resolve()
 
 
 @pytest.mark.parametrize("strategy", repository_context_strategy_names())

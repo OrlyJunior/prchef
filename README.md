@@ -144,6 +144,12 @@ We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.m
 - Agents are instructed never to commit, push, create pull requests, or merge. The orchestrator performs those steps itself, and never merges.
 - Commits and pushes to protected branches (`main`, `master`, and `develop` by default) are refused.
 - Worktrees are kept for inspection until you clean them up with `cleanup-workspaces`.
+- New worktrees default to `~/.orchestrator/workspaces/<repo>/<execution-id>`, using the
+  same per-user state directory as the database and the separate `qdrant` folder.
+  Set `defaults.workspace.root` or `repositories.<key>.workspace.root` to override the root.
+  Existing executions keep their recorded paths. `cleanup-workspaces` also lists and
+  manages the previous sibling `orchestrator-workspaces/<repo>/<execution-id>` location;
+  its `--dry-run` previews retention decisions. Existing worktrees are never migrated automatically.
 
 ## Troubleshooting
 

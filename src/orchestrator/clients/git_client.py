@@ -108,6 +108,15 @@ class GitClient:
             finally:
                 self._git("worktree", "remove", "--force", str(snapshot))
 
+    def worktree_paths(self) -> set[Path]:
+        """Return paths registered to this checkout, including retained linked worktrees."""
+        output = self._git("worktree", "list", "--porcelain", "-z").stdout
+        return {
+            Path(field.removeprefix("worktree ")).resolve()
+            for field in output.split("\0")
+            if field.startswith("worktree ")
+        }
+
     def remove_worktree(self, workspace_path: Path) -> bool:
         """Remove a linked worktree and prune its shared Git metadata.
 

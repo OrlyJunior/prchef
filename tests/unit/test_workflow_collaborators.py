@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
+from orchestrator.config.project_config import WorkspaceSettings
 from orchestrator.models.validation_result import ValidationResult
 from orchestrator.models.workflow_event import WorkflowEventKind
+from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import (
     ReviewDecision,
     StepStatus,
@@ -24,6 +27,79 @@ from orchestrator.services.workflow_stage_actions import StageActions
 from orchestrator.services.workflow_stage_events import ExecutionRuntimes, StageEvents
 from orchestrator.services.workflow_stage_sequencer import StageSequencer
 from orchestrator.services.workflow_stage_values import StageValues
+
+
+@pytest.mark.parametrize(
+    ("stage", "exists", "retained_branch"),
+    [
+        (WorkflowStage.PREPARE_BRANCH, True, True),
+        (WorkflowStage.PREPARE_BRANCH, False, True),
+        (WorkflowStage.PREPARE_BRANCH, False, False),
+        (WorkflowStage.IMPLEMENT, True, True),
+        (WorkflowStage.REVIEW, True, True),
+    ],
+)
+def test_interrupted_recovery_uses_recorded_legacy_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    stage: WorkflowStage, exists: bool, retained_branch: bool,
+) -> None:
+    control = tmp_path / "control"
+    control.mkdir()
+    legacy = tmp_path / "orchestrator-workspaces" / control.name / "one"
+    if exists:
+        legacy.mkdir(parents=True)
+    execution = WorkflowExecution(
+        id="one", status=WorkflowStatus.INTERRUPTED, resume_stage=stage,
+        workspace_path=str(legacy), working_branch="orchestrator/one", base_commit="base",
+        task_snapshot={"id": "task", "source": "test", "title": "Task",
+                       "description": "", "url": ""},
+        spec_snapshot={"technical_context": "", "current_behavior": ""},
+    )
+    config = SimpleNamespace(
+        path=control, workspace=WorkspaceSettings(),
+        repository=SimpleNamespace(base_branch="develop", protected_branches=["develop"]),
+    )
+    repository = Mock()
+    repository.list_steps.return_value = []
+    loader = Mock()
+    loader.load.return_value = config
+    git = Mock()
+    git.github_repository.return_value = "owner/repo"
+    git.branch_exists.return_value = retained_branch
+    git.create_worktree.side_effect = lambda path, *args: path.mkdir()
+    git.attach_existing_worktree.side_effect = lambda path, *args: path.mkdir(parents=True)
+    factory = Mock()
+    factory.create.return_value = SimpleNamespace(git=git)
+    events = Mock()
+    events._step.side_effect = lambda *args: nullcontext()
+    lifecycle = Mock()
+    lifecycle._runtime_overrides_for_execution.return_value = ({}, {})
+    sequencer = StageSequencer(
+        repository, Mock(), loader, factory, events, Mock(), Mock(), lifecycle, Mock()
+    )
+    monkeypatch.setattr(sequencer, "_repository_context_strategy", Mock())
+    sentinel = object()
+    implement = Mock(return_value=sentinel)
+    monkeypatch.setattr(sequencer, "_implement_and_review", implement)
+
+    result = sequencer._execute_interrupted(execution)
+
+    assert result is sentinel, repository.reinterrupt.call_args
+    assert implement.call_args.args[6] == legacy
+    assert execution.workspace_path == str(legacy)
+    assert not (Path.home() / ".orchestrator" / "workspaces").exists()
+    git.at_path.assert_called_with(legacy)
+    if stage is WorkflowStage.PREPARE_BRANCH:
+        repository.record_workspace.assert_called_once_with("one", str(legacy))
+        if not exists and retained_branch:
+            git.attach_existing_worktree.assert_called_once_with(
+                legacy, "orchestrator/one", "base"
+            )
+        elif not exists:
+            assert git.create_worktree.call_args.args[0] == legacy
+    if exists:
+        git.create_worktree.assert_not_called()
+        git.attach_existing_worktree.assert_not_called()
 
 
 def test_stage_events_persist_before_delivery_and_isolate_execution_state() -> None:
