@@ -27,6 +27,9 @@ class StubGit:
         self.removed.append(path)
         return False
 
+    def worktree_paths(self) -> set[Path]:
+        return set()
+
 
 def _service(
     tmp_path: Path, executions: list[WorkflowExecution]
@@ -182,3 +185,59 @@ def test_index_deletion_runs_before_git_and_failure_preserves_worktree(tmp_path:
     retry = service.cleanup(dry_run=False)
     assert git.removed == [approved]
     assert retry.removed_count == 1
+
+
+def test_cleanup_lists_both_defaults_and_removes_only_finished_recorded_workspaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "user-state"
+    monkeypatch.setattr(
+        "orchestrator.services.workspace_cleaner.default_state_directory", lambda: state
+    )
+    control = tmp_path / "control"
+    control.mkdir()
+    root = state / "workspaces"
+    legacy = tmp_path / "orchestrator-workspaces" / control.name
+    current = root / control.name
+    executions = [
+        _execution(legacy / "old-approved", WorkflowStatus.APPROVED),
+        _execution(legacy / "old-interrupted", WorkflowStatus.INTERRUPTED),
+        _execution(legacy / "old-failed", WorkflowStatus.FAILED),
+        _execution(current / "new-approved", WorkflowStatus.APPROVED),
+    ]
+    for execution in executions:
+        Path(execution.workspace_path).mkdir(parents=True)
+    orphan = legacy / "orphan"
+    orphan.mkdir()
+    git = StubGit()
+    service = WorkspaceCleanupService(  # type: ignore[arg-type]
+        StubRepository(executions), git, control, root
+    )
+
+    dry = service.cleanup(dry_run=True)
+    items = {item.path: item for item in dry.workspaces}
+    assert items[legacy / "old-approved"].eligible
+    assert items[current / "new-approved"].eligible
+    assert items[legacy / "old-interrupted"].retention is WorkspaceRetention.ACTIVE_PROTECTED
+    assert items[legacy / "old-failed"].retention is WorkspaceRetention.RECOVERY_PRESERVED
+    assert items[orphan].retention is WorkspaceRetention.UNMANAGED
+    assert len(items) == 5
+    assert git.removed == []
+    assert all(path.exists() for path in items)
+
+    report = service.cleanup(dry_run=False, include_failed=True)
+    assert report.removed_count == 3
+    assert git.removed == [legacy / "old-approved", legacy / "old-failed", current / "new-approved"]
+
+
+def test_cleanup_deduplicates_roots_when_configured_root_is_legacy(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    control.mkdir()
+    legacy = tmp_path / "orchestrator-workspaces"
+    orphan = legacy / control.name / "orphan"
+    orphan.mkdir(parents=True)
+    service = WorkspaceCleanupService(  # type: ignore[arg-type]
+        StubRepository([]), StubGit(), control, legacy
+    )
+
+    assert [item.path for item in service.inspect().workspaces] == [orphan]

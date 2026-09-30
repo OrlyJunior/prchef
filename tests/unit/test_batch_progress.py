@@ -680,6 +680,7 @@ def test_category_for_execution_matches_summary_categories() -> None:
             "QUEUED",
             "WAITING",
             "RUNNING",
+            "INTERRUPTED",
             "NEEDS_HUMAN",
             "APPROVED",
             "CHANGES_REQUESTED",

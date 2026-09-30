@@ -111,6 +111,7 @@ class _BatchRun:
         final = {
             WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED,
             WorkflowStatus.FAILED, WorkflowStatus.CANCELLED,
+            WorkflowStatus.INTERRUPTED,
         }
         if self.stopping:
             final.add(WorkflowStatus.NEEDS_HUMAN)
@@ -158,6 +159,25 @@ class WorkflowController:
         self._execution_batches: dict[str, str] = {}
         self._index_operations: set[str] = set()
         self._index_operation_lock = threading.RLock()
+        self._detail_listeners: set[WorkflowEventListener] = set()
+        self._detail_listeners_lock = threading.RLock()
+
+    def subscribe_execution_events(self, listener: WorkflowEventListener) -> None:
+        with self._detail_listeners_lock:
+            self._detail_listeners.add(listener)
+
+    def unsubscribe_execution_events(self, listener: WorkflowEventListener) -> None:
+        with self._detail_listeners_lock:
+            self._detail_listeners.discard(listener)
+
+    def _notify_detail_listeners(self, event: WorkflowEvent) -> None:
+        with self._detail_listeners_lock:
+            listeners = tuple(self._detail_listeners)
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception:
+                logger.exception("Execution %s detail listener failed", event.execution_id)
 
     def repositories(self) -> list[ConfiguredRepository]:
         repositories = self._config_loader.list_repositories()
@@ -701,6 +721,7 @@ class WorkflowController:
         final = {
             WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED,
             WorkflowStatus.FAILED, WorkflowStatus.CANCELLED,
+            WorkflowStatus.INTERRUPTED,
         }
         unresolved = {
             execution_id: position
@@ -814,8 +835,12 @@ class WorkflowController:
         def observe(event: WorkflowEvent) -> None:
             if event.kind is WorkflowEventKind.EXECUTION_CREATED:
                 self._active_services[event.execution_id] = service
-            elif event.kind is WorkflowEventKind.WORKFLOW_FINISHED:
+            elif event.kind is WorkflowEventKind.WORKFLOW_FINISHED or (
+                event.kind is WorkflowEventKind.STATUS_CHANGED
+                and event.status is WorkflowStatus.INTERRUPTED
+            ):
                 self._active_services.pop(event.execution_id, None)
+            self._notify_detail_listeners(event)
             if event_listener is not None:
                 event_listener(event)
 
@@ -824,8 +849,8 @@ class WorkflowController:
     def cancel_workflow(self, execution_id: str) -> bool:
         """Request cancellation through the service boundary when it is live.
 
-        Falling back to the repository keeps a request durable when the TUI was
-        restarted while an execution is still marked running.
+        Falling back to the repository settles an interrupted execution with
+        no live service, or records a request for another active service.
         """
         service = self._active_services.get(execution_id)
         if service is not None:
@@ -846,6 +871,49 @@ class WorkflowController:
                         run.statuses[position] = WorkflowStatus.CANCELLED
                         run.condition.notify_all()
         return accepted
+
+    def interrupted_executions(self) -> list[WorkflowExecution]:
+        list_executions = getattr(self._repository, "list_executions", None)
+        if not callable(list_executions):
+            return []
+        return [
+            execution for execution in list_executions()
+            if execution.status is WorkflowStatus.INTERRUPTED
+        ]
+
+    def active_execution_count(self) -> int:
+        return sum(execution.status in ACTIVE_WORKFLOW_STATUSES
+                   for execution in self._repository.list_executions())
+
+    def shutdown_for_exit(self) -> None:
+        """Stop admission and command trees before the UI process exits."""
+        from orchestrator.clients.command_client import interrupt_active_commands
+
+        stop_writes = getattr(self._repository, "stop_session_writes", None)
+        if callable(stop_writes):
+            stop_writes()
+        self._dispatcher.shutdown(wait=False, interrupt=True)
+        if callable(stop_writes):
+            interrupt_active_commands()
+        recover = getattr(self._repository, "recover_interrupted", None)
+        if callable(recover):
+            recover()
+
+    def submit_interrupted(
+        self, execution_id: str, *,
+        event_listener: WorkflowEventListener | None = None,
+    ) -> ExecutionHandle:
+        service = self._service_for_execution(self._repository.get_execution(execution_id))
+        self._active_services[execution_id] = service
+        try:
+            handle = service.submit_interrupted(
+                execution_id,
+                event_listener=self._tracking_listener(service, event_listener),
+            )
+        except Exception:
+            self._active_services.pop(execution_id, None)
+            raise
+        return handle
 
     def cancel_batch(self, batch_id: str) -> bool:
         run = self._active_batches.get(batch_id)
@@ -975,6 +1043,12 @@ class WorkflowController:
     def execution_diagnostics(self, execution_id: str) -> list[ExecutionDiagnostic]:
         method = getattr(self._repository, "list_diagnostics", None)
         return method(execution_id) if callable(method) else []
+
+    def execution_diagnostics_after(
+        self, execution_id: str, after_id: int
+    ) -> list[ExecutionDiagnostic]:
+        method = getattr(self._repository, "list_diagnostics_after", None)
+        return method(execution_id, after_id) if callable(method) else []
 
     def submit_response(
         self,

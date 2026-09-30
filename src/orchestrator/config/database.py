@@ -11,6 +11,7 @@ from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from orchestrator.config.project_config import ConfigurationError, resolve_global_config
+from orchestrator.config.state import default_state_directory
 
 
 class PersistenceConfigurationError(RuntimeError):
@@ -19,16 +20,11 @@ class PersistenceConfigurationError(RuntimeError):
 
 _DATABASE_URL_ENVIRONMENT_VARIABLE = "ORCHESTRATOR_DATABASE_URL"
 _DATABASE_PATH_ENVIRONMENT_VARIABLE = "ORCHESTRATOR_DATABASE_PATH"
-_DEFAULT_STATE_DIRECTORY_NAME = ".orchestrator"
 _DATABASE_FILENAME = "orchestrator.db"
 
 
 class Base(DeclarativeBase):
     pass
-
-
-def _default_state_directory(home: Path | None = None) -> Path:
-    return (home or Path.home()).expanduser() / _DEFAULT_STATE_DIRECTORY_NAME
 
 
 def _read_configured_database_location(config_file: Path) -> tuple[str | None, str | None]:
@@ -135,7 +131,7 @@ def resolve_database_url(
     discovered global configuration, then ``~/.orchestrator/orchestrator.db``.
     """
     environment = os.environ if environ is None else environ
-    state_directory = _default_state_directory(home)
+    state_directory = default_state_directory(home)
     discovered_config: Path | None = None
     try:
         discovered_config = resolve_global_config(

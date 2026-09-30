@@ -14,7 +14,7 @@ from textual.widgets import Button, Checkbox, SelectionList, Static
 
 from orchestrator.models.development_task import DevelopmentTask
 from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import can_start_fresh_run
+from orchestrator.models.workflow_status import WorkflowStatus, can_start_fresh_run
 
 # Checked/unchecked/blocked glyphs. ASCII keeps every column aligned on
 # terminals that render the Unicode ballot boxes as double-width cells.
@@ -25,7 +25,13 @@ _CHECKBOX_WIDTH = 3
 _GAP = 1
 _MAX_NUMBER_WIDTH = 12
 _MAX_LABELS_WIDTH = 28
-_MAX_STATUS_WIDTH = 16
+_MAX_STATUS_WIDTH = 32
+
+
+def _execution_status(execution: WorkflowExecution) -> str:
+    if execution.status is WorkflowStatus.INTERRUPTED:
+        return f"INTERRUPTED: {(execution.resume_stage or execution.current_stage).value}"
+    return execution.status.value
 _MIN_TITLE_WIDTH = 8
 _MIN_LABELS_WIDTH = 8
 
@@ -355,7 +361,7 @@ class TaskSelector(Vertical):
             suffix = f" [{label_text}]" if label_text else ""
             status = ""
             if execution is not None:
-                status = execution.status.value
+                status = _execution_status(execution)
                 suffix += (
                     f" — Latest execution: {status}. Selecting starts a new run; "
                     "earlier runs remain in Execution history."
@@ -401,7 +407,7 @@ class TaskSelector(Vertical):
         )
         status = max(
             (
-                len(execution.status.value)
+                len(_execution_status(execution))
                 for task in self._tasks
                 if (execution := self._executions.get(task.id)) is not None
             ),

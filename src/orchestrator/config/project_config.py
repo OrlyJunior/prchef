@@ -25,6 +25,7 @@ from pydantic import (
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError as RoundTripYAMLError
 
+from orchestrator.config.state import default_state_directory
 from orchestrator.models.development_task import DevelopmentTask
 
 logger = logging.getLogger(__name__)
@@ -615,7 +616,7 @@ class ClaudeCodeProviderSettings(BaseModel):
     permission_mode: Literal["dontAsk", "acceptEdits", "auto"] = "dontAsk"
     max_turns: int | None = Field(default=None, gt=0, le=100)
     max_budget_usd: float | None = Field(default=None, gt=0, le=10_000)
-    bare_mode: bool = True
+    bare_mode: bool = False
 
     @field_validator("executable", "model")
     @classmethod
@@ -1684,7 +1685,7 @@ class ProjectConfigLoader:
             ):
                 raw_index_path = qdrant.get("path")
                 index_path = (
-                    Path.home().expanduser() / ".orchestrator" / "qdrant"
+                    default_state_directory() / "qdrant"
                     if raw_index_path is None
                     else Path(str(raw_index_path)).expanduser()
                 )

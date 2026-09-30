@@ -23,6 +23,7 @@ from orchestrator.models.repository_spec import RepositorySpec
 from orchestrator.models.validation_result import ValidationResult
 from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from orchestrator.models.workflow_execution import WorkflowExecution
+from orchestrator.models.workflow_interruption import WorkflowInterruptedError
 from orchestrator.models.workflow_status import (
     ACTIVE_WORKFLOW_STATUSES,
     PolishOutcome,
@@ -47,6 +48,10 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def _dump(value: Any) -> str:
     return json.dumps(redact_payload(asdict(value)), ensure_ascii=False, default=str)
 
@@ -68,6 +73,20 @@ def _load(value: str | None) -> dict[str, Any] | None:
 # have not reached a terminal status, so they remain cancellable. The column is
 # string-backed, so compare persisted values rather than enum members.
 _ACTIVE_STATUS_VALUES = frozenset(status.value for status in ACTIVE_WORKFLOW_STATUSES)
+
+_NEXT_STAGE = {
+    WorkflowStage.LOAD_TASK: WorkflowStage.LOAD_CONFIG,
+    WorkflowStage.LOAD_CONFIG: WorkflowStage.GENERATE_SPEC,
+    WorkflowStage.GENERATE_SPEC: WorkflowStage.PREPARE_BRANCH,
+    WorkflowStage.PREPARE_BRANCH: WorkflowStage.IMPLEMENT,
+    WorkflowStage.IMPLEMENT: WorkflowStage.VALIDATE,
+    WorkflowStage.POLISH: WorkflowStage.VALIDATE,
+    WorkflowStage.VALIDATE: WorkflowStage.COMMIT,
+    WorkflowStage.COMMIT: WorkflowStage.PUSH,
+    WorkflowStage.PUSH: WorkflowStage.CREATE_PR,
+    WorkflowStage.CREATE_PR: WorkflowStage.REVIEW,
+    WorkflowStage.REVIEW: WorkflowStage.REVIEW,
+}
 
 
 def _lock_fresh_run_admission(session: Session, task_source: str, task_id: str) -> None:
@@ -97,11 +116,17 @@ def _lock_fresh_run_admission(session: Session, task_source: str, task_id: str) 
 class WorkflowRepository:
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self._sessions = session_factory
+        self._interrupting = False
+
+    def stop_session_writes(self) -> None:
+        """Prevent in-flight workers from reviving rows during UI shutdown."""
+        self._interrupting = True
 
     def create_execution(
         self, task_id: str, task_source: str = "trello", *,
         repository_ref: str | None = None,
         repository_aliases: Sequence[str] = (),
+        runtime_overrides: dict[str, Any] | None = None,
     ) -> WorkflowExecution:
         if repository_ref == "":
             raise ValueError("Repository reference must be non-empty when provided")
@@ -157,6 +182,20 @@ class WorkflowRepository:
                 updated_at=now,
             )
             session.add(entity)
+            if runtime_overrides is not None:
+                selected = json.loads(json.dumps(runtime_overrides, ensure_ascii=False,
+                                                 default=str))
+                redacted = json.loads(json.dumps(redact_payload(runtime_overrides),
+                                                 ensure_ascii=False, default=str))
+                if redacted != selected:
+                    raise ValueError("Selected agent runtime overrides cannot be stored losslessly")
+                session.add(ExecutionDiagnosticEntity(
+                    workflow_execution_id=entity.id,
+                    category=DiagnosticCategory.WORKFLOW_EVENT.value,
+                    stage=WorkflowStage.LOAD_CONFIG.value,
+                    payload_json=json.dumps(selected, ensure_ascii=False),
+                    occurred_at=now,
+                ))
             # Build the detached domain object while the session is still
             # available.  The execution's interactions relationship is lazy
             # loaded and a newly committed entity is expired on session exit.
@@ -339,7 +378,117 @@ class WorkflowRepository:
         )
 
     def update_stage(self, execution_id: str, stage: WorkflowStage) -> None:
-        self._mutate(execution_id, lambda entity: setattr(entity, "current_stage", stage.value))
+        def mutate(entity: WorkflowExecutionEntity) -> None:
+            entity.current_stage = stage.value
+            entity.resume_stage = stage.value
+        self._mutate(execution_id, mutate)
+
+    def set_resume_stage(self, execution_id: str, stage: WorkflowStage) -> None:
+        self._mutate(execution_id, lambda entity: setattr(entity, "resume_stage", stage.value))
+
+    def set_resume_mode(
+        self, execution_id: str, mode: str | None, *, attempt: int | None = None
+    ) -> None:
+        def mutate(entity: WorkflowExecutionEntity) -> None:
+            entity.resume_mode = mode
+            if mode == "REVIEW_CORRECTION" and attempt is not None:
+                entity.review_retry_attempt = attempt
+            if (
+                mode in {"VALIDATION_CORRECTION", "REVIEW_VALIDATION_CORRECTION"}
+                and attempt is not None
+            ):
+                entity.validation_retry_attempt = attempt
+        self._mutate(execution_id, mutate)
+
+    def recover_interrupted(self) -> list[WorkflowExecution]:
+        """Reconcile orphaned work once, in one transaction, before presenting state."""
+        with self._sessions() as session, session.begin():
+            entities = session.scalars(
+                select(WorkflowExecutionEntity).where(
+                    WorkflowExecutionEntity.status.in_(_ACTIVE_STATUS_VALUES)
+                )
+            ).all()
+            now = _utcnow()
+            for entity in entities:
+                entity.interrupted_from_status = entity.status
+                latest_step = max(entity.steps, key=lambda step: step.id, default=None)
+                if entity.resume_mode is None:
+                    latest_answer = next(
+                        (interaction for interaction in reversed(entity.human_interactions)
+                         if interaction.responded_at is not None),
+                        None,
+                    )
+                    if latest_answer is not None:
+                        assert latest_answer.responded_at is not None
+                        if latest_step is None or _aware(latest_answer.responded_at) > _aware(
+                            latest_step.finished_at or latest_step.started_at
+                        ):
+                            entity.resume_mode = "HUMAN_RESPONSE"
+                            entity.resume_stage = latest_answer.requesting_stage
+                if entity.resume_stage is None:
+                    if latest_step is not None and latest_step.status == StepStatus.SUCCEEDED.value:
+                        entity.resume_stage = _NEXT_STAGE.get(
+                            WorkflowStage(latest_step.stage), WorkflowStage(latest_step.stage)
+                        ).value
+                    else:
+                        entity.resume_stage = (
+                            latest_step.stage if latest_step is not None else entity.current_stage
+                        )
+                if (entity.current_stage == WorkflowStage.POLISH.value
+                        and latest_step is not None
+                        and latest_step.stage == WorkflowStage.REVIEW.value
+                        and latest_step.status == StepStatus.SUCCEEDED.value):
+                    entity.resume_stage = WorkflowStage.POLISH.value
+                if (
+                    entity.resume_mode is None
+                    and (entity.resume_stage == WorkflowStage.POLISH.value
+                         or entity.current_stage == WorkflowStage.POLISH.value)
+                ):
+                    entity.resume_mode = "POLISH"
+                entity.status = WorkflowStatus.INTERRUPTED.value
+                entity.updated_at = now
+                for step in entity.steps:
+                    if step.status == StepStatus.RUNNING.value:
+                        step.status = StepStatus.INTERRUPTED.value
+                        step.finished_at = now
+            session.flush()
+            return [self._to_domain(entity) for entity in entities]
+
+    def queue_interrupted(self, execution_id: str) -> WorkflowExecution:
+        """Atomically admit an interrupted row without changing its durable checkpoint."""
+        with self._sessions() as session, session.begin():
+            result = cast(CursorResult[Any], session.execute(
+                update(WorkflowExecutionEntity)
+                .where(
+                    WorkflowExecutionEntity.id == execution_id,
+                    WorkflowExecutionEntity.status == WorkflowStatus.INTERRUPTED.value,
+                )
+                .values(status=WorkflowStatus.PENDING.value, updated_at=_utcnow(),
+                        error_message=None)
+            ))
+            if not result.rowcount:
+                raise ValueError(f"Execution {execution_id} is not interrupted")
+            entity = session.get(WorkflowExecutionEntity, execution_id)
+            assert entity is not None
+            session.refresh(entity)
+            return self._to_domain(entity)
+
+    def reinterrupt(self, execution_id: str, message: str) -> WorkflowExecution:
+        """Keep a failed recovery attempt retryable, unless cancellation won."""
+        with self._sessions() as session, session.begin():
+            entity = session.get(WorkflowExecutionEntity, execution_id)
+            if entity is None:
+                raise KeyError(f"Workflow execution not found: {execution_id}")
+            if entity.cancellation_requested_at is not None:
+                entity.status = WorkflowStatus.CANCELLED.value
+                entity.finished_at = _utcnow()
+            else:
+                entity.status = WorkflowStatus.INTERRUPTED.value
+                entity.error_message = redact_text(message)
+                entity.finished_at = None
+            entity.updated_at = _utcnow()
+            session.flush()
+            return self._to_domain(entity)
 
     def update_status(self, execution_id: str, status: WorkflowStatus) -> None:
         self._mutate(execution_id, lambda entity: setattr(entity, "status", status.value))
@@ -365,7 +514,10 @@ class WorkflowRepository:
                     update(WorkflowExecutionEntity)
                     .where(
                         WorkflowExecutionEntity.id == execution_id,
-                        WorkflowExecutionEntity.status == WorkflowStatus.NEEDS_HUMAN.value,
+                        WorkflowExecutionEntity.status.in_((
+                            WorkflowStatus.NEEDS_HUMAN.value,
+                            WorkflowStatus.INTERRUPTED.value,
+                        )),
                     )
                     .values(
                         cancellation_requested_at=now,
@@ -445,9 +597,24 @@ class WorkflowRepository:
         self._mutate(execution_id, mutate)
 
     def record_review(self, execution_id: str, review: CodeReview) -> None:
-        self._mutate(
-            execution_id, lambda entity: setattr(entity, "review_snapshot_json", _dump(review))
-        )
+        def mutate(entity: WorkflowExecutionEntity) -> None:
+            entity.review_snapshot_json = _dump(review)
+            entity.review_publication_pending = True
+            entity.review_step_id = max(
+                (
+                    step.id for step in entity.steps
+                    if step.id is not None
+                    and step.stage == WorkflowStage.REVIEW.value
+                    and step.status == StepStatus.RUNNING.value
+                ),
+                default=None,
+            )
+        self._mutate(execution_id, mutate)
+
+    def finish_review_publication(self, execution_id: str) -> None:
+        self._mutate(execution_id, lambda entity: setattr(
+            entity, "review_publication_pending", False
+        ))
 
     def record_polish_outcome(self, execution_id: str, outcome: PolishOutcome) -> None:
         self._mutate(execution_id, lambda entity: setattr(entity, "polish_outcome", outcome.value))
@@ -494,6 +661,21 @@ class WorkflowRepository:
             entities = session.scalars(
                 select(ExecutionDiagnosticEntity)
                 .where(ExecutionDiagnosticEntity.workflow_execution_id == execution_id)
+                .order_by(ExecutionDiagnosticEntity.id)
+            ).all()
+            return [self._diagnostic_to_domain(entity) for entity in entities]
+
+    def list_diagnostics_after(
+        self, execution_id: str, after_id: int
+    ) -> list[ExecutionDiagnostic]:
+        """Read only diagnostics added after the displayed cursor."""
+        with self._sessions() as session:
+            entities = session.scalars(
+                select(ExecutionDiagnosticEntity)
+                .where(
+                    ExecutionDiagnosticEntity.workflow_execution_id == execution_id,
+                    ExecutionDiagnosticEntity.id > after_id,
+                )
                 .order_by(ExecutionDiagnosticEntity.id)
             ).all()
             return [self._diagnostic_to_domain(entity) for entity in entities]
@@ -548,6 +730,10 @@ class WorkflowRepository:
                 raise ValueError(f"Execution {execution_id} is not awaiting human input")
             entity.response = redact_text(response)
             entity.responded_at = now
+            execution = session.get(WorkflowExecutionEntity, execution_id)
+            assert execution is not None
+            execution.resume_mode = "HUMAN_RESPONSE"
+            execution.resume_stage = entity.requesting_stage
             return self._interaction_to_domain(entity)
 
     def resume_execution(self, execution_id: str) -> None:
@@ -609,14 +795,21 @@ class WorkflowRepository:
                 CursorResult[Any],
                 session.execute(
                     update(WorkflowExecutionEntity)
-                    .where(WorkflowExecutionEntity.id == execution_id)
+                    .where(
+                        WorkflowExecutionEntity.id == execution_id,
+                        WorkflowExecutionEntity.status != WorkflowStatus.INTERRUPTED.value,
+                    )
                     .values(**values)
                 ),
             )
             if not result.rowcount:
-                raise KeyError(f"Workflow execution not found: {execution_id}")
+                entity = session.get(WorkflowExecutionEntity, execution_id)
+                if entity is None:
+                    raise KeyError(f"Workflow execution not found: {execution_id}")
 
     def start_step(self, execution_id: str, stage: WorkflowStage) -> int:
+        if self._interrupting:
+            raise WorkflowInterruptedError("Application is closing")
         entity = WorkflowStepEntity(
             workflow_execution_id=execution_id,
             stage=stage.value,
@@ -642,6 +835,19 @@ class WorkflowRepository:
             entity.status = status.value
             entity.error_message = error_message
             entity.finished_at = _utcnow()
+            execution = session.get(WorkflowExecutionEntity, entity.workflow_execution_id)
+            if execution is not None and execution.status == WorkflowStatus.INTERRUPTED.value:
+                entity.status = StepStatus.INTERRUPTED.value
+                return
+            if status is StepStatus.SUCCEEDED:
+                if execution is not None:
+                    if execution.resume_mode in {
+                        "POLISH", "REVIEW_CORRECTION", "REVIEW_VALIDATION_CORRECTION"
+                    } and entity.stage == WorkflowStage.PUSH.value:
+                        execution.resume_stage = WorkflowStage.REVIEW.value
+                    else:
+                        execution.resume_stage = _NEXT_STAGE.get(WorkflowStage(entity.stage),
+                                                                 WorkflowStage(entity.stage)).value
 
     def get_execution(self, execution_id: str) -> WorkflowExecution:
         with self._sessions() as session:
@@ -700,6 +906,8 @@ class WorkflowRepository:
             entity = session.get(WorkflowExecutionEntity, execution_id)
             if entity is None:
                 raise KeyError(f"Workflow execution not found: {execution_id}")
+            if self._interrupting:
+                raise WorkflowInterruptedError("Application is closing")
             operation(entity)
             entity.updated_at = _utcnow()
 
@@ -722,6 +930,14 @@ class WorkflowRepository:
             pr_url=entity.pr_url,
             current_stage=WorkflowStage(entity.current_stage),
             status=WorkflowStatus(entity.status),
+            interrupted_from_status=(
+                WorkflowStatus(entity.interrupted_from_status)
+                if entity.interrupted_from_status else None
+            ),
+            resume_stage=WorkflowStage(entity.resume_stage) if entity.resume_stage else None,
+            resume_mode=entity.resume_mode,
+            review_retry_attempt=entity.review_retry_attempt,
+            validation_retry_attempt=entity.validation_retry_attempt,
             error_message=entity.error_message,
             created_at=entity.created_at,
             updated_at=entity.updated_at,
@@ -737,6 +953,8 @@ class WorkflowRepository:
             review_jules_session_id=entity.review_jules_session_id,
             review_jules_session_url=entity.review_jules_session_url,
             review_snapshot=_load(entity.review_snapshot_json),
+            review_publication_pending=entity.review_publication_pending,
+            review_step_id=entity.review_step_id,
             polish_outcome=(
                 PolishOutcome(entity.polish_outcome) if entity.polish_outcome is not None else None
             ),

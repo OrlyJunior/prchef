@@ -6,6 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from orchestrator.clients.git_client import GitClient
+from orchestrator.config.state import default_state_directory
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import ACTIVE_WORKFLOW_STATUSES, WorkflowStatus
 from orchestrator.repositories.workflow_repository import WorkflowRepository
@@ -60,7 +61,7 @@ class WorkspaceCleanupService:
     }
     # WAITING work is queued for provider capacity, not finished: its worktree
     # is still needed as soon as a slot frees up.
-    _ACTIVE_STATUSES = ACTIVE_WORKFLOW_STATUSES
+    _ACTIVE_STATUSES = ACTIVE_WORKFLOW_STATUSES | {WorkflowStatus.INTERRUPTED}
 
     def __init__(
         self,
@@ -74,11 +75,19 @@ class WorkspaceCleanupService:
         self._repository = workflow_repository
         self._git = git
         self._control_repository = control_repository.resolve()
-        self._workspace_root = workspace_root.resolve()
-        self._workspace_base = (self._workspace_root / self._control_repository.name).resolve()
+        roots = (
+            workspace_root,
+            default_state_directory() / "workspaces",
+            self._control_repository.parent / "orchestrator-workspaces",
+        )
+        self._workspace_bases = tuple(
+            dict.fromkeys((root / self._control_repository.name).resolve() for root in roots)
+        )
         self._delete_index_points = delete_index_points
+        self._registered_workspaces: set[Path] | None = None
 
     def inspect(self, *, include_failed: bool = False) -> WorkspaceCleanupReport:
+        self._registered_workspaces = None
         report = WorkspaceCleanupReport(dry_run=True)
         known_paths: set[Path] = set()
         for execution in self._repository.list_executions():
@@ -106,8 +115,10 @@ class WorkspaceCleanupService:
                 item.eligible = False
                 item.retention = WorkspaceRetention.ACTIVE_PROTECTED
 
-        if self._workspace_base.is_dir():
-            for path in self._workspace_base.iterdir():
+        for base in self._workspace_bases:
+            if not base.is_dir():
+                continue
+            for path in base.iterdir():
                 resolved = path.resolve()
                 if resolved not in known_paths:
                     report.workspaces.append(
@@ -187,9 +198,15 @@ class WorkspaceCleanupService:
         )
 
     def _is_expected_workspace_path(self, path: Path) -> bool:
-        if path == self._control_repository or not self._is_within(path, self._workspace_root):
+        if self._is_within(path, self._control_repository):
             return False
-        return path.parent == self._workspace_base
+        if path.parent in self._workspace_bases:
+            return True
+        # A recorded execution can outlive an explicit root override, too. Accept
+        # those paths only when Git still ties them to this control checkout.
+        if self._registered_workspaces is None:
+            self._registered_workspaces = self._git.worktree_paths()
+        return path in self._registered_workspaces
 
     @staticmethod
     def _resolve(path: str) -> Path:

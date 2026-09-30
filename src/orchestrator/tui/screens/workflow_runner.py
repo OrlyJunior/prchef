@@ -146,8 +146,13 @@ class FreshRunConfirmation(ModalScreen[tuple[str, ...] | None]):
                         "could lead to a second PR."
                     )
                 for index, (task, execution) in enumerate(self.previous):
+                    resume_label = (
+                        f" - resume {(execution.resume_stage or execution.current_stage).value}"
+                        if execution.status is WorkflowStatus.INTERRUPTED else ""
+                    )
                     yield Checkbox(
-                        f"{task.id} [{execution.status.value}]: {task.title or '(untitled)'}",
+                        f"{task.id} [{execution.status.value}{resume_label}]: "
+                        f"{task.title or '(untitled)'}",
                         value=True,
                         id=f"fresh-run-{index}",
                     )
@@ -2023,6 +2028,11 @@ class WorkflowRunnerScreen(Screen[None]):
             outcome_class = "cancelled"
             title = "Workflow stopped — cancelled"
             message = "No further action is available."
+        elif status is WorkflowStatus.INTERRUPTED:
+            outcome_class = "awaiting-user"
+            title = "Workflow interrupted"
+            stage = execution.resume_stage or execution.current_stage
+            message = f"Resume from {stage.value} in Execution history when ready."
         elif status in ACTIVE_WORKFLOW_STATUSES:
             return
 

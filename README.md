@@ -1,569 +1,182 @@
-# Autonomous Development Orchestrator — V1
+# Autonomous Dev Orchestrator
 
-CLI em Python que executa e persiste o fluxo:
+Autonomous Dev Orchestrator turns a GitHub issue or Trello card into a reviewed pull request. It plans the change, implements it in an isolated Git worktree, runs your validation commands, opens a pull request, and performs an automated review. It never merges: the final decision is always yours.
 
-```text
-Trello Card   ─┐
-               ├─> planner -> implementer -> validacoes locais
-GitHub Issue  ─┘   -> Git branch/commit/push -> GitHub PR -> reviewer
+<!-- screenshot: TUI launcher -->
+
+## Status
+
+This is an early v0.1.0 release, designed for one user running one process.
+
+Known limitations:
+
+- Work runs inside the app's process. Closing the app interrupts active executions; on reopening, you can choose which interrupted executions to resume.
+- On macOS, recovery checks retained worktrees for surviving processes and leaves an execution interrupted until its worktree is idle.
+- SQLite is the default database, local Qdrant is single-process, and provider concurrency limits don't coordinate across processes.
+- Nothing is rolled back after a failure: a pushed branch or open pull request stays in place. Inspect the saved execution and its worktree before continuing.
+
+## Requirements
+
+- Python 3.11 or newer, and Git.
+- The GitHub CLI (`gh`), installed and authenticated for the repository you want to use.
+- At least one agent backend:
+  - [Codex CLI](https://github.com/openai/codex) v0.156.0 or newer (the minimum version verified with this project's required flags)
+  - [Claude Code](https://docs.claude.com/en/docs/claude-code) v2.1.259 or newer
+  - An API model through [LiteLLM](https://docs.litellm.ai/)
+  - Optionally, Gemini on Vertex AI (`gemini-vertex`)
+
+## Installation
+
+Install the command in an isolated environment with [pipx](https://pipx.pypa.io/):
+
+```sh
+pipx install git+https://github.com/OrlyJunior/autonomous-development-orchestrator
 ```
 
-A V1 nunca faz merge, nunca envia commits diretamente a branches protegidas e encerra em
-`NEEDS_HUMAN` quando a spec informa que uma ambiguidade impede uma implementacao segura. O fluxo é sempre: task -> spec -> branch -> Codex -> validação
-local -> commit -> push -> PR -> review. O merge continua inteiramente manual.
+Or, from a local clone:
 
-## Requisitos
-
-- Python 3.11+
-- Git
-- Codex CLI autenticado
-- Opcionalmente, Claude Code CLI autenticado para o provider `claude-code`
-- GitHub CLI (`gh`) autenticado, usado para GitHub Issues e Pull Requests
-- Uma credencial para o provider API escolhido, por exemplo `OPENAI_API_KEY` para o exemplo
-  LiteLLM incluído
-- credenciais Trello quando esse provider for utilizado
-- Para o provider `gemini-vertex`: projeto Google Cloud com Vertex AI habilitado e credenciais
-  Application Default Credentials (ADC), por exemplo `gcloud auth application-default login`.
-  Ele usa `google-genai` em modo Vertex AI; `GEMINI_API_KEY` nao e usado nem deve ser configurado.
-
-O adaptador Codex usa o modo oficial nao interativo `codex exec`, com workspace limitado ao
-repositorio. LiteLLM é o backend API-modelo de primeira classe para provedores cloud e endpoints
-locais compatíveis; ele não recebe implicitamente shell, filesystem ou estado de workflow.
-O adaptador `gemini-vertex` faz uma unica chamada request/response ao Vertex AI usando ADC e nao
-recebe acesso ao filesystem, shell ou ferramentas locais.
-
-O provider opcional `claude-code` usa somente `claude -p --output-format json` no workspace que o
-orquestrador forneceu. Cada execucao tambem usa `--restricted` e um conjunto fixo de ferramentas
-de arquivo (`Read,Edit,Write,Glob,Grep`): isso ignora configuracoes de usuario/projeto, confina as
-ferramentas de arquivo ao workspace e nao disponibiliza shell/Bash, MCP ou execucao cloud. Para
-respostas estruturadas, ele encaminha o schema existente por
-`--json-schema`, consome o envelope JSON (incluindo `result`, `structured_output` e metadados de
-uso) e valida o objeto antes de ele chegar ao planner ou reviewer. Instale uma versao recente da
-CLI v2.1.259 ou posterior, que suporte `--json-schema` e `--permission-prompts`, e autentique fora
-do YAML. O modo
-`bare_mode: true` e o default recomendado para chamadas reproduziveis; ele reforca o isolamento
-desabilitando auto-descoberta de hooks, plugins, skills e MCP. Mesmo se configurado como `false`,
-`--restricted` continua a proteger a fronteira de workspace. No modo bare, Claude Code requer
-`ANTHROPIC_API_KEY` (ou credenciais suportadas de cloud) e nao usa login de assinatura ou
-keychain. `permission_mode: dontAsk` e apropriado para papeis de leitura; apenas configure
-`acceptEdits` para um papel que possa editar o worktree criado pelo orquestrador. Um unico
-provider Claude pode servir todos os papeis: use presets ou a configuracao temporaria da TUI para
-atribuir `dontAsk`, `acceptEdits` ou `auto` por papel. O valor no YAML do provider continua sendo
-o default quando o papel nao define uma substituicao.
-
-Para controlar o pensamento estendido de Claude, configure opcionalmente `effort` no provider com
-um de `low`, `medium`, `high`, `xhigh` ou `max`. O orquestrador envia `--effort <valor>` apenas
-quando o campo esta presente; se omitido, o default da CLI Claude permanece autoritativo. A TUI e
-os presets usam a chave neutra `reasoning_effort` para essa mesma opcao por papel, sem alterar o
-YAML ou outros papeis que compartilhem o provider.
-
-A configuracao Claude aceita apenas `executable`, modelo, esforco, limites de turno/orcamento, modo de
-permissao e bare mode. Nao ha campo para argumentos arbitrarios, `--worktree`, `--add-dir`,
-`--resume`, `--continue`, execucao remota ou bypass de permissao. Claude nunca cria branch,
-commit, push, PR, merge ou revisao: o provider nao expoe shell, e esses passos continuam pertencendo
-ao orquestrador. O session
-ID e guardado somente como metadado diagnostico apos a conclusao; nao existe resume automatico.
-
-Por padrao, o Codex roda com `--sandbox workspace-write`. Para optar explicitamente pela revisao
-automatica de pedidos de aprovacao da CLI, configure `approval_policy: approve-for-me` em
-`providers.<nome-codex>.approval_policy`. Nesse modo o orquestrador invoca
-`codex exec --approve-for-me` sem
-`--sandbox`: a CLI associa esse modo a `workspace-write` e rejeita a combinacao dos dois flags.
-Isso aumenta a autonomia para escalacoes suportadas, mas nao equivale a `danger-full-access`.
-O orquestrador nunca troca de politica automaticamente apos uma falha.
-Consulte a [documentacao oficial de aprovacoes do Codex](https://learn.chatgpt.com/docs/agent-approvals-security)
-para os limites e criterios da revisao automatica.
-
-Para execucoes reproduziveis, configure `model` e, quando desejado, `reasoning_effort` dentro da
-instancia `codex-cli`. O orquestrador envia o modelo por `--model` e o esforco por
-`--config model_reasoning_effort="..."`; ambos substituem somente aquela execucao, sem depender
-dos defaults da CLI ou do app. Os valores precisam ser suportados pela CLI e pela conta usada; nao
-ha fallback automatico se um deles for rejeitado.
-
-### Diagnostico do sandbox Codex no Windows
-
-O orquestrador preserva `--sandbox workspace-write`; ele nunca seleciona automaticamente acesso
-total nem altera ACLs do repositorio. Se a CLI do Codex informar uma negacao de escrita do sandbox,
-o workflow falha com o caminho do repositorio e o modo de sandbox em vez de informar apenas que o
-Codex nao alterou arquivos.
-
-Para isolar o problema, execute no diretorio do repositorio e solicite a criacao e remocao de um
-arquivo descartavel no diretorio afetado:
-
-```powershell
-@'
-Crie e remova apenas o arquivo descartavel codex-sandbox-probe.txt neste diretorio.
-Nao altere nenhum outro arquivo.
-'@ | codex exec --sandbox workspace-write -
+```sh
+pipx install .
 ```
 
-No Windows, a configuracao oficial tambem oferece os modos sandboxed `elevated` e `unelevated`.
-Qualquer mudanca entre eles deve ser uma decisao explicita do usuario ou administrador; o
-orquestrador nao faz esse fallback automaticamente. Consulte a documentacao do sandbox Windows do
-[Codex](https://learn.chatgpt.com/docs/windows/windows-sandbox).
+For development, install the package and contributor tools in a virtual environment:
 
-Uma configuracao com provider do tipo `jules` ou `integrations.jules` agora falha ao carregar.
-Substitua por um provider suportado, como `codex-cli`, e configure explicitamente os papeis.
-
-## Instalacao
-
-Instale a CLI isoladamente com [pipx](https://pipx.pypa.io/). Isso cria um ambiente virtual
-gerenciado pelo pipx, mas disponibiliza o comando `orchestrator` para o seu usuario, sem ativar
-uma `.venv` do projeto:
-
-```bash
-pipx install autonomous-dev-orchestrator
-pipx ensurepath
+```sh
+python -m pip install -e ".[dev]"
 ```
 
-Quando a distribuicao for fornecida como wheel ou diretorio-fonte, substitua o nome do pacote pelo
-caminho recebido, por exemplo `pipx install C:\Downloads\autonomous_dev_orchestrator-0.1.0-py3-none-any.whl`.
+## Configuration
 
-Feche e abra o terminal depois de `pipx ensurepath`, entao valide fora de qualquer checkout:
+The app reads one global `orchestrator.yml`. An explicit `--config` path takes precedence, followed by the `ORCHESTRATOR_CONFIG`, `ORCHESTRATOR_CONFIG_PATH`, and `ORCHESTRATOR_CONFIG_FILE` environment variables. Otherwise it looks in `~/.config/orchestrator/orchestrator.yml`, then `~/.orchestrator/orchestrator.yml`. Repository-local `.orchestrator.yml` files are ignored.
 
-```bash
-orchestrator --help
-orchestrator tui
-```
-
-O arquivo de configuracao global e descoberto em `~/.config/orchestrator/orchestrator.yml` ou,
-como alternativa compativel, em `~/.orchestrator/orchestrator.yml` (no Windows,
-`$HOME\.orchestrator\orchestrator.yml`). Salve a configuracao e os caminhos dos repositorios em
-uma dessas localizacoes; o `orchestrator.example.yml` e um ponto de partida. Caminhos relativos de
-repositorios, banco e Qdrant no YAML sao ancorados ao diretorio desse arquivo global, nunca ao
-diretorio em que o comando foi iniciado. Para selecionar outro arquivo global, defina
-`ORCHESTRATOR_CONFIG_PATH` como um caminho absoluto ou use `--config` explicitamente.
-
-Credenciais devem ser variaveis de ambiente. Como conveniencia, o aplicativo tambem le
-`~/.orchestrator/.env`; ele nao le `.env` do checkout ou do diretorio atual. Voce pode copiar
-`.env.example` para essa localizacao e preencher apenas as credenciais necessarias.
-
-### Desenvolvimento com instalacao editavel
-
-Contribuidores podem manter o mesmo comando global apontando para o clone atual:
-
-```powershell
-pipx install --editable C:\Git\agents-orchestrator
-pipx ensurepath
-```
-
-Em macOS/Linux, use o caminho do clone, por exemplo
-`pipx install --editable ~/src/agents-orchestrator`. Alteracoes em `src/` passam a ser usadas
-imediatamente. Se mudar dependencias ou metadados de empacotamento, atualize o ambiente pipx:
-
-```bash
-pipx reinstall autonomous-dev-orchestrator
-```
-
-### Release
-
-Para publicar uma release, mescle `develop` em `main`. Em **Actions → Release**, execute o workflow
-na branch `main` e escolha o incremento `patch`, `minor` ou `major`.
-
-### Atualizacao, desinstalacao e PATH
-
-Para uma instalacao publicada, execute `pipx upgrade autonomous-dev-orchestrator`. Para uma
-instalacao a partir de clone ou wheel, repita `pipx install` com a origem desejada ou use
-`pipx reinstall autonomous-dev-orchestrator`.
-
-O pipx informa ao final da instalacao quando o diretorio de binarios dele nao esta no `PATH`.
-Trate esse aviso como bloqueante: rode `pipx ensurepath`, abra um novo terminal e confira
-`Get-Command orchestrator` no PowerShell ou `command -v orchestrator` em shells POSIX. No Windows,
-o diretorio normalmente e `%USERPROFILE%\.local\bin`; nao adicione
-`.venv\Scripts` do checkout ao `PATH`. O orquestrador nao altera PATH, perfis de shell ou
-configuracoes de sistema.
-
-Remova a CLI e seu ambiente isolado com:
-
-```bash
-pipx uninstall autonomous-dev-orchestrator
-```
-
-Para executar testes e ferramentas de desenvolvimento no clone, instale o extra de desenvolvimento com
-`python -m pip install -e ".[dev]"`. LiteLLM já faz parte das dependências principais; não há
-extra `litellm` para instalar.
-
-Edite o `orchestrator.yml` global. Para Trello, o card deve possuir um custom field chamado
-`Repository` (ou `Repo`) cujo valor corresponda a uma chave em `repositories`; `--repository`
-continua podendo sobrescrevê-lo. Para GitHub Issues, informe `--repository owner/repo` e use essa
-mesma chave no registro `repositories` para associá-la ao checkout local.
-
-## Contexto duravel do projeto
-
-Cada repositorio pode versionar `docs/PROJECT_CONTEXT.md` como contexto duravel do projeto. O
-orquestrador fornece esse arquivo aos agentes de planejamento, implementacao e revisao como
-contexto complementar; a tarefa atual e o estado do repositorio continuam sendo autoritativos.
-O conteudo enviado a cada prompt e limitado a 12.000 caracteres. `PLANNER.md`,
-`IMPLEMENTER.md` e `REVIEWER.md` sao instrucoes locais e opcionais especificas de cada papel,
-lidas da raiz do repositorio configurado em cada execucao. O planner usa `PLANNER.md` durante
-planejamento normal, retomado e debug; sem ele, as regras padrao de seguranca e JSON continuam
-valendo. A tela Agent Instructions permite editar e salvar cada arquivo separadamente, sem stage
-ou commit; os arquivos sao ignorados pelo Git por padrao.
-
-A recuperacao de contexto do checkout e uma politica propria do orquestrador, separada dos agent
-providers. Configure-a em `defaults.repository_context.strategy` ou sobrescreva-a em
-`repositories.<chave>.repository_context.strategy`. Sem uma estrategia explicita, repositorios
-registrados usam `qdrant` em modo local. Para voltar ao contexto limitado anterior, configure
-`strategy: heuristic`: o planner recebe arvore e excertos; o reviewer recebe metadados de
-repositorio e branches. Nomes desconhecidos falham com a lista de estrategias suportadas.
-
-`qdrant` habilita recuperacao semantica densa com o cliente Python oficial e embeddings locais
-FastEmbed, incluidos na instalacao padrao. Para repositorios selecionados apenas por caminho, o
-orquestrador usa `heuristic` e informa como registrar o repositorio. Qdrant cria uma collection
-deterministica por chave/caminho configurado e separa o checkout de controle de cada worktree no
-payload. O orquestrador descobre, filtra, calcula hashes e divide os arquivos; arquivos inalterados
-nao sao re-embeddados. Snapshots e worktrees guardam pontos apenas para arquivos diferentes do
-checkout configurado; a consulta combina esses pontos com os arquivos validos do indice persistente.
-Chunks alterados/removidos sao sincronizados sob demanda. Arquivos
-ignorados pelo Git, binarios, symlinks, artefatos gerados conhecidos, `PLANNER.md`,
-`IMPLEMENTER.md`, `REVIEWER.md` e `docs/PROJECT_CONTEXT.md` nao entram no indice.
-No primeiro uso, o indice persistente do repositorio registrado e construido automaticamente.
-Planejamento consulta o snapshot temporario e remove seus pontos ao fim da consulta; vetores
-compativeis sao reutilizados. Progresso da indexacao e do primeiro download do modelo aparece no
-TUI e em `--verbose`. Falhas de
-modelo, download ou indice usam contexto `heuristic` e mostram um diagnostico com a causa e solucao.
-
-Exemplo local persistente (o caminho deve ficar fora de todo checkout):
+This example uses one Codex provider for all three roles. Replace the repository path, base branch, and validation commands with values for your checkout:
 
 ```yaml
-repository_context:
-  strategy: qdrant  # opcional: este e o default
-  qdrant:
-    mode: local
-    path: ~/.orchestrator/qdrant
-  embedding:
-    provider: fastembed
-    model: BAAI/bge-small-en-v1.5
-    version: "1"
-    dimension: 384
-    cpu_threads: 2  # limite de threads para o modelo local
-```
-
-O primeiro uso pode baixar o modelo e ter custo de inicializacao. O modo local persistente e para
-indices pequenos e um unico processo, pois o storage possui lock exclusivo. Para processos
-concorrentes, execute um servidor Qdrant e configure `qdrant: {mode: server, url: http://127.0.0.1:6333}`
-em `repository_context`, ou use `host` e `port` no lugar de `url`. Mudancas de provider,
-modelo, versao, dimensao, distancia ou schema recriam a collection e reindexam. Esta iteracao usa
-somente o vetor nomeado `dense`; vetores esparsos e fusao hibrida ficam para uma extensao futura.
-Falhas de scanning, embedding ou Qdrant produzem um diagnostico limitado ao repositorio solicitado
-e nunca alteram arquivos do checkout.
-
-## Banco e migrations
-
-No startup, os comandos da CLI aplicam automaticamente todas as migrations pendentes antes de
-acessar o banco. Se uma migration falhar, o comando aborta com erro claro. O Alembic le
-`ORCHESTRATOR_DATABASE_URL` do ambiente ou de `~/.orchestrator/.env`.
-
-O comando manual continua disponível para provisionamento e diagnóstico:
-
-```bash
-alembic upgrade head
-```
-
-O runtime nao chama `Base.metadata.create_all()`. Toda mudanca de schema deve ser versionada:
-
-```bash
-alembic revision --autogenerate -m "describe schema change"
-alembic upgrade head
-```
-
-## Uso
-
-```bash
-orchestrator --version
-orchestrator providers
-orchestrator tui
-orchestrator run --trello-card CARD_ID
-orchestrator run --github-issue 42 --repository owner/repository
-```
-
-Use `orchestrator --version` para exibir a versao atual do pacote.
-
-### Interface interativa
-
-`orchestrator tui` abre uma interface Textual para selecionar repositorios configurados, provider
-de task, issues GitHub (ou um ID de card Trello), providers dos papeis planner/implementer/reviewer,
-e iniciar o mesmo workflow usado por `run`. Ela mostra as transicoes persistidas ao vivo e permite
-filtrar execucoes anteriores, inspecionar snapshots/steps e abrir links de task, PR e referencias
-de execucao historicas.
-As selecoes de providers valem apenas para a execucao iniciada e nunca alteram o YAML. Os comandos
-CLI nao interativos continuam disponiveis para automacao.
-
-Para listar as instancias de agent provider configuradas nos defaults globais, use:
-
-```text
-$ orchestrator providers
-cloud-api  litellm
-codex  codex-cli
-```
-
-Overrides uteis:
-
-```bash
-orchestrator run --trello-card CARD_ID --repository example-api
-orchestrator run --trello-card CARD_ID --config ./orchestrator.yml
-orchestrator run --task-id 42 --repository owner/repository  # usa task.provider
-orchestrator show EXECUTION_ID
-```
-
-### Debug isolado por etapa
-
-O comando `debug` executa somente uma etapa em isolamento. Ele nao chama `run`, nao avanca o
-workflow e nao cria nem altera uma execucao persistida. Use `--from-execution` (ou o alias legado
-`--execution-id`) somente quando quiser reutilizar dados historicos como defaults:
-
-```bash
-orchestrator debug --stage task-loading --github-issue 2 --repository owner/repository
-orchestrator debug --stage validation --repository owner/repository --dry-run
-orchestrator debug --stage implementation --repository owner/repository --prompt "Add --version"
-orchestrator debug --stage review --from-execution EXECUTION_ID --verbose
-```
-
-As etapas aceitas e seus inputs sao (a entrada explicita sempre tem precedencia sobre historico e
-defaults de configuracao):
-
-- `task-loading`: `--trello-card` ou `--github-issue`/`--task-id`, mais `--repository` quando
-  necessario pelo provider. Sem esses argumentos, use `--from-execution`.
-- `spec-generation`: os mesmos inputs de task-loading para obter a task normalizada, mais
-  `--repository`/configuracao. Executa apenas o planner selecionado sem persistir
-  o resultado na execucao original.
-- `implementation`: `--repository` e `--prompt`/`--prompt-file`, ou task via provider e spec via
-  `--spec-file`/`--from-execution`. Usa o workspace configurado/atual;
-  uma execucao real pode modificar arquivos locais. Nao depende da branch historica, nao troca/cria
-  branches e nunca faz commit, push ou PR. Use `--dry-run` para nao chamar o Codex.
-- `validation`: `--repository` e a configuracao normal de validacao. Os comandos locais rodam apenas
-  sem `--dry-run` e nenhuma persistencia de workflow e alterada.
-- `review`: task via provider ou historico, `--spec-file`, `--validation-file`,
-  `--pull-request-file`, `--feature-branch` e opcionalmente `--diff-file`; `--from-execution` pode
-  preencher esses dados. A revisao permanece read-only e nao publica alteracoes.
-
-`--dry-run` valida os inputs sem chamar providers ou comandos locais. O resultado do
-debug e JSON em `stdout`, e o progresso continua em `stderr`. Nenhuma etapa seguinte e iniciada
-automaticamente. `debug` e diagnostico isolado; uma futura funcionalidade `resume` sera responsavel
-por continuar o workflow original usando seu estado Git persistido e nao faz parte deste comando.
-
-No comando `run`, exatamente uma origem deve ser informada por execução. GitHub Issues é a opção recomendada para
-projetos hospedados no GitHub porque reutiliza a autenticação existente do `gh` e permite que o PR
-inclua `Closes #<numero>` quando issue e PR pertencem ao mesmo repositório. Para issues em outro
-repositório, o PR registra apenas `owner/repo#numero`, sem solicitar fechamento automático.
-
-Cada etapa e persistida em `workflow_executions` e `workflow_steps`. A saida final do comando e
-JSON e inclui `task_source`, `task_id`, `task_url`, repositorio, branch, commit, PR, validacoes,
-review e status final. As colunas Trello antigas são mantidas para leitura de execuções existentes.
-As referencias de execucao dos providers ficam registradas com ID e URL para inspecao futura.
-
-## Observabilidade da CLI
-
-O progresso do workflow e escrito em `stderr`, mantendo o JSON da execucao exclusivamente em
-`stdout` para que possa ser consumido por scripts. Os logs mostram entrada e conclusao de cada
-etapa, transicoes de estado, execucao das validacoes, branch/commit/push,
-criação do PR e um resumo final mesmo quando o resultado e `FAILED` ou `NEEDS_HUMAN`.
-
-Use `--verbose` para incluir detalhes adicionais de subprocessos e retentativas de polling:
-
-```bash
-orchestrator run --github-issue 42 --repository owner/repository --verbose
-```
-
-Prompts, respostas completas dos agentes e credenciais nao sao incluidos nos logs.
-
-## Review e Pull Request
-
-Depois do push e da criacao do PR pelo `gh` autenticado, o reviewer selecionado recebe a task,
-a spec, o repositorio, as branches base/feature, o PR, o diff e as validacoes. O resultado deve ser
-um JSON com `decision`
-(`APPROVED`, `CHANGES_REQUESTED` ou `NEEDS_HUMAN`), `summary`, `findings`, `blocking_findings` e
-`suggestions`. Resposta malformada ou contraditória vira `NEEDS_HUMAN`; o orquestrador nunca infere
-aprovação de texto livre. `CHANGES_REQUESTED` não inicia uma nova rodada do Codex nesta V1.
-
-Após cada resultado estruturado, a integração GitHub publica uma review formal no mesmo PR:
-`APPROVED` envia `APPROVE`, `CHANGES_REQUESTED` envia `REQUEST_CHANGES` com os achados bloqueantes,
-e `NEEDS_HUMAN` deixa um comentário neutro. Sugestões não bloqueantes acompanham uma aprovação sem
-alterar a decisão. Falhas ao publicar são registradas, mas não mudam a decisão do reviewer nem o
-status final do workflow. O orquestrador nunca faz auto-merge.
-
-O PR continua sendo criado pela identidade autenticada no `gh`. Para reviews formais confiáveis,
-configure um GitHub App instalado no repositório: [guia de configuração](docs/github_app.md).
-O App gera tokens de instalação curtos somente para a chamada de publicação; sem essa configuração,
-o `gh` usa sua autenticação ambiente. GitHub pode impedir uma identidade de aprovar ou solicitar
-mudanças no próprio PR, então use uma identidade de App separada quando necessário.
-
-## Configuracao por repositorio
-
-O `orchestrator.yml` global e a unica fonte persistente de configuracao. Ele e descoberto em
-`~/.config/orchestrator/orchestrator.yml` ou `~/.orchestrator/orchestrator.yml`, sem procurar no
-checkout nem no diretorio atual. Os defaults sao mesclados com a
-entrada correspondente em `repositories.<owner/repository>`; `.orchestrator.yml` no repositorio e
-ignorado com um aviso. Exemplo:
-
-```yaml
-task:
-  provider: github  # usado apenas com --task-id; opções explícitas têm precedência
-
 defaults:
+  repository:
+    base_branch: main
   agents:
-    planner: {provider: cloud-api}
-    implementer: {provider: codex}
-    reviewer: {provider: cloud-api}
+    planner:
+      provider: codex
+    implementer:
+      provider: codex
+    reviewer:
+      provider: codex
   providers:
-    cloud-api:
-      type: litellm
-      model: openai/gpt-4.1-mini
-      api_key_env: OPENAI_API_KEY
-      max_concurrency: 3
     codex:
       type: codex-cli
       command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
-      max_concurrency: 2
-  safety:
-    allow_direct_merge: false
-    require_tests: true
+      approval_policy: approve-for-me
+  integrations:
+    github:
+      command: [gh]
+  validation:
+    commands:
+      - [python, -m, pytest]
+
 repositories:
   owner/repository:
-    path: C:/Git/repository
-    repository:
-      base_branch: develop
-      protected_branches: [main, master, develop, release]
-    validation:
-      auto_detect: true
-      commands:
-        - [python, -m, pytest]
+    path: /absolute/path/to/repository
 ```
 
-Task providers suportados:
+For unattended Codex runs, we recommend `approval_policy: approve-for-me` as shown. The adapter passes `--approve-for-me` and removes the explicit `--sandbox` argument; Codex uses the `workspace-write` sandbox for this mode. [Codex Auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review) handles actions that need approval, while ordinary edits inside the worktree proceed without review. If Auto-review is unavailable for your account, omit `approval_policy` and keep the `--sandbox workspace-write` command.
 
-- `trello`: usa `ORCHESTRATOR_TRELLO_API_KEY` e `ORCHESTRATOR_TRELLO_TOKEN`.
-- `github`: executa `gh issue view` com a autenticação já ativa no GitHub CLI.
+Each provider runs one agent call at a time by default. To allow more, set `max_concurrency` on the provider under `defaults.providers`.
 
-Agent providers sao instancias nomeadas em `providers`, dos tipos `litellm`, `codex-cli`,
-`claude-code` e `gemini-vertex`. `agents.planner`, `agents.implementer` e `agents.reviewer` associam responsabilidades
-do workflow a essas instancias. Mais de um papel pode reutilizar a mesma instancia, ou cada papel
-pode apontar para uma configuracao diferente do mesmo tipo. Opcoes de runtime/modelo permanecem
-dentro da instancia do provider.
+For the `claude-code` provider, `bare_mode` defaults to `false`. Claude subscription users should leave it off (omit it or set `bare_mode: false`) and authenticate with Claude Code outside the orchestrator.
 
-| Backend | Status | Uso |
-| --- | --- | --- |
-| `litellm` | primeira classe | APIs de modelos cloud, locais e self-hosted compatíveis; instalado normalmente. |
-| `codex-cli` | primeira classe | agente especializado de implementação no worktree local. |
-| `gemini-vertex` | opcional | integração especializada com Vertex AI/ADC. |
-| outros tipos | não suportados | rejeitados com erro de configuração. |
+Optionally set `bare_mode: true` for reproducible runs that skip user hooks, plugins, skills, and MCP auto-discovery. [Bare mode requires an API key (`ANTHROPIC_API_KEY`) or supported cloud credentials](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode); it does not use subscription login credentials. The provider always passes [`--restricted`](https://code.claude.com/docs/en/cli-reference#cli-flags), which confines Claude Code's file tools to the supplied worktree with or without bare mode. See [orchestrator.example.yml](orchestrator.example.yml) for provider options.
 
-No `codex-cli`, `model` e `reasoning_effort` sao opcionais somente para compatibilidade com
-configuracoes legadas. Quando ausentes, a execucao usa o default externo da Codex CLI e o log
-verbose mostra `<external-default>`. Prefira fixa-los para controle de reproducibilidade, quota e
-custo. Em comandos customizados, o orquestrador injeta cada opcao apenas se a flag correspondente
-nao existir; uma flag existente com valor diferente e rejeitada antes do subprocesso.
+Credentials belong in environment variables or ambient `gh` authentication, never in YAML. For Trello, set `ORCHESTRATOR_TRELLO_API_KEY` and `ORCHESTRATOR_TRELLO_TOKEN`. Optional GitHub App identities are described in [GitHub App setup](docs/github_app.md).
 
-No `claude-code`, `model` e `effort` tambem sao opcionais. `effort` aceita apenas `low`, `medium`,
-`high`, `xhigh` ou `max` e e enviado como `--effort` somente quando configurado. A TUI e os presets
-o apresentam como `reasoning_effort`, uma substituicao em memoria por papel que e validada pela
-mesma schema Claude e nunca persiste sobre o default YAML.
+## First run
 
-`gemini-vertex` exige `project` e `model`; `location` tem default `global`. A autenticacao e sempre
-via ADC, nunca por API key. Quando uma etapa solicita JSON estruturado, o adapter usa
-`response_mime_type: application/json` e o JSON Schema neutro de `StructuredOutputExpectation` na
-configuracao nativa do SDK. Para, por exemplo, usar Gemini tanto no planejamento quanto no review:
+Start the terminal UI:
 
-```yaml
-agents:
-  planner:
-    provider: vertex-gemini
-  implementer:
-    provider: codex
-  reviewer:
-    provider: vertex-gemini
+```sh
+orchestrator tui
 ```
 
-`litellm` é o backend API genérico de primeira classe, incluído em uma instalação normal de
-`autonomous-dev-orchestrator`, para identificadores de modelo livres, incluindo
-provedores cloud e endpoints locais/self-hosted compativeis, como Ollama, vLLM e servidores
-OpenAI-compativeis. Configure `api_key_env` somente com o nome da variavel de ambiente; omita-o
-para endpoints sem autenticacao. `temperature`, `max_output_tokens` e `generation` ficam isolados
-na configuracao do provider. Como uma API de modelo simples nao fornece automaticamente shell ou
-edicao de arquivos, um provider LiteLLM pode planejar ou revisar, mas nao substitui as ferramentas
-de coding agent do `codex-cli` para implementacao local.
+On the home screen, choose **Repositories** → **Add repository** → **Save repository** to register a local checkout, if it isn't already in your configuration. Then choose **Start workflow**, select the repository and task provider, pick a task, and start it.
 
-Configuracoes legadas com `roles.spec|implementation|review` e `integrations.codex`
-continuam aceitas quando spec e review apontam explicitamente para `codex`.
-`integrations.jules`, roles sem provider resolvivel e providers do tipo `jules` sao rejeitados
-na carga com orientacao para configurar um tipo suportado, como `codex-cli`.
-Nomes ou tipos desconhecidos produzem um erro com os nomes disponiveis/suportados.
+The equivalent command for a GitHub issue:
 
-`allow_direct_merge: true` e rejeitado nesta V1. Credenciais ficam exclusivamente em variaveis
-de ambiente e `.env` nao e versionado.
-
-### Execucoes concorrentes e limites por provider
-
-Varias execucoes podem correr ao mesmo tempo no mesmo processo (`run` ou `tui`), mas a
-concorrencia e sempre limitada. O limite e declarado por instancia nomeada de provider, porque e
-o provider que representa o recurso realmente compartilhado: uma unica cota de API, ou a VRAM de
-uma unica GPU no caso de modelos locais. Um teto global sozinho nao protegeria nenhum dos dois.
-
-```yaml
-defaults:
-  providers:
-    codex:
-      type: codex-cli
-      command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
-      max_concurrency: 2   # duas chamadas Codex simultaneas
-    local-ollama:
-      type: litellm
-      model: ollama/llama3.2
-      api_base: http://localhost:11434
-      max_concurrency: 1   # uma GPU, uma chamada por vez
+```sh
+orchestrator run --github-issue ISSUE_NUMBER --repository owner/repository
 ```
 
-- `max_concurrency` e um inteiro positivo e vale **1** quando omitido: o default e
-  deliberadamente conservador, ou seja, execucao sequencial por provider.
-- O teto e por provider, nao global. Providers com nomes diferentes sao admitidos de forma
-  independente; `codex` ocupado nao bloqueia `local-ollama`.
-- Declare `max_concurrency` apenas em `defaults.providers.<nome>`. Uma entrada em
-  `repositories.<chave>.providers.<nome>` que defina `max_concurrency` e rejeitada com um erro de
-  configuracao acionavel, mesmo quando repete o default. Um repositorio que precise de capacidade
-  propria esta usando outra conexao e merece um nome de provider proprio. Os demais overrides de
-  provider por repositorio continuam funcionando normalmente.
-- Os tetos sao lidos uma vez na inicializacao e valem para todo o processo. Alterar
-  `max_concurrency` exige reiniciar `orchestrator run`/`tui`.
-- Overrides de runtime da TUI e presets por papel criam variantes em memoria, mas continuam
-  contabilizados no provider configurado de origem: trocar o modelo nao cria uma segunda cota.
-  Um fallback libera o slot do provider primario antes de disputar o slot do seu proprio provider.
+For a Trello card, use `orchestrator run --trello-card CARD_ID --repository owner/repository` after configuring its credentials.
 
-Uma chamada de agente que nao consegue um slot imediatamente entra numa fila FIFO. A execucao
-passa a `WAITING` (distinto de `PENDING`, que e trabalho ainda nao iniciado) e volta a `RUNNING`
-quando e admitida. O slot e mantido apenas durante a chamada ao agente, nunca durante Git,
-validacao ou operacoes GitHub. Execucoes em `PENDING`, `WAITING` e `RUNNING` continuam
-cancelaveis pela TUI e terminam como `CANCELLED` sem iniciar outra etapa.
+## CLI overview
 
-Trabalho enfileirado vive apenas na memoria do processo. As linhas persistidas permanecem no banco
-apos um encerramento, mas **nao** sao retomadas automaticamente no proximo start; a recuperacao
-automatica e trabalho futuro (#46).
+| Command | What it does |
+| --- | --- |
+| `orchestrator run` | Run one GitHub issue (`--github-issue`), Trello card (`--trello-card`), or configured task provider ID (`--task-id`). |
+| `orchestrator tui` | Open the interactive launcher, settings, and execution history. |
+| `orchestrator respond EXECUTION_ID --message "..."` | Answer an agent's blocking question and resume that execution. |
+| `orchestrator show EXECUTION_ID` | Print a saved execution as JSON. |
+| `orchestrator cleanup-workspaces --repository owner/repository` | Remove eligible retained worktrees. Use `--dry-run` to preview. |
+| `orchestrator debug --stage STAGE` | Run one diagnostic stage. `--dry-run` previews its inputs without calling integrations. |
+| `orchestrator providers` | List configured agent providers. |
+| `orchestrator --version` | Print the installed version. |
 
-## Validacoes
+## Repository context
 
-Com `validation.commands` vazio e `auto_detect: true`, a V1 reconhece configuracoes comuns de
-Python (`pytest`, Ruff, mypy), Node (`npm test`, lint, typecheck), Maven e Gradle. Se
-`require_tests` estiver ativo e nenhum comando for encontrado, o fluxo encerra em falha antes
-de qualquer commit.
+Agents get relevant code from your repository through Qdrant semantic retrieval, which is the default for registered repositories. The first time it's used, the orchestrator downloads a small local embedding model and builds an index of your repository. This takes some CPU time on large repositories, but only happens once; later runs only process files that changed.
 
-Quando uma validacao falha, `max_validation_retries` (default `2`) controla quantas vezes o
-implementador pode corrigir a mesma implementacao antes da falha final. Cada tentativa reutiliza
-a mesma execucao, branch e worktree; o planejamento nao e executado novamente. Ao esgotar o
-limite, o worktree e preservado para inspecao.
+If semantic retrieval is unavailable, a simpler heuristic retrieval is used instead. You can also select it permanently with `repository_context.strategy: heuristic`. Local Qdrant is the default; `repository_context.qdrant.mode: server` connects to a separately running Qdrant server configured with `url` or `host`.
 
-```bash
-ruff check .
-mypy src/orchestrator
-pytest
+## Role guidance files
+
+Optional local `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` files in your repository give each role its own extra instructions. They're ignored by Git by default, and each role sees only its own file. You can edit them from the TUI.
+
+We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) to every repository the orchestrator works on. It is shared by the planner, implementer, and reviewer; the orchestrator reads it when present but does not scaffold it. Without it, each run has to rediscover project boundaries and design rules from the task and retrieved code. A brand-new repository can start without it and add it once there is real code to describe.
+
+- Keep it short and durable: purpose and boundaries, layering rules, invariants, design decisions (including things deliberately not done), and where secrets and configuration come from.
+- Leave out feature descriptions, UI details, and per-change notes. The code, tests, and repository retrieval already cover those.
+- It is supplementary: the task, repository state, and the orchestrator's own invariants remain authoritative.
+- The prompt includes at most 12,000 characters of stripped content. Longer content is truncated with a notice and a workflow warning; the file stays intact.
+- The implementer is instructed to update it only when a change alters an architecture-level decision, keeping it within the cap by condensing or replacing existing content.
+
+## Safety model
+
+- Implementation happens in an isolated Git worktree. Your main checkout is never switched, reset, or cleaned.
+- Agents are instructed never to commit, push, create pull requests, or merge. The orchestrator performs those steps itself, and never merges.
+- Commits and pushes to protected branches (`main`, `master`, and `develop` by default) are refused.
+- Worktrees are kept for inspection until you clean them up with `cleanup-workspaces`.
+- New worktrees default to `~/.orchestrator/workspaces/<repo>/<execution-id>`, using the
+  same per-user state directory as the database and the separate `qdrant` folder.
+  Set `defaults.workspace.root` or `repositories.<key>.workspace.root` to override the root.
+  Existing executions keep their recorded paths. `cleanup-workspaces` also lists and
+  manages the previous sibling `orchestrator-workspaces/<repo>/<execution-id>` location;
+  its `--dry-run` previews retention decisions. Existing worktrees are never migrated automatically.
+
+## Troubleshooting
+
+- **`GitHub CLI failed`:** check that `gh` is authenticated and has access to the target repository.
+- **`Executable not found: codex`, `claude`, or `gh`:** install the CLI and make sure it's on your `PATH`, or select a provider you have installed.
+- **Claude Code authentication fails with `bare_mode: true`:** bare mode requires an API key or supported cloud credentials. For a Claude subscription, omit `bare_mode` or set it to `false` and authenticate with Claude Code outside the orchestrator.
+- **`Global configuration not found. Searched:`:** put `orchestrator.yml` in one of the locations listed under Configuration, or pass `--config` with an existing file.
+- **A local Qdrant index lock error:** another process is using the index. Close it, or configure Qdrant server mode.
+
+## Contributing
+
+Label pull requests Feature, Improvement or Bug (or skip-changelog for internal changes) so the generated release notes group them correctly.
+
+Install the development dependencies above, then run:
+
+```sh
+python -m pytest
+python -m ruff check .
+python -m mypy src/orchestrator
 ```
 
-O `pytest` já configura `--basetemp=.pytest-tmp/run`, um diretório relativo ao projeto ignorado
-pelo Git. Isso evita a dependência de `%LOCALAPPDATA%\\Temp\\pytest-of-...` no Windows; basta executar
-`python -m pytest`, sem workaround adicional.
+Database schema changes use versioned Alembic migrations in `src/orchestrator/migrations/versions`. From the repository root, create one with `alembic revision --autogenerate -m "describe change"` and apply it with `alembic upgrade head`. Normal CLI startup applies pending migrations automatically.
 
-## Arquitetura
+## Changelog
 
-Veja [docs/architecture.md](docs/architecture.md). Em resumo, models nao conhecem HTTP,
-subprocessos ou SQLAlchemy; services coordenam regras; clients encapsulam integracoes externas;
-e repositories sao a unica porta de persistencia. Os services de planner, implementacao e review
-dependem apenas de `AgentProvider.execute(AgentRequest) -> AgentResult`; `CodexClient` encapsula
-a execucao por subprocesso.
+Release notes live on the [GitHub Releases page](https://github.com/OrlyJunior/autonomous-development-orchestrator/releases).
+
+## License
+
+Released under the MIT License. See [LICENSE](LICENSE).

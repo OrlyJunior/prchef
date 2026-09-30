@@ -27,7 +27,7 @@ and repository retrieval cover those.
 
 - Dispatch queues are in-memory and process-scoped; SQLite is the default database. Qdrant local
   mode is single-process. Provider ceilings have no cross-process coordination.
-- Persisted `PENDING`/`WAITING` executions do not recover at startup.
+- Startup marks orphaned active executions interrupted; resumption requires an explicit user choice.
 - Configuration comes only from a global `orchestrator.yml` (`defaults` deep-merged with
   `repositories.<key>`). Repository-local configuration files are ignored. Discovery and
   persistence never depend on the current directory or a source checkout. Explicit CLI and

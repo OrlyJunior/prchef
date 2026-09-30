@@ -24,6 +24,11 @@ class WorkflowExecution:
     pr_url: str | None = None
     current_stage: WorkflowStage = WorkflowStage.LOAD_TASK
     status: WorkflowStatus = WorkflowStatus.PENDING
+    interrupted_from_status: WorkflowStatus | None = None
+    resume_stage: WorkflowStage | None = None
+    resume_mode: str | None = None
+    review_retry_attempt: int = 0
+    validation_retry_attempt: int = 0
     error_message: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -39,6 +44,8 @@ class WorkflowExecution:
     review_jules_session_id: str | None = None
     review_jules_session_url: str | None = None
     review_snapshot: dict[str, Any] | None = None
+    review_step_id: int | None = None
+    review_publication_pending: bool = False
     polish_outcome: PolishOutcome | None = None
     polish_skip_comment_attempted: bool = False
     human_interactions: list[HumanInteraction] = field(default_factory=list)

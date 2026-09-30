@@ -108,6 +108,15 @@ class GitClient:
             finally:
                 self._git("worktree", "remove", "--force", str(snapshot))
 
+    def worktree_paths(self) -> set[Path]:
+        """Return paths registered to this checkout, including retained linked worktrees."""
+        output = self._git("worktree", "list", "--porcelain", "-z").stdout
+        return {
+            Path(field.removeprefix("worktree ")).resolve()
+            for field in output.split("\0")
+            if field.startswith("worktree ")
+        }
+
     def remove_worktree(self, workspace_path: Path) -> bool:
         """Remove a linked worktree and prune its shared Git metadata.
 
@@ -159,6 +168,37 @@ class GitClient:
     def changed_files(self) -> list[str]:
         lines = self._git("status", "--porcelain").stdout.splitlines()
         return [line[3:].strip() for line in lines if len(line) > 3]
+
+    def head_commit(self) -> str:
+        return self._git("rev-parse", "HEAD").stdout.strip()
+
+    def head_commit_message(self) -> str:
+        return self._git("log", "-1", "--format=%s").stdout.strip()
+
+    def head_parent_commit(self) -> str | None:
+        """Return HEAD's first parent, if it has one."""
+        result = self._git("rev-parse", "HEAD^", check=False)
+        return result.stdout.strip() if result.success else None
+
+    def remote_branch_commit(self, branch: str) -> str | None:
+        result = self._git("ls-remote", "--heads", "origin", branch)
+        line = result.stdout.strip()
+        return line.split()[0] if line else None
+
+    def branch_exists(self, branch: str) -> bool:
+        return self._git("show-ref", "--verify", f"refs/heads/{branch}", check=False).success
+
+    def attach_existing_worktree(
+        self, workspace_path: Path, branch: str, base_commit: str
+    ) -> None:
+        if workspace_path.exists():
+            raise GitClientError(f"Workspace path already exists: {workspace_path}")
+        actual = self._git("rev-parse", branch).stdout.strip()
+        if actual != base_commit:
+            raise GitClientError(
+                "Retained branch differs from the recorded base; inspect it before retrying"
+            )
+        self._git("worktree", "add", str(workspace_path), branch)
 
     def discard_uncommitted_changes(self) -> None:
         """Return this workflow worktree to HEAD after an optional polish attempt fails."""
