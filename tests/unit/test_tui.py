@@ -4117,13 +4117,22 @@ def test_execution_detail_actions_and_diagnostics_stay_bounded_in_narrow_termina
                 assert not button.disabled
                 button.focus()
                 await settle_tui(pilot)
+                await pilot.wait_for_scheduled_animations()
                 assert application.focused is button
                 assert 0 <= button.region.x < button.region.right <= application.size.width
                 assert 0 <= button.region.y < button.region.bottom <= application.size.height
 
-            screen.query_one("#execution-cancel", Button).focus()
+            cancel = screen.query_one("#execution-cancel", Button)
+            cancel.focus()
             await settle_tui(pilot)
-            assert await pilot.click("#execution-cancel")
+            # Draining messages does not finish focus-triggered scrolling. Click
+            # the button's interior only after its rendered position has settled.
+            await pilot.wait_for_scheduled_animations()
+            assert application.focused is cancel
+            assert screen.can_view_entire(cancel)
+            assert await pilot.click(
+                cancel, offset=(cancel.size.width // 2, cancel.size.height // 2)
+            )
             await settle_tui(pilot)
             assert isinstance(application.screen, StopWorkflowConfirmation)
             assert repository.cancellation_requests == []
