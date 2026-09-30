@@ -8,9 +8,11 @@ defaults:
   # are resolved from this global configuration file.
   # persistence:
   #   database_path: state/orchestrator.db
-  workspace:
-    # Worktrees are created outside the configured repository checkout.
-    root: C:/Git/orchestrator-workspaces
+  # Worktrees default to ~/.orchestrator/workspaces/<repo>/<execution-id>.
+  # Override globally here or under repositories.<key>. The root must stay
+  # outside the configured repository checkout.
+  # workspace:
+  #   root: C:/Orchestrator/workspaces
   repository:
     base_branch: develop
     protected_branches: [main, master, develop]

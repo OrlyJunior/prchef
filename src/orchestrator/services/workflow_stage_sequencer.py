@@ -631,13 +631,10 @@ class StageSequencer:
                 config.repository.branch_prefix, task.id, task.title, execution.id
             )
             manager = WorkspaceManager(clients.git, config.path, config.workspace)
-            workspace_path = manager.workspace_path(execution.id)
+            workspace_path = manager.workspace_path(
+                execution.id, recorded_path=execution.workspace_path
+            )
             assert_worktree_idle(workspace_path)
-            if (
-                execution.workspace_path
-                and Path(execution.workspace_path).resolve() != workspace_path
-            ):
-                raise WorkflowError("Cannot resume: persisted workspace path changed")
             if stage is WorkflowStage.PREPARE_BRANCH:
                 with self._events._step(execution.id, WorkflowStage.PREPARE_BRANCH):
                     self._repository.record_workspace(execution.id, str(workspace_path))
@@ -654,6 +651,7 @@ class StageSequencer:
                             manager.create(
                                 execution.id, config.repository.base_branch, branch,
                                 config.repository.protected_branches, execution.base_commit,
+                                recorded_path=execution.workspace_path,
                             )
                     clients.git.at_path(workspace_path).verify_worktree_branch(branch, None)
                     self._repository.record_branch(execution.id, branch)

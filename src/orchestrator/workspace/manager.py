@@ -5,6 +5,7 @@ from pathlib import Path
 
 from orchestrator.clients.git_client import GitClient
 from orchestrator.config.project_config import WorkspaceSettings
+from orchestrator.config.state import default_state_directory
 
 
 class WorkspaceManager:
@@ -27,8 +28,10 @@ class WorkspaceManager:
         working_branch: str,
         protected_branches: list[str],
         base_commit: str | None = None,
+        *,
+        recorded_path: str | None = None,
     ) -> Path:
-        workspace = self.workspace_path(execution_id)
+        workspace = self.workspace_path(execution_id, recorded_path=recorded_path)
         workspace.parent.mkdir(parents=True, exist_ok=True)
         self._git.create_worktree(
             workspace,
@@ -39,11 +42,14 @@ class WorkspaceManager:
         )
         return workspace
 
-    def workspace_path(self, execution_id: str) -> Path:
-        safe_execution_id = self._safe_component(execution_id, "execution id")
-        repository_name = self._safe_component(self._control_repository.name, "repository name")
-        root = self.workspace_root()
-        workspace = (root / repository_name / safe_execution_id).resolve()
+    def workspace_path(self, execution_id: str, *, recorded_path: str | None = None) -> Path:
+        if recorded_path is not None:
+            # Existing executions own their recorded location, regardless of current defaults.
+            workspace = Path(recorded_path).expanduser().resolve()
+        else:
+            safe_execution_id = self._safe_component(execution_id, "execution id")
+            repository_name = self._safe_component(self._control_repository.name, "repository name")
+            workspace = (self.workspace_root() / repository_name / safe_execution_id).resolve()
         if self._is_within(workspace, self._control_repository):
             raise ValueError(
                 "Workspace root must not create execution worktrees inside the configured "
@@ -64,8 +70,7 @@ class WorkspaceManager:
     def _workspace_root(self) -> Path:
         configured = self._settings.root
         if configured is None:
-            # A sibling avoids placing generated worktrees in version-controlled project files.
-            return (self._control_repository.parent / "orchestrator-workspaces").resolve()
+            return (default_state_directory() / "workspaces").resolve()
         root = configured.expanduser()
         if not root.is_absolute():
             root = self._control_repository.parent / root

@@ -16,7 +16,9 @@ from textual.css.query import NoMatches
 from textual.pilot import Pilot
 from textual.worker import Worker, WorkerCancelled
 
-DEFAULT_TIMEOUT = 2.0
+# This bounds state-based waits, rather than measuring UI performance. Shared
+# CI runners can spend several seconds dispatching mount/layout and worker callbacks.
+DEFAULT_TIMEOUT = 10.0
 
 
 def _screen_workers(pilot: Pilot[Any]) -> list[Worker[Any]]:
