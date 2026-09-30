@@ -1563,6 +1563,38 @@ def test_manual_continuation_creates_pr_when_original_failure_had_none(workflow)
     assert factory.github.create_calls == 2
 
 
+@pytest.mark.parametrize("mode", ["human-answer", "manual-continuation"])
+def test_existing_execution_keeps_legacy_workspace_after_default_changes(
+    workflow, mode: str,
+) -> None:
+    service, repository, _, factory = workflow
+    config = service._config_loader.config
+    legacy_root = config.path.parent / "orchestrator-workspaces"
+    config.workspace.root = legacy_root
+    if mode == "human-answer":
+        factory.planner.review_error = AgentNeedsHumanError("Please clarify.")
+    else:
+        factory.planner.changes_requested = True
+    paused = service.run("card-legacy-workspace")
+    recorded = paused.workspace_path
+    assert recorded == str(legacy_root / config.path.name / paused.id)
+    config.workspace.root = None
+    factory.planner.review_error = None
+    factory.planner.changes_requested = False
+
+    resumed = (
+        service.respond_and_resume(paused.id, "Proceed as implemented.")
+        if mode == "human-answer"
+        else service.continue_execution(paused.id, "Address the review.")
+    )
+
+    assert resumed.status is WorkflowStatus.APPROVED
+    assert resumed.workspace_path == recorded
+    assert repository.get_execution(paused.id).workspace_path == recorded
+    assert factory.codex.workspace_path == Path(recorded)
+    assert not (Path.home() / ".orchestrator" / "workspaces").exists()
+
+
 def test_review_correction_uses_validation_retry_handling(workflow) -> None:
     service, repository, _, factory = workflow
     factory.planner.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]

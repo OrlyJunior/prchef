@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 
 from orchestrator.clients.command_client import CommandClient
+from orchestrator.clients.exceptions import GitClientError
 from orchestrator.clients.git_client import GitClient
 from orchestrator.config.project_config import WorkspaceSettings
+from orchestrator.models import WorkflowExecution, WorkflowStatus
+from orchestrator.services.workspace_cleaner import WorkspaceCleanupService
 from orchestrator.workspace.manager import WorkspaceManager
 
 
@@ -175,3 +178,79 @@ def test_workspace_root_accepts_windows_style_paths() -> None:
     settings = WorkspaceSettings(root=Path("C:/Git/orchestrator-workspaces"))
 
     assert str(settings.root).replace("\\", "/").endswith("C:/Git/orchestrator-workspaces")
+
+
+def test_default_workspace_uses_shared_user_state_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control, _ = _repository_with_origin(tmp_path)
+    state = tmp_path / "custom-state"
+    monkeypatch.setattr("orchestrator.workspace.manager.default_state_directory", lambda: state)
+    manager = WorkspaceManager(GitClient(CommandClient(), control), control, WorkspaceSettings())
+
+    workspace = manager.create("execution-1", "develop", "orchestrator/execution-1", ["develop"])
+
+    assert workspace == state / "workspaces" / control.name / "execution-1"
+    assert not (control.parent / "orchestrator-workspaces").exists()
+    with pytest.raises(GitClientError, match="Workspace path already exists"):
+        manager.create("execution-1", "develop", "orchestrator/execution-1", ["develop"])
+
+
+@pytest.mark.parametrize("root", ["custom-workspaces", "../relative-workspaces"])
+def test_explicit_workspace_root_still_wins(tmp_path: Path, root: str) -> None:
+    control = tmp_path / "control"
+    configured = tmp_path / root if root == "custom-workspaces" else Path(root)
+    manager = WorkspaceManager(
+        GitClient(CommandClient(), control), control, WorkspaceSettings(root=configured)
+    )
+    expected_root = configured if configured.is_absolute() else control.parent / configured
+
+    assert manager.workspace_path("one") == (expected_root / control.name / "one").resolve()
+
+
+def test_default_workspace_inside_control_checkout_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("orchestrator.workspace.manager.default_state_directory", lambda: tmp_path)
+    manager = WorkspaceManager(GitClient(CommandClient(), tmp_path), tmp_path, WorkspaceSettings())
+
+    with pytest.raises(ValueError, match="must not create execution worktrees inside"):
+        manager.workspace_path("one")
+
+
+def test_recorded_path_wins_over_current_root_and_preserves_checkout_safety(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    manager = WorkspaceManager(GitClient(CommandClient(), control), control, WorkspaceSettings())
+    recorded = tmp_path / "previous-custom-root" / control.name / "one"
+
+    assert manager.workspace_path("one", recorded_path=str(recorded)) == recorded.resolve()
+    with pytest.raises(ValueError, match="must not create execution worktrees inside"):
+        manager.workspace_path("one", recorded_path=str(control / "one"))
+
+
+def test_recorded_custom_workspace_can_be_cleaned_after_root_override_is_removed(
+    tmp_path: Path,
+) -> None:
+    from tests.unit.test_workspace_cleaner import StubRepository
+
+    control, _ = _repository_with_origin(tmp_path)
+    git = GitClient(CommandClient(), control)
+    manager = WorkspaceManager(git, control, WorkspaceSettings(root=tmp_path / "previous-root"))
+    recorded = manager.create("one", "develop", "orchestrator/one", ["develop"])
+    execution = WorkflowExecution(
+        id="one", workspace_path=str(recorded), status=WorkflowStatus.APPROVED
+    )
+    cleaner = WorkspaceCleanupService(
+        StubRepository([execution]),  # type: ignore[arg-type]
+        git, control, WorkspaceManager(git, control, WorkspaceSettings()).workspace_root(),
+    )
+
+    dry = cleaner.cleanup(dry_run=True)
+    assert dry.workspaces[0].path == recorded
+    assert dry.workspaces[0].eligible
+    assert recorded.is_dir()
+
+    report = cleaner.cleanup(dry_run=False)
+    assert report.removed_count == 1
+    assert not recorded.exists()
+    assert recorded not in git.worktree_paths()
