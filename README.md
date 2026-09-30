@@ -49,6 +49,14 @@ python -m pip install -e ".[dev]"
 
 The app reads one global `orchestrator.yml`. An explicit `--config` path takes precedence, followed by the `ORCHESTRATOR_CONFIG`, `ORCHESTRATOR_CONFIG_PATH`, and `ORCHESTRATOR_CONFIG_FILE` environment variables. Otherwise it looks in `~/.config/orchestrator/orchestrator.yml`, then `~/.orchestrator/orchestrator.yml`. Repository-local `.orchestrator.yml` files are ignored.
 
+The app loads its settings and Trello credentials from the optional `~/.orchestrator/.env` file. A repository-local `.env` is not loaded; [.env.example](.env.example) shows the format. The three configuration selectors above are read only from the process environment, not from `.env`.
+
+- `ORCHESTRATOR_DATABASE_URL`: database URL override (default: unset).
+- `ORCHESTRATOR_DATABASE_PATH`: alternative SQLite file path (default: unset).
+- `ORCHESTRATOR_LOG_LEVEL`: log level (default: `INFO`).
+
+Set only one database override. Without either, the app uses global persistence settings or an existing database beside the global YAML, otherwise SQLite at `~/.orchestrator/orchestrator.db`.
+
 This example uses one Codex provider for all three roles. Replace the repository path, base branch, and validation commands with values for your checkout:
 
 ```yaml
