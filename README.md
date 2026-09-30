@@ -175,7 +175,7 @@ Database schema changes use versioned Alembic migrations in `src/orchestrator/mi
 
 ### Releasing
 
-To publish a release, merge `develop` into `main`. Then, under **Actions → Release**, run the workflow on the `main` branch and choose the `patch`, `minor`, or `major` increment.
+To publish a release, under **Actions → Release**, run the workflow on the `develop` branch and choose the `patch`, `minor`, or `major` increment.
 
 ## Changelog
 
