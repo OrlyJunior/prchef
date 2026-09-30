@@ -386,6 +386,7 @@ def test_human_interactions_persist_response_and_resume_state(tmp_path: Path) ->
 def test_execution_diagnostics_are_redacted_and_available_after_repository_restart(
     tmp_path: Path,
 ) -> None:
+    token = "ghs_" + ("FAKE_NOT_A_SECRET.AaZz09-_" * 22)[:516]
     project_root = Path(__file__).resolve().parents[2]
     database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
@@ -401,7 +402,7 @@ def test_execution_diagnostics_are_redacted_and_available_after_repository_resta
             execution_id=execution.id,
             category=DiagnosticCategory.VALIDATION,
             stage=WorkflowStage.VALIDATE,
-            payload={"command": "pytest", "stderr": "Authorization: Bearer secret"},
+            payload={"command": "pytest", "stderr": f"Authorization: Bearer {token}\n{token}"},
         )
     )
 
@@ -410,7 +411,7 @@ def test_execution_diagnostics_are_redacted_and_available_after_repository_resta
 
     assert diagnostics[0].category is DiagnosticCategory.VALIDATION
     assert diagnostics[0].payload["command"] == "pytest"
-    assert diagnostics[0].payload["stderr"] == "Authorization=[REDACTED] [REDACTED]"
+    assert diagnostics[0].payload["stderr"] == "Authorization=[REDACTED] [REDACTED]\n[REDACTED]"
 
 
 def test_diagnostic_cursor_reads_new_rows_in_id_order_after_restart(tmp_path: Path) -> None:

@@ -12,18 +12,24 @@ if TYPE_CHECKING:
     from orchestrator.models.repository_spec import RepositorySpec
 
 _SENSITIVE_VALUE = re.compile(
-    r"(?i)(jules_api_key|orchestrator_jules_api_key|github_token|gh_token|"
+    r"(?i)(?<![a-z0-9_-])(jules_api_key|orchestrator_jules_api_key|github_token|gh_token|"
     r"x-api-key|[a-z0-9_-]*(?:api[_-]?key|secret|password))"
-    r"(\s*[=:]\s*|\s+)([^\s,;]+)"
+    r"(\s*+[=:]\s*+|\s++)([^\s,;]++)"
 )
 _SENSITIVE_HEADER_VALUE = re.compile(
-    r"(?i)(authorization|token)(\s*[=:]\s*)([^\s,;]+)"
+    r"(?i)(authorization|token)(\s*+[=:]\s*+)([^\s,;]++)"
 )
-_BEARER = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
-_GITHUB_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
-_PRIVATE_KEY = re.compile(
-    r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----",
-    re.DOTALL,
+_BEARER = re.compile(r"(?i)\bBearer\s++[^\s,;]++")
+_BASIC_AUTHORIZATION = re.compile(
+    r"(?i)(\bauthorization[\"']?\s*+[=:]\s*+[\"']?)Basic\s++[^\s,;\"']++"
+)
+# Tokens are opaque: consume the entire allowed character run, including a
+# final dot/hyphen. A trailing word boundary would leave those characters behind.
+_GITHUB_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9._-]++"
+)
+_PRIVATE_KEY_MARKER = re.compile(
+    r"-----(BEGIN|END) (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"
 )
 _SENSITIVE_FIELD_NAME = re.compile(
     r"(?i)(?:^|[_-])(?:api[_-]?key|token|secret|password|authorization|private[_-]?key)(?:$|[_-])"
@@ -52,12 +58,31 @@ class CurrentStderrHandler(logging.StreamHandler[TextIO]):
         super().emit(record)
 
 
+def _redact_private_keys(value: str) -> str:
+    # Visit each marker once, even when many BEGIN markers have no matching END.
+    # A repeated lazy search for the end of each block would rescan the same tail.
+    parts: list[str] = []
+    start: int | None = None
+    cursor = 0
+    for marker in _PRIVATE_KEY_MARKER.finditer(value):
+        if marker.group(1) == "BEGIN":
+            if start is None:
+                start = marker.start()
+        elif start is not None:
+            parts.extend((value[cursor:start], "[REDACTED PRIVATE KEY]"))
+            cursor = marker.end()
+            start = None
+    parts.append(value[cursor:])
+    return "".join(parts)
+
+
 def redact_text(value: str) -> str:
     """Remove common credential forms before text reaches a log handler."""
-    # Redact bearer values first.  Otherwise an ``Authorization: Bearer ...``
-    # value would have only ``Bearer`` consumed by _SENSITIVE_VALUE, leaving
+    # Redact authorization schemes first. Otherwise ``Authorization: Basic ...``
+    # would have only ``Basic`` consumed by _SENSITIVE_HEADER_VALUE, leaving
     # the credential itself in the log message.
-    redacted = _PRIVATE_KEY.sub("[REDACTED PRIVATE KEY]", value)
+    redacted = _redact_private_keys(value)
+    redacted = _BASIC_AUTHORIZATION.sub(r"\1Basic [REDACTED]", redacted)
     redacted = _BEARER.sub("Bearer [REDACTED]", redacted)
     redacted = _SENSITIVE_VALUE.sub(r"\1=[REDACTED]", redacted)
     redacted = _SENSITIVE_HEADER_VALUE.sub(r"\1=[REDACTED]", redacted)
