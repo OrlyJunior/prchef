@@ -173,6 +173,10 @@ python -m mypy src/orchestrator
 
 Database schema changes use versioned Alembic migrations in `src/orchestrator/migrations/versions`. From the repository root, create one with `alembic revision --autogenerate -m "describe change"` and apply it with `alembic upgrade head`. Normal CLI startup applies pending migrations automatically.
 
+### Releasing
+
+To publish a release, merge `develop` into `main`. Then, under **Actions → Release**, run the workflow on the `main` branch and choose the `patch`, `minor`, or `major` increment.
+
 ## Changelog
 
 Release notes live on the [GitHub Releases page](https://github.com/OrlyJunior/autonomous-development-orchestrator/releases).
