@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "autonomous-dev-orchestrator"
 dynamic = ["version"]
-description = "Orquestrador CLI para tasks do Trello/GitHub, LiteLLM, Codex e Git"
+description = "CLI orchestrator for Trello/GitHub tasks using LiteLLM, Codex, and Git"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

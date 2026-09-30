@@ -1,6 +1,6 @@
 task:
-  # Provider usado com `orchestrator run --task-id ...`.
-  # --trello-card e --github-issue selecionam explicitamente o provider.
+  # Provider used by `orchestrator run --task-id ...`.
+  # --trello-card and --github-issue explicitly select their providers.
   provider: github
 
 defaults:
@@ -52,7 +52,7 @@ defaults:
       provider: codex
     reviewer:
       provider: cloud-api
-    # Exemplo optional de Vertex AI: a mesma instancia pode atender planner e reviewer.
+    # Optional Vertex AI example: the same instance can serve the planner and reviewer.
     # planner:
     #   provider: vertex-gemini
     # reviewer:
@@ -82,13 +82,13 @@ defaults:
     require_tests: true
   validation:
     auto_detect: true
-    # `python -m pytest` usa .pytest-tmp/run automaticamente via pyproject.toml.
+    # `python -m pytest` automatically uses .pytest-tmp/run through pyproject.toml.
     commands: []
-    # Tentativas de correcao no mesmo worktree apos uma validacao falhar.
+    # Correction attempts in the same worktree after validation fails.
     max_validation_retries: 2
   review:
-    # Tentativas de correcao no mesmo worktree apos uma revisao pedir mudancas.
-    # Cada correcao valida, cria um novo commit e atualiza a PR existente antes de nova revisao.
+    # Correction attempts in the same worktree after a review requests changes.
+    # Each correction validates, creates a new commit, and updates the existing PR before review.
     max_review_retries: 1
   notifications:
     # Desktop alerts are opt-in. Windows is supported in this first version.
@@ -111,13 +111,13 @@ defaults:
       # Two Codex agent calls may be in flight at once; a third queues (FIFO)
       # and its execution is reported as WAITING until a slot frees up.
       max_concurrency: 2
-      # Fixe estes valores com opcoes suportadas pela sua Codex CLI; nao dependa do default externo.
+      # Set these values to options supported by your Codex CLI; do not rely on its defaults.
       # model: <your-supported-codex-model>
       # reasoning_effort: <your-supported-reasoning-effort>
       command: [codex, exec, --sandbox, workspace-write, --output-last-message, "{output_file}", -]
       timeout_seconds: 3600
-      # Opcional: usa o modo de revisao automatica do Codex CLI.
-      # Ele implica workspace-write e nao pode ser combinado com --sandbox.
+      # Optional: use the Codex CLI's automatic review mode.
+      # It implies workspace-write and cannot be combined with --sandbox.
       # approval_policy: approve-for-me
     # Claude Code needs a recent `claude` CLI with `--output-format json`,
     # `--json-schema`, `--restricted`, and `--permission-prompts`. Authenticate outside this
@@ -143,7 +143,7 @@ defaults:
     #   bare_mode: false
     #   # max_turns: 12
     #   # max_budget_usd: 5.00
-    # Requer ADC (por exemplo, `gcloud auth application-default login`), nao uma API key.
+    # Requires ADC (for example, `gcloud auth application-default login`), not an API key.
     # vertex-gemini:
     #   type: gemini-vertex
     #   project: my-gcp-project
@@ -153,7 +153,7 @@ defaults:
     #   generation:
     #     temperature: 0.2
     #     # max_output_tokens: 8192
-    # LiteLLM e o backend API-modelo de primeira classe e ja vem na instalacao normal.
+    # LiteLLM is the primary API model backend and is included in the standard installation.
     # Model identifiers are free-form. A key is referenced by its environment
     # variable name only; omit api_key_env for local/self-hosted endpoints.
     # local-ollama:
@@ -191,7 +191,7 @@ defaults:
       #   private_key_path: C:/secure/github-app-private-key.pem
       #   # Alternative: private_key_env: GITHUB_APP_PRIVATE_KEY
 
-# Trello usa o custom field "Repository". Para GitHub Issues, prefira owner/repo.
+# Trello uses the "Repository" custom field. For GitHub Issues, prefer owner/repo.
 repositories:
   example-api:
     path: /absolute/path/to/example-api
