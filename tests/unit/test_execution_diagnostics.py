@@ -22,6 +22,8 @@ class _Provider:
 
 
 def test_diagnostic_provider_records_full_redacted_request_and_response() -> None:
+    token = "ghs_" + ("FAKE_NOT_A_SECRET.AaZz09-_" * 22)[:516]
+    instructions = f"Authorization: Bearer {token}\nAPI_KEY=also-secret\n{token}\nfull context"
     events: list[tuple[DiagnosticCategory, AgentRole, dict[str, object]]] = []
     wrapped_provider = _Provider()
     provider = DiagnosticAgentProvider(
@@ -34,7 +36,7 @@ def test_diagnostic_provider_records_full_redacted_request_and_response() -> Non
     provider.execute(
         AgentRequest(
             title="plan",
-            instructions="Authorization: Bearer very-secret\nAPI_KEY=also-secret\nfull context",
+            instructions=instructions,
             workspace_path=Path("/workspace"),
         )
     )
@@ -46,7 +48,7 @@ def test_diagnostic_provider_records_full_redacted_request_and_response() -> Non
         DiagnosticCategory.RESPONSE,
     ]
     assert request["effective_instructions"] == (
-        "Authorization=[REDACTED] [REDACTED]\nAPI_KEY=[REDACTED]\nfull context"
+        "Authorization=[REDACTED] [REDACTED]\nAPI_KEY=[REDACTED]\n[REDACTED]\nfull context"
     )
     assert "instructions" not in request
     assert request["provider"] == {"name": "provider", "model": "test", "api_key": "[REDACTED]"}
@@ -56,9 +58,7 @@ def test_diagnostic_provider_records_full_redacted_request_and_response() -> Non
         "finish_reason": "stop", "input_tokens": 12, "api_key": "[REDACTED]"
     }
     assert wrapped_provider.request is not None
-    assert wrapped_provider.request.instructions == (
-        "Authorization: Bearer very-secret\nAPI_KEY=also-secret\nfull context"
-    )
+    assert wrapped_provider.request.instructions == instructions
 
 
 def test_diagnostic_provider_redacts_retryable_provider_error_metadata() -> None:

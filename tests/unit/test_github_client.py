@@ -329,15 +329,27 @@ def test_assign_implementer_is_noop_without_implementer_app(tmp_path: Path) -> N
     assert commands.calls == []
 
 
-def test_assign_pull_request_redacts_token_when_github_cli_fails(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("error_template", "redacted"),
+    [
+        ("{token}", "[REDACTED]"),
+        ("GH_TOKEN={token}", "GH_TOKEN=[REDACTED]"),
+        ("Authorization: Bearer {token}", "Authorization=[REDACTED] [REDACTED]"),
+    ],
+)
+def test_assign_pull_request_redacts_token_when_github_cli_fails(
+    tmp_path: Path, error_template: str, redacted: str,
+) -> None:
+    token = "ghs_" + ("FAKE_NOT_A_SECRET.AaZz09-_" * 22)[:516]
+
     class FailingCommands(RecordingCommands):
         def run(self, command: list[str], **kwargs: Any) -> CommandResult:
             self.calls.append({"command": command, **kwargs})
-            return CommandResult(command, 1, "", "GH_TOKEN=ghs_installation", 0.01)
+            return CommandResult(command, 1, "", error_template.format(token=token), 0.01)
 
     client = GitHubClient(FailingCommands(), tmp_path, ["gh"], 120)
 
     with pytest.raises(GitHubClientError, match="GitHub CLI failed") as exc_info:
         client.assign_pull_request(42, ("implementer[bot]",))
 
-    assert "ghs_installation" not in str(exc_info.value)
+    assert str(exc_info.value) == f"GitHub CLI failed: {redacted}"
