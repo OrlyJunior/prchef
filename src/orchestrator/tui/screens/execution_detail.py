@@ -135,8 +135,8 @@ class ExecutionDetailScreen(Screen[None]):
         page = self.query_one("#execution-detail", VerticalScroll)
         log = self.query_one("#execution-detailed-logs", Log)
         offsets = (
-            (page.scroll_x, page.scroll_y),
-            (log.scroll_x, log.scroll_y),
+            (page.scroll_target_x, page.scroll_target_y),
+            (log.scroll_target_x, log.scroll_target_y),
         )
         try:
             execution, steps = self.controller.execution_detail(self.execution_id)
@@ -181,7 +181,11 @@ class ExecutionDetailScreen(Screen[None]):
             offsets,
             strict=True,
         ):
-            self.query_one(f"#{widget_id}").scroll_to(x=x, y=y, animate=False)
+            widget = self.query_one(f"#{widget_id}")
+            # Focus or user scrolling can change the target after the refresh
+            # snapshot. A delayed restore must not undo that newer navigation.
+            if (widget.scroll_target_x, widget.scroll_target_y) == (x, y):
+                widget.scroll_to(x=x, y=y, animate=False)
 
     def _observe_status(self, event: WorkflowEvent) -> None:
         if event.execution_id != self.execution_id:
