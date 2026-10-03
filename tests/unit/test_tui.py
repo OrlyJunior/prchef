@@ -46,6 +46,7 @@ from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from orchestrator.models.workflow_execution import WorkflowExecution
 from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from orchestrator.models.workflow_step import WorkflowStep
+from orchestrator.services.qdrant_repository_context import RepositoryIndexOperationError
 from orchestrator.tui.app import OrchestratorApp
 from orchestrator.tui.batch_progress import BatchRowView, persisted_row
 from orchestrator.tui.bridge import (
@@ -1951,6 +1952,54 @@ def test_repository_load_failure_disables_stale_editor_and_prevents_save(
     asyncio.run(drive())
 
 
+@pytest.mark.parametrize("request_failure", [False, True])
+def test_index_action_failure_shows_diagnostic_and_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request_failure: bool,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    monkeypatch.setattr(
+        controller, "_inspect_repository_index",
+        lambda config: RepositoryIndexStatus(strategy="qdrant", state=IndexLifecycleState.READY),
+    )
+    application = OrchestratorApp(controller)
+    message = "Vector dimension mismatch: expected 2, got 3; rebuild the index."
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise RepositoryIndexOperationError(message)
+
+    async def drive() -> None:
+        async with application.run_test(size=(42, 24)) as pilot:
+            await pilot.press("r")
+            await wait_for_tui(
+                pilot, lambda: "READY" in str(application.screen.query_one(
+                    "#index-status", Static).renderable), description="initial ready index",
+            )
+            screen = application.screen
+            field = screen.query_one("#repository-key", Input)
+            field.focus()
+            await wait_for_tui(
+                pilot, lambda: application.focused is field, description="editor focus",
+            )
+            if request_failure:
+                monkeypatch.setattr(controller, "request_repository_index", fail)
+            else:
+                monkeypatch.setattr(controller, "_perform_repository_index_operation", fail)
+            screen.query_one("#refresh-index", Button).press()
+            await wait_for_tui(
+                pilot, lambda: "FAILED" in str(screen.query_one(
+                    "#index-status", Static).renderable), description="action failure delivered",
+            )
+            errors = screen.query_one("#index-errors", Static)
+            assert str(errors.renderable) == message
+            assert not errors.has_class("-activity")
+            assert not screen.query_one("#build-index", Button).disabled
+            assert application.focused is field
+            await pilot.press("escape")
+            assert application.screen is not screen
+
+    asyncio.run(drive())
+
+
 def test_repository_index_management_renders_independent_status_and_dispatches_actions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2178,6 +2227,67 @@ def test_repository_switch_ignores_previous_refresh_completion(
                 assert application.focused is field
             finally:
                 release.set()
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize("manual_refresh", [False, True])
+def test_repository_index_requests_finish_registration_without_cancelling_previous_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manual_refresh: bool,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    monkeypatch.setattr(
+        controller, "_inspect_repository_index",
+        lambda config: RepositoryIndexStatus(strategy="qdrant", state=IndexLifecycleState.READY),
+    )
+    application = OrchestratorApp(controller)
+    entered, release, replacement_entered = threading.Event(), threading.Event(), threading.Event()
+
+    def request(
+        repository: str, listener: Callable[[RepositoryIndexStatus], None],
+        *, operation: str | None = None,
+    ) -> None:
+        assert repository == "example"
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(10)
+            chunks = 1
+        else:
+            assert operation == ("refresh_changed_files" if manual_refresh else None)
+            replacement_entered.set()
+            chunks = 9
+        listener(RepositoryIndexStatus(
+            strategy="qdrant", state=IndexLifecycleState.READY, point_count=chunks,
+        ))
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 60)) as pilot:
+            await pilot.press("r")
+            await wait_for_tui(
+                pilot, lambda: "READY" in str(application.screen.query_one(
+                    "#index-status", Static).renderable), description="initial index status",
+            )
+            screen = application.screen
+            assert isinstance(screen, RepositorySettingsScreen)
+            monkeypatch.setattr(controller, "request_repository_index", request)
+            screen._load_index_status("example")
+            first = next(worker for worker in application.workers if worker.node is screen)
+            try:
+                assert await asyncio.to_thread(entered.wait, 10)
+                if manual_refresh:
+                    screen._start_index_action("refresh")
+                else:
+                    screen._load_index_status("example")
+                assert await asyncio.to_thread(replacement_entered.wait, 10)
+                assert not first.is_cancelled
+            finally:
+                release.set()
+                await first.wait()
+            await wait_for_tui(
+                pilot, lambda: "Chunks: 9" in str(screen.query_one(
+                    "#index-metadata", Static).renderable), description="latest index result",
+            )
+            assert "Chunks: 1" not in str(screen.query_one("#index-metadata", Static).renderable)
 
     asyncio.run(drive())
 

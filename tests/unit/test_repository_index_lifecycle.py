@@ -180,6 +180,33 @@ def test_unrelated_error_still_fails(index: Any) -> None:
     assert index.strategy.inspect_index().state is IndexLifecycleState.FAILED
 
 
+@pytest.mark.parametrize("action", ["build_index", "refresh_changed_files", "clear_index"])
+def test_backend_action_failure_preserves_sanitized_diagnostic(
+    index: Any, monkeypatch: pytest.MonkeyPatch, action: str,
+) -> None:
+    (index.root / "a.txt").write_text("source")
+    index.strategy.build_index()
+    (index.root / "a.txt").write_text("changed")
+
+    def fail(*args: Any) -> None:
+        raise RuntimeError(
+            "Vector dimension mismatch; rebuild the index. api_key=private-secret "
+            "at https://user:private-password@qdrant.invalid/index"
+        )
+
+    if action == "clear_index":
+        monkeypatch.setattr(index.client, "delete_collection", fail)
+    else:
+        index.embedding.on_embed = fail
+    with pytest.raises(RepositoryIndexOperationError) as caught:
+        getattr(index.strategy, action)()
+    for message in (str(caught.value), index.strategy.inspect_index().error_message):
+        assert "Vector dimension mismatch; rebuild the index." in message
+        assert "private-secret" not in message
+        assert "private-password" not in message
+        assert "qdrant.invalid" not in message
+
+
 @pytest.mark.parametrize("change_head", [False, True])
 def test_changes_during_refresh_never_publish_newer_provenance(
     index: Any, monkeypatch: pytest.MonkeyPatch, change_head: bool,
@@ -228,6 +255,65 @@ def controller_for(index: Any, monkeypatch: pytest.MonkeyPatch) -> WorkflowContr
     monkeypatch.setattr("orchestrator.tui.bridge.resolve_repository_context_strategy",
                         lambda *args, **kwargs: index.strategy)
     return controller
+
+
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("operation", ["build_index", "refresh_changed_files", "clear_index"])
+def test_controller_preserves_actionable_index_failure(
+    index: Any, monkeypatch: pytest.MonkeyPatch, background: bool, operation: str,
+) -> None:
+    controller = controller_for(index, monkeypatch)
+    message = "Vector dimension mismatch: expected 2, got 3; rebuild the index."
+
+    def fail() -> None:
+        raise RepositoryIndexOperationError(message)
+
+    monkeypatch.setattr(index.strategy, operation, fail)
+    if background:
+        completed = threading.Event()
+        statuses: list[Any] = []
+
+        def listener(status: Any) -> None:
+            statuses.append(status)
+            if status.state is not IndexLifecycleState.INDEXING:
+                completed.set()
+
+        controller.request_repository_index("repo", listener, operation=operation)
+        assert completed.wait(TIMEOUT)
+        failed = statuses[-1]
+    else:
+        with pytest.raises(RepositoryIndexOperationError, match="Vector dimension mismatch"):
+            controller._run_repository_index_operation("repo", operation)
+        identity = controller._index_identity(controller.project_config("repo"))
+        failed = controller._index_statuses[identity]
+    assert failed.state is IndexLifecycleState.FAILED
+    assert failed.error_message == message
+    with controller._index_operation_lock:
+        assert not controller._index_operations
+
+
+def test_automatic_refresh_preserves_actionable_failure(
+    index: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index.strategy.build_index()
+    monkeypatch.setattr(backend, "_git_head", lambda root: "next-head")
+    controller = controller_for(index, monkeypatch)
+    completed = threading.Event()
+    statuses: list[Any] = []
+
+    def fail() -> None:
+        raise RepositoryIndexOperationError("Embedding unavailable; check model configuration.")
+
+    def listener(status: Any) -> None:
+        statuses.append(status)
+        if status.state is not IndexLifecycleState.INDEXING:
+            completed.set()
+
+    monkeypatch.setattr(index.strategy, "refresh_changed_files", fail)
+    controller.request_repository_index("repo", listener)
+    assert completed.wait(TIMEOUT)
+    assert statuses[-1].state is IndexLifecycleState.FAILED
+    assert statuses[-1].error_message == "Embedding unavailable; check model configuration."
 
 
 def test_open_refresh_is_owned_deduplicated_and_status_never_inspects_active_work(

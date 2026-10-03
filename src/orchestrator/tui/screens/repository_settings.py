@@ -16,6 +16,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Input, Static
 
 from orchestrator.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
+from orchestrator.services.qdrant_repository_context import repository_index_error_message
 from orchestrator.tui.bridge import WorkflowController
 from orchestrator.tui.widgets import (
     OrchestratorSelect,
@@ -522,7 +523,10 @@ class RepositorySettingsScreen(Screen[None]):
         self._set_index_buttons_disabled(True)
         self._fetch_index_status(repository, token)
 
-    @work(thread=True, exclusive=True)
+    # These workers only register listeners with the controller, which owns
+    # operation deduplication. Let registrations finish; tokens reject stale
+    # deliveries without cancelling a worker during a duplicate selection load.
+    @work(thread=True)
     def _fetch_index_status(self, repository: str, token: int) -> None:
         application = self.app
 
@@ -535,7 +539,7 @@ class RepositorySettingsScreen(Screen[None]):
             status = RepositoryIndexStatus(
                 strategy="qdrant",
                 state=IndexLifecycleState.FAILED,
-                error_message=f"Could not inspect the semantic index: {exc}",
+                error_message=repository_index_error_message(exc),
             )
             deliver(status)
 
@@ -603,7 +607,7 @@ class RepositorySettingsScreen(Screen[None]):
         self._index_status_token += 1
         self._run_index_action(repository, action, self._index_status_token)
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True)
     def _run_index_action(self, repository: str, action: str, token: int) -> None:
         application = self.app
 
@@ -620,7 +624,7 @@ class RepositorySettingsScreen(Screen[None]):
         except Exception as exc:
             deliver(RepositoryIndexStatus(
                 strategy="qdrant", state=IndexLifecycleState.FAILED,
-                error_message=f"Semantic index operation failed ({type(exc).__name__}).",
+                error_message=repository_index_error_message(exc),
             ))
 
     def _save_repository(self) -> None:

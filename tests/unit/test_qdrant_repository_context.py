@@ -1399,7 +1399,9 @@ def test_temporary_planning_worktrees_leave_index_unchanged_on_query_failure(
     assert "LOCAL REPOSITORY CONTEXT" in failed
     status = strategy.inspect_index()
     assert status.state is IndexLifecycleState.FAILED
-    assert status.error_message == "Semantic index operation failed (RuntimeError)."
+    assert status.error_message == (
+        "Semantic index operation failed (RuntimeError). simulated query failure"
+    )
 
 
 @pytest.mark.parametrize(

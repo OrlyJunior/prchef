@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -26,6 +27,7 @@ from orchestrator.models.repository_context import (
     RepositorySourceFile,
     RetrievedRepositoryChunk,
 )
+from orchestrator.runtime_logging import summarize_text
 from orchestrator.services.embeddings import (
     EmbeddingProvider,
     FastEmbedEmbeddingProvider,
@@ -64,6 +66,18 @@ class _PointSummary(NamedTuple):
 
 class RepositoryIndexOperationError(RuntimeError):
     """A sanitized, user-displayable index lifecycle operation failure."""
+
+
+def repository_index_error_message(exc: Exception) -> str:
+    """Preserve bounded diagnostics while redacting credentials and connection URLs."""
+    detail = summarize_text(
+        re.sub(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s]+", "[REDACTED CONNECTION]", str(exc)),
+        limit=1000,
+    )
+    if isinstance(exc, RepositoryIndexOperationError) and detail:
+        return detail
+    summary = f"Semantic index operation failed ({type(exc).__name__})."
+    return f"{summary} {detail}" if detail else summary
 
 
 def _external_storage_busy(exc: Exception) -> bool:
@@ -128,6 +142,49 @@ def qdrant_connection_key(settings: QdrantSettings) -> str:
     return f"host:{settings.host}:{settings.port or 6333}"
 
 
+class _OperationAdmission:
+    """Reentrant admission that reserves a released store for blocking waiters.
+
+    A screen's nonblocking request never queues, and cannot overtake a workflow
+    between the previous owner's release and the workflow waking up.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._owner: int | None = None
+        self._depth = 0
+        self._waiting = 0
+
+    def acquire(self, blocking: bool = True) -> bool:
+        owner = threading.get_ident()
+        with self._condition:
+            if self._owner == owner:
+                self._depth += 1
+                return True
+            if not blocking:
+                if self._owner is not None or self._waiting:
+                    return False
+            else:
+                self._waiting += 1
+                try:
+                    self._condition.wait_for(lambda: self._owner is None)
+                finally:
+                    self._waiting -= 1
+                    self._condition.notify_all()
+            self._owner = owner
+            self._depth = 1
+            return True
+
+    def release(self) -> None:
+        with self._condition:
+            if self._owner != threading.get_ident():
+                raise RuntimeError("Cannot release index admission owned by another thread")
+            self._depth -= 1
+            if not self._depth:
+                self._owner = None
+                self._condition.notify_all()
+
+
 class QdrantClientManager:
     """Own one long-lived Qdrant client per configured connection.
 
@@ -143,7 +200,7 @@ class QdrantClientManager:
         self._client_factory = client_factory
         self._lock = threading.RLock()
         self._clients: dict[str, Any] = {}
-        self._operation_locks: dict[str, threading.RLock] = {}
+        self._operation_locks: dict[str, _OperationAdmission] = {}
         self._creation_locks: dict[str, threading.RLock] = {}
         self._settled = threading.Condition(self._lock)
         self._active = 0
@@ -166,7 +223,7 @@ class QdrantClientManager:
             if self._closed or (self._closing and not getattr(self._thread_state, "depth", 0)):
                 raise RuntimeError("The Qdrant client manager is already closed")
             operation_lock = (
-                self._operation_locks.setdefault(key, threading.RLock())
+                self._operation_locks.setdefault(key, _OperationAdmission())
                 if serialize else None
             )
             self._active += 1
@@ -514,7 +571,7 @@ class QdrantRepositoryContextStrategy:
             return RepositoryIndexStatus(
                 strategy="qdrant",
                 state=IndexLifecycleState.FAILED,
-                error_message=_safe_error_message(exc),
+                error_message=repository_index_error_message(exc),
             )
 
     def inspect_indexed_commit(self) -> str | None:
@@ -566,7 +623,7 @@ class QdrantRepositoryContextStrategy:
             if _external_storage_busy(exc):
                 return _busy_status(external=True)
             self._record_failure(exc)
-            raise RepositoryIndexOperationError(_safe_error_message(exc)) from exc
+            raise RepositoryIndexOperationError(repository_index_error_message(exc)) from exc
         return self.inspect_index()
 
     def _run_index_operation(self, *, rebuild: bool) -> RepositoryIndexStatus:
@@ -598,7 +655,7 @@ class QdrantRepositoryContextStrategy:
             if _external_storage_busy(exc):
                 return _busy_status(external=True)
             self._record_failure(exc)
-            raise RepositoryIndexOperationError(_safe_error_message(exc)) from exc
+            raise RepositoryIndexOperationError(repository_index_error_message(exc)) from exc
         return self.inspect_index()
 
     def _validate_request_root(self, requested_root: Path) -> Path:
@@ -1410,7 +1467,7 @@ class QdrantRepositoryContextStrategy:
                                 last_successful_indexed_at=_string_or_none(
                                     prior.get("last_successful_indexed_at")
                                 ),
-                                last_error=_safe_error_message(exc),
+                                last_error=repository_index_error_message(exc),
                             ),
                         )
                     ],
@@ -1637,12 +1694,6 @@ def _load_optional_module(name: str) -> Any:
     """Load an implementation dependency without importing its types into this boundary."""
 
     return import_module(name)
-
-
-def _safe_error_message(exc: Exception) -> str:
-    """Keep lifecycle diagnostics useful without leaking backend connection details."""
-
-    return f"Semantic index operation failed ({type(exc).__name__})."
 
 
 def _string_or_none(value: Any) -> str | None:

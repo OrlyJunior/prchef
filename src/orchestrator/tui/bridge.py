@@ -56,6 +56,7 @@ from orchestrator.services.qdrant_repository_context import (
     QdrantClientManager,
     canonical_path_identifier,
     qdrant_connection_key,
+    repository_index_error_message,
 )
 from orchestrator.services.repository_context import resolve_repository_context_strategy
 from orchestrator.services.task_provider import LabelCatalogProvider, TaskProvider
@@ -488,7 +489,7 @@ class WorkflowController:
         except Exception as exc:
             status = RepositoryIndexStatus(
                 strategy=config.repository_context.strategy, state=IndexLifecycleState.FAILED,
-                error_message=f"Semantic index operation failed ({type(exc).__name__}).",
+                error_message=repository_index_error_message(exc),
             )
         finally:
             self._finish_repository_index(repository, identity, run, status)
@@ -563,7 +564,7 @@ class WorkflowController:
         except Exception as exc:
             status = replace(
                 status, state=IndexLifecycleState.FAILED,
-                error_message=f"Semantic index operation failed ({type(exc).__name__}).",
+                error_message=repository_index_error_message(exc),
             )
             raise
         finally:
