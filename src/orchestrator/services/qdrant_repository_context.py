@@ -210,13 +210,13 @@ class QdrantClientManager:
 
     @contextmanager
     def operation(self, settings: QdrantSettings, *, blocking: bool = True) -> Iterator[bool]:
-        """Admit complete operations before discovery or client creation."""
+        """Serialize complete local operations and track all modes for shutdown."""
         with self._admission(settings, blocking=blocking) as admitted:
             yield admitted
 
     @contextmanager
     def _admission(
-        self, settings: QdrantSettings, *, blocking: bool = True, serialize: bool = True
+        self, settings: QdrantSettings, *, blocking: bool = True
     ) -> Iterator[bool]:
         key = qdrant_connection_key(settings)
         with self._lock:
@@ -224,7 +224,7 @@ class QdrantClientManager:
                 raise RuntimeError("The Qdrant client manager is already closed")
             operation_lock = (
                 self._operation_locks.setdefault(key, _OperationAdmission())
-                if serialize else None
+                if settings.mode == "local" else None
             )
             self._active += 1
         acquired = False
@@ -246,9 +246,9 @@ class QdrantClientManager:
     def session(self, settings: QdrantSettings) -> Iterator[Any]:
         """Reuse clients; expensive creation never holds the registry lock."""
         key = qdrant_connection_key(settings)
-        # Direct server sessions remain concurrent. Complete strategy operations
-        # still share admission so lifecycle mutations cannot interleave retrieval.
-        with self._admission(settings, serialize=settings.mode == "local"):
+        # Server sessions and complete operations remain concurrent; only local
+        # stores require exclusive admission.
+        with self._admission(settings):
             with self._lock:
                 creation_lock = self._creation_locks.setdefault(key, threading.RLock())
             with creation_lock:

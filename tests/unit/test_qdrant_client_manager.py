@@ -272,18 +272,12 @@ def test_workflow_waits_for_admitted_refresh_and_reenters(tmp_path: Path) -> Non
     assert not thread.is_alive()
 
 
-@pytest.mark.parametrize("mode", ["local", "server"])
 def test_screen_cannot_overtake_workflow_between_release_and_wakeup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = QdrantClientManager(_Factory())
-    settings = (
-        _local(tmp_path / "index") if mode == "local"
-        else QdrantSettings(mode="server", url="http://localhost:6333")
-    )
-    alias = (
-        _local(tmp_path / "other" / ".." / "index") if mode == "local" else settings
-    )
+    settings = _local(tmp_path / "index")
+    alias = _local(tmp_path / "other" / ".." / "index")
     waiting, awakened, resume, entered = (threading.Event() for _ in range(4))
     errors: list[BaseException] = []
 
@@ -430,9 +424,15 @@ def test_failed_client_creation_releases_admission_and_can_retry(tmp_path: Path)
     assert calls == 2
 
 
-def test_shutdown_waits_without_closing_active_or_nested_sessions(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["local", "server"])
+def test_shutdown_waits_without_closing_active_or_nested_sessions(
+    tmp_path: Path, mode: str,
+) -> None:
     manager = QdrantClientManager(_Factory())
-    settings = _local(tmp_path / "index")
+    settings = (
+        _local(tmp_path / "index") if mode == "local"
+        else QdrantSettings(mode="server", url="http://localhost:6333")
+    )
     closed = threading.Event()
 
     def close() -> None:
@@ -454,25 +454,57 @@ def test_shutdown_waits_without_closing_active_or_nested_sessions(tmp_path: Path
     assert client.close_calls == 1
 
 
-def test_complete_server_operations_coordinate_without_serializing_raw_sessions() -> None:
+@pytest.mark.parametrize("blocking", [False, True])
+@pytest.mark.parametrize("settings", [
+    QdrantSettings(mode="server", url="http://localhost:6333"),
+    QdrantSettings(mode="server", host="localhost", port=6333),
+])
+def test_complete_server_operations_and_sessions_remain_concurrent(
+    settings: QdrantSettings, blocking: bool,
+) -> None:
     manager = QdrantClientManager(_Factory())
-    settings = QdrantSettings(mode="server", url="http://localhost:6333")
-    held, release = threading.Event(), threading.Event()
+    held, release, completed = (threading.Event() for _ in range(3))
+    errors: list[BaseException] = []
+    clients: list[_Client] = []
 
     def workflow() -> None:
-        with manager.operation(settings):
-            held.set()
-            assert release.wait(TIMEOUT)
+        try:
+            with manager.operation(settings) as admitted:
+                assert admitted
+                with manager.session(settings) as client:
+                    clients.append(client)
+                    held.set()
+                    assert release.wait(TIMEOUT)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def screen() -> None:
+        try:
+            with manager.operation(settings, blocking=blocking) as admitted:
+                assert admitted
+                with manager.session(settings) as client:
+                    assert client is clients[0]
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            completed.set()
 
     thread = threading.Thread(target=workflow, daemon=True)
+    screen_thread = threading.Thread(target=screen, daemon=True)
     thread.start()
-    assert held.wait(TIMEOUT)
     try:
-        with manager.operation(settings, blocking=False) as admitted:
-            assert not admitted
-        with manager.session(settings):
-            pass
+        assert held.wait(TIMEOUT)
+        screen_thread.start()
+        assert completed.wait(TIMEOUT)
+        assert not errors
+        assert not manager._operation_locks
+        assert manager.open_connections() == 1
     finally:
         release.set()
         thread.join(TIMEOUT)
-    assert not thread.is_alive()
+        if screen_thread.ident is not None:
+            screen_thread.join(TIMEOUT)
+    assert not thread.is_alive() and not screen_thread.is_alive()
+    assert not errors
+    manager.close()
+    assert clients[0].close_calls == 1

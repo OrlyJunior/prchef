@@ -24,8 +24,8 @@ Code, tests, and repository retrieval cover feature behavior, UI, and implementa
 ## Operating model
 
 - In-memory dispatch queues are process-scoped; SQLite is the default. Local Qdrant is single-process.
-  Shared client admission covers complete retrieval, indexing, and cleanup per canonical store.
-  Workflows wait; screen actions only try admission and cannot overtake waiting workflows.
+  Retrieval, indexing, and cleanup share admission per canonical local store; server operations
+  stay concurrent. Workflows wait; screen actions try admission without overtaking them.
   Shutdown waits for admitted work. Provider ceilings have no cross-process coordination.
 - Startup marks orphaned active executions interrupted; resumption requires an explicit user choice.
 - Configuration comes only from a global `orchestrator.yml` (`defaults` deep-merged with

@@ -488,6 +488,89 @@ def test_real_strategy_workflow_waits_for_refresh_without_fallback(
     assert results == ["semantic result"]
 
 
+@pytest.mark.parametrize("connection", [
+    {"url": "http://localhost:6333"},
+    {"host": "localhost", "port": 6333},
+])
+def test_server_retrieval_allows_inspection_and_other_repository_operations(
+    index: Any, monkeypatch: pytest.MonkeyPatch, connection: dict[str, Any],
+) -> None:
+    index.settings.qdrant = QdrantSettings(mode="server", **connection)
+    (index.root / "a.txt").write_text("checkout")
+    index.strategy.build_index()
+    other_root = index.root.parent / "other-checkout"
+    other_root.mkdir()
+    (other_root / "b.txt").write_text("other checkout")
+    other = QdrantRepositoryContextStrategy(
+        index.settings, "other", other_root, embedding_provider=FakeEmbedding(),
+        client_manager=index.manager,
+    )
+    controller = controller_for(index, monkeypatch)
+    config = controller.project_config("other")
+    config.path = other_root
+    config.configured_repository_key = "other"
+    monkeypatch.setattr("orchestrator.tui.bridge.resolve_repository_context_strategy",
+                        lambda *args, **kwargs: other)
+    entered, release, completed = (threading.Event() for _ in range(3))
+    errors: list[BaseException] = []
+    results: list[str] = []
+
+    def query(*args: Any) -> list[Any]:
+        entered.set()
+        assert release.wait(TIMEOUT)
+        return []
+
+    monkeypatch.setattr(index.strategy, "_query", query)
+    monkeypatch.setattr(index.strategy, "_render_results", lambda *args: "semantic result")
+    monkeypatch.setattr(other, "_query", lambda *args: [])
+    monkeypatch.setattr(other, "_render_results", lambda *args: "other semantic result")
+
+    def workflow() -> None:
+        try:
+            results.append(index.strategy.render(request_for(index.root)))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def other_operations() -> None:
+        try:
+            assert index.strategy.inspect_index().state is IndexLifecycleState.READY
+            assert controller.repository_index_status("other").state is (
+                IndexLifecycleState.NOT_INDEXED
+            )
+            refreshed = controller.refresh_repository_index("other")
+            assert refreshed.state is IndexLifecycleState.READY
+            assert refreshed.document_count == 1
+            assert refreshed.last_indexed_commit == "checkout-head"
+            assert other.render(request_for(other_root)) == "other semantic result"
+            assert controller.clear_repository_index("other").state is (
+                IndexLifecycleState.NOT_INDEXED
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            completed.set()
+
+    workflow_thread = threading.Thread(target=workflow, daemon=True)
+    other_thread = threading.Thread(target=other_operations, daemon=True)
+    workflow_thread.start()
+    try:
+        assert entered.wait(TIMEOUT)
+        other_thread.start()
+        assert completed.wait(TIMEOUT)
+        assert not errors
+        assert index.client.close_calls == 0
+    finally:
+        release.set()
+        workflow_thread.join(TIMEOUT)
+        if other_thread.ident is not None:
+            other_thread.join(TIMEOUT)
+    assert not workflow_thread.is_alive() and not other_thread.is_alive()
+    assert not errors
+    assert results == ["semantic result"]
+    index.manager.close()
+    assert index.client.close_calls == 1
+
+
 @pytest.mark.parametrize("strategy_name", ["qdrant", "heuristic"])
 def test_ready_and_heuristic_openings_do_not_refresh(
     index: Any, monkeypatch: pytest.MonkeyPatch, strategy_name: str,
