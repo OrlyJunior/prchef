@@ -11,7 +11,7 @@ import sys
 import threading
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
@@ -64,6 +64,30 @@ class _PointSummary(NamedTuple):
 
 class RepositoryIndexOperationError(RuntimeError):
     """A sanitized, user-displayable index lifecycle operation failure."""
+
+
+def _external_storage_busy(exc: Exception) -> bool:
+    """Recognize Qdrant local's directory-lock error, including wrapped causes."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).casefold()
+        if "storage folder" in message and "already accessed" in message:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _busy_status(*, external: bool = False) -> RepositoryIndexStatus:
+    reason = (
+        "Index busy in another process."
+        if external else "Refresh skipped: workflow or another index operation is using the index."
+    )
+    return RepositoryIndexStatus(
+        strategy="qdrant", state=IndexLifecycleState.BUSY,
+        error_message=reason + " Retry on the next screen open or manual refresh.",
+    )
 
 
 def canonical_path_identifier(path: Path) -> str:
@@ -120,26 +144,63 @@ class QdrantClientManager:
         self._lock = threading.RLock()
         self._clients: dict[str, Any] = {}
         self._operation_locks: dict[str, threading.RLock] = {}
+        self._creation_locks: dict[str, threading.RLock] = {}
+        self._settled = threading.Condition(self._lock)
+        self._active = 0
+        self._thread_state = threading.local()
+        self._closing = False
         self._closed = False
 
     @contextmanager
-    def session(self, settings: QdrantSettings) -> Iterator[Any]:
-        """Yield the shared client for ``settings``, coordinating local access."""
+    def operation(self, settings: QdrantSettings, *, blocking: bool = True) -> Iterator[bool]:
+        """Admit complete operations before discovery or client creation."""
+        with self._admission(settings, blocking=blocking) as admitted:
+            yield admitted
 
+    @contextmanager
+    def _admission(
+        self, settings: QdrantSettings, *, blocking: bool = True, serialize: bool = True
+    ) -> Iterator[bool]:
         key = qdrant_connection_key(settings)
         with self._lock:
-            if self._closed:
+            if self._closed or (self._closing and not getattr(self._thread_state, "depth", 0)):
                 raise RuntimeError("The Qdrant client manager is already closed")
-            client = self._clients.get(key)
-            if client is None:
-                client = self._client_factory(settings)
-                self._clients[key] = client
             operation_lock = (
                 self._operation_locks.setdefault(key, threading.RLock())
-                if settings.mode == "local"
-                else None
+                if serialize else None
             )
-        with operation_lock or nullcontext():
+            self._active += 1
+        acquired = False
+        try:
+            acquired = operation_lock is None or operation_lock.acquire(blocking=blocking)
+            if acquired:
+                self._thread_state.depth = getattr(self._thread_state, "depth", 0) + 1
+            yield acquired
+        finally:
+            if acquired and operation_lock is not None:
+                operation_lock.release()
+            if acquired:
+                self._thread_state.depth -= 1
+            with self._settled:
+                self._active -= 1
+                self._settled.notify_all()
+
+    @contextmanager
+    def session(self, settings: QdrantSettings) -> Iterator[Any]:
+        """Reuse clients; expensive creation never holds the registry lock."""
+        key = qdrant_connection_key(settings)
+        # Direct server sessions remain concurrent. Complete strategy operations
+        # still share admission so lifecycle mutations cannot interleave retrieval.
+        with self._admission(settings, serialize=settings.mode == "local"):
+            with self._lock:
+                creation_lock = self._creation_locks.setdefault(key, threading.RLock())
+            with creation_lock:
+                with self._lock:
+                    client = self._clients.get(key)
+                if client is None:
+                    client = self._client_factory(settings)
+                    with self._lock:
+                        self._clients[key] = client
             yield client
 
     def open_connections(self) -> int:
@@ -151,10 +212,15 @@ class QdrantClientManager:
     def close(self) -> None:
         """Close every held client exactly once."""
 
-        with self._lock:
+        with self._settled:
+            self._closing = True
+            self._settled.notify_all()
+            while self._active:
+                self._settled.wait()
             clients = list(self._clients.values())
             self._clients.clear()
             self._operation_locks.clear()
+            self._creation_locks.clear()
             self._closed = True
         for client in clients:
             _close_client(client)
@@ -239,6 +305,14 @@ class QdrantRepositoryContextStrategy:
             manager.close()
 
     def render(self, request: RepositoryContextRequest) -> str:
+        with self.index_operation():
+            return self._render_admitted(request)
+
+    def index_operation(self, *, blocking: bool = True) -> AbstractContextManager[bool]:
+        """Coordinate lifecycle and retrieval through the injected store manager."""
+        return self._clients.operation(self._settings.qdrant, blocking=blocking)
+
+    def _render_admitted(self, request: RepositoryContextRequest) -> str:
         self._check_cancellation()
         # A rejected root must never reach the heuristic fallback. In particular,
         # a planning request must not read the control checkout in place of its snapshot.
@@ -256,6 +330,7 @@ class QdrantRepositoryContextStrategy:
                 self.build_index()
             try:
                 self._progress("Discovering files for semantic retrieval")
+                discovered_commit = _git_head(source_root)
                 source_pipeline = RepositorySourcePipeline(self._repository_key, source_root)
                 sources: Sequence[RepositorySourceFile] | Callable[
                     [], Iterator[RepositorySourceFile]
@@ -290,6 +365,7 @@ class QdrantRepositoryContextStrategy:
                     source_root,
                     record_success=not request.temporary_source,
                     checkout_hashes=checkout_hashes,
+                    discovered_commit=discovered_commit,
                 )
                 results = self._query(
                     f"{request.task.title}\n\n{request.task.description}",
@@ -368,6 +444,13 @@ class QdrantRepositoryContextStrategy:
     def inspect_index(self) -> RepositoryIndexStatus:
         """Inspect the configured root without mutating its collection."""
 
+        with self.index_operation(blocking=False) as admitted:
+            if not admitted:
+                return _busy_status()
+            return self._inspect_admitted()
+
+    def _inspect_admitted(self) -> RepositoryIndexStatus:
+
         source_root_id = canonical_path_identifier(self._configured_root)
         try:
             with self._session() as client:
@@ -426,6 +509,8 @@ class QdrantRepositoryContextStrategy:
                     error_message=error_message,
                 )
         except Exception as exc:
+            if _external_storage_busy(exc):
+                return _busy_status(external=True)
             return RepositoryIndexStatus(
                 strategy="qdrant",
                 state=IndexLifecycleState.FAILED,
@@ -466,6 +551,11 @@ class QdrantRepositoryContextStrategy:
     def clear_index(self) -> RepositoryIndexStatus:
         """Delete only this configured repository's deterministic collection."""
 
+        with self.index_operation():
+            return self._clear_admitted()
+
+    def _clear_admitted(self) -> RepositoryIndexStatus:
+
         try:
             with self._session() as client:
                 if client.collection_exists(self._collection_name):
@@ -473,13 +563,20 @@ class QdrantRepositoryContextStrategy:
                 if client.collection_exists(self._cleanup_collection_name):
                     self._delete_collection(client, self._cleanup_collection_name)
         except Exception as exc:
+            if _external_storage_busy(exc):
+                return _busy_status(external=True)
             self._record_failure(exc)
             raise RepositoryIndexOperationError(_safe_error_message(exc)) from exc
         return self.inspect_index()
 
     def _run_index_operation(self, *, rebuild: bool) -> RepositoryIndexStatus:
+        with self.index_operation():
+            return self._run_admitted(rebuild=rebuild)
+
+    def _run_admitted(self, *, rebuild: bool) -> RepositoryIndexStatus:
         try:
             self._check_cancellation()
+            discovered_commit = _git_head(self._configured_root)
             self._progress("Discovering repository files for semantic index")
             sources = RepositorySourcePipeline(
                 self._repository_key, self._configured_root
@@ -493,10 +590,13 @@ class QdrantRepositoryContextStrategy:
                 canonical_path_identifier(self._configured_root),
                 self._configured_root,
                 rebuild=rebuild,
+                discovered_commit=discovered_commit,
             )
         except WorkflowCancelledError:
             raise
         except Exception as exc:
+            if _external_storage_busy(exc):
+                return _busy_status(external=True)
             self._record_failure(exc)
             raise RepositoryIndexOperationError(_safe_error_message(exc)) from exc
         return self.inspect_index()
@@ -535,6 +635,7 @@ class QdrantRepositoryContextStrategy:
         rebuild: bool = False,
         record_success: bool = True,
         checkout_hashes: dict[str, str] | None = None,
+        discovered_commit: str | None = None,
     ) -> tuple[dict[str, tuple[int, int]], set[str], dict[str, str]]:
         self._check_cancellation()
         with self._session() as client:
@@ -637,7 +738,12 @@ class QdrantRepositoryContextStrategy:
                 self._write_inventory(client, models, source_root_id, final_inventory)
             if record_success and source_root == self._configured_root:
                 self._check_cancellation()
-                self._record_success(client, models, source_root)
+                current_hashes = RepositorySourcePipeline(
+                    self._repository_key, source_root
+                ).discover_hashes(cancellation_check=self._check_cancellation)
+                if current_hashes != source_hashes or _git_head(source_root) != discovered_commit:
+                    raise RuntimeError("Repository source changed during indexing; refresh again")
+                self._record_success(client, models, discovered_commit)
             self._progress("Semantic index ready")
             return (
                 valid_checkout_files,
@@ -864,10 +970,11 @@ class QdrantRepositoryContextStrategy:
     def delete_worktree_points(self, worktree_root: Path) -> None:
         """Remove points for one linked worktree without changing index provenance."""
 
-        source_root = worktree_root.resolve()
-        if source_root == self._configured_root:
-            raise ValueError("Cannot delete configured-checkout points as a worktree")
-        self._delete_source_points(canonical_path_identifier(source_root))
+        with self.index_operation():
+            source_root = worktree_root.resolve()
+            if source_root == self._configured_root:
+                raise ValueError("Cannot delete configured-checkout points as a worktree")
+            self._delete_source_points(canonical_path_identifier(source_root))
 
     def _delete_source_points(self, source_root_id: str) -> None:
         """Discard points for a source root without changing index provenance."""
@@ -1248,7 +1355,7 @@ class QdrantRepositoryContextStrategy:
         expected = self._metadata_payload()
         return all(payload.get(key) == value for key, value in expected.items())
 
-    def _record_success(self, client: Any, models: Any, source_root: Path) -> None:
+    def _record_success(self, client: Any, models: Any, discovered_commit: str | None) -> None:
         client.upsert(
             collection_name=self._collection_name,
             points=[
@@ -1259,7 +1366,7 @@ class QdrantRepositoryContextStrategy:
                         + [0.0] * (self._embedding.identity.dimension - 1)
                     },
                     payload=self._metadata_payload(
-                        last_indexed_commit=_git_head(source_root),
+                        last_indexed_commit=discovered_commit,
                         last_successful_indexed_at=datetime.now(UTC).isoformat(),
                     ),
                 )
@@ -1269,6 +1376,9 @@ class QdrantRepositoryContextStrategy:
 
     def _record_failure(self, exc: Exception) -> None:
         """Best-effort persistent failure state; never masks the original failure."""
+
+        if _external_storage_busy(exc):
+            return
 
         try:
             with self._session() as client:

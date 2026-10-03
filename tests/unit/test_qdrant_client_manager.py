@@ -222,3 +222,152 @@ def test_sessions_are_refused_after_shutdown(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="already closed"):
         with manager.session(_local(tmp_path / "index")):
             pass
+
+
+def test_try_admission_skips_before_client_creation(tmp_path: Path) -> None:
+    factory = _Factory()
+    manager = QdrantClientManager(factory)
+    settings = _local(tmp_path / "index")
+    inside, release = threading.Event(), threading.Event()
+
+    def workflow() -> None:
+        with manager.operation(settings):
+            inside.set()
+            assert release.wait(TIMEOUT)
+
+    thread = threading.Thread(target=workflow, daemon=True)
+    thread.start()
+    assert inside.wait(TIMEOUT)
+    try:
+        with manager.operation(_local(tmp_path / "other" / ".." / "index"),
+                               blocking=False) as admitted:
+            assert not admitted
+        assert not factory.clients
+        with manager.operation(_local(tmp_path / "different"), blocking=False) as admitted:
+            assert admitted
+    finally:
+        release.set()
+        thread.join(TIMEOUT)
+    assert not thread.is_alive()
+
+
+def test_workflow_waits_for_admitted_refresh_and_reenters(tmp_path: Path) -> None:
+    manager = QdrantClientManager(_Factory())
+    settings = _local(tmp_path / "index")
+    attempted, entered = threading.Event(), threading.Event()
+    with manager.operation(settings):
+        def workflow() -> None:
+            attempted.set()
+            with manager.operation(settings):
+                with manager.session(settings):
+                    entered.set()
+
+        thread = threading.Thread(target=workflow, daemon=True)
+        thread.start()
+        assert attempted.wait(TIMEOUT)
+        # The holding thread still owns the exact lock the workflow must enter.
+        assert not entered.is_set()
+    assert entered.wait(TIMEOUT)
+    thread.join(TIMEOUT)
+    assert not thread.is_alive()
+
+
+def test_slow_creation_does_not_block_try_admission_or_other_stores(tmp_path: Path) -> None:
+    started, release = threading.Event(), threading.Event()
+    settings = _local(tmp_path / "one")
+
+    def factory(config: QdrantSettings) -> _Client:
+        if config == settings:
+            started.set()
+            assert release.wait(TIMEOUT)
+        return _Client(config)
+
+    manager = QdrantClientManager(factory)
+
+    def create() -> None:
+        with manager.session(settings):
+            pass
+
+    thread = threading.Thread(target=create, daemon=True)
+    thread.start()
+    assert started.wait(TIMEOUT)
+    try:
+        with manager.operation(settings, blocking=False) as admitted:
+            assert not admitted
+        with manager.session(_local(tmp_path / "two")):
+            pass
+    finally:
+        release.set()
+        thread.join(TIMEOUT)
+    assert not thread.is_alive()
+
+
+def test_failed_client_creation_releases_admission_and_can_retry(tmp_path: Path) -> None:
+    calls = 0
+
+    def factory(config: QdrantSettings) -> _Client:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("Storage folder is already accessed by another instance")
+        return _Client(config)
+
+    manager = QdrantClientManager(factory)
+    settings = _local(tmp_path / "index")
+    with pytest.raises(RuntimeError, match="Storage folder"):
+        with manager.session(settings):
+            pass
+    assert manager.open_connections() == 0
+    with manager.operation(settings, blocking=False) as admitted:
+        assert admitted
+        with manager.session(settings):
+            pass
+    assert calls == 2
+
+
+def test_shutdown_waits_without_closing_active_or_nested_sessions(tmp_path: Path) -> None:
+    manager = QdrantClientManager(_Factory())
+    settings = _local(tmp_path / "index")
+    closed = threading.Event()
+
+    def close() -> None:
+        manager.close()
+        closed.set()
+
+    with manager.operation(settings):
+        with manager.session(settings) as client:
+            thread = threading.Thread(target=close, daemon=True)
+            thread.start()
+            with manager._settled:
+                assert manager._settled.wait_for(lambda: manager._closing, timeout=TIMEOUT)
+            assert client.close_calls == 0
+            assert not closed.is_set()
+            with manager.session(settings) as nested:
+                assert nested is client
+    assert closed.wait(TIMEOUT)
+    thread.join(TIMEOUT)
+    assert client.close_calls == 1
+
+
+def test_complete_server_operations_coordinate_without_serializing_raw_sessions() -> None:
+    manager = QdrantClientManager(_Factory())
+    settings = QdrantSettings(mode="server", url="http://localhost:6333")
+    held, release = threading.Event(), threading.Event()
+
+    def workflow() -> None:
+        with manager.operation(settings):
+            held.set()
+            assert release.wait(TIMEOUT)
+
+    thread = threading.Thread(target=workflow, daemon=True)
+    thread.start()
+    assert held.wait(TIMEOUT)
+    try:
+        with manager.operation(settings, blocking=False) as admitted:
+            assert not admitted
+        with manager.session(settings):
+            pass
+    finally:
+        release.set()
+        thread.join(TIMEOUT)
+    assert not thread.is_alive()

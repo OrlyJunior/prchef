@@ -134,6 +134,17 @@ Agents get relevant code from your repository through Qdrant semantic retrieval,
 
 If semantic retrieval is unavailable, a simpler heuristic retrieval is used instead. You can also select it permanently with `repository_context.strategy: heuristic`. Local Qdrant is the default; `repository_context.qdrant.mode: server` connects to a separately running Qdrant server configured with `url` or `host`.
 
+Opening a repository's index management view checks the configured checkout and refreshes a
+STALE index in the background. Reopening joins an update already in progress. STALE means the
+recorded commit differs from the checkout's current HEAD; it alone does not indicate a run
+retrieval failure, because each run indexes its own snapshot. Displayed document and chunk
+counts cover the whole checkout index, including unchanged files.
+
+Workflow retrieval and index actions share one local-store lock. A screen action skips promptly
+if the store is busy; a workflow arriving during an admitted refresh waits for it to finish.
+Busy results retry on the next screen open or manual action. There is no idle polling or watcher;
+external checkout changes are checked on the next opening or manual refresh.
+
 ## Role guidance files
 
 Optional local `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` files in your repository give each role its own extra instructions. They're ignored by Git by default, and each role sees only its own file. You can edit them from the TUI.
@@ -165,7 +176,9 @@ We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.m
 - **`Executable not found: codex`, `claude`, or `gh`:** install the CLI and make sure it's on your `PATH`, or select a provider you have installed.
 - **Claude Code authentication fails with `bare_mode: true`:** bare mode requires an API key or supported cloud credentials. For a Claude subscription, omit `bare_mode` or set it to `false` and authenticate with Claude Code outside the orchestrator.
 - **`Global configuration not found. Searched:`:** put `orchestrator.yml` in one of the locations listed under Configuration, or pass `--config` with an existing file.
-- **A local Qdrant index lock error:** another process is using the index. Close it, or configure Qdrant server mode.
+- **A local Qdrant index lock error:** another process is using the index. Index management shows
+  BUSY without recording a failure. After closing the other process, reopen the view or press
+  Refresh changed files to retry. You can also configure Qdrant server mode.
 
 ## Contributing
 

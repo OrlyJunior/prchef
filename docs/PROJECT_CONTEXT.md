@@ -26,7 +26,9 @@ and repository retrieval cover those.
 ## Operating model
 
 - Dispatch queues are in-memory and process-scoped; SQLite is the default database. Qdrant local
-  mode is single-process. Provider ceilings have no cross-process coordination.
+  mode is single-process. Its shared client manager admits complete retrieval, indexing, and
+  cleanup operations per canonical store: workflows wait, screen actions only try admission.
+  Client shutdown waits for admitted work. Provider ceilings have no cross-process coordination.
 - Startup marks orphaned active executions interrupted; resumption requires an explicit user choice.
 - Configuration comes only from a global `orchestrator.yml` (`defaults` deep-merged with
   `repositories.<key>`). Repository-local configuration files are ignored. Discovery and
