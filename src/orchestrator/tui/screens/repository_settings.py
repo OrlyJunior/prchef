@@ -16,6 +16,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Input, Static
 
 from orchestrator.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
+from orchestrator.services.qdrant_repository_context import repository_index_error_message
 from orchestrator.tui.bridge import WorkflowController
 from orchestrator.tui.widgets import (
     OrchestratorSelect,
@@ -113,6 +114,7 @@ class RepositorySettingsScreen(Screen[None]):
     }
     #repository-path-warning { color: $warning; }
     #repository-errors, #index-errors { color: $error; }
+    #index-errors.-activity { color: $warning; }
     #review-budget-error, #validation-budget-error { color: $error; }
     #review-budget-actions, #validation-budget-actions { height: auto; }
     #validation-command-actions, #repository-actions, #index-actions {
@@ -144,6 +146,7 @@ class RepositorySettingsScreen(Screen[None]):
         self._commands: list[list[str]] = []
         self._selected_command: int | None = None
         self._index_status_token = 0
+        self._index_view_mounted = False
         self._budget_original: dict[str, tuple[int, bool, int]] = {}
         self._cleared_budgets: set[str] = set()
 
@@ -198,6 +201,7 @@ class RepositorySettingsScreen(Screen[None]):
                     yield Static("Context strategy: checking…", id="index-context-strategy")
                     yield Static("Index status: checking…", id="index-status")
                     yield Static("", id="index-metadata")
+                    yield Static("", id="index-explanation")
                     yield Static("", id="index-errors")
                     with Horizontal(id="index-actions"):
                         yield Button("Build / Rebuild", id="build-index")
@@ -238,11 +242,16 @@ class RepositorySettingsScreen(Screen[None]):
             yield Static("Choose a repository to edit or add a new one.", id="repository-status")
 
     def on_mount(self) -> None:
+        self._index_view_mounted = True
         self._set_layout_mode(self.size.width)
         # A screen may be pushed from a button message while the previous
         # screen is still completing its refresh. Defer child queries until
         # this screen's composed widgets have participated in a layout pass.
         self.call_after_refresh(self._refresh_repositories, self._initial_repository)
+
+    def on_unmount(self) -> None:
+        self._index_view_mounted = False
+        self._index_status_token += 1
 
     def on_resize(self, event: Resize) -> None:
         self._set_layout_mode(event.size.width)
@@ -425,6 +434,7 @@ class RepositorySettingsScreen(Screen[None]):
             "index-context-strategy",
             "index-status",
             "index-metadata",
+            "index-explanation",
             "index-errors",
         ):
             self.query_one(f"#{status_id}", Static).update("")
@@ -513,22 +523,33 @@ class RepositorySettingsScreen(Screen[None]):
         self._set_index_buttons_disabled(True)
         self._fetch_index_status(repository, token)
 
-    @work(thread=True, exclusive=True)
+    # These workers only register listeners with the controller, which owns
+    # operation deduplication. Let registrations finish; tokens reject stale
+    # deliveries without cancelling a worker during a duplicate selection load.
+    @work(thread=True)
     def _fetch_index_status(self, repository: str, token: int) -> None:
+        application = self.app
+
+        def deliver(status: RepositoryIndexStatus) -> None:
+            application.call_later(self._receive_index_status, repository, token, status)
+
         try:
-            status = self.controller.repository_index_status(repository)
+            self.controller.request_repository_index(repository, deliver)
         except Exception as exc:
             status = RepositoryIndexStatus(
                 strategy="qdrant",
                 state=IndexLifecycleState.FAILED,
-                error_message=f"Could not inspect the semantic index: {exc}",
+                error_message=repository_index_error_message(exc),
             )
-        self.app.call_from_thread(self._receive_index_status, repository, token, status)
+            deliver(status)
 
     def _receive_index_status(
         self, repository: str, token: int, status: RepositoryIndexStatus
     ) -> None:
-        if token != self._index_status_token or repository != self._editing_key:
+        if (
+            not self._index_view_mounted or token != self._index_status_token
+            or repository != self._editing_key
+        ):
             return
         self._render_index_status(status)
 
@@ -538,18 +559,33 @@ class RepositorySettingsScreen(Screen[None]):
         self.query_one("#index-context-strategy", Static).update(
             f"Context strategy: {strategy_label}"
         )
-        self.query_one("#index-status", Static).update(f"Index status: {state_label}")
+        explanation = ""
+        if status.state is IndexLifecycleState.STALE:
+            explanation = (
+                " — the recorded commit differs from current checkout HEAD. "
+                "Run retrieval is unaffected: each run indexes its own snapshot."
+            )
+        elif status.state is IndexLifecycleState.INDEXING:
+            explanation = " — checkout index update in progress."
+        self.query_one("#index-status", Static).update(f"Index status: {state_label}{explanation}")
         details: list[str] = []
         if status.last_successful_indexed_at:
             details.append(f"Last successful index: {status.last_successful_indexed_at}")
         if status.last_indexed_commit:
             details.append(f"Commit: {status.last_indexed_commit}")
         if status.document_count is not None:
-            details.append(f"Documents: {status.document_count}")
+            details.append(f"Checkout Documents: {status.document_count}")
         if status.point_count is not None:
-            details.append(f"Chunks: {status.point_count}")
+            details.append(f"Checkout Chunks: {status.point_count}")
         self.query_one("#index-metadata", Static).update(" • ".join(details))
-        self.query_one("#index-errors", Static).update(status.error_message or "")
+        self.query_one("#index-explanation", Static).update(
+            "STALE means the recorded checkout commit differs from current checkout HEAD. "
+            "Run retrieval is unaffected by STALE: each run indexes its own snapshot."
+            if status.strategy == "qdrant" else ""
+        )
+        errors = self.query_one("#index-errors", Static)
+        errors.set_class(status.state is not IndexLifecycleState.FAILED, "-activity")
+        errors.update(status.error_message or "")
         self._set_index_buttons_disabled(
             self._editing_key is None
             or status.strategy != "qdrant"
@@ -568,38 +604,28 @@ class RepositorySettingsScreen(Screen[None]):
         self._render_index_status(
             RepositoryIndexStatus(strategy="qdrant", state=IndexLifecycleState.INDEXING)
         )
-        self._run_index_action(repository, action)
+        self._index_status_token += 1
+        self._run_index_action(repository, action, self._index_status_token)
 
-    @work(thread=True, exclusive=True)
-    def _run_index_action(self, repository: str, action: str) -> None:
+    @work(thread=True)
+    def _run_index_action(self, repository: str, action: str, token: int) -> None:
+        application = self.app
+
+        def deliver(status: RepositoryIndexStatus) -> None:
+            application.call_later(self._receive_index_status, repository, token, status)
+
         try:
             methods = {
-                "build": self.controller.build_repository_index,
-                "refresh": self.controller.refresh_repository_index,
-                "clear": self.controller.clear_repository_index,
+                "build": "build_index",
+                "refresh": "refresh_changed_files",
+                "clear": "clear_index",
             }
-            status = methods[action](repository)
+            self.controller.request_repository_index(repository, deliver, operation=methods[action])
         except Exception as exc:
-            self.app.call_from_thread(self._index_action_failed, repository, str(exc))
-            return
-        self.app.call_from_thread(self._index_action_finished, repository, status)
-
-    def _index_action_finished(self, repository: str, status: RepositoryIndexStatus) -> None:
-        if repository != self._editing_key:
-            return
-        self._render_index_status(status)
-        self._status(f"Index operation completed for {repository!r}.")
-
-    def _index_action_failed(self, repository: str, message: str) -> None:
-        if repository != self._editing_key:
-            return
-        self._render_index_status(
-            RepositoryIndexStatus(
-                strategy="qdrant",
-                state=IndexLifecycleState.FAILED,
-                error_message=message or "Semantic index operation failed.",
-            )
-        )
+            deliver(RepositoryIndexStatus(
+                strategy="qdrant", state=IndexLifecycleState.FAILED,
+                error_message=repository_index_error_message(exc),
+            ))
 
     def _save_repository(self) -> None:
         if self._editing_key is None and not self._creating_repository:

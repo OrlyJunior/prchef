@@ -1,9 +1,7 @@
 # Durable project context
 
-This file holds what the code alone doesn't make obvious: purpose and boundaries, the operating
-model, layering rules, invariants, and design decisions (including things deliberately not done).
-Feature behavior, UI layout, and implementation details are not described here; the code, tests,
-and repository retrieval cover those.
+This file records purpose, boundaries, operating model, layering, invariants, and design decisions.
+Code, tests, and repository retrieval cover feature behavior, UI, and implementation details.
 
 ## Purpose and boundaries
 
@@ -25,8 +23,10 @@ and repository retrieval cover those.
 
 ## Operating model
 
-- Dispatch queues are in-memory and process-scoped; SQLite is the default database. Qdrant local
-  mode is single-process. Provider ceilings have no cross-process coordination.
+- In-memory dispatch queues are process-scoped; SQLite is the default. Local Qdrant is single-process.
+  Retrieval, indexing, and cleanup share admission per canonical local store; server operations
+  stay concurrent. Workflows wait; screen actions try admission without overtaking them.
+  Shutdown waits for admitted work. Provider ceilings have no cross-process coordination.
 - Startup marks orphaned active executions interrupted; resumption requires an explicit user choice.
 - Configuration comes only from a global `orchestrator.yml` (`defaults` deep-merged with
   `repositories.<key>`). Repository-local configuration files are ignored. Discovery and

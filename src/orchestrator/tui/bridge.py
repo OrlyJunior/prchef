@@ -52,6 +52,12 @@ from orchestrator.services.project_context import (
     load_planner_instructions,
     load_reviewer_instructions,
 )
+from orchestrator.services.qdrant_repository_context import (
+    QdrantClientManager,
+    canonical_path_identifier,
+    qdrant_connection_key,
+    repository_index_error_message,
+)
 from orchestrator.services.repository_context import resolve_repository_context_strategy
 from orchestrator.services.task_provider import LabelCatalogProvider, TaskProvider
 from orchestrator.services.workflow_service import WorkflowService
@@ -121,6 +127,13 @@ class _BatchRun:
         )
 
 
+@dataclass(slots=True)
+class _IndexRun:
+    status: RepositoryIndexStatus
+    listeners: list[Callable[[RepositoryIndexStatus], None]] = field(default_factory=list)
+    done: threading.Event = field(default_factory=threading.Event)
+
+
 class WorkflowController:
     """Expose existing orchestration services in forms useful to terminal views.
 
@@ -152,12 +165,15 @@ class WorkflowController:
         # continues competes for the same bounded capacity.
         self._dispatcher = dispatcher or ExecutionDispatcher()
         self._provider_coordinator = provider_coordinator or ProviderConcurrencyCoordinator()
-        self._repository_index_clients = repository_index_clients
+        self._owns_repository_index_clients = repository_index_clients is None
+        self._repository_index_clients = repository_index_clients or QdrantClientManager()
         self._selected_repository: str | None = None
         self._active_services: dict[str, WorkflowService] = {}
         self._active_batches: dict[str, _BatchRun] = {}
         self._execution_batches: dict[str, str] = {}
-        self._index_operations: set[str] = set()
+        self._index_operations: dict[str, _IndexRun] = {}
+        self._index_statuses: dict[str, RepositoryIndexStatus] = {}
+        self._index_stopping = False
         self._index_operation_lock = threading.RLock()
         self._detail_listeners: set[WorkflowEventListener] = set()
         self._detail_listeners_lock = threading.RLock()
@@ -356,12 +372,32 @@ class WorkflowController:
         """Return a repository-scoped index status without starting a workflow."""
 
         config = self.project_config(repository)
+        identity = self._index_identity(config)
+        with self._index_operation_lock:
+            active = self._index_operations.get(identity)
+            if active is not None:
+                return active.status
+        return self._inspect_repository_index(config)
+
+    @staticmethod
+    def _index_identity(config: ProjectConfig) -> str:
+        return (
+            f"{config.configured_repository_key}:{canonical_path_identifier(config.path)}:"
+            f"{qdrant_connection_key(config.repository_context.qdrant)}:"
+            f"{config.repository_context.model_dump_json(exclude={'qdrant'})}"
+        )
+
+    def _inspect_repository_index(self, config: ProjectConfig) -> RepositoryIndexStatus:
         if config.repository_context.strategy == "heuristic":
-            status = RepositoryIndexStatus(
+            return RepositoryIndexStatus(
                 strategy="heuristic",
                 state=IndexLifecycleState.READY,
             )
-        else:
+        with self._repository_index_clients.operation(
+            config.repository_context.qdrant, blocking=False
+        ) as admitted:
+            if not admitted:
+                return self._index_busy()
             strategy = resolve_repository_context_strategy(
                 config.repository_context.strategy,
                 settings=config.repository_context,
@@ -376,10 +412,119 @@ class WorkflowController:
                     "does not expose index lifecycle management"
                 )
             status = inspect()
+            if isinstance(status, RepositoryIndexStatus):
+                return status
+            raise ValueError("The configured context strategy returned an invalid index status")
+
+    @staticmethod
+    def _index_busy() -> RepositoryIndexStatus:
+        return RepositoryIndexStatus(
+            strategy="qdrant", state=IndexLifecycleState.BUSY,
+            error_message="Refresh skipped: workflow or another index operation is using the "
+            "index. Retry on the next screen open or manual refresh.",
+        )
+
+    def request_repository_index(
+        self, repository: str, listener: Callable[[RepositoryIndexStatus], None],
+        *, operation: str | None = None,
+    ) -> None:
+        """Open/join a controller-owned inspection and optional stale refresh.
+
+        Listeners must enqueue UI delivery without waiting for the event loop.
+        A manual operation uses the same ownership and admission as opening.
+        """
+        config = self.project_config(repository)
+        identity = self._index_identity(config)
         with self._index_operation_lock:
-            if repository in self._index_operations:
-                return replace(status, state=IndexLifecycleState.INDEXING, error_message=None)
-        return status
+            if self._index_stopping:
+                return
+            run = self._index_operations.get(identity)
+            if run is not None:
+                run.listeners.append(listener)
+                self._notify_index_listener(listener, run.status)
+                return
+            previous = self._index_statuses.get(identity)
+            initial = replace(
+                previous or RepositoryIndexStatus(
+                    strategy=config.repository_context.strategy, state=IndexLifecycleState.INDEXING
+                ),
+                state=IndexLifecycleState.INDEXING, error_message="Checking checkout index…",
+            )
+            run = _IndexRun(initial, [listener])
+            self._index_operations[identity] = run
+            self._notify_index_listeners(run)
+            thread = threading.Thread(
+                target=self._background_repository_index,
+                args=(repository, config, identity, run, operation),
+                name=f"repository-index-{repository}", daemon=True,
+            )
+            try:
+                thread.start()
+            except BaseException:
+                self._index_operations.pop(identity, None)
+                run.done.set()
+                raise
+
+    def _background_repository_index(
+        self, repository: str, config: ProjectConfig, identity: str,
+        run: _IndexRun, operation: str | None,
+    ) -> None:
+        status = run.status
+        try:
+            if operation is None:
+                status = self._inspect_repository_index(config)
+                if status.strategy == "qdrant" and status.state is IndexLifecycleState.STALE:
+                    with self._index_operation_lock:
+                        self._index_statuses[identity] = status
+                        run.status = replace(
+                            status, state=IndexLifecycleState.INDEXING,
+                            error_message="Refreshing checkout index in background…",
+                        )
+                        self._notify_index_listeners(run)
+                    status = self._perform_repository_index_operation(
+                        config, "refresh_changed_files"
+                    )
+            else:
+                status = self._perform_repository_index_operation(config, operation)
+        except Exception as exc:
+            status = RepositoryIndexStatus(
+                strategy=config.repository_context.strategy, state=IndexLifecycleState.FAILED,
+                error_message=repository_index_error_message(exc),
+            )
+        finally:
+            self._finish_repository_index(repository, identity, run, status)
+
+    def _finish_repository_index(
+        self, repository: str, identity: str, run: _IndexRun, status: RepositoryIndexStatus
+    ) -> None:
+        with self._index_operation_lock:
+            try:
+                if self._index_identity(self.project_config(repository)) == identity:
+                    prior = self._index_statuses.get(identity)
+                    if status.state is IndexLifecycleState.BUSY and prior is not None:
+                        status = replace(prior, state=status.state,
+                                         error_message=status.error_message)
+                    self._index_statuses[identity] = status
+                    run.status = status
+                    self._notify_index_listeners(run)
+            except Exception:
+                logger.exception("Could not publish repository index status")
+            self._index_operations.pop(identity, None)
+            run.done.set()
+
+    @staticmethod
+    def _notify_index_listeners(run: _IndexRun) -> None:
+        for listener in run.listeners:
+            WorkflowController._notify_index_listener(listener, run.status)
+
+    @staticmethod
+    def _notify_index_listener(
+        listener: Callable[[RepositoryIndexStatus], None], status: RepositoryIndexStatus
+    ) -> None:
+        try:
+            listener(status)
+        except Exception:
+            logger.exception("Repository index listener failed")
 
     def build_repository_index(self, repository: str) -> RepositoryIndexStatus:
         """Build or rebuild one configured repository's semantic index."""
@@ -400,16 +545,44 @@ class WorkflowController:
         self, repository: str, operation: str
     ) -> RepositoryIndexStatus:
         config = self.project_config(repository)
+        identity = self._index_identity(config)
+        with self._index_operation_lock:
+            if self._index_stopping:
+                return self._index_busy()
+            active = self._index_operations.get(identity)
+            if active is not None:
+                return active.status
+            run = _IndexRun(RepositoryIndexStatus(
+                strategy="qdrant", state=IndexLifecycleState.INDEXING,
+                error_message="Updating checkout index…",
+            ))
+            self._index_operations[identity] = run
+        status = run.status
+        try:
+            status = self._perform_repository_index_operation(config, operation)
+            return status
+        except Exception as exc:
+            status = replace(
+                status, state=IndexLifecycleState.FAILED,
+                error_message=repository_index_error_message(exc),
+            )
+            raise
+        finally:
+            self._finish_repository_index(repository, identity, run, status)
+
+    def _perform_repository_index_operation(
+        self, config: ProjectConfig, operation: str
+    ) -> RepositoryIndexStatus:
         if config.repository_context.strategy != "qdrant":
             raise ValueError(
                 "Semantic index actions require repository_context.strategy: qdrant; "
                 "heuristic context is already available without an index."
             )
-        with self._index_operation_lock:
-            if repository in self._index_operations:
-                raise RuntimeError(f"An index operation is already running for {repository!r}")
-            self._index_operations.add(repository)
-        try:
+        with self._repository_index_clients.operation(
+            config.repository_context.qdrant, blocking=False
+        ) as admitted:
+            if not admitted:
+                return self._index_busy()
             strategy = resolve_repository_context_strategy(
                 config.repository_context.strategy,
                 settings=config.repository_context,
@@ -424,9 +597,6 @@ class WorkflowController:
             if isinstance(result, RepositoryIndexStatus):
                 return result
             raise ValueError("The configured context strategy returned an invalid index status")
-        finally:
-            with self._index_operation_lock:
-                self._index_operations.discard(repository)
 
     def resolve_repository_path(self, path: str) -> Path:
         """Resolve an editor path exactly as normal configuration loading will."""
@@ -889,6 +1059,12 @@ class WorkflowController:
         """Stop admission and command trees before the UI process exits."""
         from orchestrator.clients.command_client import interrupt_active_commands
 
+        with self._index_operation_lock:
+            self._index_stopping = True
+            index_runs = tuple(self._index_operations.values())
+        for run in index_runs:
+            run.done.wait()
+
         stop_writes = getattr(self._repository, "stop_session_writes", None)
         if callable(stop_writes):
             stop_writes()
@@ -898,6 +1074,8 @@ class WorkflowController:
         recover = getattr(self._repository, "recover_interrupted", None)
         if callable(recover):
             recover()
+        if self._owns_repository_index_clients:
+            self._repository_index_clients.close()
 
     def submit_interrupted(
         self, execution_id: str, *,

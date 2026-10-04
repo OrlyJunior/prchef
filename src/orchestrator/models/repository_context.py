@@ -11,6 +11,7 @@ class IndexLifecycleState(StrEnum):
 
     NOT_INDEXED = "not_indexed"
     INDEXING = "indexing"
+    BUSY = "busy"
     READY = "ready"
     STALE = "stale"
     FAILED = "failed"
