@@ -15,7 +15,7 @@ Code, tests, and repository retrieval cover feature behavior, UI, and implementa
   resume system.
 - Planning uses up to 12,000 characters of the task's newest comments. Resumed planning uses the
   persisted snapshot; other roles receive no separate comment section.
-- `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` are optional, local, Git-ignored-by-default
+- `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` are optional, local, ignored by this project's `.gitignore`
   role guidance; each role receives only its own file. This file is shared by all roles. All of
   them are supplementary: the task, repository state, and core invariants win. Role files load
   from the configured checkout at execution time, with a control-checkout fallback for worktrees;

@@ -1,13 +1,26 @@
 [build-system]
-requires = ["hatchling>=1.25", "hatch-vcs>=0.5,<1"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
+# NAME PLACEHOLDER: keep the current distribution name until the final name is chosen.
 name = "autonomous-dev-orchestrator"
-dynamic = ["version"]
-description = "CLI orchestrator for Trello/GitHub tasks using LiteLLM, Codex, and Git"
+version = "0.1.0"
+description = "Plan, implement, validate, and review GitHub or Trello tasks in isolated Git worktrees"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Orly Antunes Borges Júnior (OrlyJunior)"}]
 requires-python = ">=3.11"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development",
+]
 dependencies = [
   "alembic>=1.13,<2",
   "google-genai>=1.75,<2",
@@ -27,6 +40,12 @@ dependencies = [
   "typer>=0.12,<1",
 ]
 
+[project.urls]
+# NAME PLACEHOLDER: retain the current repository URL until the final name is chosen.
+Repository = "https://github.com/OrlyJunior/autonomous-development-orchestrator"
+Issues = "https://github.com/OrlyJunior/autonomous-development-orchestrator/issues"
+Changelog = "https://github.com/OrlyJunior/autonomous-development-orchestrator/releases"
+
 [project.optional-dependencies]
 dev = [
   "mypy>=1.11,<2",
@@ -39,10 +58,6 @@ dev = [
 
 [project.scripts]
 orchestrator = "orchestrator.cli.main:app"
-
-[tool.hatch.version]
-source = "vcs"
-tag-pattern = '^v(?P<version>\d+\.\d+\.\d+)$'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/orchestrator"]

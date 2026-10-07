@@ -15,6 +15,10 @@ Known limitations:
 - SQLite is the default database, local Qdrant is single-process, and provider concurrency limits don't coordinate across processes.
 - Nothing is rolled back after a failure: a pushed branch or open pull request stays in place. Inspect the saved execution and its worktree before continuing.
 
+## Before you run it
+
+Agents act with your authenticated GitHub CLI and local credentials. Start with a repository you can afford to experiment on. Review every pull request before merging: the orchestrator never merges, but agents write the code. With `approve-for-me` or similar unattended modes, agents run commands in the worktree without per-command review. Put credentials in environment variables, never in YAML. Validation commands run on your machine.
+
 ## Requirements
 
 - Python 3.11 or newer, and Git.
@@ -48,6 +52,8 @@ python -m pip install -e ".[dev]"
 ## Configuration
 
 The app reads one global `orchestrator.yml`. An explicit `--config` path takes precedence, followed by the `ORCHESTRATOR_CONFIG`, `ORCHESTRATOR_CONFIG_PATH`, and `ORCHESTRATOR_CONFIG_FILE` environment variables. Otherwise it looks in `~/.config/orchestrator/orchestrator.yml`, then `~/.orchestrator/orchestrator.yml`. Repository-local `.orchestrator.yml` files are ignored.
+
+Before the first run, create the parent directory and save your configuration in one of those global locations, or pass `--config` to the command. Installation does not create the YAML file. Start from [orchestrator.example.yml](orchestrator.example.yml) or the minimal example below and replace its repository paths and provider settings.
 
 The app loads its settings and Trello credentials from the optional `~/.orchestrator/.env` file. A repository-local `.env` is not loaded; [.env.example](.env.example) shows the format. The three configuration selectors above are read only from the process environment, not from `.env`.
 
@@ -147,7 +153,7 @@ external checkout changes are checked on the next opening or manual refresh.
 
 ## Role guidance files
 
-Optional local `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` files in your repository give each role its own extra instructions. They're ignored by Git by default, and each role sees only its own file. You can edit them from the TUI.
+Optional local `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` files in your repository give each role its own extra instructions. Each role sees only its own file. This project's `.gitignore` excludes them; add them to your repository's ignore rules if you want to keep them local. You can edit them from the TUI.
 
 We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) to every repository the orchestrator works on. It is shared by the planner, implementer, and reviewer; the orchestrator reads it when present but does not scaffold it. Without it, each run has to rediscover project boundaries and design rules from the task and retrieved code. A brand-new repository can start without it and add it once there is real code to describe.
 
@@ -197,6 +203,8 @@ Database schema changes use versioned Alembic migrations in `src/orchestrator/mi
 ### Releasing
 
 To publish a release, under **Actions → Release**, run the workflow on the `develop` branch and choose the `patch`, `minor`, or `major` increment.
+
+The first release tag is `v0.1.0`. Before later releases, update `project.version` in `pyproject.toml` to the version the workflow will select. The workflow checks that the built package version matches the tag.
 
 ## Changelog
 

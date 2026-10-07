@@ -20,30 +20,34 @@ on its own pull request. Repository rules and the App's permissions still apply.
 ## Configure credentials
 
 Use exactly one key source. An absolute, protected `private_key_path` is preferred. An environment
-variable supports secret managers; literal `\\n` sequences are converted to newlines.
+variable supports secret managers; literal `\n` sequences are converted to newlines.
+
+Merge this fragment into your existing global `orchestrator.yml`; keep your agent,
+provider, and repository settings alongside it under the appropriate keys.
 
 ```yaml
-integrations:
-  github:
-    command: [gh]
-    timeout_seconds: 120
-    # Reviewer identity. `app` is the established, backwards-compatible key.
-    app:
-      app_id: 123456
-      installation_id: 987654
-      private_key_path: C:/secure/github-app-private-key.pem
-      # Alternative to the path, never use both:
-      # private_key_env: GITHUB_APP_PRIVATE_KEY
-    # Implementer identity. It may be a different installation or the same App.
-    implementer_app:
-      app_id: 654321
-      installation_id: 456789
-      private_key_env: IMPLEMENTER_GITHUB_APP_PRIVATE_KEY
-    # Planner identity for GitHub issue and label reads.
-    planner_app:
-      app_id: 112233
-      installation_id: 445566
-      private_key_env: PLANNER_GITHUB_APP_PRIVATE_KEY
+defaults:
+  integrations:
+    github:
+      command: [gh]
+      timeout_seconds: 120
+      # Reviewer identity. `app` is the established, backwards-compatible key.
+      app:
+        app_id: 123456
+        installation_id: 987654
+        private_key_path: C:/secure/github-app-private-key.pem
+        # Alternative to the path, never use both:
+        # private_key_env: GITHUB_APP_PRIVATE_KEY
+      # Implementer identity. It may be a different installation or the same App.
+      implementer_app:
+        app_id: 654321
+        installation_id: 456789
+        private_key_env: IMPLEMENTER_GITHUB_APP_PRIVATE_KEY
+      # Planner identity for GitHub issue and label reads.
+      planner_app:
+        app_id: 112233
+        installation_id: 445566
+        private_key_env: PLANNER_GITHUB_APP_PRIVATE_KEY
 ```
 
 When an App is configured, `app_id`, `installation_id`, and exactly one private-key source are
