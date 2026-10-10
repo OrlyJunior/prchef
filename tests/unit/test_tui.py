@@ -30,6 +30,7 @@ from textual.widgets import (
 from orchestrator.config.project_config import (
     AgentPresetConfig,
     AgentProviderSettings,
+    ConfigurationError,
     ConfiguredRepository,
     GitHubAppSettings,
     ProjectConfig,
@@ -8294,6 +8295,70 @@ def test_provider_editor_failed_save_retains_values_and_failed_load_disables_act
             await settle_tui(pilot)
             for action in ("save-provider", "remove-provider", "add-provider"):
                 assert screen.query_one(f"#{action}", Button).disabled
+
+    asyncio.run(drive())
+
+
+def test_provider_editor_failed_reload_blocks_stale_selection_and_pending_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, path = _provider_editor_controller(tmp_path)
+    controller.save_provider("api", {"type": "litellm", "model": "one"}, create=True)
+    original = path.read_bytes()
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ProviderSettingsScreen)
+            selector = screen.query_one("#provider-select", OrchestratorSelect)
+            selector.value = "api"
+            await settle_tui(pilot)
+            screen.query_one("#remove-provider", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, RemoveProviderConfirmation)
+
+            def fail_load() -> dict[str, dict[str, Any]]:
+                raise ConfigurationError("Cannot load provider settings; reload.")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(controller, "provider_settings", fail_load)
+                screen._reload()
+                await settle_tui(pilot)
+                assert selector.disabled
+                assert not any(value == "api" for _, value in selector._options)
+                assert screen._source is None
+                assert screen._providers == {}
+                assert screen._editing is None
+                # A stale selection handler must not restore actions after the failure.
+                screen._edit("api")
+                for action in ("save-provider", "remove-provider", "add-provider"):
+                    assert screen.query_one(f"#{action}", Button).disabled
+
+                def fail_delete(*args: Any, **kwargs: Any) -> None:
+                    pytest.fail("Removal must not reach persistence after a failed load")
+
+                patch.setattr(controller, "delete_provider", fail_delete)
+                application.screen.query_one("#confirm-remove-provider", Button).press()
+                await settle_tui(pilot)
+                assert path.read_bytes() == original
+                assert "Reload provider configuration" in str(
+                    screen.query_one("#provider-status", Static).renderable
+                )
+
+            screen.query_one("#reload-providers", Button).press()
+            await settle_tui(pilot)
+            assert not selector.disabled
+            selector.value = "api"
+            await settle_tui(pilot)
+            assert not screen.query_one("#remove-provider", Button).disabled
+            screen.query_one("#remove-provider", Button).press()
+            await settle_tui(pilot)
+            application.screen.query_one("#confirm-remove-provider", Button).press()
+            await settle_tui(pilot)
+            assert controller.provider_settings() == {}
 
     asyncio.run(drive())
 

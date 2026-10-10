@@ -11,6 +11,7 @@ from copy import deepcopy
 from math import isfinite
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 from pydantic import BaseModel, ValidationError
@@ -71,10 +72,16 @@ def reject_provider_credentials(values: Mapping[str, Any]) -> None:
     )):
         raise ConfigurationError("api_key_env must be an environment variable name.")
     base = values.get("api_base")
-    if isinstance(base, str) and ("@" in base or re.search(
-        r"[?&].*(key|token|secret)=", base, flags=re.I,
-    )):
-        raise ConfigurationError("api_base must not contain credentials.")
+    if isinstance(base, str):
+        try:
+            query = parse_qsl(urlsplit(base).query, keep_blank_values=True)
+        except ValueError:
+            raise ConfigurationError("api_base must be a valid URL without credentials.") from None
+        if "@" in base or any(
+            _CREDENTIAL.search(name) or re.search(r"key|token|secret", name, flags=re.I)
+            for name, _ in query
+        ):
+            raise ConfigurationError("api_base must not contain credentials.")
     command = values.get("command", [])
     if isinstance(command, str) and _CREDENTIAL.search(command):
         raise ConfigurationError("command must not contain credential flags or assignments.")

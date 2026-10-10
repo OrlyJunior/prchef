@@ -180,6 +180,42 @@ def test_environment_reference_is_never_resolved(
     assert b"RECOGNIZABLE_SECRET" not in path.read_bytes()
 
 
+@pytest.mark.parametrize("parameter", [
+    "password", "authorization", "PASSWORD", "Authorization", "pass%77ord",
+    "%61uthorization", "api_key", "access_token", "client_secret", "credentials",
+])
+@pytest.mark.parametrize("create", [True, False])
+def test_endpoint_credentials_never_save(
+    tmp_path: Path, parameter: str, create: bool,
+) -> None:
+    path = tmp_path / "orchestrator.yml"
+    path.write_bytes(b"defaults: {providers: {}}\n")
+    loader = ProjectConfigLoader(path)
+    if not create:
+        loader.save_provider("api", definition("litellm"), create=True)
+    original = path.read_bytes()
+    values = definition("litellm") | {
+        "api_base": f"https://example.test/v1?region=west&{parameter}=RECOGNIZABLE_SECRET",
+    }
+    with pytest.raises(
+        ConfigurationError, match="api_base must not contain credentials",
+    ) as failure:
+        loader.save_provider("api", values, create=create)
+    assert "RECOGNIZABLE_SECRET" not in str(failure.value)
+    assert path.read_bytes() == original
+
+
+def test_endpoint_noncredential_query_is_preserved(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.yml"
+    path.write_bytes(b"defaults: {providers: {}}\n")
+    loader = ProjectConfigLoader(path)
+    values = definition("litellm") | {
+        "api_base": "https://example.test/v1?api-version=2026-01&deployment=password-model",
+    }
+    loader.save_provider("api", values, create=True)
+    assert loader.provider_settings()["api"] == values
+
+
 @pytest.mark.parametrize("kind", ["codex-cli", "claude-code"])
 @pytest.mark.parametrize("found", [True, False])
 def test_path_warning_is_nonblocking(

@@ -152,6 +152,12 @@ class ProviderSettingsScreen(Screen[None]):
                 raise ConfigurationError("Configuration changed externally; reload.")
         except Exception as exc:
             self._source = None
+            self._providers = {}
+            self._editing = None
+            self._original = {}
+            selector = self.query_one("#provider-select", OrchestratorSelect)
+            selector.set_options([], allow_blank=True)
+            selector.disabled = True
             for action in ("save-provider", "remove-provider", "add-provider"):
                 self.query_one(f"#{action}", Button).disabled = True
             message = str(exc) if isinstance(exc, ConfigurationError) else \
@@ -161,6 +167,7 @@ class ProviderSettingsScreen(Screen[None]):
         self._source = source
         self._providers = providers
         selector = self.query_one("#provider-select", OrchestratorSelect)
+        selector.disabled = False
         selector.set_options([(f"{name} ({value.get('type', 'unknown')})", name)
                               for name, value in providers.items()], allow_blank=True)
         self.query_one("#add-provider", Button).disabled = False
@@ -185,6 +192,8 @@ class ProviderSettingsScreen(Screen[None]):
         self._fill("codex-cli", PROVIDER_DEFAULTS["codex-cli"])
 
     def _edit(self, name: str) -> None:
+        if self._source is None or name not in self._providers:
+            return
         self._editing = name
         self._original = deepcopy(self._providers[name])
         self.query_one("#save-provider", Button).disabled = self._source is None
@@ -246,7 +255,8 @@ class ProviderSettingsScreen(Screen[None]):
             self._reload(self._editing)
         elif event.button.id == "save-provider":
             self._save()
-        elif event.button.id == "remove-provider" and self._editing is not None:
+        elif (event.button.id == "remove-provider" and self._editing is not None
+              and self._source is not None):
             name = self._editing
             self.app.push_screen(RemoveProviderConfirmation(name),
                                  lambda confirmed: self._remove(name, confirmed))
@@ -296,6 +306,9 @@ class ProviderSettingsScreen(Screen[None]):
     def _remove(self, name: str, confirmed: bool | None) -> None:
         if not confirmed:
             self._status("Provider removal cancelled.")
+            return
+        if self._source is None:
+            self._status("Reload provider configuration before removing a provider.", error=True)
             return
         try:
             self.controller.delete_provider(name, expected_source=self._source)
