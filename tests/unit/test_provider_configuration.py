@@ -166,6 +166,42 @@ def test_credentials_are_rejected_without_echo(tmp_path: Path, change: dict[str,
     assert path.read_bytes() == b"defaults: {providers: {}}\n"
 
 
+@pytest.mark.parametrize("change", [
+    {"auth": "RECOGNIZABLE_SECRET"},
+    {"bearer": "RECOGNIZABLE_SECRET"},
+    {"generation": {"nested": {"AUTH": "RECOGNIZABLE_SECRET"}}},
+    {"generation": {"headers": {"Bearer": "RECOGNIZABLE_SECRET"}}},
+    {"generation": {"headers": {"X-Custom": "Bearer RECOGNIZABLE_SECRET"}}},
+    {"type": "codex-cli", "command": ["env", "AUTH=RECOGNIZABLE_SECRET", "codex"]},
+    {"type": "codex-cli", "command": ["env", "BEARER=RECOGNIZABLE_SECRET", "codex"]},
+    {"type": "codex-cli", "command": ["codex", "--auth", "RECOGNIZABLE_SECRET"]},
+    {"type": "codex-cli", "command": ["codex", "--bearer=RECOGNIZABLE_SECRET"]},
+    {"type": "codex-cli", "command": ["codex", "--config=auth=RECOGNIZABLE_SECRET"]},
+    {"type": "codex-cli", "command": ["codex", "X-Custom: bEaReR RECOGNIZABLE_SECRET"]},
+    {"type": "codex-cli", "command": ["codex", "Bearer", "RECOGNIZABLE_SECRET"]},
+    {"type": "codex-cli", "command": "codex --header 'Bearer RECOGNIZABLE_SECRET'"},
+])
+@pytest.mark.parametrize("create", [True, False])
+def test_auth_and_bearer_credentials_never_save_or_display(
+    tmp_path: Path, change: dict[str, Any], create: bool,
+) -> None:
+    path = tmp_path / "orchestrator.yml"
+    path.write_bytes(b"defaults: {providers: {}}\n")
+    loader = ProjectConfigLoader(path)
+    if not create:
+        loader.save_provider("api", definition("litellm"), create=True)
+    original = path.read_bytes()
+    values = definition("litellm") | change
+    # The editor uses this same guard before filling fields from existing YAML.
+    with pytest.raises(ConfigurationError) as display_failure:
+        editor.reject_provider_credentials(values)
+    assert "RECOGNIZABLE_SECRET" not in str(display_failure.value)
+    with pytest.raises(ConfigurationError) as save_failure:
+        loader.save_provider("api", values, create=create)
+    assert "RECOGNIZABLE_SECRET" not in str(save_failure.value)
+    assert path.read_bytes() == original
+
+
 def test_environment_reference_is_never_resolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -183,6 +219,7 @@ def test_environment_reference_is_never_resolved(
 @pytest.mark.parametrize("parameter", [
     "password", "authorization", "PASSWORD", "Authorization", "pass%77ord",
     "%61uthorization", "api_key", "access_token", "client_secret", "credentials",
+    "auth", "AUTH", "%61uth", "bearer", "Bearer", "bea%72er", "x_auth", "x-bearer",
 ])
 @pytest.mark.parametrize("create", [True, False])
 def test_endpoint_credentials_never_save(
@@ -211,6 +248,19 @@ def test_endpoint_noncredential_query_is_preserved(tmp_path: Path) -> None:
     loader = ProjectConfigLoader(path)
     values = definition("litellm") | {
         "api_base": "https://example.test/v1?api-version=2026-01&deployment=password-model",
+    }
+    loader.save_provider("api", values, create=True)
+    assert loader.provider_settings()["api"] == values
+
+
+def test_noncredential_auth_substrings_are_preserved(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.yml"
+    path.write_bytes(b"defaults: {providers: {}}\n")
+    loader = ProjectConfigLoader(path)
+    values = definition("litellm") | {
+        "model": "author/bearer-model",
+        "api_base": "https://example.test/v1?author=example&bearers=example",
+        "generation": {"author": "example"},
     }
     loader.save_provider("api", values, create=True)
     assert loader.provider_settings()["api"] == values

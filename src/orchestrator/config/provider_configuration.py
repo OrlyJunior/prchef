@@ -48,8 +48,10 @@ _SCHEMAS: dict[str, type[BaseModel]] = {
 }
 _CREDENTIAL = re.compile(
     r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|authorization|password|"
-    r"secret|credential|private[_-]?key|(?:^|[_-])token$)", re.I,
+    r"secret|credential|private[_-]?key|(?:^|[_-])token$|"
+    r"(?:^|[\W_])(?:auth|bearer)(?=$|[\W_]))", re.I,
 )
+_BEARER_CREDENTIAL = re.compile(r"(?<!\w)bearer\s+\S+", re.I)
 
 
 def _reject_credentials(value: Any, *, root: bool = False) -> None:
@@ -61,6 +63,8 @@ def _reject_credentials(value: Any, *, root: bool = False) -> None:
     elif isinstance(value, list):
         for item in value:
             _reject_credentials(item)
+    elif isinstance(value, str) and _BEARER_CREDENTIAL.search(value):
+        raise ConfigurationError("Credentials are forbidden; use api_key_env references.")
 
 
 def reject_provider_credentials(values: Mapping[str, Any]) -> None:
@@ -89,7 +93,9 @@ def reject_provider_credentials(values: Mapping[str, Any]) -> None:
         isinstance(arg, str) and any(_CREDENTIAL.search(part) for part in (
             arg.split("=")[:-1] if "=" in arg else [arg]
         ))
-        for arg in command if isinstance(arg, str) and ("=" in arg or arg.startswith("--"))
+        for arg in command if isinstance(arg, str) and (
+            "=" in arg or arg.startswith("--") or arg.casefold() == "bearer"
+        )
     ):
         raise ConfigurationError("command must not contain credential flags or assignments.")
     executable = values.get("executable")
