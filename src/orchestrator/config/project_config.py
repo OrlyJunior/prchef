@@ -1309,6 +1309,29 @@ class ProjectConfigLoader:
         except ValueError as exc:
             raise ConfigurationError(f"Invalid project configuration: {exc}") from exc
 
+    def provider_settings(self) -> dict[str, dict[str, Any]]:
+        """Read global provider definitions without selecting a repository."""
+        from orchestrator.config.provider_configuration import list_providers
+
+        return list_providers(self._config_file)
+
+    def provider_configuration_source(self) -> bytes:
+        return self._config_file.read_bytes()
+
+    def save_provider(
+        self, name: str, settings: Mapping[str, Any], *, create: bool = False,
+        expected_source: bytes | None = None,
+    ) -> list[str]:
+        from orchestrator.config.provider_configuration import save_provider
+
+        return save_provider(self._config_file, name, settings, create=create,
+                             expected_source=expected_source)
+
+    def delete_provider(self, name: str, *, expected_source: bytes | None = None) -> None:
+        from orchestrator.config.provider_configuration import save_provider
+
+        save_provider(self._config_file, name, None, expected_source=expected_source)
+
     def has_planner_github_app(self) -> bool:
         """Check whether any repository could use a Planner App without probing Git."""
         try:

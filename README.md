@@ -113,6 +113,20 @@ orchestrator tui
 
 On the home screen, choose **Repositories** → **Add repository** → **Save repository** to register a local checkout, if it isn't already in your configuration. Then choose **Start workflow**, select the repository and task provider, pick a task, and start it.
 
+Manage agent providers through **Providers** on the home screen (shortcut **o**), alongside
+the other Settings destinations. Add, edit, or remove Codex CLI, Claude Code, LiteLLM, and
+Gemini Vertex entries in `defaults.providers`; no repository selection is needed. An existing
+resolved global configuration is required. Provider names remain fixed when editing, and
+providers used by roles or presets cannot be removed. [orchestrator.example.yml](orchestrator.example.yml)
+remains the reference for all provider options.
+
+For LiteLLM, enter only an environment variable name in `api_key_env`, never an API key value.
+Local CLIs authenticate outside the editor; Vertex uses Application Default Credentials.
+Missing local executables produce a warning and can be installed later. Saved definitions
+apply to subsequent workflow submissions; select a provider manually for any role with an
+unavailable default. Active runs keep their resolved settings. Restart the TUI after changing
+an existing provider's `max_concurrency`, or to expand the dispatcher's startup capacity.
+
 The equivalent command for a GitHub issue:
 
 ```sh

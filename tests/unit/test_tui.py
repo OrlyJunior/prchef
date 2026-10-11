@@ -30,9 +30,11 @@ from textual.widgets import (
 from orchestrator.config.project_config import (
     AgentPresetConfig,
     AgentProviderSettings,
+    ConfigurationError,
     ConfiguredRepository,
     GitHubAppSettings,
     ProjectConfig,
+    ProjectConfigLoader,
     RepositoryConfiguration,
     RepositoryContextSettings,
 )
@@ -65,6 +67,10 @@ from orchestrator.tui.screens.execution_history import (
     execution_status_label,
 )
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
+from orchestrator.tui.screens.provider_settings import (
+    ProviderSettingsScreen,
+    RemoveProviderConfirmation,
+)
 from orchestrator.tui.screens.repository_settings import (
     DeleteRepositoryConfirmation,
     RepositorySettingsScreen,
@@ -8152,3 +8158,344 @@ def test_controller_routes_cancellation_to_the_live_service_then_the_repository(
 
     assert controller.cancel_workflow("execution-1") is True
     assert service.cancellations == ["execution-1"]
+
+
+def _provider_editor_controller(
+    tmp_path: Path,
+) -> tuple[WorkflowController, _WorkflowService, Path]:
+    controller, service, _ = _controller(tmp_path)
+    (tmp_path / "checkout" / ".git").mkdir(parents=True)
+    path = tmp_path / "orchestrator.yml"
+    path.write_text(
+        "defaults:\n  providers: {}\n  task: {provider: github}\n"
+        "  repository_context: {strategy: heuristic}\n  agents:\n"
+        "    planner: {provider: placeholder}\n    implementer: {provider: placeholder}\n"
+        "    reviewer: {provider: placeholder}\nrepositories:\n  example: {path: checkout}\n",
+        encoding="utf-8",
+    )
+    controller._config_loader = ProjectConfigLoader(path)
+    return controller, service, path
+
+
+@pytest.mark.parametrize("kind", ["codex-cli", "claude-code", "litellm", "gemini-vertex"])
+def test_provider_editor_types_crud_and_keyboard_scrolling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    from orchestrator.config.provider_configuration import PROVIDER_DEFAULTS
+
+    monkeypatch.setattr("orchestrator.config.provider_configuration.shutil.which",
+                        lambda executable: "/fake/executable")
+    controller, _, path = _provider_editor_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(42, 18)) as pilot:
+            await pilot.press("o")
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ProviderSettingsScreen)
+            assert "No providers" in str(screen.query_one("#provider-status", Static).renderable)
+            assert not screen.query_one("#add-provider", Button).disabled
+            assert screen.query_one("#remove-provider", Button).disabled
+            selector = screen.query_one("#provider-type", OrchestratorSelect)
+            if kind == "claude-code":
+                selector.focus()
+                await pilot.press("enter", "down", "enter")
+                await settle_tui(pilot)
+                assert selector.value == "claude-code"
+            else:
+                selector.value = kind
+                await settle_tui(pilot)
+            assert screen.query_one("#provider-field-command").display == (kind == "codex-cli")
+            assert screen.query_one("#provider-field-executable").display == (kind == "claude-code")
+            assert screen.query_one("#provider-field-api_key_env").display == (kind == "litellm")
+            assert screen.query_one("#provider-field-project").display == (kind == "gemini-vertex")
+            for field, value in PROVIDER_DEFAULTS[kind].items():
+                if field != "command":
+                    assert screen.query_one(f"#provider-{field}", Input).value == str(value)
+            screen.query_one("#provider-name", Input).value = "new"
+            if kind in ("litellm", "gemini-vertex"):
+                screen.query_one("#provider-model", Input).value = "test/model"
+            if kind == "gemini-vertex":
+                screen.query_one("#provider-project", Input).value = "test-project"
+            button = screen.query_one("#save-provider", Button)
+            button.focus()
+            await settle_tui(pilot)
+            assert screen.can_view_entire(button)
+            await pilot.press("enter")
+            await settle_tui(pilot)
+            assert controller.provider_settings()["new"]["type"] == kind
+            assert screen.query_one("#provider-name", Input).disabled
+            screen.query_one("#provider-max_concurrency", Input).value = "2"
+            screen.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            assert controller.provider_settings()["new"]["max_concurrency"] == 2
+            assert "Restart" in str(screen.query_one("#provider-restart", Static).renderable)
+            saved = path.read_bytes()
+            screen.query_one("#remove-provider", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, RemoveProviderConfirmation)
+            await pilot.press("escape")
+            await settle_tui(pilot)
+            assert path.read_bytes() == saved
+            screen.query_one("#remove-provider", Button).press()
+            await settle_tui(pilot)
+            application.screen.query_one("#confirm-remove-provider", Button).press()
+            await settle_tui(pilot)
+            assert controller.provider_settings() == {}
+            await pilot.press("escape")
+            await settle_tui(pilot)
+            assert application.screen.query("#home")
+
+    asyncio.run(drive())
+
+
+def test_provider_editor_failed_save_retains_values_and_failed_load_disables_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, path = _provider_editor_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ProviderSettingsScreen)
+            screen.query_one("#provider-type", OrchestratorSelect).value = "litellm"
+            await settle_tui(pilot)
+            screen.query_one("#provider-name", Input).value = "api"
+            original = path.read_bytes()
+            screen.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            assert "model is required" in str(
+                screen.query_one("#provider-status", Static).renderable
+            )
+            assert path.read_bytes() == original
+            screen.query_one("#provider-model", Input).value = "entered/model"
+
+            def fail_replace(*args: Any) -> None:
+                raise OSError("failure")
+
+            with monkeypatch.context() as patch:
+                patch.setattr("orchestrator.config.provider_configuration.os.replace", fail_replace)
+                screen.query_one("#save-provider", Button).press()
+                await settle_tui(pilot)
+            assert path.read_bytes() == original
+            assert screen.query_one("#provider-name", Input).value == "api"
+            assert screen.query_one("#provider-model", Input).value == "entered/model"
+            assert "no changes saved" in str(
+                screen.query_one("#provider-status", Static).renderable
+            )
+            screen.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            assert "api" in controller.provider_settings()
+            path.write_bytes(b"defaults: [invalid")
+            screen.query_one("#reload-providers", Button).press()
+            await settle_tui(pilot)
+            for action in ("save-provider", "remove-provider", "add-provider"):
+                assert screen.query_one(f"#{action}", Button).disabled
+
+    asyncio.run(drive())
+
+
+def test_provider_editor_failed_reload_blocks_stale_selection_and_pending_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, path = _provider_editor_controller(tmp_path)
+    controller.save_provider("api", {"type": "litellm", "model": "one"}, create=True)
+    original = path.read_bytes()
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, ProviderSettingsScreen)
+            selector = screen.query_one("#provider-select", OrchestratorSelect)
+            selector.value = "api"
+            await settle_tui(pilot)
+            screen.query_one("#remove-provider", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, RemoveProviderConfirmation)
+
+            def fail_load() -> dict[str, dict[str, Any]]:
+                raise ConfigurationError("Cannot load provider settings; reload.")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(controller, "provider_settings", fail_load)
+                screen._reload()
+                await settle_tui(pilot)
+                assert selector.disabled
+                assert not any(value == "api" for _, value in selector._options)
+                assert screen._source is None
+                assert screen._providers == {}
+                assert screen._editing is None
+                # A stale selection handler must not restore actions after the failure.
+                screen._edit("api")
+                for action in ("save-provider", "remove-provider", "add-provider"):
+                    assert screen.query_one(f"#{action}", Button).disabled
+
+                def fail_delete(*args: Any, **kwargs: Any) -> None:
+                    pytest.fail("Removal must not reach persistence after a failed load")
+
+                patch.setattr(controller, "delete_provider", fail_delete)
+                application.screen.query_one("#confirm-remove-provider", Button).press()
+                await settle_tui(pilot)
+                assert path.read_bytes() == original
+                assert "Reload provider configuration" in str(
+                    screen.query_one("#provider-status", Static).renderable
+                )
+
+            screen.query_one("#reload-providers", Button).press()
+            await settle_tui(pilot)
+            assert not selector.disabled
+            selector.value = "api"
+            await settle_tui(pilot)
+            assert not screen.query_one("#remove-provider", Button).disabled
+            screen.query_one("#remove-provider", Button).press()
+            await settle_tui(pilot)
+            application.screen.query_one("#confirm-remove-provider", Button).press()
+            await settle_tui(pilot)
+            assert controller.provider_settings() == {}
+
+    asyncio.run(drive())
+
+
+def test_first_provider_can_be_selected_for_all_roles_and_submitted(tmp_path: Path) -> None:
+    controller, service, path = _provider_editor_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            editor = application.screen
+            editor.query_one("#provider-type", OrchestratorSelect).value = "litellm"
+            await settle_tui(pilot)
+            editor.query_one("#provider-name", Input).value = "api"
+            editor.query_one("#provider-model", Input).value = "test/model"
+            editor.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            await pilot.press("escape")
+            application.action_new_workflow()
+            await settle_tui(pilot)
+            runner = application.screen
+            assert isinstance(runner, WorkflowRunnerScreen)
+            for _role, prefix in runner._role_fields():
+                selector = runner.query_one(f"#{prefix}-provider", OrchestratorSelect)
+                assert not isinstance(selector.value, str)
+                assert "unavailable" in str(
+                    runner.query_one(f"#{prefix}-summary", Static).renderable
+                )
+                selector.value = "api"
+            await settle_tui(pilot)
+            runner._restore_role_defaults(AgentRole.PLANNER, "planner")
+            assert runner.query_one("#planner-provider", OrchestratorSelect).value == "api"
+            runner.query_one("#task-checkbox-0", TaskRow).value = True
+            await settle_tui(pilot)
+            runner.query_one("#start-workflow", Button).press()
+            await settle_tui(pilot)
+            assert service.calls[0][2] == {role: "api" for role in AgentRole}
+            assert path.read_bytes().count(b"provider: placeholder") == 3
+
+    asyncio.run(drive())
+
+
+def test_provider_choices_refresh_on_launcher_return(tmp_path: Path) -> None:
+    controller, _, _ = _provider_editor_controller(tmp_path)
+    controller.save_provider("api", {"type": "litellm", "model": "one"}, create=True)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_new_workflow()
+            await settle_tui(pilot)
+            runner = application.screen
+            for _, prefix in runner._role_fields():
+                runner.query_one(f"#{prefix}-provider", OrchestratorSelect).value = "api"
+            await settle_tui(pilot)
+            runner.query_one("#planner-model", Input).value = "local-choice"
+            application.action_providers()
+            await settle_tui(pilot)
+            controller.save_provider("second", {"type": "litellm", "model": "two"}, create=True)
+            controller.save_provider("api", {"type": "litellm", "model": "updated"})
+            await pilot.press("escape")
+            await settle_tui(pilot)
+            selector = runner.query_one("#planner-provider", OrchestratorSelect)
+            assert selector.value == "api"
+            assert runner.query_one("#planner-model", Input).value == "local-choice"
+            assert runner.query_one("#reviewer-model", Input).value == "updated"
+            selector.value = "second"
+            await settle_tui(pilot)
+            assert selector.value == "second"
+
+    asyncio.run(drive())
+
+
+def test_provider_editor_warning_and_in_use_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("orchestrator.config.provider_configuration.shutil.which",
+                        lambda executable: None)
+    controller, _, path = _provider_editor_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#provider-name", Input).value = "placeholder"
+            screen.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            assert "PATH" in str(screen.query_one("#provider-status", Static).renderable)
+            original = path.read_bytes()
+            screen.query_one("#remove-provider", Button).press()
+            await settle_tui(pilot)
+            application.screen.query_one("#confirm-remove-provider", Button).press()
+            await settle_tui(pilot)
+            status = str(screen.query_one("#provider-status", Static).renderable)
+            assert "defaults.agents.planner.provider" in status
+            assert "defaults.agents.implementer.provider" in status
+            assert "defaults.agents.reviewer.provider" in status
+            assert path.read_bytes() == original
+
+    asyncio.run(drive())
+
+
+def test_provider_editor_preserves_hidden_options_and_clears_changed_type(tmp_path: Path) -> None:
+    controller, _, _ = _provider_editor_controller(tmp_path)
+    controller.save_provider("api", {
+        "type": "litellm", "model": "one", "generation": {"seed": 42},
+        "temperature": 0.7,
+    }, create=True)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#provider-select", OrchestratorSelect).value = "api"
+            await settle_tui(pilot)
+            screen.query_one("#provider-model", Input).value = "two"
+            screen.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            values = controller.provider_settings()["api"]
+            assert values["generation"] == {"seed": 42}
+            assert values["temperature"] == 0.7
+            screen.query_one("#provider-type", OrchestratorSelect).value = "gemini-vertex"
+            await settle_tui(pilot)
+            assert screen.query_one("#provider-model", Input).value == ""
+            screen.query_one("#provider-model", Input).value = "vertex/model"
+            screen.query_one("#provider-project", Input).value = "project"
+            screen.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            values = controller.provider_settings()["api"]
+            assert values["type"] == "gemini-vertex"
+            assert "generation" not in values
+            assert "temperature" not in values
+
+    asyncio.run(drive())

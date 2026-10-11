@@ -368,6 +368,22 @@ class WorkflowController:
 
         return self._config_loader.repository_settings(repository)
 
+    def provider_settings(self) -> dict[str, dict[str, Any]]:
+        return self._config_loader.provider_settings()
+
+    def provider_configuration_source(self) -> bytes:
+        return self._config_loader.provider_configuration_source()
+
+    def save_provider(
+        self, name: str, settings: Mapping[str, Any], *, create: bool = False,
+        expected_source: bytes | None = None,
+    ) -> list[str]:
+        return self._config_loader.save_provider(name, settings, create=create,
+                                                expected_source=expected_source)
+
+    def delete_provider(self, name: str, *, expected_source: bytes | None = None) -> None:
+        self._config_loader.delete_provider(name, expected_source=expected_source)
+
     def repository_index_status(self, repository: str) -> RepositoryIndexStatus:
         """Return a repository-scoped index status without starting a workflow."""
 

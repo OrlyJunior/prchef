@@ -462,6 +462,27 @@ class WorkflowRunnerScreen(Screen[None]):
             self._reconcile_active_execution()
         repository = self._selected("#repository")
         provider = self._selected("#task-provider")
+        # Textual also resumes a newly mounted screen before the repository's
+        # Changed event initializes role selections. Refresh only initialized roles.
+        if (
+            repository is not None and self._role_default_providers and not self._batch_running
+            and not self.query_one("#start-workflow", Button).disabled
+        ):
+            try:
+                options = self.controller.configured_agent_provider_options(repository)
+                available = {name for _, name in options}
+                for role, prefix in self._role_fields():
+                    selector = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
+                    selected = self._selected(f"#{prefix}-provider")
+                    selector.set_options(options, allow_blank=True)
+                    if selected is not None and selected in available:
+                        selector.value = selected
+                        self._refresh_role_provider_defaults(role, prefix, selected)
+                    else:
+                        selector.clear()
+                        self._missing_role_provider(role, prefix, selected)
+            except Exception as exc:
+                self.notify(f"Cannot refresh agent providers: {exc}", severity="error")
         if (
             repository is not None
             and provider is not None
@@ -605,12 +626,64 @@ class WorkflowRunnerScreen(Screen[None]):
         self._advanced_open.clear()
         for role, prefix in self._role_fields():
             select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
-            select.set_options(configured_agent_options, allow_blank=False)
-            select.value = selected_agents[role]
-            self._load_role_runtime_controls(role, prefix, selected_agents[role])
+            available = {name for _, name in configured_agent_options}
+            default = selected_agents[role]
+            select.set_options(configured_agent_options, allow_blank=default not in available)
+            if default in available:
+                select.value = default
+                self._load_role_runtime_controls(role, prefix, default)
+            else:
+                select.clear()
+                self._missing_role_provider(role, prefix, default)
             self._load_role_presets(role, prefix)
         self._load_github_app_summary(repository)
         self._request_task_load(repository, providers[0])
+
+    def _missing_role_provider(self, role: AgentRole, prefix: str, name: str | None) -> None:
+        self._role_providers.pop(role, None)
+        self.query_one(f"#{prefix}-config").display = True
+        message = (
+            f"{role.value.title()} provider {name!r} is unavailable. Choose a provider manually."
+        )
+        self.query_one(f"#{prefix}-summary", Static).update(message)
+        self.notify(message, severity="warning")
+
+    def _refresh_role_provider_defaults(
+        self, role: AgentRole, prefix: str, provider: str,
+    ) -> None:
+        """Read saved defaults again while retaining deliberate role-local edits."""
+        repository = self._selected("#repository")
+        if repository is None:
+            return
+        baseline = self._runtime_defaults.get((role, provider), {})
+        current = self._runtime_values_from_controls(prefix)
+        provider_values = self.controller.provider_runtime_values(repository, provider)
+        values = self._copy_runtime_values(provider_values)
+        # None means the permission selector's Provider/YAML default option.
+        values["permission_mode"] = current["permission_mode"]
+        selected = self._selected_presets.get(role)
+        preset = self._role_presets.get(role, {}).get(selected) if selected else None
+        if preset is not None and preset.provider == provider:
+            for key, value in preset.runtime_options().items():
+                if key == "generation":
+                    values["generation"].update(value)
+                else:
+                    values[key] = value
+        for key in ("model", "reasoning_effort"):
+            if self._preset_comparison_value(current[key]) != self._preset_comparison_value(
+                baseline.get(key)
+            ):
+                values[key] = current[key]
+        old_generation = baseline.get("generation", {})
+        for key in _CONTROLLED_GENERATION_OPTIONS:
+            if self._preset_comparison_value(current["generation"].get(key)) != \
+                    self._preset_comparison_value(old_generation.get(key)):
+                values["generation"][key] = current["generation"].get(key)
+        self._runtime_defaults[(role, provider)] = self._copy_runtime_values(provider_values)
+        self._runtime_inputs[(role, provider)] = values
+        # Loading must not replace the refreshed cache with the old controls.
+        self._role_providers.pop(role, None)
+        self._load_role_runtime_controls(role, prefix, provider)
 
     @staticmethod
     def _role_fields() -> tuple[tuple[AgentRole, str], ...]:
@@ -715,9 +788,14 @@ class WorkflowRunnerScreen(Screen[None]):
 
         self._selected_presets.pop(role, None)
         default_provider = self._role_default_providers.get(role)
-        if default_provider is None:
+        repository = self._selected("#repository")
+        available = {name for _, name in self.controller.configured_agent_provider_options(
+            repository
+        )} if repository is not None else set()
+        if default_provider is None or default_provider not in available:
             self.notify(
-                f"Could not restore {role.value} defaults: no default provider is configured.",
+                f"Could not restore {role.value} defaults: provider {default_provider!r} "
+                "is unavailable. Choose a provider manually.",
                 severity="warning",
             )
             return
@@ -1321,9 +1399,17 @@ class WorkflowRunnerScreen(Screen[None]):
         if any(value is None for value in provider_selections.values()):
             self.notify("Select an agent provider for every workflow role.", severity="warning")
             return
+        available = {name for _, name in
+                     self.controller.configured_agent_provider_options(repository)}
+        if any(value not in available for value in provider_selections.values()):
+            self.notify("A selected provider is unavailable. Reload and select every role.",
+                        severity="warning")
+            return
         agent_providers = {
             role: value for role, value in provider_selections.items() if value is not None
         }
+        for role, prefix in self._role_fields():
+            self._refresh_role_provider_defaults(role, prefix, agent_providers[role])
         runtime_options = {
             role: self._runtime_options_for_role(role, prefix)
             for role, prefix in self._role_fields()

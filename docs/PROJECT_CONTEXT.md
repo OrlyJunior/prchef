@@ -63,9 +63,9 @@ Code, tests, and repository retrieval cover feature behavior, UI, and implementa
 - The TUI may launch one task or an ordered persisted batch. Batch policy, cancellation, and
   admission live in `WorkflowController`/`WorkflowRepository`; batch progress is a projection.
   Batch items link to, but do not own, execution rows. Cancelling one item never cancels its peers.
-- Repository, agent-preset, and GitHub App settings screens update only the selected entries in
-  the resolved global configuration. Role-local runtime selections apply only to one run and are
-  persisted for resumption; they do not rewrite YAML defaults.
+- Settings update selected global entries. Provider writes preserve unrelated YAML bytes and use
+  validated atomic replacement. Role-local runtime selections apply to one run, persist for
+  resumption, and never rewrite YAML defaults.
 - Schema changes require versioned Alembic migrations; never `create_all` at runtime.
 
 ## Workflow invariants

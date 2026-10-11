@@ -6,7 +6,7 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Resize
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Static
@@ -17,6 +17,7 @@ from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
 from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
 from orchestrator.tui.screens.execution_history import ExecutionHistoryScreen
 from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
+from orchestrator.tui.screens.provider_settings import ProviderSettingsScreen
 from orchestrator.tui.screens.repository_settings import RepositorySettingsScreen
 from orchestrator.tui.screens.workflow_runner import WorkflowRunnerScreen
 
@@ -351,6 +352,7 @@ class OrchestratorApp(App[None]):
         Binding("i", "agent_instructions", "Agent instructions"),
         Binding("p", "agent_presets", "Agent presets"),
         Binding("r", "repositories", "Repositories"),
+        Binding("o", "providers", "Providers"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -360,7 +362,7 @@ class OrchestratorApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with Container(id="home"):
+        with VerticalScroll(id="home"):
             yield Static("Orchestrator workflow control", classes="screen-title")
             yield Static(
                 "Browse configured repositories and tasks, select role providers, "
@@ -390,6 +392,8 @@ class OrchestratorApp(App[None]):
                     id="agent-instructions-button",
                     classes="navigation-control",
                 )
+            with Horizontal(classes="navigation-actions"):
+                yield Button("Providers", id="providers", classes="navigation-control")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -435,6 +439,8 @@ class OrchestratorApp(App[None]):
             self.action_agent_presets()
         elif event.button.id == "repositories":
             self.action_repositories()
+        elif event.button.id == "providers":
+            self.action_providers()
         elif event.button.id == "github-apps":
             self.action_github_apps()
         elif event.button.id == "agent-instructions-button":
@@ -454,6 +460,9 @@ class OrchestratorApp(App[None]):
 
     def action_repositories(self) -> None:
         self.push_screen(RepositorySettingsScreen())
+
+    def action_providers(self) -> None:
+        self.push_screen(ProviderSettingsScreen())
 
     def action_agent_instructions(self) -> None:
         self.push_screen(AgentInstructionsScreen())
