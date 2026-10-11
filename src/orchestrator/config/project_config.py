@@ -589,6 +589,14 @@ class ProviderRuntimeCapabilities:
     supports_generation: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeValueSource:
+    """A resolved launch value and its inherited origin, for display only."""
+
+    value: Any
+    source: Literal["launch", "preset", "provider", "default"]
+
+
 class CodexCliProviderSettings(CodexIntegrationSettings):
     model_config = ConfigDict(extra="forbid")
 
@@ -1126,6 +1134,67 @@ class ProjectConfig(BaseModel):
                 generation["max_output_tokens"] = litellm.max_output_tokens
             return {"model": litellm.model, "generation": generation}
         return {}
+
+    def _effective_runtime_values(self, provider: str) -> dict[str, Any]:
+        values = self.provider_runtime_values(provider)
+        settings = self.providers[provider]
+        if settings.type == "codex-cli":
+            codex = CodexCliProviderSettings.model_validate(settings.model_dump())
+            values["model"] = codex.model or _command_model(codex.command)
+            values["reasoning_effort"] = (
+                codex.reasoning_effort or _command_reasoning_effort(codex.command)
+            )
+        return values
+
+    def role_runtime_value_sources(
+        self, role: str, provider: str, runtime_options: Mapping[str, Any],
+        *, preset_name: str | None = None,
+    ) -> dict[str, RuntimeValueSource]:
+        """Project the exact launch payload through the normal validation seam.
+
+        The launcher already copies selected preset values into its payload.
+        Resolve that payload exactly as submission does, then compare it with
+        the inherited preset/provider values. Pre-filled, unchanged controls
+        keep their inherited source; edits that detach a preset become launch
+        values. No YAML or runtime configuration is changed by this projection.
+        CLI defaults outside our configuration remain unknown (value None).
+        """
+        resolved = self.with_agent_runtime_overrides({role: provider}, {role: runtime_options})
+        effective_provider = getattr(resolved.agents, role).provider
+        effective = resolved._effective_runtime_values(effective_provider)
+        inherited = self._effective_runtime_values(provider)
+        preset_options: dict[str, Any] = {}
+        if preset_name is not None:
+            preset = self.presets_for_role(role).get(preset_name)
+            if preset is None or preset.provider != provider:
+                raise ConfigurationError(f"Preset {preset_name!r} does not select {provider!r}")
+            preset_config = self.with_agent_preset(role, preset_name)
+            inherited = preset_config._effective_runtime_values(
+                getattr(preset_config.agents, role).provider
+            )
+            preset_options = preset.runtime_options()
+        base = self.providers[provider].model_dump()
+        base_effective = self._effective_runtime_values(provider)
+        result: dict[str, RuntimeValueSource] = {}
+        for key in ("model", "reasoning_effort", "permission_mode"):
+            if key not in effective:
+                continue
+            source: Literal["launch", "preset", "provider", "default"]
+            if effective[key] != inherited.get(key):
+                source = "launch"
+            elif key in preset_options and key in runtime_options:
+                source = "preset"
+            else:
+                native_key = "effort" if (
+                    key == "reasoning_effort" and self.providers[provider].type == "claude-code"
+                ) else key
+                source = "provider" if (
+                    base.get(native_key) is not None
+                    or (self.providers[provider].type == "codex-cli"
+                        and base_effective.get(key) is not None)
+                ) else "default"
+            result[key] = RuntimeValueSource(effective[key], source)
+        return result
 
     def with_agent_runtime_overrides(
         self,

@@ -3480,6 +3480,7 @@ def test_repository_select_populates_mounted_overlay_from_configured_repository(
 
 def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
+    source_projection = controller.project_config("example").role_runtime_value_sources
     task_loads: list[tuple[str, str]] = []
     capabilities = {
         provider: controller.provider_runtime_capabilities("example", provider)
@@ -3511,6 +3512,11 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
     )
     controller.provider_runtime_values = (  # type: ignore[method-assign]
         lambda repository, provider: runtime_values[provider]
+    )
+    controller.role_runtime_value_sources = (  # type: ignore[method-assign]
+        lambda repository, role, provider, options, preset_name=None: source_projection(
+            role.value, provider, options, preset_name=preset_name,
+        )
     )
     controller.github_app_settings = (  # type: ignore[method-assign]
         lambda repository: github_settings
@@ -8709,5 +8715,63 @@ def test_workflow_runner_preserves_hidden_preset_generation_after_manual_edits(
             assert config.agent_presets["planner"]["complete"].generation == {
                 **hidden, "temperature": 0.4,
             }
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_payload(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.providers["claude"] = AgentProviderSettings.model_validate({
+        "type": "claude-code", "model": "provider-model", "effort": "low",
+    })
+    for role in AgentRole:
+        getattr(config.agents, role.value).provider = "claude"
+        config.agent_presets[role.value] = {"focused": AgentPresetConfig(
+            provider="claude", model="preset-model", reasoning_effort="high",
+            permission_mode="acceptEdits",
+        )}
+    original = config.model_dump()
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_new_workflow()
+            await settle_tui(pilot)
+            screen = application.screen
+            for role, prefix in screen._role_fields():
+                def displayed(control: str, prefix: str = prefix) -> str:
+                    return str(screen.query_one(f"#{prefix}-{control}-source", Static).renderable)
+
+                assert displayed("model") == "Effective: provider-model (provider)"
+                assert displayed("reasoning") == "Effective: low (provider)"
+                assert displayed("permission") == "Effective: dontAsk (default)"
+                screen.query_one(f"#{prefix}-preset", OrchestratorSelect).value = "focused"
+                await settle_tui(pilot)
+                assert displayed("model") == "Effective: preset-model (preset)"
+                assert displayed("reasoning") == "Effective: high (preset)"
+                assert displayed("permission") == "Effective: acceptEdits (preset)"
+                before = screen._runtime_options_for_role(role, prefix)
+                screen._update_runtime_sources(role, prefix, "claude")
+                assert screen._runtime_options_for_role(role, prefix) == before
+                screen.query_one(f"#{prefix}-model", Input).value = "launch-model"
+                await settle_tui(pilot)
+                assert displayed("model") == "Effective: launch-model (launch)"
+                assert displayed("reasoning") == "Effective: high (launch)"
+                screen.query_one(f"#{prefix}-reasoning", Input).value = "invalid"
+                await settle_tui(pilot)
+                assert "Cannot resolve values" in displayed("reasoning")
+                screen._restore_role_defaults(role, prefix)
+                await settle_tui(pilot)
+                assert displayed("model") == "Effective: provider-model (provider)"
+                assert displayed("permission") == "Effective: dontAsk (default)"
+            assert config.model_dump() == original
+            screen.query_one("#planner-provider", OrchestratorSelect).value = "planner"
+            await settle_tui(pilot)
+            assert "Not applicable" in str(
+                screen.query_one("#planner-permission-source", Static).renderable
+            )
 
     asyncio.run(drive())

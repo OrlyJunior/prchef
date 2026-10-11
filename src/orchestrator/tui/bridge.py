@@ -22,6 +22,7 @@ from orchestrator.config.project_config import (
     ProjectConfigLoader,
     ProviderRuntimeCapabilities,
     RepositoryConfiguration,
+    RuntimeValueSource,
 )
 from orchestrator.models.agent import AgentRole
 from orchestrator.models.development_task import DevelopmentTask
@@ -259,6 +260,14 @@ class WorkflowController:
 
     def provider_runtime_values(self, repository: str, provider: str) -> dict[str, Any]:
         return self.project_config(repository).provider_runtime_values(provider)
+
+    def role_runtime_value_sources(
+        self, repository: str, role: AgentRole, provider: str,
+        runtime_options: Mapping[str, Any], *, preset_name: str | None = None,
+    ) -> dict[str, RuntimeValueSource]:
+        return self.project_config(repository).role_runtime_value_sources(
+            role.value, provider, runtime_options, preset_name=preset_name,
+        )
 
     def agent_presets(self, repository: str, role: AgentRole) -> dict[str, AgentPresetConfig]:
         return self.project_config(repository).presets_for_role(role.value)

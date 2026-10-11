@@ -308,6 +308,8 @@ class WorkflowRunnerScreen(Screen[None]):
                                         placeholder="Provider/YAML default",
                                         id=f"{prefix}-model",
                                     )
+                                    yield Static("", classes="default-indicator", markup=False,
+                                                 id=f"{prefix}-model-source")
                             with Horizontal(classes="role-config-row"):
                                 with Vertical(classes="role-field"):
                                     yield Static("Reasoning effort", id=f"{prefix}-reasoning-label")
@@ -315,6 +317,8 @@ class WorkflowRunnerScreen(Screen[None]):
                                         placeholder="Provider/YAML default",
                                         id=f"{prefix}-reasoning",
                                     )
+                                    yield Static("", classes="default-indicator", markup=False,
+                                                 id=f"{prefix}-reasoning-source")
                                 with Vertical(classes="role-field"):
                                     yield Static(
                                         "Permission mode", id=f"{prefix}-permission-label"
@@ -324,6 +328,8 @@ class WorkflowRunnerScreen(Screen[None]):
                                         prompt="Provider/YAML default",
                                         id=f"{prefix}-permission",
                                     )
+                                    yield Static("", classes="default-indicator", markup=False,
+                                                 id=f"{prefix}-permission-source")
                                 with Vertical(classes="role-field role-advanced-action"):
                                     yield Button("Advanced ▸", id=f"{prefix}-advanced-toggle")
                             with Vertical(classes="role-advanced", id=f"{prefix}-advanced"):
@@ -648,6 +654,8 @@ class WorkflowRunnerScreen(Screen[None]):
             f"{role.value.title()} provider {name!r} is unavailable. Choose a provider manually."
         )
         self.query_one(f"#{prefix}-summary", Static).update(message)
+        for control in ("model", "reasoning", "permission"):
+            self.query_one(f"#{prefix}-{control}-source", Static).update("Provider unavailable")
         self.notify(message, severity="warning")
 
     def _refresh_role_provider_defaults(
@@ -1160,6 +1168,30 @@ class WorkflowRunnerScreen(Screen[None]):
                 else f"Provider/YAML default ({default or 'dontAsk'})"
             )
         self.query_one(f"#{prefix}-summary", Static).update(" · ".join(parts))
+        self._update_runtime_sources(role, prefix, provider)
+
+    def _update_runtime_sources(self, role: AgentRole, prefix: str, provider: str) -> None:
+        repository = self._selected("#repository")
+        if repository is None:
+            return
+        try:
+            sources = self.controller.role_runtime_value_sources(
+                repository, role, provider, self._runtime_options_for_role(role, prefix),
+                preset_name=self._selected_presets.get(role),
+            )
+        except (ValueError, RuntimeError) as exc:
+            message = f"Cannot resolve values: {exc}"
+            for control in ("model", "reasoning", "permission"):
+                self.query_one(f"#{prefix}-{control}-source", Static).update(message)
+            return
+        for key, control in (("model", "model"), ("reasoning_effort", "reasoning"),
+                             ("permission_mode", "permission")):
+            resolved = sources.get(key)
+            message = "Not applicable (default)" if resolved is None else (
+                f"Effective: {resolved.value if resolved.value is not None else 'CLI default'} "
+                f"({resolved.source})"
+            )
+            self.query_one(f"#{prefix}-{control}-source", Static).update(message)
 
     def _update_advanced_indicators(
         self, role: AgentRole, prefix: str, provider: str, values: dict[str, Any]
