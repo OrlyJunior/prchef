@@ -23,10 +23,10 @@ Agents act with your authenticated GitHub CLI and local credentials. Start with 
 
 - Python 3.11 or newer, and Git.
 - The GitHub CLI (`gh`), installed and authenticated for the repository you want to use.
-- At least one agent backend:
+- A CLI backend for the implementer:
   - [Codex CLI](https://github.com/openai/codex) v0.156.0 or newer (the minimum version verified with this project's required flags)
   - [Claude Code](https://docs.claude.com/en/docs/claude-code) v2.1.259 or newer
-  - An API model through [LiteLLM](https://docs.litellm.ai/)
+- Optional API models through [LiteLLM](https://docs.litellm.ai/) for planning and review.
 
 ## Installation
 
@@ -112,21 +112,6 @@ orchestrator tui
 
 On the home screen, choose **Repositories** → **Add repository** → **Save repository** to register a local checkout, if it isn't already in your configuration. Then choose **Start workflow**, select the repository and task provider, pick a task, and start it.
 
-Manage agent providers through **Providers** on the home screen (shortcut **o**), alongside
-the other Settings destinations. Add, edit, or remove Codex CLI, Claude Code, and LiteLLM
-entries in `defaults.providers`; no repository selection is needed. An existing
-resolved global configuration is required. Provider names remain fixed when editing, and
-providers used by roles or presets cannot be removed. [orchestrator.example.yml](orchestrator.example.yml)
-remains the reference for all provider options.
-
-For LiteLLM, enter only an environment variable name in `api_key_env`, never an API key value.
-Local CLIs authenticate outside the editor. Gemini on Vertex uses LiteLLM with a
-`vertex_ai/` model and Application Default Credentials.
-Missing local executables produce a warning and can be installed later. Saved definitions
-apply to subsequent workflow submissions; select a provider manually for any role with an
-unavailable default. Active runs keep their resolved settings. Restart the TUI after changing
-an existing provider's `max_concurrency`, or to expand the dispatcher's startup capacity.
-
 The equivalent command for a GitHub issue:
 
 ```sh
@@ -134,6 +119,66 @@ orchestrator run --github-issue ISSUE_NUMBER --repository owner/repository
 ```
 
 For a Trello card, use `orchestrator run --trello-card CARD_ID --repository owner/repository` after configuring its credentials.
+
+## Providers and presets
+
+A provider is a named connection to an agent. Each role (planner, implementer, reviewer)
+chooses a provider by name. A preset is a reusable choice of provider and model, reasoning
+effort, permission mode, or generation options for one role.
+
+**API models can plan and review. The implementer needs Codex CLI or Claude Code to edit files.**
+
+Open **Providers** from the home screen (shortcut **o**). **How should this agent run?** offers:
+
+| Choice | YAML `type` | What it calls |
+| --- | --- | --- |
+| Codex CLI | `codex-cli` | An installed CLI in the supplied worktree. |
+| Claude Code | `claude-code` | An installed CLI with restricted file tools in the supplied worktree. |
+| Model API (LiteLLM) | `litellm` | An API model that returns text or structured output. |
+
+The screen edits `defaults.providers` in the existing global `orchestrator.yml`; no
+repository selection is needed. **Connection** holds the command or executable, endpoint,
+API key environment variable name, timeout in seconds, and maximum simultaneous calls.
+The collapsed **Defaults when no preset or launch value overrides them** holds model,
+reasoning effort, and permission settings where supported. Model API requires a base model
+in its provider definition, even when a preset supplies a different model.
+
+The precedence is **launch value > preset > repository provider setting > global provider
+setting > backend default**. Repository provider overrides win over this screen's edits.
+Concurrency is global: repository overrides cannot set `max_concurrency`. Other YAML options
+are preserved when saving the same run method. Changing the run method starts with that
+backend's fields. Provider names stay fixed when editing; used providers cannot be removed.
+An empty screen suggests a first provider named `codex` using Codex CLI.
+
+For Gemini on Vertex, choose **Model API (LiteLLM)**, then **Use Gemini on Vertex template**.
+Complete the `vertex_ai/` model prefix and replace the project placeholder. The template sets
+`generation.vertex_project` and `generation.vertex_location` (initially `global`). Authenticate
+outside the screen using Application Default Credentials, for example
+`gcloud auth application-default login`. For other APIs, `api_key_env` holds the environment
+variable's name; set the secret value outside the screen. Without that reference, LiteLLM
+uses the selected backend's environment or ambient credentials. CLIs also authenticate
+outside the editor.
+
+Existing `gemini-vertex` definitions load as LiteLLM in memory with a warning, preserving
+their provider names. Loading does not rewrite YAML. Saving an edited entry writes the
+displayed LiteLLM format. See [orchestrator.example.yml](orchestrator.example.yml) for the
+Vertex settings and other provider options.
+
+Presets live in `defaults.agent_presets.<role>` or
+`repositories.<key>.agent_presets.<role>`. **Agent presets** and explicit preset save actions
+on **Start workflow** write repository-scoped presets in the global YAML. Updating a preset
+preserves generation keys that the screen does not display. Selecting a preset on Start
+workflow copies those options for that run. The role controls show effective model, effort,
+and permission values with their source: launch, preset, provider, or default. Unchanged
+prefilled values show their inherited source. A manual edit detaches the selected preset;
+its copied values become launch values. An omitted CLI model or effort shows **CLI default**
+because the exact value depends on the CLI's own settings.
+
+Ordinary launch selections do not edit YAML. The run saves its provider selections and
+runtime options for continuation. Saved provider settings apply to subsequent submissions;
+active runs retain their resolved settings. Missing local executables produce a warning.
+Restart the TUI after changing an existing provider's `max_concurrency`, or to expand the
+dispatcher's startup capacity.
 
 ## CLI overview
 
