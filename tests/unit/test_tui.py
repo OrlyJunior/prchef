@@ -19,6 +19,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Button,
     Checkbox,
+    Collapsible,
     Input,
     Log,
     Select,
@@ -8493,6 +8494,143 @@ def test_provider_editor_preserves_hidden_options_and_clears_changed_type(tmp_pa
             assert values["type"] == "claude-code"
             assert "generation" not in values
             assert "temperature" not in values
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize("width", [80, 42])
+def test_provider_editor_plain_choices_groups_hints_and_wrapping(
+    tmp_path: Path, width: int,
+) -> None:
+    from textual.widgets._collapsible import CollapsibleTitle
+
+    controller, _, _ = _provider_editor_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(width, 30)) as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            selector = screen.query_one("#provider-type", OrchestratorSelect)
+            assert selector._options == [
+                ("Codex CLI", "codex-cli"), ("Claude Code", "claude-code"),
+                ("Model API (LiteLLM)", "litellm"),
+            ]
+            assert str(screen.query_one("#provider-run-question", Static).renderable) == (
+                "How should this agent run?"
+            )
+            assert "codex" in str(screen.query_one("#provider-status", Static).renderable)
+            defaults = screen.query_one("#provider-defaults", Collapsible)
+            assert defaults.collapsed
+            assert defaults.query_one("#provider-model") is screen.query_one("#provider-model")
+            connection = screen.query_one("#provider-connection")
+            assert connection.query_one("#provider-command") is screen.query_one(
+                "#provider-command"
+            )
+            assert "seconds" in str(screen.query_one("#provider-hint-timeout_seconds").renderable)
+            assert "number of calls" in str(
+                screen.query_one("#provider-hint-max_concurrency").renderable
+            )
+            assert "max_concurrency" in str(
+                screen.query_one("#provider-key-max_concurrency").renderable
+            )
+            assert "Launch value > preset > repository" in str(
+                screen.query_one("#provider-precedence").renderable
+            )
+            assert "cannot edit files" in str(screen.query_one("#provider-api-limit").renderable)
+            assert "preserved" in str(screen.query_one("#provider-hidden-options").renderable)
+            assert screen.query_one("#provider-intro").size.height > 1
+            title = defaults.query_one(CollapsibleTitle)
+            assert title.size.height >= (2 if width == 42 else 1)
+            for node in screen.query(Static):
+                if node.display and node.region.width:
+                    assert node.region.right <= width
+            for kind, fields in (
+                ("codex-cli", {"command", "reasoning_effort", "approval_policy"}),
+                ("claude-code", {"executable", "effort", "permission_mode"}),
+                ("litellm", {"api_base", "api_key_env"}),
+            ):
+                selector.value = kind
+                await settle_tui(pilot)
+                for field in ("command", "reasoning_effort", "approval_policy", "executable",
+                              "effort", "permission_mode", "api_base", "api_key_env"):
+                    assert screen.query_one(f"#provider-field-{field}").display == (field in fields)
+                assert screen.query_one("#provider-vertex-template").display == (kind == "litellm")
+                assert not screen.query_one("#provider-field-vertex_project").display
+
+    asyncio.run(drive())
+
+
+def test_provider_editor_vertex_template_preserves_hidden_options(tmp_path: Path) -> None:
+    controller, _, _ = _provider_editor_controller(tmp_path)
+    controller.save_provider("api", {
+        "type": "litellm", "model": "one", "generation": {"seed": 42}, "temperature": 0.7,
+    }, create=True)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#provider-select", OrchestratorSelect).value = "api"
+            await settle_tui(pilot)
+            screen.query_one("#provider-vertex-template", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#provider-model", Input).value == "vertex_ai/"
+            assert screen.query_one("#provider-vertex_project", Input).value == "your-gcp-project"
+            assert screen.query_one("#provider-vertex_location", Input).value == "global"
+            assert not screen.query_one("#provider-defaults", Collapsible).collapsed
+            assert screen.query_one("#provider-field-vertex_project").display
+            assert "gcloud auth application-default login" in str(
+                screen.query_one("#provider-auth", Static).renderable
+            )
+            screen.query_one("#provider-model", Input).value = "vertex_ai/gemini-test"
+            screen.query_one("#provider-vertex_project", Input).value = "example-project"
+            await settle_tui(pilot)
+            screen.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            assert "Provider saved" in str(screen.query_one("#provider-status", Static).renderable)
+            saved = controller.provider_settings()["api"]
+            assert saved["type"] == "litellm"
+            assert saved["model"] == "vertex_ai/gemini-test"
+            assert saved["temperature"] == 0.7
+            assert saved["generation"] == {
+                "seed": 42, "vertex_project": "example-project", "vertex_location": "global",
+            }
+            assert "vertex_project" not in saved
+
+    asyncio.run(drive())
+
+
+def test_provider_editor_repository_override_notice_keeps_override(tmp_path: Path) -> None:
+    import yaml
+
+    controller, _, path = _provider_editor_controller(tmp_path)
+    controller.save_provider("api", {"type": "litellm", "model": "global-model"}, create=True)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["repositories"]["example"]["providers"] = {"api": {"model": "repository-model"}}
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#provider-select", OrchestratorSelect).value = "api"
+            await settle_tui(pilot)
+            notice = str(screen.query_one("#provider-overrides", Static).renderable)
+            assert "example" in notice and "concurrency stays global" in notice
+            assert screen.query_one("#provider-model", Input).value == "global-model"
+            screen.query_one("#provider-model", Input).value = "edited-global"
+            await settle_tui(pilot)
+            screen.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            assert "Provider saved" in str(screen.query_one("#provider-status", Static).renderable)
+            assert controller.provider_settings()["api"]["model"] == "edited-global"
+            assert yaml.safe_load(path.read_bytes())["repositories"] == data["repositories"]
 
     asyncio.run(drive())
 

@@ -374,6 +374,9 @@ class WorkflowController:
     def provider_configuration_source(self) -> bytes:
         return self._config_loader.provider_configuration_source()
 
+    def provider_repository_overrides(self, name: str) -> list[str]:
+        return self._config_loader.provider_repository_overrides(name)
+
     def save_provider(
         self, name: str, settings: Mapping[str, Any], *, create: bool = False,
         expected_source: bytes | None = None,

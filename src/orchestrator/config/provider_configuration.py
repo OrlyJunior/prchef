@@ -211,6 +211,22 @@ def list_providers(path: Path) -> dict[str, dict[str, Any]]:
     return deepcopy(providers)
 
 
+def provider_repository_overrides(path: Path, name: str) -> list[str]:
+    """List repository entries overriding this global provider, without loading a checkout."""
+    repositories = _read(path)[2].get("repositories", {})
+    if not isinstance(repositories, dict):
+        raise ConfigurationError("repositories must be a mapping.")
+    result = []
+    for key, entry in repositories.items():
+        if not isinstance(entry, dict):
+            continue
+        providers = entry.get("providers", {})
+        override = providers.get(name) if isinstance(providers, dict) else None
+        if isinstance(override, dict) and override:
+            result.append(str(key))
+    return sorted(result)
+
+
 def provider_references(data: dict[str, Any], name: str) -> list[str]:
     """Inspect roles and presets, including inherited legacy implementer selection."""
     result: set[str] = set()

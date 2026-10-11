@@ -11,7 +11,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus, Resize
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Collapsible, Input, Static
 
 from orchestrator.config.project_config import ConfigurationError
 from orchestrator.config.provider_configuration import (
@@ -29,15 +29,35 @@ _FIELDS = {
                   "timeout_seconds", "max_concurrency"),
     "claude-code": ("executable", "model", "effort", "permission_mode",
                     "timeout_seconds", "max_concurrency"),
-    "litellm": ("model", "api_base", "api_key_env", "timeout_seconds", "max_concurrency"),
+    "litellm": ("model", "api_base", "api_key_env", "timeout_seconds", "max_concurrency",
+                "vertex_project", "vertex_location"),
 }
 _LABELS = {
-    "command": "Command (quoted arguments)", "model": "Model (free-form)",
-    "api_key_env": "API key environment variable name (never its value)",
-    "approval_policy": "Approval policy (optional: approve-for-me)",
-    "effort": "Effort (optional: low, medium, high, xhigh, max)",
-    "permission_mode": "Permission mode (dontAsk, acceptEdits, auto)",
+    "name": "Name", "command": "Command", "executable": "Executable",
+    "model": "Model", "reasoning_effort": "Reasoning effort", "effort": "Reasoning effort",
+    "api_base": "API endpoint", "api_key_env": "API key environment variable name",
+    "approval_policy": "Command approval", "permission_mode": "Permission mode",
+    "timeout_seconds": "Timeout", "max_concurrency": "Maximum simultaneous calls",
+    "vertex_project": "Google Cloud project", "vertex_location": "Vertex location",
 }
+_HINTS = {
+    "name": "Roles select this name; use codex for a first Codex CLI connection.",
+    "command": "Executable and arguments; quote paths with spaces and keep {output_file} and -.",
+    "executable": "One executable or path; do not add command arguments.",
+    "model": "A model supported by this connection; Model API requires a model here.",
+    "reasoning_effort": "Use an effort supported by Codex; blank uses its default.",
+    "effort": "Claude accepts low, medium, high, xhigh or max; blank uses its default.",
+    "api_base": "Optional endpoint URL; blank lets LiteLLM choose it from the model.",
+    "api_key_env": "The variable name only; set its secret value outside this screen.",
+    "approval_policy": "Optional approve-for-me runs commands without per-command review.",
+    "permission_mode": "Claude accepts dontAsk, acceptEdits or auto; presets can override this.",
+    "timeout_seconds": "Positive seconds per call; blank uses the backend's timeout default.",
+    "max_concurrency": "Positive number of calls across runs; restart after changing a limit.",
+    "vertex_project": "Replace the template project ID; blank uses credentials or environment.",
+    "vertex_location": "Vertex region or global; the Vertex template starts with global.",
+}
+_DEFAULT_FIELDS = {"model", "reasoning_effort", "effort", "permission_mode", "approval_policy"}
+_ALL_FIELDS = tuple(dict.fromkeys(field for fields in _FIELDS.values() for field in fields))
 
 
 def split_provider_command(value: str, *, windows: bool | None = None) -> list[str]:
@@ -84,7 +104,11 @@ class ProviderSettingsScreen(Screen[None]):
     BINDINGS = [("escape", "app.pop_screen", "Back")]
     DEFAULT_CSS = """
     #provider-settings { width: 100%; height: 1fr; padding: 1 2; }
-    #provider-form, .provider-field { height: auto; }
+    ProviderSettingsScreen Static { height: auto; width: 100%; }
+    #provider-form, #provider-connection, .provider-field { height: auto; }
+    #provider-defaults CollapsibleTitle { width: 1fr; height: auto; }
+    .provider-hint, .provider-key { color: $text-muted; }
+    #provider-overrides { margin-top: 1; }
     #provider-status, #provider-auth, #provider-restart { height: auto; margin-top: 1; }
     #provider-status.-error { color: $error; }
     ProviderSettingsScreen.-narrow .screen-actions { layout: vertical; }
@@ -106,7 +130,24 @@ class ProviderSettingsScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="provider-settings"):
             yield Static("Providers", classes="screen-title")
-            yield Static("Manage defaults.providers in the existing global orchestrator.yml.")
+            yield Static(
+                "A provider is a named way to reach an agent: a CLI installed on this machine "
+                "or an API model. Each role (planner, implementer, reviewer) chooses a provider "
+                "by name when a workflow starts and can add a preset.", id="provider-intro",
+            )
+            yield Static(
+                "Launch value > preset > repository provider setting > global provider setting "
+                "> backend default.", id="provider-precedence",
+            )
+            yield Static(
+                "Model API can plan and review, but cannot edit files. The implementer needs "
+                "Codex CLI or Claude Code.", id="provider-api-limit",
+            )
+            yield Static(
+                "This screen edits defaults.providers in the existing global orchestrator.yml. "
+                "Other options exist in YAML and are preserved when saving the same run method.",
+                id="provider-hidden-options",
+            )
             yield Static(
                 "Saved settings apply to subsequent workflow submissions. Active runs keep their "
                 "settings. Restart the TUI after changing an existing max_concurrency limit; "
@@ -118,25 +159,49 @@ class ProviderSettingsScreen(Screen[None]):
                 yield Button("Add provider", id="add-provider", variant="success")
                 yield Button("Reload", id="reload-providers")
             with Vertical(id="provider-form", classes="workflow-form"):
-                yield Static("Name", classes="field-label")
-                yield Input(id="provider-name")
-                yield Static("Type", classes="field-label")
+                yield Static("How should this agent run?", classes="field-label",
+                             id="provider-run-question")
+                yield Static("Configuration key: type", classes="provider-key")
                 yield OrchestratorSelect(
                     [("Codex CLI", "codex-cli"), ("Claude Code", "claude-code"),
-                     ("API model (LiteLLM)", "litellm")],
+                     ("Model API (LiteLLM)", "litellm")],
                     allow_blank=False, id="provider-type",
                 )
-                for field in dict.fromkeys(
-                    field for fields in _FIELDS.values() for field in fields
+                yield Button("Use Gemini on Vertex template", id="provider-vertex-template")
+                with Vertical(id="provider-connection"):
+                    yield Static("Connection", classes="role-title", id="provider-connection-title")
+                    yield from self._field("name")
+                    for field in _ALL_FIELDS:
+                        if field not in _DEFAULT_FIELDS:
+                            yield from self._field(field)
+                with Collapsible(
+                    title="Defaults when no preset or launch value overrides them",
+                    collapsed=True, id="provider-defaults",
                 ):
-                    with Vertical(classes="provider-field", id=f"provider-field-{field}"):
-                        yield Static(_LABELS.get(field, field), classes="field-label")
-                        yield Input(id=f"provider-{field}")
+                    yield Static(
+                        "Presets and launch values override these defaults. Model API requires "
+                        "a base model even when a preset will override it.",
+                    )
+                    for field in _ALL_FIELDS:
+                        if field in _DEFAULT_FIELDS:
+                            yield from self._field(field)
+                yield Static("", id="provider-overrides", markup=False)
                 yield Static("", id="provider-auth")
                 with Horizontal(classes="screen-actions"):
                     yield Button("Save provider", id="save-provider", variant="primary")
                     yield Button("Remove provider", id="remove-provider", variant="error")
             yield Static("", id="provider-status")
+
+    def _field(self, field: str) -> ComposeResult:
+        key = "defaults.providers.<name>" if field == "name" else (
+            f"generation.{field}" if field.startswith("vertex_") else field
+        )
+        with Vertical(classes="provider-field", id=f"provider-field-{field}"):
+            yield Static(_LABELS[field], classes="field-label", id=f"provider-label-{field}")
+            yield Static(_HINTS[field], classes="provider-hint", id=f"provider-hint-{field}")
+            yield Static(f"Configuration key: {key}", classes="provider-key",
+                         id=f"provider-key-{field}")
+            yield Input(id=f"provider-{field}", placeholder="codex" if field == "name" else "")
 
     def on_mount(self) -> None:
         self.set_class(self.size.width <= 60, "-narrow")
@@ -186,7 +251,7 @@ class ProviderSettingsScreen(Screen[None]):
         self.query_one("#add-provider", Button).disabled = False
         self.query_one("#save-provider", Button).disabled = False
         self._status("Select a provider to edit or add a new provider." if providers else
-                     "No providers configured. Enter a name and save your first provider.")
+                     "No providers configured. Try the name codex with Codex CLI, then save.")
         if selected in providers:
             selector.value = selected
             self._edit(selected)
@@ -196,6 +261,7 @@ class ProviderSettingsScreen(Screen[None]):
     def _new(self) -> None:
         self._editing = None
         self._original = {}
+        self.query_one("#provider-overrides", Static).update("")
         self.query_one("#save-provider", Button).disabled = self._source is None
         self.query_one("#provider-select", OrchestratorSelect).clear()
         self.query_one("#provider-name", Input).disabled = False
@@ -209,6 +275,15 @@ class ProviderSettingsScreen(Screen[None]):
             return
         self._editing = name
         self._original = deepcopy(self._providers[name])
+        try:
+            overrides = self.controller.provider_repository_overrides(name)
+            notice = (
+                "Repository-specific settings override this provider in: " + ", ".join(overrides)
+                + ". They win over the global settings edited here; concurrency stays global."
+            ) if overrides else ""
+        except ConfigurationError:
+            notice = "Could not inspect repository-specific overrides; reload the configuration."
+        self.query_one("#provider-overrides", Static).update(notice)
         self.query_one("#save-provider", Button).disabled = self._source is None
         self.query_one("#provider-name", Input).value = name
         self.query_one("#provider-name", Input).disabled = True
@@ -233,21 +308,47 @@ class ProviderSettingsScreen(Screen[None]):
 
     def _fill(self, kind: str, values: dict[str, Any]) -> None:
         self._kind = kind
-        for field in dict.fromkeys(field for fields in _FIELDS.values() for field in fields):
-            self.query_one(f"#provider-field-{field}").display = field in _FIELDS[kind]
-            value = values.get(field)
+        generation = values.get("generation", {})
+        for field in _ALL_FIELDS:
+            value = generation.get(field) if (
+                field.startswith("vertex_") and isinstance(generation, dict)
+            ) else values.get(field)
+            if field in {"max_concurrency", "executable"} and field not in values:
+                value = PROVIDER_DEFAULTS[kind].get(field)
             rendered = shlex.join(value) if (
                 field == "command" and isinstance(value, list) and
                 all(isinstance(argument, str) for argument in value)
             ) else \
                 ("" if value is None else str(value))
             self.query_one(f"#provider-{field}", Input).value = rendered
+        self._update_visibility()
+
+    def _update_visibility(self) -> None:
+        kind = self._kind
+        vertex = kind == "litellm" and self.query_one(
+            "#provider-model", Input
+        ).value.strip().startswith("vertex_ai/")
+        for field in _ALL_FIELDS:
+            self.query_one(f"#provider-field-{field}").display = (
+                field in _FIELDS[kind] and (not field.startswith("vertex_") or vertex)
+            )
+        self.query_one("#provider-vertex-template", Button).display = kind == "litellm"
         guidance = {
             "litellm": "API keys are environment variable references only. Set the value outside "
                        "this screen; it is never read or saved here.",
         }.get(kind, "Authenticate using the CLI outside this screen. Never embed credentials "
                     "in commands or YAML.")
+        if vertex:
+            guidance = (
+                "Gemini on Vertex uses LiteLLM. Authenticate outside this screen with "
+                "Application Default Credentials, for example gcloud auth application-default "
+                "login. Keep credentials out of YAML."
+            )
         self.query_one("#provider-auth", Static).update(guidance)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "provider-model":
+            self._update_visibility()
 
     def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
         if event.select.value != event.value or not isinstance(event.value, str):
@@ -266,6 +367,13 @@ class ProviderSettingsScreen(Screen[None]):
             self._reload(self._editing)
         elif event.button.id == "save-provider":
             self._save()
+        elif event.button.id == "provider-vertex-template":
+            self.query_one("#provider-model", Input).value = "vertex_ai/"
+            self.query_one("#provider-vertex_project", Input).value = "your-gcp-project"
+            self.query_one("#provider-vertex_location", Input).value = "global"
+            self.query_one("#provider-defaults", Collapsible).collapsed = False
+            self._update_visibility()
+            self.query_one("#provider-model", Input).focus()
         elif (event.button.id == "remove-provider" and self._editing is not None
               and self._source is not None):
             name = self._editing
@@ -279,6 +387,18 @@ class ProviderSettingsScreen(Screen[None]):
         values["type"] = self._kind
         try:
             for field in _FIELDS[self._kind]:
+                if field.startswith("vertex_"):
+                    if not self.query_one(f"#provider-field-{field}").display:
+                        continue
+                    generation = values.setdefault("generation", {})
+                    if not isinstance(generation, dict):
+                        raise ConfigurationError("generation must be a mapping.")
+                    option = self.query_one(f"#provider-{field}", Input).value.strip()
+                    if option:
+                        generation[field] = option
+                    else:
+                        generation.pop(field, None)
+                    continue
                 value = self.query_one(f"#provider-{field}", Input).value.strip()
                 if not value:
                     values.pop(field, None)

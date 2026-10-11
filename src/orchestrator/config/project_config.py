@@ -1376,6 +1376,11 @@ class ProjectConfigLoader:
     def provider_configuration_source(self) -> bytes:
         return self._config_file.read_bytes()
 
+    def provider_repository_overrides(self, name: str) -> list[str]:
+        from orchestrator.config.provider_configuration import provider_repository_overrides
+
+        return provider_repository_overrides(self._config_file, name)
+
     def save_provider(
         self, name: str, settings: Mapping[str, Any], *, create: bool = False,
         expected_source: bytes | None = None,

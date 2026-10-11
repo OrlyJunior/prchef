@@ -20,6 +20,21 @@ def definition(kind: str) -> dict[str, Any]:
     return values
 
 
+def test_repository_override_listing_is_read_only(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.yml"
+    original = (
+        b"defaults: {providers: {api: {type: litellm, model: global}}}\n"
+        b"repositories:\n  z: {providers: {api: {model: local}}}\n"
+        b"  a: {providers: {api: {generation: {seed: 42}}}}\n"
+        b"  other: {providers: {different: {model: other}}}\n"
+        b"  empty: {providers: {api: {}}}\n"
+    )
+    path.write_bytes(original)
+    assert ProjectConfigLoader(path).provider_repository_overrides("api") == ["a", "z"]
+    assert ProjectConfigLoader(path).provider_repository_overrides("missing") == []
+    assert path.read_bytes() == original
+
+
 @pytest.mark.parametrize("kind", editor.PROVIDER_DEFAULTS)
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 def test_provider_crud_preserves_remainder(
