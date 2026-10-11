@@ -9,7 +9,7 @@ from enum import StrEnum
 from io import StringIO
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -18,6 +18,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictInt,
+    TypeAdapter,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -47,7 +48,6 @@ _PROVIDER_SUPPORT_TIERS: dict[str, ProviderSupportTier] = {
     "litellm": ProviderSupportTier.FIRST_CLASS,
     "codex-cli": ProviderSupportTier.FIRST_CLASS,
     "claude-code": ProviderSupportTier.FIRST_CLASS,
-    "gemini-vertex": ProviderSupportTier.OPTIONAL,
 }
 
 
@@ -659,29 +659,6 @@ class ClaudeCodeProviderSettings(BaseModel):
         return value
 
 
-class GeminiGenerationSettings(BaseModel):
-    """Small, provider-local set of generation controls for Vertex Gemini."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    temperature: float = Field(default=0.2, ge=0, le=2)
-    max_output_tokens: int | None = Field(default=None, gt=0)
-
-
-class GeminiVertexProviderSettings(BaseModel):
-    """Configuration for a Google Gen AI SDK client in Vertex AI mode."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: Literal["gemini-vertex"] = "gemini-vertex"
-    max_concurrency: StrictInt = _max_concurrency_field()
-    project: str = Field(min_length=1)
-    location: str = Field(default="global", min_length=1)
-    model: str = Field(min_length=1)
-    timeout_seconds: int = Field(default=900, gt=0)
-    generation: GeminiGenerationSettings = Field(default_factory=GeminiGenerationSettings)
-
-
 class LiteLLMProviderSettings(BaseModel):
     """Configuration for LiteLLM's generic API-model execution backend.
 
@@ -733,12 +710,83 @@ class LiteLLMProviderSettings(BaseModel):
         return value
 
 
+def convert_legacy_vertex_provider(
+    name: str, settings: Mapping[str, Any], *, warn: bool = True,
+) -> dict[str, Any]:
+    """Translate the retired Vertex format without mutating its source or losing fields."""
+    values = deepcopy(dict(settings))
+    if values.get("type") != "gemini-vertex":
+        return values
+    allowed = {"type", "model", "project", "location", "timeout_seconds",
+               "max_concurrency", "generation"}
+
+    def invalid(field: str) -> ConfigurationError:
+        return ConfigurationError(
+            f"Legacy gemini-vertex provider {name!r}: cannot faithfully convert field {field!r}."
+        )
+
+    unknown = sorted(set(values) - allowed)
+    if unknown:
+        raise invalid(unknown[0])
+    strings: dict[str, str] = {}
+    for field in ("model", "project", "location"):
+        value = values.get(field, "global" if field == "location" else None)
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise invalid(field)
+        strings[field] = value
+    generation = values.get("generation", {})
+    if not isinstance(generation, Mapping):
+        raise invalid("generation")
+    unknown_generation = sorted(set(generation) - {"temperature", "max_output_tokens"})
+    if unknown_generation:
+        raise invalid(f"generation.{unknown_generation[0]}")
+    # Retain the old schema's defaults and bounds, including integer timeouts.
+    try:
+        timeout: int = TypeAdapter(Annotated[int, Field(gt=0)]).validate_python(
+            values.get("timeout_seconds", 900)
+        )
+    except ValueError:
+        raise invalid("timeout_seconds") from None
+    try:
+        temperature: float = TypeAdapter(Annotated[float, Field(ge=0, le=2)]).validate_python(
+            generation.get("temperature", 0.2)
+        )
+    except ValueError:
+        raise invalid("generation.temperature") from None
+    tokens = generation.get("max_output_tokens")
+    if tokens is not None:
+        try:
+            tokens = TypeAdapter(Annotated[int, Field(gt=0)]).validate_python(tokens)
+        except ValueError:
+            raise invalid("generation.max_output_tokens") from None
+    model = strings["model"]
+    converted = {
+        "type": "litellm",
+        "model": model if model.startswith("vertex_ai/") else f"vertex_ai/{model}",
+        "max_concurrency": values.get("max_concurrency", 1),
+        "timeout_seconds": timeout,
+        "temperature": temperature,
+        "max_output_tokens": tokens,
+        "generation": {"vertex_project": strings["project"],
+                       "vertex_location": strings["location"]},
+    }
+    try:
+        LiteLLMProviderSettings.model_validate(converted)
+    except ValueError:
+        raise invalid("max_concurrency") from None
+    if warn:
+        logger.warning(
+            "Provider %r: legacy gemini-vertex entry converted to litellm in memory; "
+            "the YAML file was not rewritten.", name,
+        )
+    return converted
+
+
 def _validate_provider_settings(
     values: Mapping[str, Any], provider_name: str
 ) -> (
     CodexCliProviderSettings
     | ClaudeCodeProviderSettings
-    | GeminiVertexProviderSettings
     | LiteLLMProviderSettings
 ):
     """Validate a runtime-adjusted provider through its existing schema."""
@@ -749,8 +797,6 @@ def _validate_provider_settings(
             return CodexCliProviderSettings.model_validate(values)
         if provider_type == "claude-code":
             return ClaudeCodeProviderSettings.model_validate(values)
-        if provider_type == "gemini-vertex":
-            return GeminiVertexProviderSettings.model_validate(values)
         if provider_type == "litellm":
             return LiteLLMProviderSettings.model_validate(values)
     except ValueError as exc:
@@ -892,6 +938,11 @@ class ProjectConfig(BaseModel):
                         "which cannot be resolved; define agents and providers with a "
                         "supported type such as 'codex-cli'"
                     )
+        providers = values.get("providers", {})
+        if isinstance(providers, dict):
+            for name, settings in providers.items():
+                if isinstance(settings, dict) and settings.get("type") == "gemini-vertex":
+                    providers[name] = convert_legacy_vertex_provider(name, settings)
         return values
 
     @model_validator(mode="after")
@@ -1043,8 +1094,6 @@ class ProjectConfig(BaseModel):
                 supports_reasoning_effort=True,
                 supports_permission_mode=True,
             )
-        if settings.type == "gemini-vertex":
-            return ProviderRuntimeCapabilities(supports_model=True, supports_generation=True)
         if settings.type == "litellm":
             return ProviderRuntimeCapabilities(supports_model=True, supports_generation=True)
         return ProviderRuntimeCapabilities()
@@ -1067,12 +1116,6 @@ class ProjectConfig(BaseModel):
                 "model": claude.model,
                 "reasoning_effort": claude.effort,
                 "permission_mode": claude.permission_mode,
-            }
-        if settings.type == "gemini-vertex":
-            vertex = GeminiVertexProviderSettings.model_validate(settings.model_dump())
-            return {
-                "model": vertex.model,
-                "generation": vertex.generation.model_dump(),
             }
         if settings.type == "litellm":
             litellm = LiteLLMProviderSettings.model_validate(settings.model_dump())
@@ -1287,6 +1330,18 @@ class ProjectConfigLoader:
         # those paths retain that behavior while all actual loads share discovery.
         self._requested_config_file = config_file
         self._resolved_config_file: Path | None = None
+        self._converted_vertex_providers: set[str] = set()
+
+    def _convert_provider_entries(self, configuration: dict[str, Any]) -> None:
+        providers = configuration.get("providers", {})
+        if not isinstance(providers, dict):
+            return
+        for name, settings in providers.items():
+            if isinstance(settings, dict) and settings.get("type") == "gemini-vertex":
+                providers[name] = convert_legacy_vertex_provider(
+                    name, settings, warn=name not in self._converted_vertex_providers,
+                )
+                self._converted_vertex_providers.add(name)
 
     @property
     def _config_file(self) -> Path:
@@ -1304,6 +1359,7 @@ class ProjectConfigLoader:
 
         configuration = deepcopy(defaults)
         configuration["path"] = self._config_file.parent
+        self._convert_provider_entries(configuration)
         try:
             return ProjectConfig.model_validate(configuration)
         except ValueError as exc:
@@ -1313,7 +1369,9 @@ class ProjectConfigLoader:
         """Read global provider definitions without selecting a repository."""
         from orchestrator.config.provider_configuration import list_providers
 
-        return list_providers(self._config_file)
+        providers = list_providers(self._config_file)
+        self._convert_provider_entries({"providers": providers})
+        return providers
 
     def provider_configuration_source(self) -> bytes:
         return self._config_file.read_bytes()
@@ -1725,6 +1783,7 @@ class ProjectConfigLoader:
                     )
                 qdrant["path"] = index_path
 
+        self._convert_provider_entries(merged)
         try:
             return ProjectConfig.model_validate(merged)
         except ValueError as exc:

@@ -29,7 +29,6 @@ _FIELDS = {
     "claude-code": ("executable", "model", "effort", "permission_mode",
                     "timeout_seconds", "max_concurrency"),
     "litellm": ("model", "api_base", "api_key_env", "timeout_seconds", "max_concurrency"),
-    "gemini-vertex": ("project", "model", "location", "timeout_seconds", "max_concurrency"),
 }
 _LABELS = {
     "command": "Command (quoted arguments)", "model": "Model (free-form)",
@@ -110,7 +109,7 @@ class ProviderSettingsScreen(Screen[None]):
                 yield Static("Type", classes="field-label")
                 yield OrchestratorSelect(
                     [("Codex CLI", "codex-cli"), ("Claude Code", "claude-code"),
-                     ("API model (LiteLLM)", "litellm"), ("Gemini on Vertex AI", "gemini-vertex")],
+                     ("API model (LiteLLM)", "litellm")],
                     allow_blank=False, id="provider-type",
                 )
                 for field in dict.fromkeys(
@@ -232,8 +231,6 @@ class ProviderSettingsScreen(Screen[None]):
         guidance = {
             "litellm": "API keys are environment variable references only. Set the value outside "
                        "this screen; it is never read or saved here.",
-            "gemini-vertex": "Authenticate outside this screen using Application Default "
-                             "Credentials (ADC). Credentials are never stored in YAML.",
         }.get(kind, "Authenticate using the CLI outside this screen. Never embed credentials "
                     "in commands or YAML.")
         self.query_one("#provider-auth", Static).update(guidance)
@@ -272,8 +269,7 @@ class ProviderSettingsScreen(Screen[None]):
                 if not value:
                     values.pop(field, None)
                     if field in ("command", "max_concurrency", "executable") or (
-                        field in ("model", "project", "location") and
-                        self._kind in ("litellm", "gemini-vertex")
+                        field == "model" and self._kind == "litellm"
                     ):
                         raise ConfigurationError(f"{field} is required.")
                     continue

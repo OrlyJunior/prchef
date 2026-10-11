@@ -12,7 +12,6 @@ from orchestrator.config.project_config import (
 from orchestrator.models import AgentRole
 from orchestrator.providers.claude_code_provider import ClaudeCodeAgentProvider
 from orchestrator.providers.codex_provider import CodexAgentProvider
-from orchestrator.providers.gemini_vertex_provider import GeminiVertexAgentProvider
 from orchestrator.providers.litellm_provider import LiteLLMAgentProvider
 
 
@@ -145,7 +144,7 @@ def test_litellm_backend_is_preserved_for_independent_planner_and_reviewer_roles
     assert isinstance(clients.agent(AgentRole.IMPLEMENTER), CodexAgentProvider)
 
 
-def test_legacy_gemini_vertex_backend_remains_available(tmp_path: Path) -> None:
+def test_legacy_vertex_provider_name_resolves_to_litellm(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
         agents={
@@ -165,8 +164,8 @@ def test_legacy_gemini_vertex_backend_remains_available(tmp_path: Path) -> None:
 
     clients = ClientFactory().create(config)
 
-    assert isinstance(clients.agent(AgentRole.PLANNER), GeminiVertexAgentProvider)
-    assert isinstance(clients.agent(AgentRole.REVIEWER), GeminiVertexAgentProvider)
+    assert isinstance(clients.agent(AgentRole.PLANNER), LiteLLMAgentProvider)
+    assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.REVIEWER)
 
 
 def test_unknown_provider_name_has_an_actionable_error(tmp_path: Path) -> None:
@@ -263,6 +262,6 @@ def test_verbose_factory_logging_reports_the_final_role_resolution(
         ClientFactory().create(config)
 
     assert (
-        "planner -> remote (gemini-vertex); implementer -> local (codex-cli); "
-        "reviewer -> remote (gemini-vertex)"
+        "planner -> remote (litellm); implementer -> local (codex-cli); "
+        "reviewer -> remote (litellm)"
     ) in caplog.text

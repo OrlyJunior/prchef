@@ -8177,7 +8177,7 @@ def _provider_editor_controller(
     return controller, service, path
 
 
-@pytest.mark.parametrize("kind", ["codex-cli", "claude-code", "litellm", "gemini-vertex"])
+@pytest.mark.parametrize("kind", ["codex-cli", "claude-code", "litellm"])
 def test_provider_editor_types_crud_and_keyboard_scrolling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
 ) -> None:
@@ -8209,15 +8209,12 @@ def test_provider_editor_types_crud_and_keyboard_scrolling(
             assert screen.query_one("#provider-field-command").display == (kind == "codex-cli")
             assert screen.query_one("#provider-field-executable").display == (kind == "claude-code")
             assert screen.query_one("#provider-field-api_key_env").display == (kind == "litellm")
-            assert screen.query_one("#provider-field-project").display == (kind == "gemini-vertex")
             for field, value in PROVIDER_DEFAULTS[kind].items():
                 if field != "command":
                     assert screen.query_one(f"#provider-{field}", Input).value == str(value)
             screen.query_one("#provider-name", Input).value = "new"
-            if kind in ("litellm", "gemini-vertex"):
+            if kind == "litellm":
                 screen.query_one("#provider-model", Input).value = "test/model"
-            if kind == "gemini-vertex":
-                screen.query_one("#provider-project", Input).value = "test-project"
             button = screen.query_one("#save-provider", Button)
             button.focus()
             await settle_tui(pilot)
@@ -8486,15 +8483,14 @@ def test_provider_editor_preserves_hidden_options_and_clears_changed_type(tmp_pa
             values = controller.provider_settings()["api"]
             assert values["generation"] == {"seed": 42}
             assert values["temperature"] == 0.7
-            screen.query_one("#provider-type", OrchestratorSelect).value = "gemini-vertex"
+            screen.query_one("#provider-type", OrchestratorSelect).value = "claude-code"
             await settle_tui(pilot)
             assert screen.query_one("#provider-model", Input).value == ""
-            screen.query_one("#provider-model", Input).value = "vertex/model"
-            screen.query_one("#provider-project", Input).value = "project"
+            screen.query_one("#provider-model", Input).value = "claude-model"
             screen.query_one("#save-provider", Button).press()
             await settle_tui(pilot)
             values = controller.provider_settings()["api"]
-            assert values["type"] == "gemini-vertex"
+            assert values["type"] == "claude-code"
             assert "generation" not in values
             assert "temperature" not in values
 

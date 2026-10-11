@@ -422,7 +422,8 @@ def test_role_runtime_overrides_are_validated_in_memory_and_keep_defaults(tmp_pa
     }
     assert overridden.provider_runtime_values("__tui_runtime_planner") == {
         "model": "another-gemini-model",
-        "generation": {"temperature": 0.8, "max_output_tokens": 512},
+        "generation": {"temperature": 0.8, "max_output_tokens": 512,
+                       "vertex_project": "example-project", "vertex_location": "global"},
     }
 
 
@@ -743,7 +744,8 @@ def test_agent_preset_supports_provider_generation_options(tmp_path: Path) -> No
     selected = config.with_agent_preset("planner", "creative")
     assert selected.provider_runtime_values("__tui_runtime_planner") == {
         "model": "free-form-model",
-        "generation": {"temperature": 0.8, "max_output_tokens": 512},
+        "generation": {"temperature": 0.8, "max_output_tokens": 512,
+                       "vertex_project": "example-project", "vertex_location": "global"},
     }
 
 
@@ -1483,7 +1485,7 @@ def test_explicit_agent_configuration_takes_precedence_over_legacy_roles(
     assert config.agents.planner.provider == "vertex-gemini"
     assert config.agents.implementer.provider == "codex"
     assert config.agents.reviewer.provider == "vertex-gemini"
-    assert config.providers["vertex-gemini"].type == "gemini-vertex"
+    assert config.providers["vertex-gemini"].type == "litellm"
     codex = CodexCliProviderSettings.model_validate(config.providers["codex"].model_dump())
     assert codex.model == "modern-model"
     assert codex.reasoning_effort == "high"

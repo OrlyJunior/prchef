@@ -145,14 +145,14 @@ defaults:
     #   # max_budget_usd: 5.00
     # Requires ADC (for example, `gcloud auth application-default login`), not an API key.
     # vertex-gemini:
-    #   type: gemini-vertex
-    #   project: my-gcp-project
-    #   location: global
-    #   model: gemini-2.5-flash
+    #   type: litellm
+    #   model: vertex_ai/gemini-2.5-flash
     #   timeout_seconds: 900
+    #   temperature: 0.2
+    #   # max_output_tokens: 8192
     #   generation:
-    #     temperature: 0.2
-    #     # max_output_tokens: 8192
+    #     vertex_project: my-gcp-project
+    #     vertex_location: global
     # LiteLLM is the primary API model backend and is included in the standard installation.
     # Model identifiers are free-form. A key is referenced by its environment
     # variable name only; omit api_key_env for local/self-hosted endpoints.
