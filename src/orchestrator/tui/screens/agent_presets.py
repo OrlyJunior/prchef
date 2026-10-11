@@ -484,16 +484,23 @@ class AgentPresetsScreen(Screen[None]):
         provider = self.query_one("#agent-preset-provider", OrchestratorSelect).value
         if not isinstance(provider, str):
             raise ValueError("Choose a provider first")
-        generation = {
-            "temperature": self._optional("temperature"),
-            "max_output_tokens": self._optional("max-output-tokens"),
-        }
+        original = self._selected_agent_preset()
+        generation = dict(original.generation) if original is not None else {}
+        for key, control in (("temperature", "temperature"),
+                             ("max_output_tokens", "max-output-tokens")):
+            if not self.query_one(f"#agent-preset-{control}", Input).display:
+                continue
+            value = self._optional(control)
+            if value is None:
+                generation.pop(key, None)
+            else:
+                generation[key] = value
         return AgentPresetConfig(
             provider=provider,
             model=self._optional("model"),
             reasoning_effort=self._optional("reasoning"),
             permission_mode=self._permission_mode(),
-            generation={key: value for key, value in generation.items() if value is not None},
+            generation=generation,
         )
 
     def _clear_values(self) -> None:

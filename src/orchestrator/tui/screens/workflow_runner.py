@@ -207,6 +207,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._suppressed_manual_preset_changes: set[AgentRole] = set()
         self._runtime_inputs: dict[tuple[AgentRole, str], dict[str, Any]] = {}
         self._runtime_defaults: dict[tuple[AgentRole, str], dict[str, Any]] = {}
+        self._preset_generation_values: dict[tuple[AgentRole, str], dict[str, Any]] = {}
         self._advanced_open: dict[AgentRole, bool] = {}
         self._task_load_token = 0
         self._task_context: tuple[str, str] | None = None
@@ -623,6 +624,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._selected_presets.clear()
         self._runtime_inputs.clear()
         self._runtime_defaults.clear()
+        self._preset_generation_values.clear()
         self._advanced_open.clear()
         for role, prefix in self._role_fields():
             select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
@@ -801,6 +803,8 @@ class WorkflowRunnerScreen(Screen[None]):
             return
         for key in [key for key in self._runtime_inputs if key[0] is role]:
             del self._runtime_inputs[key]
+        for key in [key for key in self._preset_generation_values if key[0] is role]:
+            del self._preset_generation_values[key]
         for name in ("model", "reasoning", "temperature", "max-output-tokens"):
             self.query_one(f"#{prefix}-{name}", Input).value = ""
         provider_select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
@@ -834,6 +838,9 @@ class WorkflowRunnerScreen(Screen[None]):
             selector.value = _MANUAL_PRESET
 
     def _set_preset_runtime_controls(self, prefix: str, preset: AgentPresetConfig) -> None:
+        self._preset_generation_values[(AgentRole(prefix), preset.provider)] = dict(
+            preset.generation
+        )
         # Omitted preset fields inherit the selected provider's YAML defaults,
         # which `_load_role_runtime_controls` has already populated.
         if preset.model is not None:
@@ -875,6 +882,9 @@ class WorkflowRunnerScreen(Screen[None]):
         if self._selected(f"#{prefix}-provider") != preset.provider:
             return False
         current = self._preset_from_controls(role, prefix).model_dump(exclude_none=True)
+        # Hidden keys are retained for launch, but cannot be compared with visible controls.
+        current["generation"] = {key: value for key, value in current["generation"].items()
+                                 if key in _CONTROLLED_GENERATION_OPTIONS}
         expected = self._preset_with_provider_defaults(preset).model_dump(exclude_none=True)
         return bool(
             self._preset_comparison_value(current)
@@ -1074,18 +1084,19 @@ class WorkflowRunnerScreen(Screen[None]):
         }
 
     def _runtime_values_from_controls(self, prefix: str) -> dict[str, Any]:
+        role = AgentRole(prefix)
+        provider = self._role_providers.get(role)
+        generation = dict(self._preset_generation_values.get((role, provider), {})) \
+            if provider is not None else {}
+        for name in ("temperature", "max-output-tokens"):
+            generation[name.replace("-", "_")] = self.query_one(
+                f"#{prefix}-{name}", Input
+            ).value.strip() or None
         return {
             "model": self.query_one(f"#{prefix}-model", Input).value.strip() or None,
             "reasoning_effort": self.query_one(f"#{prefix}-reasoning", Input).value.strip() or None,
             "permission_mode": self._permission_mode(prefix),
-            "generation": {
-                "temperature": self.query_one(f"#{prefix}-temperature", Input).value.strip()
-                or None,
-                "max_output_tokens": self.query_one(
-                    f"#{prefix}-max-output-tokens", Input
-                ).value.strip()
-                or None,
-            },
+            "generation": generation,
         }
 
     def _runtime_options_for_role(self, role: AgentRole, prefix: str) -> dict[str, Any]:

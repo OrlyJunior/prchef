@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
@@ -37,6 +38,19 @@ _LABELS = {
     "effort": "Effort (optional: low, medium, high, xhigh, max)",
     "permission_mode": "Permission mode (dontAsk, acceptEdits, auto)",
 }
+
+
+def split_provider_command(value: str, *, windows: bool | None = None) -> list[str]:
+    """Keep Windows path separators while retaining the editor's argument quoting."""
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return shlex.split(value)
+    lexer = shlex.shlex(value, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""
+    return list(lexer)
 
 
 class RemoveProviderConfirmation(ModalScreen[bool]):
@@ -275,7 +289,7 @@ class ProviderSettingsScreen(Screen[None]):
                     continue
                 if field == "command":
                     try:
-                        values[field] = shlex.split(value)
+                        values[field] = split_provider_command(value)
                     except ValueError:
                         raise ConfigurationError("command has invalid argument quoting.") from None
                 elif field in ("max_concurrency", "timeout_seconds"):

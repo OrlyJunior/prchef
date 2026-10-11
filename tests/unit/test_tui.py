@@ -8495,3 +8495,81 @@ def test_provider_editor_preserves_hidden_options_and_clears_changed_type(tmp_pa
             assert "temperature" not in values
 
     asyncio.run(drive())
+
+
+def test_agent_presets_update_preserves_all_generation_options(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    original = {
+        "temperature": 0.4, "max_output_tokens": 512, "seed": 42, "top_p": 0.9,
+        "vertex_project": "example-project", "vertex_location": "global",
+        "thinking": {"budget": 128},
+    }
+    config.agent_presets = {
+        "planner": {"complete": AgentPresetConfig(provider="planner", generation=original)}
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("p")
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#agent-presets-repository", Select).value = "example"
+            await settle_tui(pilot)
+            screen.query_one("#agent-preset-select", Select).value = "complete"
+            await settle_tui(pilot)
+            screen.query_one("#agent-preset-temperature", Input).value = "0.6"
+            screen.query_one("#agent-preset-max-output-tokens", Input).value = ""
+            screen.query_one("#update-agent-preset", Button).press()
+            await settle_tui(pilot)
+            saved = config.agent_presets["planner"]["complete"]
+            expected = dict(original)
+            expected["temperature"] = "0.6"
+            expected.pop("max_output_tokens")
+            assert saved.generation == expected
+            assert original["temperature"] == 0.4
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_preserves_hidden_preset_generation_after_manual_edits(
+    tmp_path: Path,
+) -> None:
+    controller, service, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    hidden = {"seed": 42, "top_p": 0.9, "vertex_project": "example-project",
+              "vertex_location": "global", "thinking": {"budget": 128}}
+    config.agent_presets = {
+        "planner": {"complete": AgentPresetConfig(
+            provider="planner", model="preset-model", generation={**hidden, "temperature": 0.4},
+        )}
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#planner-preset", Select).value = "complete"
+            await settle_tui(pilot)
+            options = screen._runtime_options_for_role(AgentRole.PLANNER, "planner")
+            assert all(options["generation"][key] == value for key, value in hidden.items())
+            assert screen._selected_presets[AgentRole.PLANNER] == "complete"
+            screen.query_one("#planner-model", Input).value = "launch-model"
+            screen.query_one("#planner-temperature", Input).value = "0.6"
+            await settle_tui(pilot)
+            assert AgentRole.PLANNER not in screen._selected_presets
+            screen.query_one("#task-checkbox-0", Checkbox).value = True
+            screen.query_one("#start-workflow", Button).press()
+            await settle_tui(pilot)
+            submitted = service.calls[-1][3][AgentRole.PLANNER]
+            assert submitted["model"] == "launch-model"
+            assert submitted["generation"] == {**hidden, "temperature": "0.6",
+                                               "max_output_tokens": None}
+            assert config.agent_presets["planner"]["complete"].generation == {
+                **hidden, "temperature": 0.4,
+            }
+
+    asyncio.run(drive())
