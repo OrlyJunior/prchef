@@ -36,7 +36,7 @@ defaults:
     #   mode: local
     #   # Persistent and external to every repository. Omit for
     #   # ~/.orchestrator/qdrant. Local mode is single-process only.
-    #   path: C:/Users/you/.orchestrator/qdrant
+    #   path: C:/Orchestrator/qdrant
     # Server mode supports concurrent orchestrator processes instead:
     # qdrant:
     #   mode: server
@@ -87,7 +87,7 @@ defaults:
     require_tests: true
   validation:
     auto_detect: true
-    # `python -m pytest` automatically uses .pytest-tmp/run through pyproject.toml.
+    # Commands run in the execution worktree. Choose tools installed for that project.
     commands: []
     # Correction attempts in the same worktree after validation fails.
     max_validation_retries: 2
@@ -184,6 +184,8 @@ defaults:
     cloud-api:
       type: litellm
       model: openai/gpt-4.1-mini
+      # Export this variable in the orchestrator process environment. The app's
+      # ~/.orchestrator/.env does not export arbitrary API provider credentials.
       api_key_env: OPENAI_API_KEY
       # A hosted account has its own finite quota pool, independent of the
       # Codex ceiling above: the two admit concurrently.
@@ -206,13 +208,12 @@ defaults:
 
 # Trello uses the "Repository" custom field. For GitHub Issues, prefer owner/repo.
 repositories:
-  example-api:
+  owner/example-api:
     path: /absolute/path/to/example-api
     repository:
+      # Replace with a branch that exists on this repository's remote.
       base_branch: develop
     validation:
       commands:
         - [python, -m, pytest]
         - [python, -m, ruff, check, .]
-  owner/example-api:
-    path: /absolute/path/to/example-api

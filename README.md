@@ -50,13 +50,26 @@ For development, install the package and contributor tools in a virtual environm
 python -m pip install -e ".[dev]"
 ```
 
+Create and activate that virtual environment first. Install the target repository's own
+dependencies and validation tools separately; the orchestrator's environment does not supply
+them to every repository it works on.
+
 ## Configuration
 
 The app reads one global `orchestrator.yml`. An explicit `--config` path takes precedence, followed by the `ORCHESTRATOR_CONFIG`, `ORCHESTRATOR_CONFIG_PATH`, and `ORCHESTRATOR_CONFIG_FILE` environment variables. Otherwise it looks in `~/.config/orchestrator/orchestrator.yml`, then `~/.orchestrator/orchestrator.yml`. Repository-local `.orchestrator.yml` files are ignored.
 
 Before the first run, create the parent directory and save your configuration in one of those global locations, or pass `--config` to the command. Installation does not create the YAML file. Start from [orchestrator.example.yml](orchestrator.example.yml) or the minimal example below and replace its repository paths and provider settings.
 
+`--config` belongs after the subcommand, for example
+`orchestrator providers --config /absolute/path/to/orchestrator.yml`. Relative `--config`
+paths use the current directory; relative `ORCHESTRATOR_CONFIG*` paths use your home directory.
+
 The app loads its settings and Trello credentials from the optional `~/.orchestrator/.env` file. A repository-local `.env` is not loaded; [.env.example](.env.example) shows the format. The three configuration selectors above are read only from the process environment, not from `.env`.
+
+API provider keys such as `OPENAI_API_KEY` must be in the process environment. The
+user-global `.env` file supplies the app's `ORCHESTRATOR_*` settings; it does not export
+arbitrary provider credentials to subprocesses or LiteLLM. The full YAML example uses
+`OPENAI_API_KEY` for its planner and reviewer; the minimal example below uses Codex for all roles.
 
 - `ORCHESTRATOR_DATABASE_URL`: database URL override (default: unset).
 - `ORCHESTRATOR_DATABASE_PATH`: alternative SQLite file path (default: unset).
@@ -94,11 +107,21 @@ repositories:
     path: /absolute/path/to/repository
 ```
 
+Use the GitHub `owner/repository` of your local clone, choose a base branch that exists on
+its remote, and use validation commands that work in that repository's worktree. The
+`python -m pytest` command above is a Python example, not a requirement for every project.
+
 For unattended Codex runs, we recommend `approval_policy: approve-for-me` as shown. The adapter passes `--approve-for-me` and removes the explicit `--sandbox` argument; Codex uses the `workspace-write` sandbox for this mode. [Codex Auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review) handles actions that need approval, while ordinary edits inside the worktree proceed without review. If Auto-review is unavailable for your account, omit `approval_policy` and keep the `--sandbox workspace-write` command.
 
 Each provider runs one agent call at a time by default. To allow more, set `max_concurrency` on the provider under `defaults.providers`.
 
 For the `claude-code` provider, `bare_mode` defaults to `false`. Claude subscription users should leave it off (omit it or set `bare_mode: false`) and authenticate with Claude Code outside the orchestrator.
+
+Claude Code defaults to `permission_mode: dontAsk`. For an implementer that needs to edit
+files, select `acceptEdits` for that role through a preset or launch override, or set it on
+the provider. The adapter always passes `--permission-prompts none`: actions that would
+require a prompt are denied instead of waiting for input. It exposes file tools, not Bash;
+the orchestrator runs validation commands separately.
 
 Optionally set `bare_mode: true` for reproducible runs that skip user hooks, plugins, skills, and MCP auto-discovery. [Bare mode requires an API key (`ANTHROPIC_API_KEY`) or supported cloud credentials](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode); it does not use subscription login credentials. The provider always passes [`--restricted`](https://code.claude.com/docs/en/cli-reference#cli-flags), which confines Claude Code's file tools to the supplied worktree with or without bare mode. See [orchestrator.example.yml](orchestrator.example.yml) for provider options.
 
@@ -106,21 +129,35 @@ Credentials belong in environment variables or ambient `gh` authentication, neve
 
 ## First run
 
-Start the terminal UI:
+Authenticate the selected agent CLI and `gh` before starting the orchestrator. The GitHub
+account must be able to read the task and push a branch/open a pull request in the target
+repository. Git push authentication must also work for the clone's remote; `gh` authentication
+alone does not configure every Git transport. Optional GitHub Apps can supply separate identities.
+
+After saving your YAML, check that it loads and lists the providers you expect:
 
 ```sh
-orchestrator tui
+orchestrator providers --config /absolute/path/to/orchestrator.yml
 ```
 
-On the home screen, choose **Repositories** → **Add repository** → **Save repository** to register a local checkout, if it isn't already in your configuration. Then choose **Start workflow**, select the repository and task provider, pick a task, and start it.
+This checks configuration, not CLI authentication or API access. Then start the terminal UI
+using the same file:
+
+```sh
+orchestrator tui --config /absolute/path/to/orchestrator.yml
+```
+
+On the home screen, choose **Repositories** → **Add repository** → **Save repository** to register a local checkout, if it isn't already in your configuration. For GitHub Issues, use its `owner/repository` key and select an existing open issue. Then choose **Start workflow**, select the repository and task provider, pick a task, and start it. Saved settings remain in the same global YAML file.
 
 The equivalent command for a GitHub issue:
 
 ```sh
-orchestrator run --github-issue ISSUE_NUMBER --repository owner/repository
+orchestrator run --github-issue ISSUE_NUMBER --repository owner/repository --config /absolute/path/to/orchestrator.yml
 ```
 
-For a Trello card, use `orchestrator run --trello-card CARD_ID --repository owner/repository` after configuring its credentials.
+For a Trello card, use `orchestrator run --trello-card CARD_ID --repository owner/repository --config /absolute/path/to/orchestrator.yml` after configuring its credentials. A card's `Repository` custom field can identify its configured repository when no explicit override is supplied.
+
+You can omit `--config` when the file is in one of the automatic discovery locations above.
 
 ## Providers and presets
 
@@ -195,6 +232,14 @@ dispatcher's startup capacity.
 | `orchestrator providers` | List configured agent providers. |
 | `orchestrator --version` | Print the installed version. |
 
+Run `orchestrator --help` or `orchestrator SUBCOMMAND --help` for the full option list.
+`show`, workflow commands, TUI startup, and cleanup initialize persistence and apply pending
+database migrations. Cleanup's `--dry-run` prevents worktree deletion; it does not make
+database access read-only. `debug --dry-run` avoids integrations, but adding
+`--from-execution` still opens persistence and applies migrations.
+Cleanup's `--include-failed` (or `--all`) also includes cancelled and human-blocked executions;
+active, interrupted, and unmanaged worktrees remain protected.
+
 ## Repository context
 
 Agents get relevant code from your repository through Qdrant semantic retrieval, which is the default for registered repositories. The first time it's used, the orchestrator downloads a small local embedding model and builds an index of your repository. This takes some CPU time on large repositories, but only happens once; later runs only process files that changed.
@@ -259,7 +304,7 @@ python -m ruff check .
 python -m mypy src/orchestrator
 ```
 
-Database schema changes use versioned Alembic migrations in `src/orchestrator/migrations/versions`. From the repository root, create one with `alembic revision --autogenerate -m "describe change"` and apply it with `alembic upgrade head`. Normal CLI startup applies pending migrations automatically.
+Database schema changes use versioned Alembic migrations in `src/orchestrator/migrations/versions`. From the repository root, create one with `alembic revision --autogenerate -m "describe change"` and apply it with `alembic upgrade head`. CLI commands that open persisted execution state apply pending migrations automatically; `--help`, `--version`, and `providers` do not.
 
 ### Releasing
 
