@@ -15,11 +15,24 @@ from orchestrator.providers.concurrency import ProviderConcurrencyCoordinator
 def definition(kind: str) -> dict[str, Any]:
     values = deepcopy(editor.PROVIDER_DEFAULTS[kind])
     values["type"] = kind
-    if kind in {"litellm", "gemini-vertex"}:
+    if kind == "litellm":
         values["model"] = "test/model"
-    if kind == "gemini-vertex":
-        values["project"] = "test-project"
     return values
+
+
+def test_repository_override_listing_is_read_only(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.yml"
+    original = (
+        b"defaults: {providers: {api: {type: litellm, model: global}}}\n"
+        b"repositories:\n  z: {providers: {api: {model: local}}}\n"
+        b"  a: {providers: {api: {generation: {seed: 42}}}}\n"
+        b"  other: {providers: {different: {model: other}}}\n"
+        b"  empty: {providers: {api: {}}}\n"
+    )
+    path.write_bytes(original)
+    assert ProjectConfigLoader(path).provider_repository_overrides("api") == ["a", "z"]
+    assert ProjectConfigLoader(path).provider_repository_overrides("missing") == []
+    assert path.read_bytes() == original
 
 
 @pytest.mark.parametrize("kind", editor.PROVIDER_DEFAULTS)
@@ -99,9 +112,6 @@ def test_empty_and_flow_containers(tmp_path: Path, source: str) -> None:
     ("claude-code", {"permission_mode": "bypassPermissions"}),
     ("litellm", {"model": " "}),
     ("litellm", {"api_key_env": "actual-secret-value"}),
-    ("gemini-vertex", {"project": " "}),
-    ("gemini-vertex", {"model": ""}),
-    ("gemini-vertex", {"location": " "}),
 ])
 def test_invalid_options_never_save(tmp_path: Path, kind: str, change: dict[str, Any]) -> None:
     path = tmp_path / "orchestrator.yml"

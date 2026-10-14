@@ -275,7 +275,7 @@ def test_cli_providers_lists_configured_provider_names_and_types(
     result = runner.invoke(main.app, ["providers", "--config", str(config)])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "vertex-gemini  gemini-vertex\ncodex  codex-cli\n"
+    assert result.stdout == "vertex-gemini  litellm\ncodex  codex-cli\n"
 
 
 def test_cli_providers_succeeds_without_configured_providers(tmp_path: Path) -> None:

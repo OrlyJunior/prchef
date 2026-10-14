@@ -23,7 +23,6 @@ from orchestrator.config.project_config import (
     ClaudeCodeProviderSettings,
     CodexCliProviderSettings,
     ConfigurationError,
-    GeminiVertexProviderSettings,
     LiteLLMProviderSettings,
     _deep_merge,
 )
@@ -37,14 +36,11 @@ PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
     "claude-code": {"executable": "claude", "permission_mode": "dontAsk",
                     "timeout_seconds": 1800, "max_concurrency": 1},
     "litellm": {"model": "", "max_concurrency": 1},
-    "gemini-vertex": {"project": "", "model": "", "location": "global",
-                      "timeout_seconds": 900, "max_concurrency": 1},
 }
 _SCHEMAS: dict[str, type[BaseModel]] = {
     "codex-cli": CodexCliProviderSettings,
     "claude-code": ClaudeCodeProviderSettings,
     "litellm": LiteLLMProviderSettings,
-    "gemini-vertex": GeminiVertexProviderSettings,
 }
 _CREDENTIAL = re.compile(
     r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|authorization|password|"
@@ -110,7 +106,7 @@ def validate_provider(settings: Mapping[str, Any]) -> tuple[dict[str, Any], list
     kind = values.get("type")
     if not isinstance(kind, str) or kind not in _SCHEMAS:
         raise ConfigurationError("Choose a supported provider type.")
-    for field in ("model", "project", "location", "executable"):
+    for field in ("model", "executable"):
         if field in values and (not isinstance(values[field], str) or not values[field].strip()):
             raise ConfigurationError(f"{field} must be nonblank.")
     concurrency = values.get("max_concurrency", 1)
@@ -213,6 +209,22 @@ def list_providers(path: Path) -> dict[str, dict[str, Any]]:
            for name, value in providers.items()):
         raise ConfigurationError("Each provider must have a name and a mapping of options.")
     return deepcopy(providers)
+
+
+def provider_repository_overrides(path: Path, name: str) -> list[str]:
+    """List repository entries overriding this global provider, without loading a checkout."""
+    repositories = _read(path)[2].get("repositories", {})
+    if not isinstance(repositories, dict):
+        raise ConfigurationError("repositories must be a mapping.")
+    result = []
+    for key, entry in repositories.items():
+        if not isinstance(entry, dict):
+            continue
+        providers = entry.get("providers", {})
+        override = providers.get(name) if isinstance(providers, dict) else None
+        if isinstance(override, dict) and override:
+            result.append(str(key))
+    return sorted(result)
 
 
 def provider_references(data: dict[str, Any], name: str) -> list[str]:

@@ -19,6 +19,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Button,
     Checkbox,
+    Collapsible,
     Input,
     Log,
     Select,
@@ -3479,6 +3480,7 @@ def test_repository_select_populates_mounted_overlay_from_configured_repository(
 
 def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
+    source_projection = controller.project_config("example").role_runtime_value_sources
     task_loads: list[tuple[str, str]] = []
     capabilities = {
         provider: controller.provider_runtime_capabilities("example", provider)
@@ -3510,6 +3512,11 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
     )
     controller.provider_runtime_values = (  # type: ignore[method-assign]
         lambda repository, provider: runtime_values[provider]
+    )
+    controller.role_runtime_value_sources = (  # type: ignore[method-assign]
+        lambda repository, role, provider, options, preset_name=None: source_projection(
+            role.value, provider, options, preset_name=preset_name,
+        )
     )
     controller.github_app_settings = (  # type: ignore[method-assign]
         lambda repository: github_settings
@@ -8177,7 +8184,7 @@ def _provider_editor_controller(
     return controller, service, path
 
 
-@pytest.mark.parametrize("kind", ["codex-cli", "claude-code", "litellm", "gemini-vertex"])
+@pytest.mark.parametrize("kind", ["codex-cli", "claude-code", "litellm"])
 def test_provider_editor_types_crud_and_keyboard_scrolling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
 ) -> None:
@@ -8209,15 +8216,12 @@ def test_provider_editor_types_crud_and_keyboard_scrolling(
             assert screen.query_one("#provider-field-command").display == (kind == "codex-cli")
             assert screen.query_one("#provider-field-executable").display == (kind == "claude-code")
             assert screen.query_one("#provider-field-api_key_env").display == (kind == "litellm")
-            assert screen.query_one("#provider-field-project").display == (kind == "gemini-vertex")
             for field, value in PROVIDER_DEFAULTS[kind].items():
                 if field != "command":
                     assert screen.query_one(f"#provider-{field}", Input).value == str(value)
             screen.query_one("#provider-name", Input).value = "new"
-            if kind in ("litellm", "gemini-vertex"):
+            if kind == "litellm":
                 screen.query_one("#provider-model", Input).value = "test/model"
-            if kind == "gemini-vertex":
-                screen.query_one("#provider-project", Input).value = "test-project"
             button = screen.query_one("#save-provider", Button)
             button.focus()
             await settle_tui(pilot)
@@ -8486,16 +8490,288 @@ def test_provider_editor_preserves_hidden_options_and_clears_changed_type(tmp_pa
             values = controller.provider_settings()["api"]
             assert values["generation"] == {"seed": 42}
             assert values["temperature"] == 0.7
-            screen.query_one("#provider-type", OrchestratorSelect).value = "gemini-vertex"
+            screen.query_one("#provider-type", OrchestratorSelect).value = "claude-code"
             await settle_tui(pilot)
             assert screen.query_one("#provider-model", Input).value == ""
-            screen.query_one("#provider-model", Input).value = "vertex/model"
-            screen.query_one("#provider-project", Input).value = "project"
+            screen.query_one("#provider-model", Input).value = "claude-model"
             screen.query_one("#save-provider", Button).press()
             await settle_tui(pilot)
             values = controller.provider_settings()["api"]
-            assert values["type"] == "gemini-vertex"
+            assert values["type"] == "claude-code"
             assert "generation" not in values
             assert "temperature" not in values
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize("width", [80, 42])
+def test_provider_editor_plain_choices_groups_hints_and_wrapping(
+    tmp_path: Path, width: int,
+) -> None:
+    from textual.widgets._collapsible import CollapsibleTitle
+
+    controller, _, _ = _provider_editor_controller(tmp_path)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(width, 30)) as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            selector = screen.query_one("#provider-type", OrchestratorSelect)
+            assert selector._options == [
+                ("Codex CLI", "codex-cli"), ("Claude Code", "claude-code"),
+                ("Model API (LiteLLM)", "litellm"),
+            ]
+            assert str(screen.query_one("#provider-run-question", Static).renderable) == (
+                "How should this agent run?"
+            )
+            assert "codex" in str(screen.query_one("#provider-status", Static).renderable)
+            defaults = screen.query_one("#provider-defaults", Collapsible)
+            assert defaults.collapsed
+            assert defaults.query_one("#provider-model") is screen.query_one("#provider-model")
+            connection = screen.query_one("#provider-connection")
+            assert connection.query_one("#provider-command") is screen.query_one(
+                "#provider-command"
+            )
+            assert "seconds" in str(screen.query_one("#provider-hint-timeout_seconds").renderable)
+            assert "number of calls" in str(
+                screen.query_one("#provider-hint-max_concurrency").renderable
+            )
+            assert "max_concurrency" in str(
+                screen.query_one("#provider-key-max_concurrency").renderable
+            )
+            assert "Launch value > preset > repository" in str(
+                screen.query_one("#provider-precedence").renderable
+            )
+            assert "cannot edit files" in str(screen.query_one("#provider-api-limit").renderable)
+            assert "preserved" in str(screen.query_one("#provider-hidden-options").renderable)
+            assert screen.query_one("#provider-intro").size.height > 1
+            title = defaults.query_one(CollapsibleTitle)
+            assert title.size.height >= (2 if width == 42 else 1)
+            for node in screen.query(Static):
+                if node.display and node.region.width:
+                    assert node.region.right <= width
+            for kind, fields in (
+                ("codex-cli", {"command", "reasoning_effort", "approval_policy"}),
+                ("claude-code", {"executable", "effort", "permission_mode"}),
+                ("litellm", {"api_base", "api_key_env"}),
+            ):
+                selector.value = kind
+                await settle_tui(pilot)
+                for field in ("command", "reasoning_effort", "approval_policy", "executable",
+                              "effort", "permission_mode", "api_base", "api_key_env"):
+                    assert screen.query_one(f"#provider-field-{field}").display == (field in fields)
+                assert screen.query_one("#provider-vertex-template").display == (kind == "litellm")
+                assert not screen.query_one("#provider-field-vertex_project").display
+
+    asyncio.run(drive())
+
+
+def test_provider_editor_vertex_template_preserves_hidden_options(tmp_path: Path) -> None:
+    controller, _, _ = _provider_editor_controller(tmp_path)
+    controller.save_provider("api", {
+        "type": "litellm", "model": "one", "generation": {"seed": 42}, "temperature": 0.7,
+    }, create=True)
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#provider-select", OrchestratorSelect).value = "api"
+            await settle_tui(pilot)
+            screen.query_one("#provider-vertex-template", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#provider-model", Input).value == "vertex_ai/"
+            assert screen.query_one("#provider-vertex_project", Input).value == "your-gcp-project"
+            assert screen.query_one("#provider-vertex_location", Input).value == "global"
+            assert not screen.query_one("#provider-defaults", Collapsible).collapsed
+            assert screen.query_one("#provider-field-vertex_project").display
+            assert "gcloud auth application-default login" in str(
+                screen.query_one("#provider-auth", Static).renderable
+            )
+            screen.query_one("#provider-model", Input).value = "vertex_ai/gemini-test"
+            screen.query_one("#provider-vertex_project", Input).value = "example-project"
+            await settle_tui(pilot)
+            screen.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            assert "Provider saved" in str(screen.query_one("#provider-status", Static).renderable)
+            saved = controller.provider_settings()["api"]
+            assert saved["type"] == "litellm"
+            assert saved["model"] == "vertex_ai/gemini-test"
+            assert saved["temperature"] == 0.7
+            assert saved["generation"] == {
+                "seed": 42, "vertex_project": "example-project", "vertex_location": "global",
+            }
+            assert "vertex_project" not in saved
+
+    asyncio.run(drive())
+
+
+def test_provider_editor_repository_override_notice_keeps_override(tmp_path: Path) -> None:
+    import yaml
+
+    controller, _, path = _provider_editor_controller(tmp_path)
+    controller.save_provider("api", {"type": "litellm", "model": "global-model"}, create=True)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["repositories"]["example"]["providers"] = {"api": {"model": "repository-model"}}
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_providers()
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#provider-select", OrchestratorSelect).value = "api"
+            await settle_tui(pilot)
+            notice = str(screen.query_one("#provider-overrides", Static).renderable)
+            assert "example" in notice and "concurrency stays global" in notice
+            assert screen.query_one("#provider-model", Input).value == "global-model"
+            screen.query_one("#provider-model", Input).value = "edited-global"
+            await settle_tui(pilot)
+            screen.query_one("#save-provider", Button).press()
+            await settle_tui(pilot)
+            assert "Provider saved" in str(screen.query_one("#provider-status", Static).renderable)
+            assert controller.provider_settings()["api"]["model"] == "edited-global"
+            assert yaml.safe_load(path.read_bytes())["repositories"] == data["repositories"]
+
+    asyncio.run(drive())
+
+
+def test_agent_presets_update_preserves_all_generation_options(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    original = {
+        "temperature": 0.4, "max_output_tokens": 512, "seed": 42, "top_p": 0.9,
+        "vertex_project": "example-project", "vertex_location": "global",
+        "thinking": {"budget": 128},
+    }
+    config.agent_presets = {
+        "planner": {"complete": AgentPresetConfig(provider="planner", generation=original)}
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("p")
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#agent-presets-repository", Select).value = "example"
+            await settle_tui(pilot)
+            screen.query_one("#agent-preset-select", Select).value = "complete"
+            await settle_tui(pilot)
+            screen.query_one("#agent-preset-temperature", Input).value = "0.6"
+            screen.query_one("#agent-preset-max-output-tokens", Input).value = ""
+            screen.query_one("#update-agent-preset", Button).press()
+            await settle_tui(pilot)
+            saved = config.agent_presets["planner"]["complete"]
+            expected = dict(original)
+            expected["temperature"] = "0.6"
+            expected.pop("max_output_tokens")
+            assert saved.generation == expected
+            assert original["temperature"] == 0.4
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_preserves_hidden_preset_generation_after_manual_edits(
+    tmp_path: Path,
+) -> None:
+    controller, service, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    hidden = {"seed": 42, "top_p": 0.9, "vertex_project": "example-project",
+              "vertex_location": "global", "thinking": {"budget": 128}}
+    config.agent_presets = {
+        "planner": {"complete": AgentPresetConfig(
+            provider="planner", model="preset-model", generation={**hidden, "temperature": 0.4},
+        )}
+    }
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            screen.query_one("#planner-preset", Select).value = "complete"
+            await settle_tui(pilot)
+            options = screen._runtime_options_for_role(AgentRole.PLANNER, "planner")
+            assert all(options["generation"][key] == value for key, value in hidden.items())
+            assert screen._selected_presets[AgentRole.PLANNER] == "complete"
+            screen.query_one("#planner-model", Input).value = "launch-model"
+            screen.query_one("#planner-temperature", Input).value = "0.6"
+            await settle_tui(pilot)
+            assert AgentRole.PLANNER not in screen._selected_presets
+            screen.query_one("#task-checkbox-0", Checkbox).value = True
+            screen.query_one("#start-workflow", Button).press()
+            await settle_tui(pilot)
+            submitted = service.calls[-1][3][AgentRole.PLANNER]
+            assert submitted["model"] == "launch-model"
+            assert submitted["generation"] == {**hidden, "temperature": "0.6",
+                                               "max_output_tokens": None}
+            assert config.agent_presets["planner"]["complete"].generation == {
+                **hidden, "temperature": 0.4,
+            }
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_payload(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    config = controller.project_config("example")
+    config.providers["claude"] = AgentProviderSettings.model_validate({
+        "type": "claude-code", "model": "provider-model", "effort": "low",
+    })
+    for role in AgentRole:
+        getattr(config.agents, role.value).provider = "claude"
+        config.agent_presets[role.value] = {"focused": AgentPresetConfig(
+            provider="claude", model="preset-model", reasoning_effort="high",
+            permission_mode="acceptEdits",
+        )}
+    original = config.model_dump()
+    application = OrchestratorApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.action_new_workflow()
+            await settle_tui(pilot)
+            screen = application.screen
+            for role, prefix in screen._role_fields():
+                def displayed(control: str, prefix: str = prefix) -> str:
+                    return str(screen.query_one(f"#{prefix}-{control}-source", Static).renderable)
+
+                assert displayed("model") == "Effective: provider-model (provider)"
+                assert displayed("reasoning") == "Effective: low (provider)"
+                assert displayed("permission") == "Effective: dontAsk (default)"
+                screen.query_one(f"#{prefix}-preset", OrchestratorSelect).value = "focused"
+                await settle_tui(pilot)
+                assert displayed("model") == "Effective: preset-model (preset)"
+                assert displayed("reasoning") == "Effective: high (preset)"
+                assert displayed("permission") == "Effective: acceptEdits (preset)"
+                before = screen._runtime_options_for_role(role, prefix)
+                screen._update_runtime_sources(role, prefix, "claude")
+                assert screen._runtime_options_for_role(role, prefix) == before
+                screen.query_one(f"#{prefix}-model", Input).value = "launch-model"
+                await settle_tui(pilot)
+                assert displayed("model") == "Effective: launch-model (launch)"
+                assert displayed("reasoning") == "Effective: high (launch)"
+                screen.query_one(f"#{prefix}-reasoning", Input).value = "invalid"
+                await settle_tui(pilot)
+                assert "Cannot resolve values" in displayed("reasoning")
+                screen._restore_role_defaults(role, prefix)
+                await settle_tui(pilot)
+                assert displayed("model") == "Effective: provider-model (provider)"
+                assert displayed("permission") == "Effective: dontAsk (default)"
+            assert config.model_dump() == original
+            screen.query_one("#planner-provider", OrchestratorSelect).value = "planner"
+            await settle_tui(pilot)
+            assert "Not applicable" in str(
+                screen.query_one("#planner-permission-source", Static).renderable
+            )
 
     asyncio.run(drive())

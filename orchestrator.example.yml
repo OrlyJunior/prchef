@@ -43,6 +43,8 @@ defaults:
     #   url: http://127.0.0.1:6333
     # Or use `host: 127.0.0.1` with optional `port: 6333`, not both URL and host.
   agents:
+    # API models return text/structured output: they can plan and review.
+    # The implementer needs Codex CLI or Claude Code to edit the worktree.
     planner:
       provider: cloud-api
       # Optional one-hop failover to a role-local named preset. It is used only
@@ -57,7 +59,10 @@ defaults:
     #   provider: vertex-gemini
     # reviewer:
     #   provider: vertex-gemini
-  # Reusable launcher templates are role-local and never modify `providers`.
+  # Reusable presets are role-local and never modify provider definitions.
+  # Precedence: launch value > preset > repository provider > global provider > backend default.
+  # Define presets here or in repositories.<key>.agent_presets; the preset editor
+  # writes the latter in this global file. Hidden generation keys are preserved.
   # agent_presets:
   #   planner:
   #     cloud-backup:
@@ -105,6 +110,9 @@ defaults:
   # restarting `orchestrator run`/`tui`. Declare it only under
   # `defaults.providers.<name>`; a `repositories.<key>.providers.<name>` entry
   # that sets `max_concurrency` is rejected with a configuration error.
+  # Providers screen choices: Codex CLI (codex-cli), Claude Code (claude-code),
+  # Model API (LiteLLM) (litellm). Connection fields are separate from defaults
+  # for model, effort and permissions; a preset or launch value can override them.
   providers:
     codex:
       type: codex-cli
@@ -143,19 +151,24 @@ defaults:
     #   bare_mode: false
     #   # max_turns: 12
     #   # max_budget_usd: 5.00
-    # Requires ADC (for example, `gcloud auth application-default login`), not an API key.
+    # Gemini on Vertex is a Model API template using LiteLLM's vertex_ai/ route.
+    # Complete the model prefix and project placeholder supplied by the screen.
+    # Authenticate outside the screen with ADC, e.g. `gcloud auth application-default login`.
+    # Legacy type: gemini-vertex entries convert in memory on load; YAML stays unchanged.
     # vertex-gemini:
-    #   type: gemini-vertex
-    #   project: my-gcp-project
-    #   location: global
-    #   model: gemini-2.5-flash
+    #   type: litellm
+    #   model: vertex_ai/gemini-2.5-flash
     #   timeout_seconds: 900
+    #   temperature: 0.2
+    #   # max_output_tokens: 8192
     #   generation:
-    #     temperature: 0.2
-    #     # max_output_tokens: 8192
+    #     vertex_project: my-gcp-project
+    #     vertex_location: global
     # LiteLLM is the primary API model backend and is included in the standard installation.
-    # Model identifiers are free-form. A key is referenced by its environment
-    # variable name only; omit api_key_env for local/self-hosted endpoints.
+    # A non-empty base model is required, even when a preset overrides it.
+    # A key is referenced by its environment variable name only. Without this
+    # reference, LiteLLM uses backend environment/ambient credentials (including
+    # Vertex ADC) or a local endpoint. Keep secret values out of this file.
     # local-ollama:
     #   type: litellm
     #   model: ollama/llama3.2

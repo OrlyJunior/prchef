@@ -1,7 +1,7 @@
 # Durable project context
 
-This file records purpose, boundaries, operating model, layering, invariants, and design decisions.
-Code, tests, and repository retrieval cover feature behavior, UI, and implementation details.
+Durable purpose, boundaries, architecture and invariants. Feature and UI details belong in code,
+tests and repository retrieval.
 
 ## Purpose and boundaries
 
@@ -65,7 +65,8 @@ Code, tests, and repository retrieval cover feature behavior, UI, and implementa
   Batch items link to, but do not own, execution rows. Cancelling one item never cancels its peers.
 - Settings update selected global entries. Provider writes preserve unrelated YAML bytes and use
   validated atomic replacement. Role-local runtime selections apply to one run, persist for
-  resumption, and never rewrite YAML defaults.
+  resumption, and never rewrite YAML defaults. Value/source displays reuse the configuration
+  submission seam.
 - Schema changes require versioned Alembic migrations; never `create_all` at runtime.
 
 ## Workflow invariants
@@ -132,9 +133,10 @@ Code, tests, and repository retrieval cover feature behavior, UI, and implementa
 - Planner and reviewer are read-only and return structured output validated locally. Ambiguous or
   malformed output is rejected, never guessed. Review separates blocking findings from optional
   suggestions; approval may trigger one bounded polish pass but cannot be revoked by it.
-- Codex CLI and Claude Code are the first-class local-worktree backends; Claude Code runs in
-  restricted mode with a fixed tool set. LiteLLM is the generic API backend with no implicit
-  filesystem access.
+- Codex CLI and Claude Code are first-class worktree backends; Claude uses restricted, fixed tools.
+  LiteLLM handles API models, including Vertex Gemini (`vertex_ai/`), without filesystem access;
+  implementation needs a CLI. Legacy `gemini-vertex` loads convert in memory, preserving names
+  and YAML; unmappable fields fail. Saved executions need no migration.
 - Behaviors that trade quota against throughput are configurable, not hardcoded to one user's
   limits.
 - Legacy-named planner/reviewer session-reference fields remain in persisted executions and
@@ -154,7 +156,5 @@ Code, tests, and repository retrieval cover feature behavior, UI, and implementa
 
 ## Maintaining this file
 
-- Update it only when purpose, operating model, layering, an invariant, or a design decision
-  changes. Do not add feature behavior, UI details, or per-change notes.
-- It must stay under the 12,000-character prompt cap. Condense or replace existing lines instead
-  of appending.
+- Update only changed purpose, operating model, layering, invariants or design decisions;
+  no feature/UI details or per-change notes. Stay under 12,000 characters by condensing or replacing.

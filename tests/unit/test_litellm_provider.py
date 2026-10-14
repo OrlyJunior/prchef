@@ -10,6 +10,7 @@ from orchestrator.config.project_config import (
     ConfigurationError,
     LiteLLMProviderSettings,
     ProjectConfig,
+    convert_legacy_vertex_provider,
 )
 from orchestrator.models import AgentRequest, AgentRole, StructuredOutputExpectation
 from orchestrator.providers.agent_provider import AgentProviderError
@@ -128,6 +129,34 @@ def test_registry_resolves_litellm_without_loading_the_sdk_until_execution(tmp_p
 
     assert isinstance(clients.agent(AgentRole.PLANNER), LiteLLMAgentProvider)
     assert clients.agent(AgentRole.PLANNER) is clients.agent(AgentRole.REVIEWER)
+
+
+def test_converted_vertex_options_reach_litellm_with_structured_output() -> None:
+    options = convert_legacy_vertex_provider("vertex", {
+        "type": "gemini-vertex", "project": "example-project", "model": "gemini-test",
+        "timeout_seconds": 45, "generation": {"temperature": 0.4, "max_output_tokens": 256},
+    })
+    expectation = StructuredOutputExpectation(
+        name="answer", schema={"type": "object", "properties": {"answer": {"type": "string"}},
+                               "required": ["answer"], "additionalProperties": False},
+    )
+    provider, client = _provider(
+        FakeResponse('{"answer":"ready"}'), LiteLLMProviderSettings.model_validate(options),
+        environ={},
+    )
+    result = provider.execute(_request(structured=expectation))
+    call = client.calls[0]
+    assert call["model"] == "vertex_ai/gemini-test"
+    assert call["vertex_project"] == "example-project"
+    assert call["vertex_location"] == "global"
+    assert call["timeout"] == 45
+    assert call["temperature"] == 0.4
+    assert call["max_tokens"] == 256
+    assert call["response_format"] == {
+        "type": "json_schema", "json_schema": {"name": "answer", "schema": expectation.schema},
+    }
+    assert "api_key" not in call
+    assert result.structured_output == {"answer": "ready"}
 
 
 @pytest.mark.parametrize("model", ["", "   "])
