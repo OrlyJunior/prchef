@@ -26,8 +26,8 @@ Agents act with your authenticated GitHub CLI and local credentials. Start with 
 - Python 3.11 or newer, and Git.
 - The GitHub CLI (`gh`), installed and authenticated for the repository you want to use.
 - A CLI backend for the implementer:
-  - [Codex CLI](https://github.com/openai/codex) v0.156.0 or newer (the minimum version verified with this project's required flags)
-  - [Claude Code](https://docs.claude.com/en/docs/claude-code) v2.1.259 or newer
+  - [Codex CLI](https://github.com/openai/codex) v0.44.0 or newer (tested with v0.160.0). It needs noninteractive `codex exec` with the `--json` event output and `--output-schema`. The optional `approval_policy: approve-for-me` also needs v0.147.0 or newer.
+  - [Claude Code](https://docs.claude.com/en/docs/claude-code) v2.1.259 or newer (tested with v2.1.288). The provider always passes `--restricted` (v2.1.248) and `--permission-prompts none` (v2.1.259). The optional `bare_mode` needs v2.1.81 or newer, and `effort: xhigh` needs v2.1.111.
 - Optional API models through [LiteLLM](https://docs.litellm.ai/) for planning and review.
 
 ## Installation
