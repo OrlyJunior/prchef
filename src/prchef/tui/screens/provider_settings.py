@@ -144,7 +144,7 @@ class ProviderSettingsScreen(Screen[None]):
                 "Codex CLI or Claude Code.", id="provider-api-limit",
             )
             yield Static(
-                "This screen edits defaults.providers in the existing global orchestrator.yml. "
+                "This screen edits defaults.providers in the existing global prchef.yml. "
                 "Other options exist in YAML and are preserved when saving the same run method.",
                 id="provider-hidden-options",
             )

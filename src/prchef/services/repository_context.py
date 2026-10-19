@@ -395,7 +395,7 @@ def resolve_repository_context_strategy(
                     "kind": "REPOSITORY_CONTEXT_FALLBACK",
                     "reason": "This repository was selected by path without a registered key.",
                     "remedy": (
-                        "Register the repository in orchestrator.yml and select its key "
+                        "Register the repository in prchef.yml and select its key "
                         "to use semantic retrieval."
                     ),
                 }

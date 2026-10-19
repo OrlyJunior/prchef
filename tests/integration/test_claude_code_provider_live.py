@@ -16,7 +16,7 @@ from prchef.models.development_task import DevelopmentTask
 from prchef.services.spec_service import SpecService
 
 _LIVE_ENABLED = (
-    os.getenv("ORCHESTRATOR_TEST_CLAUDE_CODE") == "1"
+    os.getenv("PRCHEF_TEST_CLAUDE_CODE") == "1"
     and shutil.which("claude") is not None
     and bool(os.getenv("ANTHROPIC_API_KEY"))
 )
@@ -24,7 +24,7 @@ _LIVE_ENABLED = (
 pytestmark = pytest.mark.skipif(
     not _LIVE_ENABLED,
     reason=(
-        "set ORCHESTRATOR_TEST_CLAUDE_CODE=1 with claude on PATH and ANTHROPIC_API_KEY "
+        "set PRCHEF_TEST_CLAUDE_CODE=1 with claude on PATH and ANTHROPIC_API_KEY "
         "to run authenticated Claude Code coverage"
     ),
 )

@@ -22,7 +22,7 @@ class StageValues:
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", normalized).strip("-").lower()[:48]
         safe_card_id = re.sub(r"[^a-zA-Z0-9._-]", "-", card_id)[:32]
         timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-        safe_prefix = prefix.strip("/") or "orchestrator"
+        safe_prefix = prefix.strip("/") or "prchef"
         suffix = f"-{slug}" if slug else ""
         safe_execution_id = re.sub(r"[^a-zA-Z0-9._-]", "-", execution_id)[:12]
         return f"{safe_prefix}/{safe_card_id}{suffix}-{timestamp}-{safe_execution_id}"

@@ -99,7 +99,7 @@ def test_runtime_sources_api_and_invalid_values_share_normal_validation(tmp_path
 
 def test_runtime_sources_include_repository_overrides_without_writing_yaml(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     original = (
         b"defaults:\n  providers:\n    agent: {type: claude-code, model: global}\n"
         b"  agents:\n    planner: {provider: agent}\n    implementer: {provider: agent}\n"

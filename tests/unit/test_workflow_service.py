@@ -939,7 +939,7 @@ def test_workspace_branch_name_contains_execution_id_and_is_not_protected(workfl
     result = service.run("card-branch")
 
     assert result.working_branch is not None
-    assert result.working_branch.startswith("orchestrator/")
+    assert result.working_branch.startswith("prchef/")
     assert result.working_branch != "develop"
     assert result.working_branch.endswith("execution-1")
 
@@ -1569,7 +1569,7 @@ def test_existing_execution_keeps_legacy_workspace_after_default_changes(
 ) -> None:
     service, repository, _, factory = workflow
     config = service._config_loader.config
-    legacy_root = config.path.parent / "orchestrator-workspaces"
+    legacy_root = config.path.parent / "prchef-workspaces"
     config.workspace.root = legacy_root
     if mode == "human-answer":
         factory.planner.review_error = AgentNeedsHumanError("Please clarify.")
@@ -1592,7 +1592,7 @@ def test_existing_execution_keeps_legacy_workspace_after_default_changes(
     assert resumed.workspace_path == recorded
     assert repository.get_execution(paused.id).workspace_path == recorded
     assert factory.codex.workspace_path == Path(recorded)
-    assert not (Path.home() / ".orchestrator" / "workspaces").exists()
+    assert not (Path.home() / ".prchef" / "workspaces").exists()
 
 
 def test_review_correction_uses_validation_retry_handling(workflow) -> None:

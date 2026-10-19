@@ -21,7 +21,7 @@ def definition(kind: str) -> dict[str, Any]:
 
 
 def test_repository_override_listing_is_read_only(tmp_path: Path) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     original = (
         b"defaults: {providers: {api: {type: litellm, model: global}}}\n"
         b"repositories:\n  z: {providers: {api: {model: local}}}\n"
@@ -48,7 +48,7 @@ def test_provider_crud_preserves_remainder(
         "repositories:\n   repo: {path: './missing', providers: {other: {model: override}}}\n"
         "state: {path: 'keep.db'} # footer\n"
     )
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     original = (before + existing + after).replace("\n", newline).encode()
     path.write_bytes(original)
     loader = ProjectConfigLoader(path)
@@ -78,7 +78,7 @@ def test_provider_crud_preserves_remainder(
     "other: {type: litellm, model: two}}} # keep\nrepositories: {}\n",
 ])
 def test_empty_and_flow_containers(tmp_path: Path, source: str) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(source.encode())
     loader = ProjectConfigLoader(path)
     original = yaml.safe_load(source)
@@ -114,7 +114,7 @@ def test_empty_and_flow_containers(tmp_path: Path, source: str) -> None:
     ("litellm", {"api_key_env": "actual-secret-value"}),
 ])
 def test_invalid_options_never_save(tmp_path: Path, kind: str, change: dict[str, Any]) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     original = b"defaults: {providers: {}}\n"
     path.write_bytes(original)
     with pytest.raises(ConfigurationError):
@@ -129,7 +129,7 @@ def test_invalid_options_never_save(tmp_path: Path, kind: str, change: dict[str,
 ])
 @pytest.mark.parametrize("kind", editor.PROVIDER_DEFAULTS)
 def test_invalid_numbers(tmp_path: Path, kind: str, field: str, value: Any) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(b"defaults: {providers: {}}\n")
     with pytest.raises(ConfigurationError, match=field):
         ProjectConfigLoader(path).save_provider(
@@ -139,7 +139,7 @@ def test_invalid_numbers(tmp_path: Path, kind: str, field: str, value: Any) -> N
 
 
 def test_names_and_expected_revision(tmp_path: Path) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(b"defaults: {providers: {}}\n")
     loader = ProjectConfigLoader(path)
     for name in ("", " ", " padded "):
@@ -168,7 +168,7 @@ def test_names_and_expected_revision(tmp_path: Path) -> None:
     {"api_base": "https://user:RECOGNIZABLE_SECRET@example.test"},
 ])
 def test_credentials_are_rejected_without_echo(tmp_path: Path, change: dict[str, Any]) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(b"defaults: {providers: {}}\n")
     with pytest.raises(ConfigurationError) as failure:
         ProjectConfigLoader(path).save_provider("new", definition("litellm") | change, create=True)
@@ -195,7 +195,7 @@ def test_credentials_are_rejected_without_echo(tmp_path: Path, change: dict[str,
 def test_auth_and_bearer_credentials_never_save_or_display(
     tmp_path: Path, change: dict[str, Any], create: bool,
 ) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(b"defaults: {providers: {}}\n")
     loader = ProjectConfigLoader(path)
     if not create:
@@ -216,7 +216,7 @@ def test_environment_reference_is_never_resolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TEST_PROVIDER_KEY", "RECOGNIZABLE_SECRET")
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(b"defaults: {providers: {}}\n")
     warnings = ProjectConfigLoader(path).save_provider(
         "api", definition("litellm") | {"api_key_env": "TEST_PROVIDER_KEY"}, create=True,
@@ -235,7 +235,7 @@ def test_environment_reference_is_never_resolved(
 def test_endpoint_credentials_never_save(
     tmp_path: Path, parameter: str, create: bool,
 ) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(b"defaults: {providers: {}}\n")
     loader = ProjectConfigLoader(path)
     if not create:
@@ -253,7 +253,7 @@ def test_endpoint_credentials_never_save(
 
 
 def test_endpoint_noncredential_query_is_preserved(tmp_path: Path) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(b"defaults: {providers: {}}\n")
     loader = ProjectConfigLoader(path)
     values = definition("litellm") | {
@@ -264,7 +264,7 @@ def test_endpoint_noncredential_query_is_preserved(tmp_path: Path) -> None:
 
 
 def test_noncredential_auth_substrings_are_preserved(tmp_path: Path) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(b"defaults: {providers: {}}\n")
     loader = ProjectConfigLoader(path)
     values = definition("litellm") | {
@@ -293,7 +293,7 @@ def test_path_warning_is_nonblocking(
         values["command"][0] = "/custom/bin/codex"
     else:
         values["executable"] = "/custom/bin/claude"
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(b"defaults: {providers: {}}\n")
     warnings = ProjectConfigLoader(path).save_provider("new", values, create=True)
     assert bool(warnings) is not found
@@ -321,7 +321,7 @@ def test_in_use_refusal(
     else:
         data["repositories"] = {"example": settings}
         location = "repositories.example"
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     original = yaml.safe_dump(data).encode()
     path.write_bytes(original)
     with pytest.raises(ConfigurationError, match=f"{location}.{reference}"):
@@ -330,7 +330,7 @@ def test_in_use_refusal(
 
 
 def test_implicit_legacy_implementer_and_inherited_references(tmp_path: Path) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_text("defaults:\n  providers: {codex: {type: litellm, model: one}}\n"
                     "  roles: {spec: other, review: other}\nrepositories:\n  example: {}\n")
     with pytest.raises(ConfigurationError) as failure:
@@ -346,7 +346,7 @@ def test_implicit_legacy_implementer_and_inherited_references(tmp_path: Path) ->
     "defaults: {providers: {}, providers: {}}\n",
 ])
 def test_unsafe_yaml_does_not_change(tmp_path: Path, source: str) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(source.encode())
     with pytest.raises(ConfigurationError):
         ProjectConfigLoader(path).save_provider("api", definition("litellm"), create=True)
@@ -359,7 +359,7 @@ def test_unsafe_yaml_does_not_change(tmp_path: Path, source: str) -> None:
 def test_save_failures_clean_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
 ) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     original = b"defaults: {providers: {}}\n"
     path.write_bytes(original)
 
@@ -396,7 +396,7 @@ def test_save_failures_clean_up(
 
 def test_preserved_options_and_preset_compatibility(tmp_path: Path) -> None:
     values = definition("claude-code") | {"bare_mode": True, "max_turns": 9}
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_text(yaml.safe_dump({"defaults": {
         "providers": {"local": values},
         "agent_presets": {"planner": {"fast": {"provider": "local", "permission_mode": "auto"}}},
@@ -412,7 +412,7 @@ def test_preserved_options_and_preset_compatibility(tmp_path: Path) -> None:
 
 
 def test_existing_concurrency_remains_process_scoped(tmp_path: Path) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_bytes(
         b"defaults: {providers: {api: {type: litellm, model: one, max_concurrency: 1}}}\n"
     )
@@ -424,7 +424,7 @@ def test_existing_concurrency_remains_process_scoped(tmp_path: Path) -> None:
 
 
 def test_flow_edit_preserves_quoted_neighbor_and_utf8_bom(tmp_path: Path) -> None:
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     prefix = b"\xef\xbb\xbf# keep\r\ndefaults: { providers: { "
     selected = b"'target: key': {type: litellm, model: old}"
     suffix = (

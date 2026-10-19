@@ -56,26 +56,26 @@ them to every repository it works on.
 
 ## Configuration
 
-The app reads one global `orchestrator.yml`. An explicit `--config` path takes precedence, followed by the `ORCHESTRATOR_CONFIG`, `ORCHESTRATOR_CONFIG_PATH`, and `ORCHESTRATOR_CONFIG_FILE` environment variables. Otherwise it looks in `~/.config/orchestrator/orchestrator.yml`, then `~/.orchestrator/orchestrator.yml`. Repository-local `.orchestrator.yml` files are ignored.
+The app reads one global `prchef.yml`. An explicit `--config` path takes precedence, followed by the `PRCHEF_CONFIG`, `PRCHEF_CONFIG_PATH`, and `PRCHEF_CONFIG_FILE` environment variables. Otherwise it looks in `~/.config/prchef/prchef.yml`, then `~/.prchef/prchef.yml`. Repository-local `.prchef.yml` files are ignored.
 
-Before the first run, create the parent directory and save your configuration in one of those global locations, or pass `--config` to the command. Installation does not create the YAML file. Start from [orchestrator.example.yml](orchestrator.example.yml) or the minimal example below and replace its repository paths and provider settings.
+Before the first run, create the parent directory and save your configuration in one of those global locations, or pass `--config` to the command. Installation does not create the YAML file. Start from [prchef.example.yml](prchef.example.yml) or the minimal example below and replace its repository paths and provider settings.
 
 `--config` belongs after the subcommand, for example
-`orchestrator providers --config /absolute/path/to/orchestrator.yml`. Relative `--config`
-paths use the current directory; relative `ORCHESTRATOR_CONFIG*` paths use your home directory.
+`orchestrator providers --config /absolute/path/to/prchef.yml`. Relative `--config`
+paths use the current directory; relative `PRCHEF_CONFIG*` paths use your home directory.
 
-The app loads its settings and Trello credentials from the optional `~/.orchestrator/.env` file. A repository-local `.env` is not loaded; [.env.example](.env.example) shows the format. The three configuration selectors above are read only from the process environment, not from `.env`.
+The app loads its settings and Trello credentials from the optional `~/.prchef/.env` file. A repository-local `.env` is not loaded; [.env.example](.env.example) shows the format. The three configuration selectors above are read only from the process environment, not from `.env`.
 
 API provider keys such as `OPENAI_API_KEY` must be in the process environment. The
-user-global `.env` file supplies the app's `ORCHESTRATOR_*` settings; it does not export
+user-global `.env` file supplies the app's `PRCHEF_*` settings; it does not export
 arbitrary provider credentials to subprocesses or LiteLLM. The full YAML example uses
 `OPENAI_API_KEY` for its planner and reviewer; the minimal example below uses Codex for all roles.
 
-- `ORCHESTRATOR_DATABASE_URL`: database URL override (default: unset).
-- `ORCHESTRATOR_DATABASE_PATH`: alternative SQLite file path (default: unset).
-- `ORCHESTRATOR_LOG_LEVEL`: log level (default: `INFO`).
+- `PRCHEF_DATABASE_URL`: database URL override (default: unset).
+- `PRCHEF_DATABASE_PATH`: alternative SQLite file path (default: unset).
+- `PRCHEF_LOG_LEVEL`: log level (default: `INFO`).
 
-Set only one database override. Without either, the app uses global persistence settings or an existing database beside the global YAML, otherwise SQLite at `~/.orchestrator/orchestrator.db`.
+Set only one database override. Without either, the app uses global persistence settings or an existing database beside the global YAML, otherwise SQLite at `~/.prchef/prchef.db`.
 
 This example uses one Codex provider for all three roles. Replace the repository path, base branch, and validation commands with values for your checkout:
 
@@ -123,9 +123,9 @@ the provider. The adapter always passes `--permission-prompts none`: actions tha
 require a prompt are denied instead of waiting for input. It exposes file tools, not Bash;
 the orchestrator runs validation commands separately.
 
-Optionally set `bare_mode: true` for reproducible runs that skip user hooks, plugins, skills, and MCP auto-discovery. [Bare mode requires an API key (`ANTHROPIC_API_KEY`) or supported cloud credentials](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode); it does not use subscription login credentials. The provider always passes [`--restricted`](https://code.claude.com/docs/en/cli-reference#cli-flags), which confines Claude Code's file tools to the supplied worktree with or without bare mode. See [orchestrator.example.yml](orchestrator.example.yml) for provider options.
+Optionally set `bare_mode: true` for reproducible runs that skip user hooks, plugins, skills, and MCP auto-discovery. [Bare mode requires an API key (`ANTHROPIC_API_KEY`) or supported cloud credentials](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode); it does not use subscription login credentials. The provider always passes [`--restricted`](https://code.claude.com/docs/en/cli-reference#cli-flags), which confines Claude Code's file tools to the supplied worktree with or without bare mode. See [prchef.example.yml](prchef.example.yml) for provider options.
 
-Credentials belong in environment variables or ambient `gh` authentication, never in YAML. For Trello, set `ORCHESTRATOR_TRELLO_API_KEY` and `ORCHESTRATOR_TRELLO_TOKEN`. Optional GitHub App identities are described in [GitHub App setup](docs/github_app.md).
+Credentials belong in environment variables or ambient `gh` authentication, never in YAML. For Trello, set `PRCHEF_TRELLO_API_KEY` and `PRCHEF_TRELLO_TOKEN`. Optional GitHub App identities are described in [GitHub App setup](docs/github_app.md).
 
 ## First run
 
@@ -137,14 +137,14 @@ alone does not configure every Git transport. Optional GitHub Apps can supply se
 After saving your YAML, check that it loads and lists the providers you expect:
 
 ```sh
-orchestrator providers --config /absolute/path/to/orchestrator.yml
+orchestrator providers --config /absolute/path/to/prchef.yml
 ```
 
 This checks configuration, not CLI authentication or API access. Then start the terminal UI
 using the same file:
 
 ```sh
-orchestrator tui --config /absolute/path/to/orchestrator.yml
+orchestrator tui --config /absolute/path/to/prchef.yml
 ```
 
 On the home screen, choose **Repositories** → **Add repository** → **Save repository** to register a local checkout, if it isn't already in your configuration. For GitHub Issues, use its `owner/repository` key and select an existing open issue. Then choose **Start workflow**, select the repository and task provider, pick a task, and start it. Saved settings remain in the same global YAML file.
@@ -152,10 +152,10 @@ On the home screen, choose **Repositories** → **Add repository** → **Save re
 The equivalent command for a GitHub issue:
 
 ```sh
-orchestrator run --github-issue ISSUE_NUMBER --repository owner/repository --config /absolute/path/to/orchestrator.yml
+orchestrator run --github-issue ISSUE_NUMBER --repository owner/repository --config /absolute/path/to/prchef.yml
 ```
 
-For a Trello card, use `orchestrator run --trello-card CARD_ID --repository owner/repository --config /absolute/path/to/orchestrator.yml` after configuring its credentials. A card's `Repository` custom field can identify its configured repository when no explicit override is supplied.
+For a Trello card, use `orchestrator run --trello-card CARD_ID --repository owner/repository --config /absolute/path/to/prchef.yml` after configuring its credentials. A card's `Repository` custom field can identify its configured repository when no explicit override is supplied.
 
 You can omit `--config` when the file is in one of the automatic discovery locations above.
 
@@ -175,7 +175,7 @@ Open **Providers** from the home screen (shortcut **o**). **How should this agen
 | Claude Code | `claude-code` | An installed CLI with restricted file tools in the supplied worktree. |
 | Model API (LiteLLM) | `litellm` | An API model that returns text or structured output. |
 
-The screen edits `defaults.providers` in the existing global `orchestrator.yml`; no
+The screen edits `defaults.providers` in the existing global `prchef.yml`; no
 repository selection is needed. **Connection** holds the command or executable, endpoint,
 API key environment variable name, timeout in seconds, and maximum simultaneous calls.
 The collapsed **Defaults when no preset or launch value overrides them** holds model,
@@ -200,7 +200,7 @@ outside the editor.
 
 Existing `gemini-vertex` definitions load as LiteLLM in memory with a warning, preserving
 their provider names. Loading does not rewrite YAML. Saving an edited entry writes the
-displayed LiteLLM format. See [orchestrator.example.yml](orchestrator.example.yml) for the
+displayed LiteLLM format. See [prchef.example.yml](prchef.example.yml) for the
 Vertex settings and other provider options.
 
 Presets live in `defaults.agent_presets.<role>` or
@@ -275,11 +275,12 @@ We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.m
 - Agents are instructed never to commit, push, create pull requests, or merge. The orchestrator performs those steps itself, and never merges.
 - Commits and pushes to protected branches (`main`, `master`, and `develop` by default) are refused.
 - Worktrees are kept for inspection until you clean them up with `cleanup-workspaces`.
-- New worktrees default to `~/.orchestrator/workspaces/<repo>/<execution-id>`, using the
+- New worktrees default to `~/.prchef/workspaces/<repo>/<execution-id>`, using the
   same per-user state directory as the database and the separate `qdrant` folder.
   Set `defaults.workspace.root` or `repositories.<key>.workspace.root` to override the root.
   Existing executions keep their recorded paths. `cleanup-workspaces` also lists and
-  manages the previous sibling `orchestrator-workspaces/<repo>/<execution-id>` location;
+  manages the previous `~/.orchestrator/workspaces/<repo>/<execution-id>` and sibling
+  `orchestrator-workspaces/<repo>/<execution-id>` locations;
   its `--dry-run` previews retention decisions. Existing worktrees are never migrated automatically.
 
 ## Troubleshooting
@@ -287,7 +288,7 @@ We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.m
 - **`GitHub CLI failed`:** check that `gh` is authenticated and has access to the target repository.
 - **`Executable not found: codex`, `claude`, or `gh`:** install the CLI and make sure it's on your `PATH`, or select a provider you have installed.
 - **Claude Code authentication fails with `bare_mode: true`:** bare mode requires an API key or supported cloud credentials. For a Claude subscription, omit `bare_mode` or set it to `false` and authenticate with Claude Code outside the orchestrator.
-- **`Global configuration not found. Searched:`:** put `orchestrator.yml` in one of the locations listed under Configuration, or pass `--config` with an existing file.
+- **`Global configuration not found. Searched:`:** put `prchef.yml` in one of the locations listed under Configuration, or pass `--config` with an existing file.
 - **A local Qdrant index lock error:** another process is using the index. Index management shows
   BUSY without recording a failure. After closing the other process, reopen the view or press
   Refresh changed files to retry. You can also configure Qdrant server mode.

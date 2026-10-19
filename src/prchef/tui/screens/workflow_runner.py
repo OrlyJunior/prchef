@@ -427,7 +427,7 @@ class WorkflowRunnerScreen(Screen[None]):
             repository_select.set_options([], allow_blank=True)
             self.query_one("#workflow-progress", Static).update(
                 "No repositories are configured. Add entries under repositories "
-                "in orchestrator.yml."
+                "in prchef.yml."
             )
 
     def on_resize(self, event: Resize) -> None:

@@ -793,7 +793,7 @@ def test_repository_key_and_path_share_fresh_run_admission(tmp_path: Path) -> No
     repository = _migrated_repository(tmp_path, "repository-aliases.db")
     project = tmp_path / "project"
     project.mkdir()
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text(f"repositories:\n  example:\n    path: {project.as_posix()}\n")
     aliases = ProjectConfigLoader(config).repository_identity_aliases("example")
     path = str(project.resolve())
@@ -1108,7 +1108,7 @@ def test_failed_provider_read_infers_one_repository_from_key_and_path_history(
     repository = _migrated_repository(tmp_path, "inferred-repository-aliases.db")
     project = tmp_path / "project"
     project.mkdir()
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text(f"repositories:\n  example:\n    path: {project.as_posix()}\n")
 
     by_key = repository.create_execution("12", "github", repository_ref="example")
@@ -1153,14 +1153,14 @@ def test_fresh_runs_keep_separate_branch_and_worktree_records(tmp_path: Path) ->
         object(), tmp_path / "control", WorkspaceSettings(root=tmp_path / "worktrees")
     )  # type: ignore[arg-type]
     first = repository.create_execution("12", "github", repository_ref="example")
-    first_branch = WorkflowService._branch_name("orchestrator", "12", "Fix task", first.id)
+    first_branch = WorkflowService._branch_name("prchef", "12", "Fix task", first.id)
     first_path = manager.workspace_path(first.id)
     repository.record_branch(first.id, first_branch)
     repository.record_workspace(first.id, str(first_path))
     repository.update_status(first.id, WorkflowStatus.FAILED)
 
     second = repository.create_execution("12", "github", repository_ref="example")
-    second_branch = WorkflowService._branch_name("orchestrator", "12", "Fix task", second.id)
+    second_branch = WorkflowService._branch_name("prchef", "12", "Fix task", second.id)
     second_path = manager.workspace_path(second.id)
     repository.record_branch(second.id, second_branch)
     repository.record_workspace(second.id, str(second_path))

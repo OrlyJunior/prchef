@@ -31,7 +31,7 @@ def _loader(tmp_path: Path, definition: dict[str, Any]) -> tuple[ProjectConfigLo
         },
         "repositories": {"example": {"path": str(checkout)}},
     }
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_text("# preserve me\n" + yaml.safe_dump(data), encoding="utf-8")
     return ProjectConfigLoader(path), path
 

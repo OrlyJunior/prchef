@@ -7,12 +7,12 @@ defaults:
   # Persistent execution state is global, never repository-local. Relative paths
   # are resolved from this global configuration file.
   # persistence:
-  #   database_path: state/orchestrator.db
-  # Worktrees default to ~/.orchestrator/workspaces/<repo>/<execution-id>.
+  #   database_path: state/prchef.db
+  # Worktrees default to ~/.prchef/workspaces/<repo>/<execution-id>.
   # Override globally here or under repositories.<key>. The root must stay
   # outside the configured repository checkout.
   # workspace:
-  #   root: C:/Orchestrator/workspaces
+  #   root: C:/prchef/workspaces
   repository:
     base_branch: develop
     protected_branches: [main, master, develop]
@@ -35,8 +35,8 @@ defaults:
     # qdrant:
     #   mode: local
     #   # Persistent and external to every repository. Omit for
-    #   # ~/.orchestrator/qdrant. Local mode is single-process only.
-    #   path: C:/Orchestrator/qdrant
+    #   # ~/.prchef/qdrant. Local mode is single-process only.
+    #   path: C:/prchef/qdrant
     # Server mode supports concurrent orchestrator processes instead:
     # qdrant:
     #   mode: server
@@ -185,7 +185,7 @@ defaults:
       type: litellm
       model: openai/gpt-4.1-mini
       # Export this variable in the orchestrator process environment. The app's
-      # ~/.orchestrator/.env does not export arbitrary API provider credentials.
+      # ~/.prchef/.env does not export arbitrary API provider credentials.
       api_key_env: OPENAI_API_KEY
       # A hosted account has its own finite quota pool, independent of the
       # Codex ceiling above: the two admit concurrently.

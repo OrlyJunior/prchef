@@ -88,7 +88,7 @@ class CodexClient:
         repository_path: Path,
         output_schema: Mapping[str, Any] | None = None,
     ) -> ImplementationResult:
-        with tempfile.TemporaryDirectory(prefix="orchestrator-codex-") as temp_root:
+        with tempfile.TemporaryDirectory(prefix="prchef-codex-") as temp_root:
             output_file = Path(temp_root) / "last-message.txt"
             schema_file: Path | None = None
             if output_schema is not None:

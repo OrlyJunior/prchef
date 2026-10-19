@@ -77,7 +77,7 @@ class GitHubAppSettingsScreen(Screen[None]):
         repository_select = self.query_one("#github-app-repository", RepositorySelect)
         if not repositories:
             repository_select.set_repositories(repositories)
-            self._status("No repositories are configured in orchestrator.yml.")
+            self._status("No repositories are configured in prchef.yml.")
             return
         repository_select.set_repositories(
             repositories, selected_repository=self.controller.selected_repository
@@ -102,7 +102,7 @@ class GitHubAppSettingsScreen(Screen[None]):
             self._populate("planner", planner)
             self._populate("implementer", implementer)
             self._populate("reviewer", reviewer)
-            self._status("Edit App references, then save to orchestrator.yml.")
+            self._status("Edit App references, then save to prchef.yml.")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "save-github-apps":

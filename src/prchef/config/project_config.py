@@ -66,11 +66,11 @@ def provider_option_label(name: str, provider_type: str) -> str:
     return name
 
 
-GLOBAL_CONFIG_FILENAME = "orchestrator.yml"
+GLOBAL_CONFIG_FILENAME = "prchef.yml"
 _CONFIG_ENVIRONMENT_VARIABLES = (
-    "ORCHESTRATOR_CONFIG",
-    "ORCHESTRATOR_CONFIG_PATH",
-    "ORCHESTRATOR_CONFIG_FILE",
+    "PRCHEF_CONFIG",
+    "PRCHEF_CONFIG_PATH",
+    "PRCHEF_CONFIG_FILE",
 )
 
 
@@ -116,7 +116,7 @@ class RepositorySettings(BaseModel):
     name: str = ""
     base_branch: str = "develop"
     protected_branches: list[str] = Field(default_factory=lambda: ["main", "master", "develop"])
-    branch_prefix: str = "orchestrator"
+    branch_prefix: str = "prchef"
 
 
 class EmbeddingSettings(BaseModel):
@@ -1375,8 +1375,8 @@ def resolve_global_config(
     # must never supply configuration implicitly.
     del installation_dir
     candidates = [
-        user_home / ".config" / "orchestrator" / GLOBAL_CONFIG_FILENAME,
-        user_home / ".orchestrator" / GLOBAL_CONFIG_FILENAME,
+        user_home / ".config" / "prchef" / GLOBAL_CONFIG_FILENAME,
+        user_home / ".prchef" / GLOBAL_CONFIG_FILENAME,
     ]
 
     searched: list[Path] = []
@@ -1810,10 +1810,10 @@ class ProjectConfigLoader:
         defaults = global_config.get("defaults", {})
         if not isinstance(defaults, dict):
             raise ConfigurationError("'defaults' must be a mapping")
-        legacy_local_config = repository_path / ".orchestrator.yml"
+        legacy_local_config = repository_path / ".prchef.yml"
         if legacy_local_config.is_file():
             logger.warning(
-                "Repository-local .orchestrator.yml is no longer supported and is ignored: %s",
+                "Repository-local .prchef.yml is no longer supported and is ignored: %s",
                 legacy_local_config,
             )
         merged = _deep_merge(defaults, entry)
@@ -1930,10 +1930,10 @@ class ProjectConfigLoader:
     ) -> Path:
         """Create or update one repository-scoped agent preset.
 
-        The resolved global ``orchestrator.yml`` remains the sole persistence
+        The resolved global ``prchef.yml`` remains the sole persistence
         target.  A preset is intentionally written under the selected
         repository entry, preserving the established repository override
-        behavior and never creating a local ``.orchestrator.yml``.
+        behavior and never creating a local ``.prchef.yml``.
         """
 
         normalized_role = self._preset_role(role)

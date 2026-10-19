@@ -22,7 +22,7 @@ on its own pull request. Repository rules and the App's permissions still apply.
 Use exactly one key source. An absolute, protected `private_key_path` is preferred. An environment
 variable supports secret managers; literal `\n` sequences are converted to newlines.
 
-Merge this fragment into your existing global `orchestrator.yml`; keep your agent,
+Merge this fragment into your existing global `prchef.yml`; keep your agent,
 provider, and repository settings alongside it under the appropriate keys.
 
 ```yaml
@@ -79,7 +79,7 @@ to use; checkouts without a Planner App continue to use `gh` when the origin is 
 
 The Textual TUI exposes all three roles under **GitHub Apps** (or `c`). It writes only App IDs,
 installation IDs, and private-key references to the selected repository's
-`repositories.<key>` entry in the resolved `orchestrator.yml`; it never accepts or writes private
+`repositories.<key>` entry in the resolved `prchef.yml`; it never accepts or writes private
 key contents or tokens. Clearing an identity inherited from `defaults` writes an explicit `null`
 for that repository, so the identity remains disabled there while other repositories keep the default.
 

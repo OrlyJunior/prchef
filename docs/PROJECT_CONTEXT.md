@@ -28,7 +28,7 @@ tests and repository retrieval.
   stay concurrent. Workflows wait; screen actions try admission without overtaking them.
   Shutdown waits for admitted work. Provider ceilings have no cross-process coordination.
 - Startup marks orphaned active executions interrupted; resumption requires an explicit user choice.
-- Configuration comes only from a global `orchestrator.yml` (`defaults` deep-merged with
+- Configuration comes only from a global `prchef.yml` (`defaults` deep-merged with
   `repositories.<key>`). Repository-local configuration files are ignored. Discovery and
   persistence never depend on the current directory or a source checkout. Explicit CLI and
   environment paths precede user-global defaults; a missing explicitly selected file is an error.

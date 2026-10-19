@@ -100,7 +100,7 @@ class GitClient:
     @contextmanager
     def planning_snapshot(self, base_commit: str) -> Iterator[Path]:
         """Expose an exact commit in a disposable detached worktree for local agents."""
-        with tempfile.TemporaryDirectory(prefix="orchestrator-plan-") as directory:
+        with tempfile.TemporaryDirectory(prefix="prchef-plan-") as directory:
             snapshot = Path(directory) / "checkout"
             self._git("worktree", "add", "--detach", str(snapshot), base_commit)
             try:

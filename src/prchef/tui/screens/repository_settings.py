@@ -158,7 +158,7 @@ class RepositorySettingsScreen(Screen[None]):
         with VerticalScroll(id="repository-settings"):
             yield Static("Repositories", classes="screen-title")
             yield Static(
-                "Manage repositories in the global orchestrator.yml. "
+                "Manage repositories in the global prchef.yml. "
                 "This screen never clones repositories or changes Git state."
             )
             with Horizontal(id="repository-settings-layout"):

@@ -150,7 +150,7 @@ class AgentPresetsScreen(Screen[None]):
         selector = self.query_one("#agent-presets-repository", RepositorySelect)
         if not repositories:
             selector.set_repositories(repositories)
-            self._status("No repositories are configured in orchestrator.yml.")
+            self._status("No repositories are configured in prchef.yml.")
             return
         selector.set_repositories(
             repositories,

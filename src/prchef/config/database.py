@@ -18,9 +18,9 @@ class PersistenceConfigurationError(RuntimeError):
     """Raised when the globally configured persistence location is invalid."""
 
 
-_DATABASE_URL_ENVIRONMENT_VARIABLE = "ORCHESTRATOR_DATABASE_URL"
-_DATABASE_PATH_ENVIRONMENT_VARIABLE = "ORCHESTRATOR_DATABASE_PATH"
-_DATABASE_FILENAME = "orchestrator.db"
+_DATABASE_URL_ENVIRONMENT_VARIABLE = "PRCHEF_DATABASE_URL"
+_DATABASE_PATH_ENVIRONMENT_VARIABLE = "PRCHEF_DATABASE_PATH"
+_DATABASE_FILENAME = "prchef.db"
 
 
 class Base(DeclarativeBase):
@@ -128,7 +128,7 @@ def resolve_database_url(
 
     The precedence is environment URL/path, explicit application URL/path,
     global ``defaults.persistence`` settings, a legacy database adjacent to the
-    discovered global configuration, then ``~/.orchestrator/orchestrator.db``.
+    discovered global configuration, then ``~/.prchef/prchef.db``.
     """
     environment = os.environ if environ is None else environ
     state_directory = default_state_directory(home)
@@ -148,7 +148,7 @@ def resolve_database_url(
     environment_path = environment.get(_DATABASE_PATH_ENVIRONMENT_VARIABLE, "").strip()
     if environment_url and environment_path:
         raise PersistenceConfigurationError(
-            "Configure only one of ORCHESTRATOR_DATABASE_URL or ORCHESTRATOR_DATABASE_PATH"
+            "Configure only one of PRCHEF_DATABASE_URL or PRCHEF_DATABASE_PATH"
         )
     if environment_url:
         return _prepare_sqlite_url(environment_url, base_directory)

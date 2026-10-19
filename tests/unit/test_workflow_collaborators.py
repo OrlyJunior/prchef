@@ -45,7 +45,7 @@ def test_interrupted_recovery_uses_recorded_legacy_workspace(
 ) -> None:
     control = tmp_path / "control"
     control.mkdir()
-    legacy = tmp_path / "orchestrator-workspaces" / control.name / "one"
+    legacy = tmp_path / "prchef-workspaces" / control.name / "one"
     if exists:
         legacy.mkdir(parents=True)
     execution = WorkflowExecution(
@@ -87,7 +87,7 @@ def test_interrupted_recovery_uses_recorded_legacy_workspace(
     assert result is sentinel, repository.reinterrupt.call_args
     assert implement.call_args.args[6] == legacy
     assert execution.workspace_path == str(legacy)
-    assert not (Path.home() / ".orchestrator" / "workspaces").exists()
+    assert not (Path.home() / ".prchef" / "workspaces").exists()
     git.at_path.assert_called_with(legacy)
     if stage is WorkflowStage.PREPARE_BRANCH:
         repository.record_workspace.assert_called_once_with("one", str(legacy))

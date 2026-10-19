@@ -556,11 +556,11 @@ class _ConfigLoader:
             self.repository_entries = updated
         else:
             self.repository_entries[repository_key] = replacement
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def delete_repository(self, repository_key: str) -> Path:
         del self.repository_entries[repository_key]
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def load(self, task: DevelopmentTask, repository: str | None = None) -> ProjectConfig:
         assert task.repository == repository == "example"
@@ -576,7 +576,7 @@ class _ConfigLoader:
     ) -> Path:
         assert repository_key == "example"
         self.saved_github_apps = (repository_key, planner_app, implementer_app, reviewer_app)
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def save_agent_preset(
         self,
@@ -592,7 +592,7 @@ class _ConfigLoader:
         if name in presets and not overwrite:
             raise ValueError("preset already exists")
         presets[name] = preset
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def rename_agent_preset(
         self, repository_key: str, role: str, old_name: str, new_name: str
@@ -605,21 +605,21 @@ class _ConfigLoader:
         settings = getattr(self.config.agents, role)
         if settings.fallback_preset == old_name:
             settings.fallback_preset = new_name
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def delete_agent_preset(self, repository_key: str, role: str, name: str) -> Path:
         assert repository_key == "example"
         del self.config.agent_presets[role][name]
         if not self.config.agent_presets[role]:
             del self.config.agent_presets[role]
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def save_agent_fallback_preset(
         self, repository_key: str, role: str, preset_name: str | None
     ) -> Path:
         assert repository_key == "example"
         getattr(self.config.agents, role).fallback_preset = preset_name
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
 
 class _TaskProvider:
@@ -8172,7 +8172,7 @@ def _provider_editor_controller(
 ) -> tuple[WorkflowController, _WorkflowService, Path]:
     controller, service, _ = _controller(tmp_path)
     (tmp_path / "checkout" / ".git").mkdir(parents=True)
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_text(
         "defaults:\n  providers: {}\n  task: {provider: github}\n"
         "  repository_context: {strategy: heuristic}\n  agents:\n"

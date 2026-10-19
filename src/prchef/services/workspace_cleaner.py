@@ -78,6 +78,8 @@ class WorkspaceCleanupService:
         roots = (
             workspace_root,
             default_state_directory() / "workspaces",
+            # Keep old locations discoverable only for retained-worktree cleanup.
+            Path.home() / ".orchestrator" / "workspaces",
             self._control_repository.parent / "orchestrator-workspaces",
         )
         self._workspace_bases = tuple(

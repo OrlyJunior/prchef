@@ -63,7 +63,7 @@ def test_cli_and_tui_select_only_the_matching_planner_app(
 ) -> None:
     for name in ("first", "second"):
         (tmp_path / name / ".git").mkdir(parents=True)
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         """defaults:
   roles: {spec: codex, review: codex}
@@ -118,7 +118,7 @@ def test_cli_slug_with_duplicate_origins_uses_only_a_shared_identity(
 ) -> None:
     for name in ("first", "second"):
         (tmp_path / name / ".git").mkdir(parents=True)
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     second_app = {
         "same": "        planner_app:\n          app_id: 1\n"
         "          installation_id: 11\n          private_key_env: FIRST_KEY\n",
@@ -159,7 +159,7 @@ def test_cli_slug_with_duplicate_origins_and_no_planner_app_keeps_gh_fallback(
 ) -> None:
     for name in ("first", "second"):
         (tmp_path / name / ".git").mkdir(parents=True)
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         "defaults:\n  roles: {spec: codex, review: codex}\nrepositories:\n"
         "  first:\n    path: first\n"
@@ -178,8 +178,8 @@ def test_debug_task_loading_without_global_config_uses_gh(
     monkeypatch: Any, tmp_path: Path, explicit_config: bool
 ) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.delenv("ORCHESTRATOR_CONFIG", raising=False)
-    monkeypatch.delenv("ORCHESTRATOR_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("PRCHEF_CONFIG", raising=False)
+    monkeypatch.delenv("PRCHEF_CONFIG_PATH", raising=False)
     calls: list[list[str]] = []
 
     def run(self: Any, command: list[str], **kwargs: Any) -> CommandResult:
@@ -222,7 +222,7 @@ def test_debug_task_loading_without_global_config_uses_gh(
 
 
 def test_invalid_existing_config_still_reports_error_for_planner_lookup(tmp_path: Path) -> None:
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text("defaults: [", encoding="utf-8")
     loader = ProjectConfigLoader(config_file)
     with pytest.raises(main.ConfigurationError):
@@ -239,7 +239,7 @@ def test_cli_version_option() -> None:
 def test_cli_providers_lists_configured_provider_names_and_types(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text(
         """defaults:
   agents:
@@ -279,7 +279,7 @@ def test_cli_providers_lists_configured_provider_names_and_types(
 
 
 def test_cli_providers_succeeds_without_configured_providers(tmp_path: Path) -> None:
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text(
         """defaults:
   agents:
@@ -303,14 +303,14 @@ def test_cli_providers_succeeds_without_configured_providers(tmp_path: Path) -> 
 def test_cli_providers_uses_global_config_from_an_isolated_cwd(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
-    for variable in ("ORCHESTRATOR_CONFIG", "ORCHESTRATOR_CONFIG_FILE"):
+    for variable in ("PRCHEF_CONFIG", "PRCHEF_CONFIG_FILE"):
         monkeypatch.delenv(variable, raising=False)
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text("defaults:\n  roles: {spec: codex, review: codex}\n", encoding="utf-8")
     isolated_cwd = tmp_path / "unrelated" / "directory"
     isolated_cwd.mkdir(parents=True)
     monkeypatch.chdir(isolated_cwd)
-    monkeypatch.setenv("ORCHESTRATOR_CONFIG_PATH", str(config))
+    monkeypatch.setenv("PRCHEF_CONFIG_PATH", str(config))
 
     result = runner.invoke(main.app, ["providers"])
 
@@ -322,7 +322,7 @@ def test_cli_providers_uses_global_config_from_an_isolated_cwd(
 def test_cli_surfaces_rejected_jules_provider_before_startup(
     tmp_path: Path, command: str
 ) -> None:
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text(
         """defaults:
   agents:
@@ -622,7 +622,7 @@ def test_cli_respond_uses_same_execution_and_service_logic(monkeypatch: Any) -> 
 def test_cli_launches_textual_tui_after_migrations(monkeypatch: Any, tmp_path: Path) -> None:
     _stub_runtime(monkeypatch)
     launched = False
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text("defaults:\n  roles: {spec: codex, review: codex}\n", encoding="utf-8")
     monkeypatch.setattr(main, "_config_loader", lambda path: main.ProjectConfigLoader(path))
 
@@ -706,7 +706,7 @@ def test_cli_aborts_before_repository_when_migration_fails(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
     repository_accessed = False
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text("defaults:\n  roles: {spec: codex, review: codex}\n", encoding="utf-8")
 
     def fail_migration(settings: Any) -> None:
@@ -753,7 +753,7 @@ def test_pending_migrations_accept_percent_in_database_url(tmp_path: Path) -> No
 def test_manual_alembic_upgrade_uses_global_persistence_configuration_outside_cwd(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
-    config = tmp_path / "config" / "orchestrator.yml"
+    config = tmp_path / "config" / "prchef.yml"
     config.parent.mkdir()
     database = tmp_path / "state" / "workflow.db"
     config.write_text(
@@ -763,9 +763,9 @@ def test_manual_alembic_upgrade_uses_global_persistence_configuration_outside_cw
     arbitrary_cwd = tmp_path / "arbitrary-working-directory"
     arbitrary_cwd.mkdir()
     monkeypatch.chdir(arbitrary_cwd)
-    monkeypatch.setenv("ORCHESTRATOR_CONFIG", str(config))
-    monkeypatch.delenv("ORCHESTRATOR_DATABASE_URL", raising=False)
-    monkeypatch.delenv("ORCHESTRATOR_DATABASE_PATH", raising=False)
+    monkeypatch.setenv("PRCHEF_CONFIG", str(config))
+    monkeypatch.delenv("PRCHEF_DATABASE_URL", raising=False)
+    monkeypatch.delenv("PRCHEF_DATABASE_PATH", raising=False)
 
     project_root = Path(__file__).resolve().parents[2]
     alembic_config = Config(str(project_root / "alembic.ini"))
@@ -807,7 +807,7 @@ def test_cli_uses_default_provider_from_configuration(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
     _stub_runtime(monkeypatch)
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text("task:\n  provider: github\n", encoding="utf-8")
 
     result = runner.invoke(

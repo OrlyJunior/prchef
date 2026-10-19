@@ -51,7 +51,7 @@ def test_qdrant_and_local_embeddings_are_core_dependencies() -> None:
 def test_repository_context_documentation_covers_default_override_and_server_mode() -> None:
     root = Path(__file__).resolve().parents[2]
     readme = (root / "README.md").read_text(encoding="utf-8")
-    example = (root / "orchestrator.example.yml").read_text(encoding="utf-8")
+    example = (root / "prchef.example.yml").read_text(encoding="utf-8")
     context = (root / "docs" / "PROJECT_CONTEXT.md").read_text(encoding="utf-8")
 
     assert "strategy: heuristic" in readme and "strategy: heuristic" in example

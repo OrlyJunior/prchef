@@ -61,11 +61,11 @@ def test_worktree_is_created_from_origin_without_touching_dirty_control_checkout
     )
 
     workspace = manager.create(
-        "execution-1", "develop", "orchestrator/execution-1", ["main", "master", "develop"]
+        "execution-1", "develop", "prchef/execution-1", ["main", "master", "develop"]
     )
 
     assert workspace == workspace_root / control.name / "execution-1"
-    assert _git(workspace, "branch", "--show-current") == "orchestrator/execution-1"
+    assert _git(workspace, "branch", "--show-current") == "prchef/execution-1"
     assert _git(workspace, "rev-parse", "HEAD") == _git(
         control, "rev-parse", "origin/develop"
     )
@@ -86,16 +86,16 @@ def test_workspaces_and_branches_are_unique_and_remain_available_for_recovery(
     )
 
     first = manager.create(
-        "execution-1", "develop", "orchestrator/execution-1", ["develop"]
+        "execution-1", "develop", "prchef/execution-1", ["develop"]
     )
     second = manager.create(
-        "execution-2", "develop", "orchestrator/execution-2", ["develop"]
+        "execution-2", "develop", "prchef/execution-2", ["develop"]
     )
     (first / "unfinished.txt").write_text("recover me", encoding="utf-8")
 
     assert first != second
-    assert _git(first, "branch", "--show-current") == "orchestrator/execution-1"
-    assert _git(second, "branch", "--show-current") == "orchestrator/execution-2"
+    assert _git(first, "branch", "--show-current") == "prchef/execution-1"
+    assert _git(second, "branch", "--show-current") == "prchef/execution-2"
     assert (first / "unfinished.txt").read_text(encoding="utf-8") == "recover me"
 
 
@@ -107,7 +107,7 @@ def test_git_client_removes_worktree_and_prunes_its_metadata(tmp_path: Path) -> 
         WorkspaceSettings(root=tmp_path / "workspaces"),
     )
     workspace = manager.create(
-        "execution-1", "develop", "orchestrator/execution-1", ["develop"]
+        "execution-1", "develop", "prchef/execution-1", ["develop"]
     )
 
     GitClient(CommandClient(), control).remove_worktree(workspace)
@@ -140,7 +140,7 @@ def test_pytest_creates_its_temp_directory_inside_a_fresh_execution_worktree(
         WorkspaceSettings(root=tmp_path / "workspaces"),
     )
     workspace = manager.create(
-        "windows-path-execution", "develop", "orchestrator/windows-path-execution", ["develop"]
+        "windows-path-execution", "develop", "prchef/windows-path-execution", ["develop"]
     )
     workspace_temp = workspace / ".pytest-tmp"
 
@@ -167,7 +167,7 @@ def test_workspace_root_inside_control_checkout_is_rejected(tmp_path: Path) -> N
     manager = WorkspaceManager(
         GitClient(CommandClient(), control),
         control,
-        WorkspaceSettings(root=control / ".orchestrator-workspaces"),
+        WorkspaceSettings(root=control / ".prchef-workspaces"),
     )
 
     with pytest.raises(ValueError, match="must not create execution worktrees inside"):
@@ -175,9 +175,9 @@ def test_workspace_root_inside_control_checkout_is_rejected(tmp_path: Path) -> N
 
 
 def test_workspace_root_accepts_windows_style_paths() -> None:
-    settings = WorkspaceSettings(root=Path("C:/Git/orchestrator-workspaces"))
+    settings = WorkspaceSettings(root=Path("C:/Git/prchef-workspaces"))
 
-    assert str(settings.root).replace("\\", "/").endswith("C:/Git/orchestrator-workspaces")
+    assert str(settings.root).replace("\\", "/").endswith("C:/Git/prchef-workspaces")
 
 
 def test_default_workspace_uses_shared_user_state_directory(
@@ -188,12 +188,13 @@ def test_default_workspace_uses_shared_user_state_directory(
     monkeypatch.setattr("prchef.workspace.manager.default_state_directory", lambda: state)
     manager = WorkspaceManager(GitClient(CommandClient(), control), control, WorkspaceSettings())
 
-    workspace = manager.create("execution-1", "develop", "orchestrator/execution-1", ["develop"])
+    workspace = manager.create("execution-1", "develop", "prchef/execution-1", ["develop"])
 
     assert workspace == state / "workspaces" / control.name / "execution-1"
+    assert not (control.parent / "prchef-workspaces").exists()
     assert not (control.parent / "orchestrator-workspaces").exists()
     with pytest.raises(GitClientError, match="Workspace path already exists"):
-        manager.create("execution-1", "develop", "orchestrator/execution-1", ["develop"])
+        manager.create("execution-1", "develop", "prchef/execution-1", ["develop"])
 
 
 @pytest.mark.parametrize("root", ["custom-workspaces", "../relative-workspaces"])

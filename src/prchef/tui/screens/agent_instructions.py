@@ -74,7 +74,7 @@ class AgentInstructionsScreen(Screen[None]):
         selector = self.query_one("#agent-instructions-repository", RepositorySelect)
         if not repositories:
             selector.set_repositories(repositories)
-            self._status("No repositories are configured in orchestrator.yml.")
+            self._status("No repositories are configured in prchef.yml.")
             return
         selected_repository = (
             self._initial_repository or self.controller.selected_repository

@@ -16,7 +16,7 @@ def _database_path(database_url: str) -> Path:
 def test_database_environment_url_overrides_global_persistence_configuration(
     tmp_path: Path,
 ) -> None:
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text(
         "defaults:\n  persistence:\n    database_path: configured.db\n",
         encoding="utf-8",
@@ -25,7 +25,7 @@ def test_database_environment_url_overrides_global_persistence_configuration(
 
     resolved = resolve_database_url(
         config_file=config,
-        environ={"ORCHESTRATOR_DATABASE_URL": f"sqlite:///{environment_database.as_posix()}"},
+        environ={"PRCHEF_DATABASE_URL": f"sqlite:///{environment_database.as_posix()}"},
         home=tmp_path / "home",
         cwd=tmp_path / "unrelated",
     )
@@ -37,7 +37,7 @@ def test_database_environment_url_overrides_global_persistence_configuration(
 def test_database_configuration_path_is_resolved_from_global_config_not_cwd(tmp_path: Path) -> None:
     config_directory = tmp_path / "config"
     config_directory.mkdir()
-    config = config_directory / "orchestrator.yml"
+    config = config_directory / "prchef.yml"
     config.write_text(
         "defaults:\n  persistence:\n    database_path: state/workflow.db\n",
         encoding="utf-8",
@@ -54,9 +54,9 @@ def test_database_configuration_path_is_resolved_from_global_config_not_cwd(tmp_
 
 
 def test_database_uses_legacy_file_adjacent_to_discovered_global_config(tmp_path: Path) -> None:
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text("defaults: {}\n", encoding="utf-8")
-    legacy_database = tmp_path / "orchestrator.db"
+    legacy_database = tmp_path / "prchef.db"
     legacy_database.touch()
 
     resolved = resolve_database_url(
@@ -76,13 +76,13 @@ def test_database_defaults_to_user_state_directory_independent_of_cwd(tmp_path: 
 
     resolved = resolve_database_url(environ={}, home=home, cwd=arbitrary_cwd)
 
-    assert _database_path(resolved) == (home / ".orchestrator" / "orchestrator.db").resolve()
-    assert (home / ".orchestrator").is_dir()
+    assert _database_path(resolved) == (home / ".prchef" / "prchef.db").resolve()
+    assert (home / ".prchef").is_dir()
 
 
 def test_database_uses_global_configuration_not_a_current_directory_file(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    global_config = home / ".orchestrator" / "orchestrator.yml"
+    global_config = home / ".prchef" / "prchef.yml"
     global_config.parent.mkdir(parents=True)
     global_config.write_text(
         "defaults:\n  persistence:\n    database_path: global/workflow.db\n",
@@ -90,7 +90,7 @@ def test_database_uses_global_configuration_not_a_current_directory_file(tmp_pat
     )
     working_directory = tmp_path / "repository"
     working_directory.mkdir()
-    (working_directory / "orchestrator.yml").write_text(
+    (working_directory / "prchef.yml").write_text(
         "defaults:\n  persistence:\n    database_path: local/workflow.db\n",
         encoding="utf-8",
     )

@@ -9,8 +9,8 @@ class Settings(BaseSettings):
         # A repository-local .env would make a pipx-installed command behave
         # differently for every working directory.  Keep optional dotenv
         # credentials in the same user-global state directory as persistence.
-        env_file=Path.home() / ".orchestrator" / ".env",
-        env_prefix="ORCHESTRATOR_",
+        env_file=Path.home() / ".prchef" / ".env",
+        env_prefix="PRCHEF_",
         extra="ignore",
     )
 
@@ -23,9 +23,9 @@ class Settings(BaseSettings):
     # Environment-based configuration selection is intentionally handled by
     # resolve_global_config(), which preserves its documented precedence. The
     # private validation alias keeps BaseSettings from consuming a public
-    # ORCHESTRATOR_CONFIG* variable before that resolver sees it.
+    # PRCHEF_CONFIG* variable before that resolver sees it.
     config_file: Path | None = Field(
         default=None,
-        validation_alias="_ORCHESTRATOR_CONFIG_CLI_PATH",
+        validation_alias="_PRCHEF_CONFIG_CLI_PATH",
     )
     log_level: str = "INFO"
