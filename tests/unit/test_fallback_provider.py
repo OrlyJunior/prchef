@@ -6,13 +6,13 @@ from typing import Any
 
 import pytest
 
-from orchestrator.config.project_config import ProjectConfig
-from orchestrator.models import AgentRequest, AgentResult, AgentRole, WorkflowStage
-from orchestrator.models.execution_diagnostic import ExecutionDiagnostic
-from orchestrator.models.workflow_event import WorkflowEventKind
-from orchestrator.providers.agent_provider import AgentProviderError
-from orchestrator.providers.fallback_provider import FallbackAgentProvider
-from orchestrator.services.workflow_service import WorkflowService
+from prchef.config.project_config import ProjectConfig
+from prchef.models import AgentRequest, AgentResult, AgentRole, WorkflowStage
+from prchef.models.execution_diagnostic import ExecutionDiagnostic
+from prchef.models.workflow_event import WorkflowEventKind
+from prchef.providers.agent_provider import AgentProviderError
+from prchef.providers.fallback_provider import FallbackAgentProvider
+from prchef.services.workflow_service import WorkflowService
 
 
 class FakeProvider:

@@ -3,11 +3,11 @@ from typing import Any
 
 import pytest
 
-from orchestrator.clients.command_client import CommandResult
-from orchestrator.clients.exceptions import CommandExecutionError, CommandTimeoutError
-from orchestrator.config.project_config import ValidationSettings
-from orchestrator.models import ValidationCheck
-from orchestrator.services.validation_service import ValidationService
+from prchef.clients.command_client import CommandResult
+from prchef.clients.exceptions import CommandExecutionError, CommandTimeoutError
+from prchef.config.project_config import ValidationSettings
+from prchef.models import ValidationCheck
+from prchef.services.validation_service import ValidationService
 
 
 class RecordingCommandClient:
@@ -53,7 +53,7 @@ def test_explicit_source_mypy_command_prevents_full_repository_auto_detection(
         commands=[
             ["python", "-m", "pytest"],
             ["python", "-m", "ruff", "check", "."],
-            ["python", "-m", "mypy", "src/orchestrator"],
+            ["python", "-m", "mypy", "src/prchef"],
         ],
     )
 
@@ -63,7 +63,7 @@ def test_explicit_source_mypy_command_prevents_full_repository_auto_detection(
     assert commands.commands == [
         ["python", "-m", "pytest"],
         ["python", "-m", "ruff", "check", "."],
-        ["python", "-m", "mypy", "src/orchestrator"],
+        ["python", "-m", "mypy", "src/prchef"],
     ]
 
 

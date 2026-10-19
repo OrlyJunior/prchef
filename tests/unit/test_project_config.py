@@ -6,8 +6,8 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from orchestrator.clients.factory import ClientFactory
-from orchestrator.config.project_config import (
+from prchef.clients.factory import ClientFactory
+from prchef.config.project_config import (
     AgentPresetConfig,
     CodexCliProviderSettings,
     ConfigurationError,
@@ -17,9 +17,9 @@ from orchestrator.config.project_config import (
     ProviderSupportTier,
     resolve_global_config,
 )
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.services.repository_context import repository_context_strategy_names
-from orchestrator.workspace.manager import WorkspaceManager
+from prchef.models.development_task import DevelopmentTask
+from prchef.services.repository_context import repository_context_strategy_names
+from prchef.workspace.manager import WorkspaceManager
 
 
 def _validated_config(values: dict[str, object]) -> ProjectConfig:
@@ -1066,7 +1066,7 @@ repositories:
         "created",
         "new/repository",
         True,
-        [["python", "-m", "pytest"], ["python", "-m", "mypy", "src/orchestrator"]],
+        [["python", "-m", "pytest"], ["python", "-m", "mypy", "src/prchef"]],
     )
     loader.save_repository(
         "renamed",
@@ -1089,7 +1089,7 @@ repositories:
         "auto_detect": True,
         "commands": [
             ["python", "-m", "pytest"],
-            ["python", "-m", "mypy", "src/orchestrator"],
+            ["python", "-m", "mypy", "src/prchef"],
         ],
     }
     settings = loader.repository_settings("created")

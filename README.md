@@ -301,10 +301,10 @@ Install the development dependencies above, then run:
 ```sh
 python -m pytest
 python -m ruff check .
-python -m mypy src/orchestrator
+python -m mypy src/prchef
 ```
 
-Database schema changes use versioned Alembic migrations in `src/orchestrator/migrations/versions`. From the repository root, create one with `alembic revision --autogenerate -m "describe change"` and apply it with `alembic upgrade head`. CLI commands that open persisted execution state apply pending migrations automatically; `--help`, `--version`, and `providers` do not.
+Database schema changes use versioned Alembic migrations in `src/prchef/migrations/versions`. From the repository root, create one with `alembic revision --autogenerate -m "describe change"` and apply it with `alembic upgrade head`. CLI commands that open persisted execution state apply pending migrations automatically; `--help`, `--version`, and `providers` do not.
 
 ### Releasing
 

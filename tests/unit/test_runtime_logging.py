@@ -4,7 +4,7 @@ import base64
 
 import pytest
 
-from orchestrator.runtime_logging import redact_payload, redact_text, summarize_text
+from prchef.runtime_logging import redact_payload, redact_text, summarize_text
 
 
 def _fake_token(prefix: str = "ghs_", body_length: int = 516) -> str:

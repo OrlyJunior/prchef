@@ -3,16 +3,16 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.clients.factory import ClientFactory
-from orchestrator.config.project_config import (
+from prchef.clients.factory import ClientFactory
+from prchef.config.project_config import (
     AgentProviderSettings,
     ConfigurationError,
     ProjectConfig,
 )
-from orchestrator.models import AgentRole
-from orchestrator.providers.claude_code_provider import ClaudeCodeAgentProvider
-from orchestrator.providers.codex_provider import CodexAgentProvider
-from orchestrator.providers.litellm_provider import LiteLLMAgentProvider
+from prchef.models import AgentRole
+from prchef.providers.claude_code_provider import ClaudeCodeAgentProvider
+from prchef.providers.codex_provider import CodexAgentProvider
+from prchef.providers.litellm_provider import LiteLLMAgentProvider
 
 
 def _config(
@@ -258,7 +258,7 @@ def test_verbose_factory_logging_reports_the_final_role_resolution(
         },
     )
 
-    with caplog.at_level(logging.DEBUG, logger="orchestrator"):
+    with caplog.at_level(logging.DEBUG, logger="prchef"):
         ClientFactory().create(config)
 
     assert (

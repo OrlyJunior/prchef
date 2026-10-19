@@ -7,13 +7,13 @@ from typing import Any
 
 import pytest
 
-import orchestrator.services.debug_service as debug_service_module
-from orchestrator.clients.exceptions import (
+import prchef.services.debug_service as debug_service_module
+from prchef.clients.exceptions import (
     CommandProcessTreeUnconfirmedError,
     GitHubClientError,
 )
-from orchestrator.config.project_config import ProjectConfig
-from orchestrator.models import (
+from prchef.config.project_config import ProjectConfig
+from prchef.models import (
     AgentRole,
     DevelopmentTask,
     PullRequest,
@@ -21,14 +21,14 @@ from orchestrator.models import (
     ValidationResult,
     WorkflowExecution,
 )
-from orchestrator.services.debug_service import (
+from prchef.services.debug_service import (
     DebugInputs,
     DebugService,
     DebugStage,
     parse_debug_stage,
 )
-from orchestrator.services.project_context import MAX_PROJECT_CONTEXT_CHARS
-from orchestrator.services.repository_context import RepositoryContextRequest
+from prchef.services.project_context import MAX_PROJECT_CONTEXT_CHARS
+from prchef.services.repository_context import RepositoryContextRequest
 from tests.unit.fakes import FakeClientFactory, FakeConfigLoader, FakeTrelloClient
 
 

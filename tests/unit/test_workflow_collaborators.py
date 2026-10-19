@@ -10,23 +10,23 @@ from unittest.mock import Mock
 
 import pytest
 
-from orchestrator.config.project_config import WorkspaceSettings
-from orchestrator.models.validation_result import ValidationResult
-from orchestrator.models.workflow_event import WorkflowEventKind
-from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import (
+from prchef.config.project_config import WorkspaceSettings
+from prchef.models.validation_result import ValidationResult
+from prchef.models.workflow_event import WorkflowEventKind
+from prchef.models.workflow_execution import WorkflowExecution
+from prchef.models.workflow_status import (
     ReviewDecision,
     StepStatus,
     WorkflowStage,
     WorkflowStatus,
 )
-from orchestrator.services.workflow_agent_runtime import WorkflowAgentRuntime
-from orchestrator.services.workflow_correction_policy import CorrectionPolicy
-from orchestrator.services.workflow_execution_lifecycle import ExecutionLifecycle
-from orchestrator.services.workflow_stage_actions import StageActions
-from orchestrator.services.workflow_stage_events import ExecutionRuntimes, StageEvents
-from orchestrator.services.workflow_stage_sequencer import StageSequencer
-from orchestrator.services.workflow_stage_values import StageValues
+from prchef.services.workflow_agent_runtime import WorkflowAgentRuntime
+from prchef.services.workflow_correction_policy import CorrectionPolicy
+from prchef.services.workflow_execution_lifecycle import ExecutionLifecycle
+from prchef.services.workflow_stage_actions import StageActions
+from prchef.services.workflow_stage_events import ExecutionRuntimes, StageEvents
+from prchef.services.workflow_stage_sequencer import StageSequencer
+from prchef.services.workflow_stage_values import StageValues
 
 
 @pytest.mark.parametrize(
@@ -178,7 +178,7 @@ def test_correction_policy_retries_validation_once_with_fakes(
             return SimpleNamespace(success=True)
 
     monkeypatch.setattr(
-        "orchestrator.services.workflow_correction_policy.ValidationService", Validation
+        "prchef.services.workflow_correction_policy.ValidationService", Validation
     )
     policy = CorrectionPolicy(Repository(), Events(), object())  # type: ignore[arg-type]
     config = SimpleNamespace(
@@ -307,9 +307,9 @@ def test_stage_sequencer_resumes_planning_in_stage_order(monkeypatch: pytest.Mon
         def create(self, *_: Any) -> Path:
             return Path("repo/worktree")
 
-    monkeypatch.setattr("orchestrator.services.workflow_stage_sequencer.SpecService", Spec)
+    monkeypatch.setattr("prchef.services.workflow_stage_sequencer.SpecService", Spec)
     monkeypatch.setattr(
-        "orchestrator.services.workflow_stage_sequencer.WorkspaceManager", Workspace
+        "prchef.services.workflow_stage_sequencer.WorkspaceManager", Workspace
     )
 
     @contextmanager

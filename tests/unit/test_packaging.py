@@ -17,11 +17,11 @@ def test_packaging_exposes_the_standard_orchestrator_console_script() -> None:
     with pyproject_path.open("rb") as pyproject_file:
         project = tomllib.load(pyproject_file)["project"]
 
-    assert project["scripts"]["orchestrator"] == "orchestrator.cli.main:app"
+    assert project["scripts"]["orchestrator"] == "prchef.cli.main:app"
 
 
-def test_packaging_keeps_migrations_inside_the_orchestrator_package() -> None:
-    package_root = Path(__file__).resolve().parents[2] / "src" / "orchestrator"
+def test_packaging_keeps_migrations_inside_the_prchef_package() -> None:
+    package_root = Path(__file__).resolve().parents[2] / "src" / "prchef"
 
     assert (package_root / "migrations" / "__init__.py").is_file()
     assert (package_root / "migrations" / "env.py").is_file()

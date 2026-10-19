@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.clients.factory import ClientFactory
-from orchestrator.config.project_config import ProjectConfig
-from orchestrator.models.agent import AgentRole
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.services.spec_service import SpecService
+from prchef.clients.factory import ClientFactory
+from prchef.config.project_config import ProjectConfig
+from prchef.models.agent import AgentRole
+from prchef.models.development_task import DevelopmentTask
+from prchef.services.spec_service import SpecService
 
 _LIVE_ENABLED = (
     os.getenv("ORCHESTRATOR_TEST_CLAUDE_CODE") == "1"

@@ -7,15 +7,15 @@ from typing import Any
 import pytest
 import yaml
 
-from orchestrator.clients.factory import ClientFactory
-from orchestrator.config.project_config import (
+from prchef.clients.factory import ClientFactory
+from prchef.config.project_config import (
     ConfigurationError,
     ProjectConfigLoader,
     convert_legacy_vertex_provider,
 )
-from orchestrator.models.agent import AgentRole
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.providers.litellm_provider import LiteLLMAgentProvider
+from prchef.models.agent import AgentRole
+from prchef.models.development_task import DevelopmentTask
+from prchef.providers.litellm_provider import LiteLLMAgentProvider
 
 
 def _loader(tmp_path: Path, definition: dict[str, Any]) -> tuple[ProjectConfigLoader, Path]:

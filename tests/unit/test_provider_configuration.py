@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 import yaml
 
-from orchestrator.config import provider_configuration as editor
-from orchestrator.config.project_config import ConfigurationError, ProjectConfigLoader
-from orchestrator.providers.concurrency import ProviderConcurrencyCoordinator
+from prchef.config import provider_configuration as editor
+from prchef.config.project_config import ConfigurationError, ProjectConfigLoader
+from prchef.providers.concurrency import ProviderConcurrencyCoordinator
 
 
 def definition(kind: str) -> dict[str, Any]:

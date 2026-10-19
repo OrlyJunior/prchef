@@ -7,13 +7,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from orchestrator.clients.claude_code_client import ClaudeCodeClient
-from orchestrator.clients.command_client import CommandResult
-from orchestrator.clients.exceptions import CommandExecutionError
-from orchestrator.config.project_config import ClaudeCodeProviderSettings, ProjectConfig
-from orchestrator.models import AgentRequest
-from orchestrator.providers.agent_provider import AgentProviderError
-from orchestrator.providers.claude_code_provider import ClaudeCodeAgentProvider
+from prchef.clients.claude_code_client import ClaudeCodeClient
+from prchef.clients.command_client import CommandResult
+from prchef.clients.exceptions import CommandExecutionError
+from prchef.config.project_config import ClaudeCodeProviderSettings, ProjectConfig
+from prchef.models import AgentRequest
+from prchef.providers.agent_provider import AgentProviderError
+from prchef.providers.claude_code_provider import ClaudeCodeAgentProvider
 
 
 class RecordingCommandClient:

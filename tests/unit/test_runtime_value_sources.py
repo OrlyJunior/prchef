@@ -5,12 +5,12 @@ from typing import Any
 
 import pytest
 
-from orchestrator.config.project_config import (
+from prchef.config.project_config import (
     ConfigurationError,
     ProjectConfig,
     ProjectConfigLoader,
 )
-from orchestrator.models.development_task import DevelopmentTask
+from prchef.models.development_task import DevelopmentTask
 
 
 def config(tmp_path: Path, provider: dict[str, Any]) -> ProjectConfig:

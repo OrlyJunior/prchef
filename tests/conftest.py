@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.config.settings import Settings
+from prchef.config.settings import Settings
 
 
 @pytest.fixture(autouse=True)

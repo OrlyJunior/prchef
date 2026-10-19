@@ -14,14 +14,14 @@ from alembic.config import Config
 from sqlalchemy import inspect
 from typer.testing import CliRunner
 
-import orchestrator
-from orchestrator.cli import main
-from orchestrator.clients.command_client import CommandResult
-from orchestrator.config.database import build_engine
-from orchestrator.config.project_config import ProjectConfigLoader
-from orchestrator.config.settings import Settings
-from orchestrator.models import WorkflowExecution, WorkflowStage, WorkflowStatus
-from orchestrator.services.workspace_cleaner import (
+import prchef
+from prchef.cli import main
+from prchef.clients.command_client import CommandResult
+from prchef.config.database import build_engine
+from prchef.config.project_config import ProjectConfigLoader
+from prchef.config.settings import Settings
+from prchef.models import WorkflowExecution, WorkflowStage, WorkflowStatus
+from prchef.services.workspace_cleaner import (
     CleanupWorkspace,
     WorkspaceCleanupReport,
     WorkspaceRetention,
@@ -233,7 +233,7 @@ def test_cli_version_option() -> None:
     result = runner.invoke(main.app, ["--version"])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == f"{orchestrator.__version__}\n"
+    assert result.stdout == f"{prchef.__version__}\n"
 
 
 def test_cli_providers_lists_configured_provider_names_and_types(
@@ -663,7 +663,7 @@ def test_cli_keeps_json_on_stdout_and_emits_final_summary_on_stderr(monkeypatch:
 def test_final_summary_is_emitted_for_all_terminal_statuses(
     status: WorkflowStatus, caplog: Any
 ) -> None:
-    target_logger = logging.getLogger("orchestrator.cli.main")
+    target_logger = logging.getLogger("prchef.cli.main")
     target_logger.addHandler(caplog.handler)
     previous_propagation = target_logger.propagate
     target_logger.propagate = False

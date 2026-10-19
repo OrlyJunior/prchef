@@ -10,10 +10,10 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from orchestrator.clients.command_client import CommandResult
-from orchestrator.clients.exceptions import GitHubClientError
-from orchestrator.clients.github_client import GitHubAppAuthenticator, GitHubClient
-from orchestrator.config.project_config import GitHubAppSettings
+from prchef.clients.command_client import CommandResult
+from prchef.clients.exceptions import GitHubClientError
+from prchef.clients.github_client import GitHubAppAuthenticator, GitHubClient
+from prchef.config.project_config import GitHubAppSettings
 
 
 class RecordingCommands:
@@ -52,7 +52,7 @@ def test_github_app_authenticator_mints_and_caches_installation_token(
         assert algorithm == "RS256"
         return "signed-app-jwt"
 
-    monkeypatch.setattr("orchestrator.clients.github_client.jwt.encode", fake_encode)
+    monkeypatch.setattr("prchef.clients.github_client.jwt.encode", fake_encode)
     authenticator = GitHubAppAuthenticator(
         GitHubAppSettings(
             app_id=123,

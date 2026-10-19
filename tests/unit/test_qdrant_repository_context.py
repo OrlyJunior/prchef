@@ -11,21 +11,21 @@ from typing import Any
 
 import pytest
 
-from orchestrator.config.project_config import RepositoryContextSettings
-from orchestrator.models import WorkflowExecution, WorkflowStatus
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.models.repository_context import EmbeddingIdentity, IndexLifecycleState
-from orchestrator.services.exceptions import WorkflowCancelledError
-from orchestrator.services.qdrant_repository_context import (
+from prchef.config.project_config import RepositoryContextSettings
+from prchef.models import WorkflowExecution, WorkflowStatus
+from prchef.models.development_task import DevelopmentTask
+from prchef.models.repository_context import EmbeddingIdentity, IndexLifecycleState
+from prchef.services.exceptions import WorkflowCancelledError
+from prchef.services.qdrant_repository_context import (
     QdrantClientManager,
     QdrantRepositoryContextStrategy,
     canonical_path_identifier,
     create_qdrant_client,
     repository_collection_name,
 )
-from orchestrator.services.repository_context import RepositoryContextRequest
-from orchestrator.services.repository_documents import RepositorySourcePipeline, chunk_source_file
-from orchestrator.services.workspace_cleaner import WorkspaceCleanupService
+from prchef.services.repository_context import RepositoryContextRequest
+from prchef.services.repository_documents import RepositorySourcePipeline, chunk_source_file
+from prchef.services.workspace_cleaner import WorkspaceCleanupService
 
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("qdrant_client") is None,

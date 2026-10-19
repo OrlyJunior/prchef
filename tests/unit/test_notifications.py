@@ -6,21 +6,21 @@ from collections.abc import Iterator
 
 import pytest
 
-from orchestrator.clients.notifications.base import NotificationEvent
-from orchestrator.clients.notifications.desktop import DesktopNotifier
-from orchestrator.clients.notifications.windows import WindowsToastNotifier
-from orchestrator.config.project_config import NotificationsSettings
-from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import WorkflowStatus
-from orchestrator.services.notifications import NotificationService
+from prchef.clients.notifications.base import NotificationEvent
+from prchef.clients.notifications.desktop import DesktopNotifier
+from prchef.clients.notifications.windows import WindowsToastNotifier
+from prchef.config.project_config import NotificationsSettings
+from prchef.models.workflow_execution import WorkflowExecution
+from prchef.models.workflow_status import WorkflowStatus
+from prchef.services.notifications import NotificationService
 
 
 @pytest.fixture
 def notification_log_capture(caplog) -> Iterator[None]:
     """Capture notification warnings without relying on prior CLI logging setup."""
     loggers = [
-        logging.getLogger("orchestrator.clients.notifications.windows"),
-        logging.getLogger("orchestrator.clients.notifications.desktop"),
+        logging.getLogger("prchef.clients.notifications.windows"),
+        logging.getLogger("prchef.clients.notifications.desktop"),
     ]
     previous_propagation = [logger.propagate for logger in loggers]
     for logger in loggers:

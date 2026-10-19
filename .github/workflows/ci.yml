@@ -33,7 +33,7 @@ jobs:
       - name: Lint
         run: python -m ruff check .
       - name: Type check
-        run: python -m mypy src/orchestrator
+        run: python -m mypy src/prchef
 
   tests:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}

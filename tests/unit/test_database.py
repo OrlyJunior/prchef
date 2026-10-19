@@ -4,7 +4,7 @@ from pathlib import Path
 
 from sqlalchemy.engine import make_url
 
-from orchestrator.config.database import resolve_database_url
+from prchef.config.database import resolve_database_url
 
 
 def _database_path(database_url: str) -> Path:

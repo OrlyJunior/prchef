@@ -12,9 +12,9 @@ from typing import Any
 
 import pytest
 
-from orchestrator.clients import command_client, windows_processes
-from orchestrator.clients.exceptions import CommandExecutionError
-from orchestrator.clients.windows_processes import ProcessLocation
+from prchef.clients import command_client, windows_processes
+from prchef.clients.exceptions import CommandExecutionError
+from prchef.clients.windows_processes import ProcessLocation
 
 
 @pytest.mark.parametrize("pointer_size", [4, 8], ids=["32-bit", "64-bit"])
@@ -109,7 +109,7 @@ def test_snapshot_ignores_self_and_closes_handle_even_on_enumeration_failure(
 ) -> None:
     closed = []
     inspected = []
-    pids = iter([(os.getpid(), "orchestrator.exe"), (7, "agent.exe")])
+    pids = iter([(os.getpid(), "prchef.exe"), (7, "agent.exe")])
 
     def next_process(_snapshot: int, pointer: Any) -> bool:
         try:
@@ -170,7 +170,7 @@ def test_windows_resume_ignores_self_siblings_and_unrelated_processes(
     root = tmp_path / "retained"
     root.mkdir()
     processes = [
-        ProcessLocation(os.getpid(), "orchestrator.exe", str(root), None),
+        ProcessLocation(os.getpid(), "prchef.exe", str(root), None),
         ProcessLocation(7, "sibling.exe", str(tmp_path / "retained-other"), None),
         ProcessLocation(8, "unreadable.exe", None, str(tmp_path / "elsewhere" / "agent.exe")),
         ProcessLocation(9, "exited.exe", None, None),

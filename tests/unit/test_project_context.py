@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from orchestrator.services.project_context import (
+from prchef.services.project_context import (
     MAX_PROJECT_CONTEXT_CHARS,
     load_project_context,
     project_context_prompt,

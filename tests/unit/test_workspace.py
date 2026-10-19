@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.clients.command_client import CommandClient
-from orchestrator.clients.exceptions import GitClientError
-from orchestrator.clients.git_client import GitClient
-from orchestrator.config.project_config import WorkspaceSettings
-from orchestrator.models import WorkflowExecution, WorkflowStatus
-from orchestrator.services.workspace_cleaner import WorkspaceCleanupService
-from orchestrator.workspace.manager import WorkspaceManager
+from prchef.clients.command_client import CommandClient
+from prchef.clients.exceptions import GitClientError
+from prchef.clients.git_client import GitClient
+from prchef.config.project_config import WorkspaceSettings
+from prchef.models import WorkflowExecution, WorkflowStatus
+from prchef.services.workspace_cleaner import WorkspaceCleanupService
+from prchef.workspace.manager import WorkspaceManager
 
 
 def _git(path: Path, *arguments: str) -> str:
@@ -185,7 +185,7 @@ def test_default_workspace_uses_shared_user_state_directory(
 ) -> None:
     control, _ = _repository_with_origin(tmp_path)
     state = tmp_path / "custom-state"
-    monkeypatch.setattr("orchestrator.workspace.manager.default_state_directory", lambda: state)
+    monkeypatch.setattr("prchef.workspace.manager.default_state_directory", lambda: state)
     manager = WorkspaceManager(GitClient(CommandClient(), control), control, WorkspaceSettings())
 
     workspace = manager.create("execution-1", "develop", "orchestrator/execution-1", ["develop"])
@@ -211,7 +211,7 @@ def test_explicit_workspace_root_still_wins(tmp_path: Path, root: str) -> None:
 def test_default_workspace_inside_control_checkout_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("orchestrator.workspace.manager.default_state_directory", lambda: tmp_path)
+    monkeypatch.setattr("prchef.workspace.manager.default_state_directory", lambda: tmp_path)
     manager = WorkspaceManager(GitClient(CommandClient(), tmp_path), tmp_path, WorkspaceSettings())
 
     with pytest.raises(ValueError, match="must not create execution worktrees inside"):

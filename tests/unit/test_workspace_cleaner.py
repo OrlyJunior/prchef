@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.models import WorkflowExecution, WorkflowStatus
-from orchestrator.services.workspace_cleaner import (
+from prchef.models import WorkflowExecution, WorkflowStatus
+from prchef.services.workspace_cleaner import (
     WorkspaceCleanupService,
     WorkspaceRetention,
 )
@@ -192,7 +192,7 @@ def test_cleanup_lists_both_defaults_and_removes_only_finished_recorded_workspac
 ) -> None:
     state = tmp_path / "user-state"
     monkeypatch.setattr(
-        "orchestrator.services.workspace_cleaner.default_state_directory", lambda: state
+        "prchef.services.workspace_cleaner.default_state_directory", lambda: state
     )
     control = tmp_path / "control"
     control.mkdir()

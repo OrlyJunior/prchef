@@ -56,10 +56,10 @@ dev = [
 ]
 
 [project.scripts]
-orchestrator = "orchestrator.cli.main:app"
+orchestrator = "prchef.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/orchestrator"]
+packages = ["src/prchef"]
 
 [tool.pytest.ini_options]
 addopts = "-q --basetemp=.pytest-tmp/run"
@@ -76,7 +76,7 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["orchestrator"]
+packages = ["prchef"]
 
 # jsonschema is typed by the optional development dependency above. Keep type
 # validation usable in environments where that optional stub is not provisioned.

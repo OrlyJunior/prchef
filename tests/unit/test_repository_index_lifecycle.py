@@ -9,22 +9,22 @@ from typing import Any
 
 import pytest
 
-from orchestrator.config.project_config import (
+from prchef.config.project_config import (
     ProjectConfig,
     QdrantSettings,
     RepositoryContextSettings,
 )
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.models.repository_context import EmbeddingIdentity, IndexLifecycleState
-from orchestrator.services import qdrant_repository_context as backend
-from orchestrator.services.exceptions import WorkflowCancelledError
-from orchestrator.services.qdrant_repository_context import (
+from prchef.models.development_task import DevelopmentTask
+from prchef.models.repository_context import EmbeddingIdentity, IndexLifecycleState
+from prchef.services import qdrant_repository_context as backend
+from prchef.services.exceptions import WorkflowCancelledError
+from prchef.services.qdrant_repository_context import (
     QdrantClientManager,
     QdrantRepositoryContextStrategy,
     RepositoryIndexOperationError,
 )
-from orchestrator.services.repository_context import RepositoryContextRequest
-from orchestrator.tui.bridge import WorkflowController
+from prchef.services.repository_context import RepositoryContextRequest
+from prchef.tui.bridge import WorkflowController
 
 TIMEOUT = 10.0
 
@@ -252,7 +252,7 @@ def controller_for(index: Any, monkeypatch: pytest.MonkeyPatch) -> WorkflowContr
         repository_index_clients=index.manager,
     )
     monkeypatch.setattr(controller, "project_config", lambda repository: config)
-    monkeypatch.setattr("orchestrator.tui.bridge.resolve_repository_context_strategy",
+    monkeypatch.setattr("prchef.tui.bridge.resolve_repository_context_strategy",
                         lambda *args, **kwargs: index.strategy)
     return controller
 
@@ -419,7 +419,7 @@ def test_distinct_strategy_retrieval_and_cleanup_share_store_admission(
         client_manager=index.manager,
     )
     controller = controller_for(index, monkeypatch)
-    monkeypatch.setattr("orchestrator.tui.bridge.resolve_repository_context_strategy",
+    monkeypatch.setattr("prchef.tui.bridge.resolve_repository_context_strategy",
                         lambda *args, **kwargs: other)
     results: list[str] = []
     thread = threading.Thread(target=lambda: results.append(index.strategy.render(
@@ -509,7 +509,7 @@ def test_server_retrieval_allows_inspection_and_other_repository_operations(
     config = controller.project_config("other")
     config.path = other_root
     config.configured_repository_key = "other"
-    monkeypatch.setattr("orchestrator.tui.bridge.resolve_repository_context_strategy",
+    monkeypatch.setattr("prchef.tui.bridge.resolve_repository_context_strategy",
                         lambda *args, **kwargs: other)
     entered, release, completed = (threading.Event() for _ in range(3))
     errors: list[BaseException] = []

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from orchestrator.models import (
+from prchef.models import (
     AgentRequest,
     AgentResult,
     CodeReview,
@@ -18,21 +18,21 @@ from orchestrator.models import (
     ValidationCheck,
     ValidationResult,
 )
-from orchestrator.services import project_context
-from orchestrator.services.implementation_service import ImplementationService, _ImplementerPath
-from orchestrator.services.project_context import (
+from prchef.services import project_context
+from prchef.services.implementation_service import ImplementationService, _ImplementerPath
+from prchef.services.project_context import (
     MAX_AGENT_INSTRUCTIONS_CHARS,
     MAX_PROJECT_CONTEXT_CHARS,
     load_implementer_instructions,
     load_planner_instructions,
     load_reviewer_instructions,
 )
-from orchestrator.services.repository_context import (
+from prchef.services.repository_context import (
     HeuristicRepositoryContextStrategy,
     RepositoryContextRequest,
 )
-from orchestrator.services.review_service import ReviewService, format_pull_request_review
-from orchestrator.services.spec_service import SpecService
+from prchef.services.review_service import ReviewService, format_pull_request_review
+from prchef.services.spec_service import SpecService
 
 
 class RecordingProvider:

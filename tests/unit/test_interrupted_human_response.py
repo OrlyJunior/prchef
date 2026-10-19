@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 from unittest.mock import Mock
 
-from orchestrator.models import DevelopmentTask, WorkflowExecution, WorkflowStage, WorkflowStatus
-from orchestrator.models.human_interaction import HumanInteraction
-from orchestrator.services.workflow_stage_sequencer import StageSequencer
-from orchestrator.services.workflow_stage_values import StageValues
+from prchef.models import DevelopmentTask, WorkflowExecution, WorkflowStage, WorkflowStatus
+from prchef.models.human_interaction import HumanInteraction
+from prchef.services.workflow_stage_sequencer import StageSequencer
+from prchef.services.workflow_stage_values import StageValues
 
 
 def test_recovered_human_answer_keeps_missing_provider_retryable(monkeypatch) -> None:

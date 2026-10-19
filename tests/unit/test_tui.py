@@ -28,7 +28,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from orchestrator.config.project_config import (
+from prchef.config.project_config import (
     AgentPresetConfig,
     AgentProviderSettings,
     ConfigurationError,
@@ -39,54 +39,54 @@ from orchestrator.config.project_config import (
     RepositoryConfiguration,
     RepositoryContextSettings,
 )
-from orchestrator.models.agent import AgentRole
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
-from orchestrator.models.human_interaction import HumanInteraction
-from orchestrator.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
-from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
-from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
-from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
-from orchestrator.models.workflow_step import WorkflowStep
-from orchestrator.services.qdrant_repository_context import RepositoryIndexOperationError
-from orchestrator.tui.app import OrchestratorApp
-from orchestrator.tui.batch_progress import BatchRowView, persisted_row
-from orchestrator.tui.bridge import (
+from prchef.models.agent import AgentRole
+from prchef.models.development_task import DevelopmentTask
+from prchef.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from prchef.models.human_interaction import HumanInteraction
+from prchef.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
+from prchef.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
+from prchef.models.workflow_event import WorkflowEvent, WorkflowEventKind
+from prchef.models.workflow_execution import WorkflowExecution
+from prchef.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
+from prchef.models.workflow_step import WorkflowStep
+from prchef.services.qdrant_repository_context import RepositoryIndexOperationError
+from prchef.tui.app import OrchestratorApp
+from prchef.tui.batch_progress import BatchRowView, persisted_row
+from prchef.tui.bridge import (
     WorkflowBatchLaunch,
     WorkflowController,
     WorkflowLaunch,
     _BatchRun,
 )
-from orchestrator.tui.diagnostics import format_diagnostics_for_export
-from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
-from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
-from orchestrator.tui.screens.batch_detail import BatchDetailScreen
-from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
-from orchestrator.tui.screens.execution_history import (
+from prchef.tui.diagnostics import format_diagnostics_for_export
+from prchef.tui.screens.agent_instructions import AgentInstructionsScreen
+from prchef.tui.screens.agent_presets import AgentPresetsScreen
+from prchef.tui.screens.batch_detail import BatchDetailScreen
+from prchef.tui.screens.execution_detail import ExecutionDetailScreen
+from prchef.tui.screens.execution_history import (
     ExecutionHistoryScreen,
     execution_status_label,
 )
-from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
-from orchestrator.tui.screens.provider_settings import (
+from prchef.tui.screens.github_app_settings import GitHubAppSettingsScreen
+from prchef.tui.screens.provider_settings import (
     ProviderSettingsScreen,
     RemoveProviderConfirmation,
 )
-from orchestrator.tui.screens.repository_settings import (
+from prchef.tui.screens.repository_settings import (
     DeleteRepositoryConfirmation,
     RepositorySettingsScreen,
 )
-from orchestrator.tui.screens.task_selector import (
+from prchef.tui.screens.task_selector import (
     TaskRow,
     TaskSelector,
     TaskTableHeader,
 )
-from orchestrator.tui.screens.workflow_runner import (
+from prchef.tui.screens.workflow_runner import (
     FreshRunConfirmation,
     StopWorkflowConfirmation,
     WorkflowRunnerScreen,
 )
-from orchestrator.tui.widgets import (
+from prchef.tui.widgets import (
     BatchItemRow,
     BatchProgressView,
     OrchestratorSelect,
@@ -1395,7 +1395,7 @@ def test_controller_logs_tui_role_resolution_with_selected_backend(
     config.agents.planner.provider = "vertex-gemini-litellm"
     config.agents.reviewer.provider = "vertex-gemini-litellm"
 
-    with caplog.at_level(logging.DEBUG, logger="orchestrator"):
+    with caplog.at_level(logging.DEBUG, logger="prchef"):
         controller.start_workflow(
             WorkflowLaunch(
                 repository="example",
@@ -1494,7 +1494,7 @@ def test_agent_instructions_save_cannot_follow_a_link_added_during_write(
             pytest.skip(f"Symlinks unavailable: {exc}")
         original_replace(source, destination)
 
-    monkeypatch.setattr("orchestrator.tui.bridge.os.replace", replace_after_link)
+    monkeypatch.setattr("prchef.tui.bridge.os.replace", replace_after_link)
     controller, _, _ = _controller(repository_path)
     controller.save_agent_instructions("example", AgentRole.PLANNER, "New guidance")
 
@@ -1705,12 +1705,12 @@ def test_repository_settings_creates_repository_and_reorders_commands(
             screen.query_one("#add-validation-command", Button).press()
             await settle_tui(pilot)
             assert screen._commands == [["python", "-m", "pytest"]]
-            command.value = "python -m mypy 'src/orchestrator package'"
+            command.value = "python -m mypy 'src/prchef package'"
             screen.query_one("#add-validation-command", Button).press()
             await settle_tui(pilot)
             assert screen._commands == [
                 ["python", "-m", "pytest"],
-                ["python", "-m", "mypy", "src/orchestrator package"],
+                ["python", "-m", "mypy", "src/prchef package"],
             ]
             screen.query_one("#validation-command-list", OrchestratorSelect).value = 1
             await settle_tui(pilot)
@@ -1721,7 +1721,7 @@ def test_repository_settings_creates_repository_and_reorders_commands(
 
             settings = controller.repository_settings("owner/new-repository")
             assert settings.commands == [
-                ["python", "-m", "mypy", "src/orchestrator package"],
+                ["python", "-m", "mypy", "src/prchef package"],
                 ["python", "-m", "pytest"],
             ]
             assert controller.selected_repository == "owner/new-repository"
@@ -4033,7 +4033,7 @@ def test_execution_detail_actions_reflow_without_diagnostic_overflow(
         payload={"output": "diagnostic" * 300},
     )]
     opened: list[str] = []
-    monkeypatch.setattr("orchestrator.tui.screens.execution_detail.webbrowser.open", opened.append)
+    monkeypatch.setattr("prchef.tui.screens.execution_detail.webbrowser.open", opened.append)
     application = OrchestratorApp(controller)
 
     async def drive() -> None:
@@ -4241,7 +4241,7 @@ def test_execution_detail_open_and_refresh_do_not_fetch_task_or_context(
 
     controller._task_provider_factory = unexpected_call
     monkeypatch.setattr(
-        "orchestrator.services.project_context.load_project_context", unexpected_call
+        "prchef.services.project_context.load_project_context", unexpected_call
     )
     application = OrchestratorApp(controller)
 
@@ -8188,9 +8188,9 @@ def _provider_editor_controller(
 def test_provider_editor_types_crud_and_keyboard_scrolling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
 ) -> None:
-    from orchestrator.config.provider_configuration import PROVIDER_DEFAULTS
+    from prchef.config.provider_configuration import PROVIDER_DEFAULTS
 
-    monkeypatch.setattr("orchestrator.config.provider_configuration.shutil.which",
+    monkeypatch.setattr("prchef.config.provider_configuration.shutil.which",
                         lambda executable: "/fake/executable")
     controller, _, path = _provider_editor_controller(tmp_path)
     application = OrchestratorApp(controller)
@@ -8282,7 +8282,7 @@ def test_provider_editor_failed_save_retains_values_and_failed_load_disables_act
                 raise OSError("failure")
 
             with monkeypatch.context() as patch:
-                patch.setattr("orchestrator.config.provider_configuration.os.replace", fail_replace)
+                patch.setattr("prchef.config.provider_configuration.os.replace", fail_replace)
                 screen.query_one("#save-provider", Button).press()
                 await settle_tui(pilot)
             assert path.read_bytes() == original
@@ -8441,7 +8441,7 @@ def test_provider_choices_refresh_on_launcher_return(tmp_path: Path) -> None:
 def test_provider_editor_warning_and_in_use_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("orchestrator.config.provider_configuration.shutil.which",
+    monkeypatch.setattr("prchef.config.provider_configuration.shutil.which",
                         lambda executable: None)
     controller, _, path = _provider_editor_controller(tmp_path)
     application = OrchestratorApp(controller)

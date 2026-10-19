@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from orchestrator.models import CodeReview, ReviewDecision
-from orchestrator.services.workflow_stage_actions import StageActions
+from prchef.models import CodeReview, ReviewDecision
+from prchef.services.workflow_stage_actions import StageActions
 
 
 def test_identical_review_from_previous_attempt_is_not_reused() -> None:

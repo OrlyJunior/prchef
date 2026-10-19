@@ -12,16 +12,16 @@ from collections.abc import Callable, Iterator
 
 import pytest
 
-from orchestrator.models.agent import AgentRequest, AgentResult
-from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.providers.agent_provider import AgentProviderError
-from orchestrator.providers.concurrency import (
+from prchef.models.agent import AgentRequest, AgentResult
+from prchef.models.workflow_execution import WorkflowExecution
+from prchef.providers.agent_provider import AgentProviderError
+from prchef.providers.concurrency import (
     ConcurrencyLimitedAgentProvider,
     ProviderConcurrencyCoordinator,
     ProviderSlotCancelled,
 )
-from orchestrator.providers.fallback_provider import FallbackAgentProvider
-from orchestrator.services.execution_dispatcher import ExecutionDispatcher
+from prchef.providers.fallback_provider import FallbackAgentProvider
+from prchef.services.execution_dispatcher import ExecutionDispatcher
 
 # Every blocking wait in this module is bounded so a regression fails the suite
 # instead of hanging it.

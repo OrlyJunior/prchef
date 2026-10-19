@@ -14,15 +14,15 @@ from typing import Any
 
 import pytest
 
-from orchestrator.clients import codex_client, command_client
-from orchestrator.clients.codex_client import CodexClient
-from orchestrator.clients.command_client import CommandClient, CommandResult
-from orchestrator.clients.exceptions import (
+from prchef.clients import codex_client, command_client
+from prchef.clients.codex_client import CodexClient
+from prchef.clients.command_client import CommandClient, CommandResult
+from prchef.clients.exceptions import (
     CommandExecutionError,
     CommandProcessTreeUnconfirmedError,
     CommandTimeoutError,
 )
-from orchestrator.config.project_config import CodexCliProviderSettings
+from prchef.config.project_config import CodexCliProviderSettings
 
 
 def _completed(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -863,7 +863,7 @@ def test_detached_service_stops_when_owning_app_exits(
     owner_script = (
         "import sys\n"
         "from pathlib import Path\n"
-        "from orchestrator.clients.command_client import CommandClient, interrupt_active_commands\n"
+        "from prchef.clients.command_client import CommandClient, interrupt_active_commands\n"
         "result = CommandClient().run([sys.executable, sys.argv[1]], cwd=Path(sys.argv[2]))\n"
         "print(result.stdout.split()[-1], flush=True)\n"
         "sys.stdin.readline()\n"
@@ -1209,7 +1209,7 @@ def test_codex_client_approve_for_me_preserves_model_and_reasoning(tmp_path: Pat
 
 def test_codex_runtime_settings_do_not_embed_a_hard_coded_model_or_leak_to_services() -> None:
     client_source = Path(codex_client.__file__).read_text(encoding="utf-8")
-    services = Path(__file__).parents[2] / "src" / "orchestrator" / "services"
+    services = Path(__file__).parents[2] / "src" / "prchef" / "services"
 
     assert "gpt-" not in client_source.casefold()
     for filename in ("spec_service.py", "implementation_service.py", "review_service.py"):

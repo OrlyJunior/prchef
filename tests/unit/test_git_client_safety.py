@@ -4,11 +4,11 @@ from typing import Any
 
 import pytest
 
-from orchestrator.clients.command_client import CommandClient, CommandResult
-from orchestrator.clients.exceptions import GitClientError
-from orchestrator.clients.git_client import GitClient
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.services.repository_context import (
+from prchef.clients.command_client import CommandClient, CommandResult
+from prchef.clients.exceptions import GitClientError
+from prchef.clients.git_client import GitClient
+from prchef.models.development_task import DevelopmentTask
+from prchef.services.repository_context import (
     HeuristicRepositoryContextStrategy,
     RepositoryContextRequest,
 )

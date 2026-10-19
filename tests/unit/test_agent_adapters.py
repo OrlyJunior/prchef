@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from orchestrator.models import (
+from prchef.models import (
     AgentRequest,
     ImplementationResult,
     StructuredOutputExpectation,
 )
-from orchestrator.providers.codex_provider import CodexAgentProvider
+from prchef.providers.codex_provider import CodexAgentProvider
 
 
 def test_codex_adapter_passes_request_structured_output_to_client(tmp_path: Path) -> None:

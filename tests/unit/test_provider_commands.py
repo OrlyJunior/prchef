@@ -4,7 +4,7 @@ import shlex
 
 import pytest
 
-from orchestrator.tui.screens.provider_settings import split_provider_command
+from prchef.tui.screens.provider_settings import split_provider_command
 
 
 @pytest.mark.parametrize("command,executable", [

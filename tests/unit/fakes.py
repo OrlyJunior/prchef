@@ -8,10 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from orchestrator.clients.command_client import CommandResult
-from orchestrator.clients.exceptions import CommandTimeoutError
-from orchestrator.config.project_config import ProjectConfig
-from orchestrator.models import (
+from prchef.clients.command_client import CommandResult
+from prchef.clients.exceptions import CommandTimeoutError
+from prchef.config.project_config import ProjectConfig
+from prchef.models import (
     AgentExecutionReference,
     AgentRequest,
     AgentResult,

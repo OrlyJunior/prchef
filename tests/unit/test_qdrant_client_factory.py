@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 from pytest import MonkeyPatch
 
-from orchestrator.config.project_config import QdrantSettings
-from orchestrator.services.qdrant_repository_context import create_qdrant_client
+from prchef.config.project_config import QdrantSettings
+from prchef.services.qdrant_repository_context import create_qdrant_client
 
 
 def test_client_factory_passes_local_url_and_host_configuration(
