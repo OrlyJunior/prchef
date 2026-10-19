@@ -36,8 +36,8 @@ def _repository_with_origin(tmp_path: Path) -> tuple[Path, Path]:
         check=True,
         capture_output=True,
     )
-    _git(repository, "config", "user.email", "orchestrator@example.test")
-    _git(repository, "config", "user.name", "Orchestrator Tests")
+    _git(repository, "config", "user.email", "prchef@example.test")
+    _git(repository, "config", "user.name", "Prchef Tests")
     (repository / "tracked.txt").write_text("base\n", encoding="utf-8")
     _git(repository, "add", "tracked.txt")
     _git(repository, "commit", "-m", "Initial commit")

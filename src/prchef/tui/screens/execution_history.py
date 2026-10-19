@@ -14,10 +14,10 @@ from prchef.models.workflow_batch import WorkflowBatch
 from prchef.models.workflow_execution import WorkflowExecution
 from prchef.models.workflow_status import ACTIVE_WORKFLOW_STATUSES, WorkflowStatus
 from prchef.tui.bridge import WorkflowController
-from prchef.tui.widgets import OrchestratorSelect, is_orchestrator_select_widget
+from prchef.tui.widgets import PrchefSelect, is_prchef_select_widget
 
 if TYPE_CHECKING:
-    from prchef.tui.app import OrchestratorApp
+    from prchef.tui.app import PrchefApp
 
 
 def execution_status_label(execution: WorkflowExecution) -> str:
@@ -55,7 +55,7 @@ class ExecutionHistoryScreen(Screen[None]):
         with VerticalScroll(id="execution-history"):
             yield Static("Execution history", classes="screen-title")
             yield Static("Stored batches", classes="field-label")
-            yield OrchestratorSelect([], prompt="Select a batch", id="batch-picker")
+            yield PrchefSelect([], prompt="Select a batch", id="batch-picker")
             with Horizontal(classes="screen-actions"):
                 yield Button("Inspect batch", id="inspect-batch")
             yield Static("", id="batch-history-summary")
@@ -64,7 +64,7 @@ class ExecutionHistoryScreen(Screen[None]):
                 placeholder="Filter by task, repository, stage, or status",
                 id="history-filter",
             )
-            yield OrchestratorSelect([], prompt="Select an execution", id="execution-picker")
+            yield PrchefSelect([], prompt="Select an execution", id="execution-picker")
             with Horizontal(classes="screen-actions"):
                 yield Button("Inspect", variant="primary", id="inspect-execution")
                 yield Button("Resume interrupted", id="resume-interrupted")
@@ -74,13 +74,13 @@ class ExecutionHistoryScreen(Screen[None]):
 
     @property
     def controller(self) -> WorkflowController:
-        return cast("OrchestratorApp", self.app).controller
+        return cast("PrchefApp", self.app).controller
 
     def on_mount(self) -> None:
         self.refresh_history()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
-        if is_orchestrator_select_widget(event.widget):
+        if is_prchef_select_widget(event.widget):
             return
         self.query_one("#execution-history", VerticalScroll).scroll_to_widget(
             event.widget, animate=False
@@ -123,7 +123,7 @@ class ExecutionHistoryScreen(Screen[None]):
             )
             return
         executions_by_id = {execution.id: execution for execution in all_executions}
-        self.query_one("#batch-picker", OrchestratorSelect).set_options(
+        self.query_one("#batch-picker", PrchefSelect).set_options(
             [
                 (
                     f"{batch.created_at.isoformat()} | {batch.repository} | "
@@ -186,13 +186,13 @@ class ExecutionHistoryScreen(Screen[None]):
             )
             for execution in executions
         ]
-        self.query_one("#execution-picker", OrchestratorSelect).set_options(options)
+        self.query_one("#execution-picker", PrchefSelect).set_options(options)
         self.query_one("#history-summary", Static).update(
             f"{len(executions)} persisted workflow execution(s)."
         )
 
     def _inspect_selected(self) -> None:
-        execution_id = self.query_one("#execution-picker", OrchestratorSelect).value
+        execution_id = self.query_one("#execution-picker", PrchefSelect).value
         if not isinstance(execution_id, str):
             self.notify("Select an execution to inspect.", severity="warning")
             return
@@ -201,7 +201,7 @@ class ExecutionHistoryScreen(Screen[None]):
         self.app.push_screen(ExecutionDetailScreen(execution_id))
 
     def _act_on_interrupted(self, *, resume: bool) -> None:
-        execution_id = self.query_one("#execution-picker", OrchestratorSelect).value
+        execution_id = self.query_one("#execution-picker", PrchefSelect).value
         if not isinstance(execution_id, str):
             self.notify("Select an interrupted execution.", severity="warning")
             return
@@ -223,7 +223,7 @@ class ExecutionHistoryScreen(Screen[None]):
         self.refresh_history()
 
     def _inspect_batch(self) -> None:
-        batch_id = self.query_one("#batch-picker", OrchestratorSelect).value
+        batch_id = self.query_one("#batch-picker", PrchefSelect).value
         if not isinstance(batch_id, str):
             self.notify("Select a batch to inspect.", severity="warning")
             return

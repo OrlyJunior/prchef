@@ -180,7 +180,7 @@ class QdrantSettings(BaseModel):
 
 
 class RepositoryContextSettings(BaseModel):
-    """Selects orchestrator-owned repository retrieval policy."""
+    """Selects prchef-owned repository retrieval policy."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -610,7 +610,7 @@ class ClaudeCodeProviderSettings(BaseModel):
     The executable is intentionally a single entry rather than a free-form
     command list.  The provider constructs every supported CLI argument so
     configuration cannot opt into worktrees, session resume, remote runs, or
-    permission-bypass switches that would undermine orchestrator ownership.
+    permission-bypass switches that would undermine prchef ownership.
     """
 
     model_config = ConfigDict(extra="forbid")

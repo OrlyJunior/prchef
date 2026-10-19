@@ -13,13 +13,13 @@ from textual.widgets import Button, Input, Static
 from prchef.config.project_config import GitHubAppSettings
 from prchef.tui.bridge import WorkflowController
 from prchef.tui.widgets import (
-    OrchestratorSelect,
+    PrchefSelect,
     RepositorySelect,
-    is_orchestrator_select_widget,
+    is_prchef_select_widget,
 )
 
 if TYPE_CHECKING:
-    from prchef.tui.app import OrchestratorApp
+    from prchef.tui.app import PrchefApp
 
 
 class GitHubAppSettingsScreen(Screen[None]):
@@ -66,7 +66,7 @@ class GitHubAppSettingsScreen(Screen[None]):
 
     @property
     def controller(self) -> WorkflowController:
-        return cast("OrchestratorApp", self.app).controller
+        return cast("PrchefApp", self.app).controller
 
     def on_mount(self) -> None:
         try:
@@ -85,13 +85,13 @@ class GitHubAppSettingsScreen(Screen[None]):
         repository_select.focus()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
-        if is_orchestrator_select_widget(event.widget):
+        if is_prchef_select_widget(event.widget):
             return
         self.query_one("#github-app-settings", VerticalScroll).scroll_to_widget(
             event.widget, animate=False, top=True
         )
 
-    def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
+    def on_select_changed(self, event: PrchefSelect.Changed) -> None:
         if event.select.id == "github-app-repository" and isinstance(event.value, str):
             self.controller.select_repository(event.value)
             try:
@@ -107,7 +107,7 @@ class GitHubAppSettingsScreen(Screen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "save-github-apps":
             return
-        repository = self.query_one("#github-app-repository", OrchestratorSelect).value
+        repository = self.query_one("#github-app-repository", PrchefSelect).value
         if not isinstance(repository, str):
             self._status("Choose a repository first.")
             return

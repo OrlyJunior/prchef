@@ -1,6 +1,6 @@
 # GitHub Apps for planning, implementation, and review
 
-The orchestrator can use separate GitHub App installations for task discovery, implementation, and review. It signs
+prchef can use separate GitHub App installations for task discovery, implementation, and review. It signs
 a short-lived JWT and exchanges it for an installation token kept only in memory. Tokens, JWTs,
 and private key contents are never written to YAML, persistence, or logs.
 
@@ -11,7 +11,7 @@ and private key contents are never written to YAML, persistence, or logs.
    Add **Workflows: Read and write** only if the intended repository changes require it. Grant the
    reviewer App only **Pull requests: Read and write**.
 3. Generate an App private key and store the PEM outside the repository.
-4. Install each App only on repositories the orchestrator should operate on. Record the App ID and the
+4. Install each App only on repositories prchef should operate on. Record the App ID and the
    installation ID (the latter is visible in the installation settings URL or App installations API).
 
 Use a distinct App identity when GitHub disallows a PR author from approving or requesting changes
@@ -53,9 +53,9 @@ defaults:
 When an App is configured, `app_id`, `installation_id`, and exactly one private-key source are
 required. `app` is the reviewer identity; `implementer_app` and `planner_app` are independent. Never commit the PEM
 or place it in versioned YAML or `.env.example`. Optionally configure `bot_name` and `bot_user_id`
-together for known commit attribution; otherwise the orchestrator resolves the App bot identity.
+together for known commit attribution; otherwise prchef resolves the App bot identity.
 
-The standard orchestrator installation already includes the PyJWT cryptography support required
+The standard prchef installation already includes the PyJWT cryptography support required
 to sign GitHub App JWTs. No separate `pip install "PyJWT[crypto]"` step is needed.
 
 Without `implementer_app`, commits, pushes, and PR creation retain ambient Git and `gh`

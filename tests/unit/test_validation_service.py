@@ -45,7 +45,7 @@ def test_explicit_source_mypy_command_prevents_full_repository_auto_detection(
 ) -> None:
     (tmp_path / "tests").mkdir()
     (tmp_path / "pyproject.toml").write_text(
-        "[tool.ruff]\n[tool.mypy]\npackages = [\"orchestrator\"]\n", encoding="utf-8"
+        "[tool.ruff]\n[tool.mypy]\npackages = [\"prchef\"]\n", encoding="utf-8"
     )
     commands = RecordingCommandClient()
     settings = ValidationSettings(

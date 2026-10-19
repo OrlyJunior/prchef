@@ -241,6 +241,6 @@ def _agent_instructions_prompt(
     return (
         f"REPOSITORY {role.upper()} INSTRUCTIONS ({filename}):\n"
         "These are additional role-specific guidance. The original task, repository state, "
-        "and core orchestrator invariants remain authoritative.\n"
+        "and core prchef invariants remain authoritative.\n"
         f"{content}\n\n"
     )

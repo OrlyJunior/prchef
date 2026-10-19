@@ -3,8 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-# NAME PLACEHOLDER: keep the current distribution name until the final name is chosen.
-name = "autonomous-dev-orchestrator"
+name = "prchef"
 version = "0.1.0"
 description = "Plan, implement, validate, and review GitHub or Trello tasks in isolated Git worktrees"
 readme = "README.md"
@@ -40,10 +39,9 @@ dependencies = [
 ]
 
 [project.urls]
-# NAME PLACEHOLDER: retain the current repository URL until the final name is chosen.
-Repository = "https://github.com/OrlyJunior/autonomous-development-orchestrator"
-Issues = "https://github.com/OrlyJunior/autonomous-development-orchestrator/issues"
-Changelog = "https://github.com/OrlyJunior/autonomous-development-orchestrator/releases"
+Repository = "https://github.com/OrlyJunior/prchef"
+Issues = "https://github.com/OrlyJunior/prchef/issues"
+Changelog = "https://github.com/OrlyJunior/prchef/releases"
 
 [project.optional-dependencies]
 dev = [
@@ -56,7 +54,7 @@ dev = [
 ]
 
 [project.scripts]
-orchestrator = "prchef.cli.main:app"
+prchef = "prchef.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prchef"]

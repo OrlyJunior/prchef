@@ -53,7 +53,7 @@ class WindowsToastNotifier:
             f"$texts.Item(1).AppendChild($xml.CreateTextNode({message})) > $null; "
             "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); "
             "[Windows.UI.Notifications.ToastNotificationManager]::"
-            "CreateToastNotifier('Development Orchestrator').Show($toast)"
+            "CreateToastNotifier('prchef').Show($toast)"
         )
         return [*_POWERSHELL, script]
 

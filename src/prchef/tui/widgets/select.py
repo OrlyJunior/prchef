@@ -18,7 +18,7 @@ from prchef.config.project_config import ConfiguredRepository
 SelectValue = TypeVar("SelectValue", bound=Hashable)
 
 
-class _OrchestratorSelectCurrent(SelectCurrent):
+class _PrchefSelectCurrent(SelectCurrent):
     """Forward mouse activation directly to the adapted parent Select."""
 
     FOCUS_ON_CLICK = False
@@ -34,14 +34,14 @@ class _OrchestratorSelectCurrent(SelectCurrent):
         event.stop()
         event.prevent_default()
         parent = self.parent
-        if isinstance(parent, OrchestratorSelect):
+        if isinstance(parent, PrchefSelect):
             if parent.expanded:
                 parent.action_hide_overlay()
             else:
                 parent.action_show_overlay()
 
 
-class _OrchestratorSelectOverlay(SelectOverlay):
+class _PrchefSelectOverlay(SelectOverlay):
     """Close and select without delegating back to Textual's scroll-visible handlers."""
 
     def on_mount(self, event: events.Mount) -> None:  # type: ignore[override]
@@ -54,7 +54,7 @@ class _OrchestratorSelectOverlay(SelectOverlay):
 
     def action_dismiss(self) -> None:
         parent = self.parent
-        if isinstance(parent, OrchestratorSelect):
+        if isinstance(parent, PrchefSelect):
             parent.action_hide_overlay()
         else:
             super().action_dismiss()
@@ -67,7 +67,7 @@ class _OrchestratorSelectOverlay(SelectOverlay):
             search_reset_timer.reset()
             search_reset_timer.stop()
         parent = self.parent
-        if isinstance(parent, OrchestratorSelect):
+        if isinstance(parent, PrchefSelect):
             parent.expanded = False
             self.suppress_click()
         else:
@@ -76,13 +76,13 @@ class _OrchestratorSelectOverlay(SelectOverlay):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
         parent = self.parent
-        if isinstance(parent, OrchestratorSelect):
+        if isinstance(parent, PrchefSelect):
             parent._select_option(event.option_index)
         else:
             super().on_option_list_option_selected(event)
 
 
-class OrchestratorSelect(Select[SelectValue]):
+class PrchefSelect(Select[SelectValue]):
     """A ``Select`` that reserves visible space for its overlay before opening.
 
     Textual renders a Select overlay in an overlay layer, but a ``VerticalScroll``
@@ -101,8 +101,8 @@ class OrchestratorSelect(Select[SelectValue]):
     def compose(self) -> ComposeResult:
         """Compose Select internals that delegate mouse events to this adaptation."""
 
-        yield _OrchestratorSelectCurrent(self.prompt)
-        overlay = _OrchestratorSelectOverlay()
+        yield _PrchefSelectCurrent(self.prompt)
+        overlay = _PrchefSelectOverlay()
         if hasattr(Select, "compact"):
             overlay = overlay.data_bind(compact=Select.compact)
         yield overlay
@@ -213,7 +213,7 @@ class OrchestratorSelect(Select[SelectValue]):
         )
 
 
-class RepositorySelect(OrchestratorSelect[str]):
+class RepositorySelect(PrchefSelect[str]):
     """A Select whose choices are the configured repository keys.
 
     Repository controls are mounted with no choices because configuration is
@@ -414,9 +414,9 @@ class RepositorySelect(OrchestratorSelect[str]):
             self.value = value
 
 
-def is_orchestrator_select_widget(widget: Widget) -> bool:
-    """Whether a focus event belongs to an ``OrchestratorSelect`` or its internals."""
+def is_prchef_select_widget(widget: Widget) -> bool:
+    """Whether a focus event belongs to an ``PrchefSelect`` or its internals."""
 
-    return isinstance(widget, OrchestratorSelect) or any(
-        isinstance(ancestor, OrchestratorSelect) for ancestor in widget.ancestors
+    return isinstance(widget, PrchefSelect) or any(
+        isinstance(ancestor, PrchefSelect) for ancestor in widget.ancestors
     )

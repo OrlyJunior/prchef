@@ -14,13 +14,13 @@ from prchef.config.project_config import AgentPresetConfig
 from prchef.models.agent import AgentRole
 from prchef.tui.bridge import WorkflowController
 from prchef.tui.widgets import (
-    OrchestratorSelect,
+    PrchefSelect,
     RepositorySelect,
-    is_orchestrator_select_widget,
+    is_prchef_select_widget,
 )
 
 if TYPE_CHECKING:
-    from prchef.tui.app import OrchestratorApp
+    from prchef.tui.app import PrchefApp
 
 
 _NEW_PRESET = object()
@@ -71,7 +71,7 @@ class AgentPresetsScreen(Screen[None]):
                 yield Static("Repository", classes="field-label")
                 yield RepositorySelect(id="agent-presets-repository")
                 yield Static("Role", classes="field-label")
-                yield OrchestratorSelect(
+                yield PrchefSelect(
                     [(role.value.title(), role.value) for role in AgentRole],
                     allow_blank=False,
                     prompt="Choose a role",
@@ -79,7 +79,7 @@ class AgentPresetsScreen(Screen[None]):
                 )
                 yield Static("Fallback preset", classes="field-label")
                 with Horizontal(classes="role-config-row"):
-                    yield OrchestratorSelect(
+                    yield PrchefSelect(
                         [("Disabled", _NO_FALLBACK)],
                         allow_blank=False,
                         prompt="Disabled",
@@ -87,7 +87,7 @@ class AgentPresetsScreen(Screen[None]):
                     )
                     yield Button("Save fallback", id="save-agent-fallback")
                 yield Static("Preset", classes="field-label")
-                yield OrchestratorSelect(
+                yield PrchefSelect(
                     [("Create new preset", _NEW_PRESET)],
                     prompt="Choose a preset",
                     id="agent-preset-select",
@@ -97,7 +97,7 @@ class AgentPresetsScreen(Screen[None]):
                 with Horizontal(classes="role-config-row"):
                     with Vertical(classes="role-field"):
                         yield Static("Provider", id="agent-preset-provider-label")
-                        yield OrchestratorSelect(
+                        yield PrchefSelect(
                             [], prompt="Choose a provider", id="agent-preset-provider"
                         )
                     with Vertical(classes="role-field"):
@@ -113,7 +113,7 @@ class AgentPresetsScreen(Screen[None]):
                         )
                     with Vertical(classes="role-field"):
                         yield Static("Permission mode", id="agent-preset-permission-label")
-                        yield OrchestratorSelect(
+                        yield PrchefSelect(
                             [],
                             prompt="Provider/YAML default",
                             id="agent-preset-permission",
@@ -139,7 +139,7 @@ class AgentPresetsScreen(Screen[None]):
 
     @property
     def controller(self) -> WorkflowController:
-        return cast("OrchestratorApp", self.app).controller
+        return cast("PrchefApp", self.app).controller
 
     def on_mount(self) -> None:
         try:
@@ -159,13 +159,13 @@ class AgentPresetsScreen(Screen[None]):
         selector.focus()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
-        if is_orchestrator_select_widget(event.widget):
+        if is_prchef_select_widget(event.widget):
             return
         self.query_one("#agent-presets", VerticalScroll).scroll_to_widget(
             event.widget, animate=False, top=True
         )
 
-    def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
+    def on_select_changed(self, event: PrchefSelect.Changed) -> None:
         if event.select.id == "agent-presets-repository" and isinstance(event.value, str):
             self.controller.select_repository(event.value)
             self._load_repository(event.value)
@@ -214,9 +214,9 @@ class AgentPresetsScreen(Screen[None]):
         except Exception as exc:
             self._status(f"Cannot load agent providers: {exc}")
             return
-        provider = self.query_one("#agent-preset-provider", OrchestratorSelect)
+        provider = self.query_one("#agent-preset-provider", PrchefSelect)
         provider.set_options(provider_options, allow_blank=False)
-        role_selector = self.query_one("#agent-preset-role", OrchestratorSelect)
+        role_selector = self.query_one("#agent-preset-role", PrchefSelect)
         active_role = self._role() or AgentRole.PLANNER
         # Keep the role-local editor active when navigating between repositories.
         # Assigning the existing value does not emit a change event, so load the
@@ -236,12 +236,12 @@ class AgentPresetsScreen(Screen[None]):
         except Exception as exc:
             self._status(f"Cannot load {role.value} presets: {exc}")
             return
-        selector = self.query_one("#agent-preset-select", OrchestratorSelect)
+        selector = self.query_one("#agent-preset-select", PrchefSelect)
         self._suppressed_preset_changes.add(_NEW_PRESET)
         selector.set_options(
             [("Create new preset", _NEW_PRESET), *[(name, name) for name in presets]]
         )
-        fallback = self.query_one("#agent-fallback-preset", OrchestratorSelect)
+        fallback = self.query_one("#agent-fallback-preset", PrchefSelect)
         fallback.set_options(
             [("Disabled", _NO_FALLBACK), *[(name, name) for name in presets]],
             allow_blank=False,
@@ -250,7 +250,7 @@ class AgentPresetsScreen(Screen[None]):
         self._selected_preset = None
         selector.value = _NEW_PRESET
         self._clear_values()
-        provider = self.query_one("#agent-preset-provider", OrchestratorSelect)
+        provider = self.query_one("#agent-preset-provider", PrchefSelect)
         provider.set_options(provider_options, allow_blank=False)
         provider.value = default_provider
         if not self._load_provider_controls(default_provider):
@@ -270,7 +270,7 @@ class AgentPresetsScreen(Screen[None]):
             return
         self._selected_preset = name
         self.query_one("#agent-preset-name", Input).value = name
-        provider = self.query_one("#agent-preset-provider", OrchestratorSelect)
+        provider = self.query_one("#agent-preset-provider", PrchefSelect)
         try:
             provider.value = preset.provider
             if not self._load_provider_controls(
@@ -284,7 +284,7 @@ class AgentPresetsScreen(Screen[None]):
             return
         self.query_one("#agent-preset-model", Input).value = preset.model or ""
         self.query_one("#agent-preset-reasoning", Input).value = preset.reasoning_effort or ""
-        permission = self.query_one("#agent-preset-permission", OrchestratorSelect)
+        permission = self.query_one("#agent-preset-permission", PrchefSelect)
         if permission.display:
             permission.value = (
                 preset.permission_mode
@@ -339,7 +339,7 @@ class AgentPresetsScreen(Screen[None]):
         self, provider: str, visible: bool, permission_mode: _PermissionMode | None
     ) -> bool:
         label = self.query_one("#agent-preset-permission-label", Static)
-        selector = self.query_one("#agent-preset-permission", OrchestratorSelect)
+        selector = self.query_one("#agent-preset-permission", PrchefSelect)
         label.display = visible
         selector.display = visible
         if not visible:
@@ -435,7 +435,7 @@ class AgentPresetsScreen(Screen[None]):
     def _save_fallback(self) -> None:
         repository = self._repository()
         role = self._role()
-        value = self.query_one("#agent-fallback-preset", OrchestratorSelect).value
+        value = self.query_one("#agent-fallback-preset", PrchefSelect).value
         if repository is None or role is None:
             self._status("Choose a repository and role first.")
             return
@@ -457,7 +457,7 @@ class AgentPresetsScreen(Screen[None]):
             return
         self._load_role(role)
         if selected is not None:
-            selector = self.query_one("#agent-preset-select", OrchestratorSelect)
+            selector = self.query_one("#agent-preset-select", PrchefSelect)
             self._suppressed_preset_changes.add(selected)
             selector.value = selected
             self._load_preset(selected)
@@ -481,7 +481,7 @@ class AgentPresetsScreen(Screen[None]):
         return repository, role, name
 
     def _preset(self) -> AgentPresetConfig:
-        provider = self.query_one("#agent-preset-provider", OrchestratorSelect).value
+        provider = self.query_one("#agent-preset-provider", PrchefSelect).value
         if not isinstance(provider, str):
             raise ValueError("Choose a provider first")
         original = self._selected_agent_preset()
@@ -506,7 +506,7 @@ class AgentPresetsScreen(Screen[None]):
     def _clear_values(self) -> None:
         for name in ("model", "reasoning", "temperature", "max-output-tokens"):
             self.query_one(f"#agent-preset-{name}", Input).value = ""
-        selector = self.query_one("#agent-preset-permission", OrchestratorSelect)
+        selector = self.query_one("#agent-preset-permission", PrchefSelect)
         if _PROVIDER_DEFAULT_PERMISSION in selector._legal_values:
             selector.value = _PROVIDER_DEFAULT_PERMISSION
 
@@ -526,18 +526,18 @@ class AgentPresetsScreen(Screen[None]):
         return widget.value.strip() or None
 
     def _permission_mode(self) -> _PermissionMode | None:
-        selector = self.query_one("#agent-preset-permission", OrchestratorSelect)
+        selector = self.query_one("#agent-preset-permission", PrchefSelect)
         if not selector.display:
             return None
         value = selector.value
         return cast(_PermissionMode, value) if value in _PERMISSION_MODES else None
 
     def _repository(self) -> str | None:
-        value = self.query_one("#agent-presets-repository", OrchestratorSelect).value
+        value = self.query_one("#agent-presets-repository", PrchefSelect).value
         return value if isinstance(value, str) else None
 
     def _role(self) -> AgentRole | None:
-        value = self.query_one("#agent-preset-role", OrchestratorSelect).value
+        value = self.query_one("#agent-preset-role", PrchefSelect).value
         return AgentRole(value) if isinstance(value, str) else None
 
     @staticmethod

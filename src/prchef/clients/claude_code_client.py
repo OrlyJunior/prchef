@@ -207,7 +207,7 @@ class ClaudeCodeClient:
             "--restricted",
             # Keep the mutable surface intentionally file-only.  In
             # particular, do not re-add Bash: otherwise a model could bypass
-            # orchestrator-owned Git/GitHub lifecycle policy with a shell.
+            # prchef-owned Git/GitHub lifecycle policy with a shell.
             "--tools",
             "Read,Edit,Write,Glob,Grep",
             # --tools does not limit MCP tools. Deny them explicitly so the

@@ -42,9 +42,9 @@ from prchef.tui.screens.task_selector import TaskSelector
 from prchef.tui.widgets import (
     BatchItemRow,
     BatchProgressView,
-    OrchestratorSelect,
+    PrchefSelect,
     RepositorySelect,
-    is_orchestrator_select_widget,
+    is_prchef_select_widget,
 )
 from prchef.tui.workflow_presentation import (
     STAGE_ROLES,
@@ -61,7 +61,7 @@ from prchef.tui.workflow_presentation import (
 )
 
 if TYPE_CHECKING:
-    from prchef.tui.app import OrchestratorApp
+    from prchef.tui.app import PrchefApp
 
 
 _MANUAL_PRESET = object()
@@ -234,7 +234,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 yield Static("Repository", classes="field-label")
                 yield RepositorySelect(id="repository")
                 yield Static("Task provider", classes="field-label")
-                yield OrchestratorSelect([], prompt="Task provider", id="task-provider")
+                yield PrchefSelect([], prompt="Task provider", id="task-provider")
                 yield TaskSelector(id="task-selector")
                 yield Static("", id="github-app-summary")
                 # Launch and navigation remain usable before the optional role
@@ -281,7 +281,7 @@ class WorkflowRunnerScreen(Screen[None]):
                         yield Static(role.value.title(), classes="role-title", id=f"{prefix}-title")
                         with Horizontal(classes="role-summary-row"):
                             yield Static("", id=f"{prefix}-summary")
-                            yield OrchestratorSelect(
+                            yield PrchefSelect(
                                 [],
                                 prompt="Provider/YAML default",
                                 id=f"{prefix}-preset",
@@ -297,7 +297,7 @@ class WorkflowRunnerScreen(Screen[None]):
                             with Horizontal(classes="role-config-row"):
                                 with Vertical(classes="role-field"):
                                     yield Static("Provider", id=f"{prefix}-provider-label")
-                                    yield OrchestratorSelect(
+                                    yield PrchefSelect(
                                         [],
                                         prompt=f"{role.value.title()} provider",
                                         id=f"{prefix}-provider",
@@ -323,7 +323,7 @@ class WorkflowRunnerScreen(Screen[None]):
                                     yield Static(
                                         "Permission mode", id=f"{prefix}-permission-label"
                                     )
-                                    yield OrchestratorSelect(
+                                    yield PrchefSelect(
                                         [],
                                         prompt="Provider/YAML default",
                                         id=f"{prefix}-permission",
@@ -398,7 +398,7 @@ class WorkflowRunnerScreen(Screen[None]):
 
     @property
     def controller(self) -> WorkflowController:
-        return cast("OrchestratorApp", self.app).controller
+        return cast("PrchefApp", self.app).controller
 
     def on_mount(self) -> None:
         self._reconcile_timer = self.set_interval(
@@ -479,7 +479,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 options = self.controller.configured_agent_provider_options(repository)
                 available = {name for _, name in options}
                 for role, prefix in self._role_fields():
-                    selector = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
+                    selector = self.query_one(f"#{prefix}-provider", PrchefSelect)
                     selected = self._selected(f"#{prefix}-provider")
                     selector.set_options(options, allow_blank=True)
                     if selected is not None and selected in available:
@@ -515,7 +515,7 @@ class WorkflowRunnerScreen(Screen[None]):
         # A mouse press focuses a clickable control before its release/click.
         # Scrolling it under the pointer turns that first click into focus only.
         # Textual still scrolls controls into view during keyboard navigation.
-        if isinstance(event.widget, (Button, Checkbox)) or is_orchestrator_select_widget(
+        if isinstance(event.widget, (Button, Checkbox)) or is_prchef_select_widget(
             event.widget
         ):
             return
@@ -523,7 +523,7 @@ class WorkflowRunnerScreen(Screen[None]):
             event.widget, animate=False, top=True
         )
 
-    def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
+    def on_select_changed(self, event: PrchefSelect.Changed) -> None:
         if event.select.id == "repository" and isinstance(event.value, str):
             self.controller.select_repository(event.value)
             self._load_repository_options(event.value)
@@ -614,7 +614,7 @@ class WorkflowRunnerScreen(Screen[None]):
         if not providers:
             self.query_one("#task-selector", TaskSelector).clear_tasks()
             return
-        task_provider_select = self.query_one("#task-provider", OrchestratorSelect)
+        task_provider_select = self.query_one("#task-provider", PrchefSelect)
         task_provider_select.set_options([(provider, provider) for provider in providers])
         self._suppressed_task_provider_change = (repository, providers[0])
         task_provider_select.value = providers[0]
@@ -633,7 +633,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._preset_generation_values.clear()
         self._advanced_open.clear()
         for role, prefix in self._role_fields():
-            select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
+            select = self.query_one(f"#{prefix}-provider", PrchefSelect)
             available = {name for _, name in configured_agent_options}
             default = selected_agents[role]
             select.set_options(configured_agent_options, allow_blank=default not in available)
@@ -718,7 +718,7 @@ class WorkflowRunnerScreen(Screen[None]):
             self.notify(f"Could not load {role.value} presets: {exc}", severity="error")
             return
         self._role_presets[role] = presets
-        selector = self.query_one(f"#{prefix}-preset", OrchestratorSelect)
+        selector = self.query_one(f"#{prefix}-preset", PrchefSelect)
         # The explicit Manual option is the only fallback this selector needs.
         # Remove Textual's synthetic blank choice so the first option remains
         # the role-local manual reset and cannot be mistaken for a separate
@@ -785,7 +785,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 f"{preset.provider!r}: {exc}"
             )
             return
-        provider_select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
+        provider_select = self.query_one(f"#{prefix}-provider", PrchefSelect)
         provider_select.value = preset.provider
         self._load_role_runtime_controls(
             role, prefix, preset.provider, reset_to_defaults=True
@@ -815,7 +815,7 @@ class WorkflowRunnerScreen(Screen[None]):
             del self._preset_generation_values[key]
         for name in ("model", "reasoning", "temperature", "max-output-tokens"):
             self.query_one(f"#{prefix}-{name}", Input).value = ""
-        provider_select = self.query_one(f"#{prefix}-provider", OrchestratorSelect)
+        provider_select = self.query_one(f"#{prefix}-provider", PrchefSelect)
         provider_select.value = default_provider
         self._load_role_runtime_controls(
             role, prefix, default_provider, reset_to_defaults=True
@@ -840,7 +840,7 @@ class WorkflowRunnerScreen(Screen[None]):
         """Reflect an edit in the selector while retaining that edit for this run."""
 
         self._selected_presets.pop(role, None)
-        selector = self.query_one(f"#{prefix}-preset", OrchestratorSelect)
+        selector = self.query_one(f"#{prefix}-preset", PrchefSelect)
         if selector.value is not _MANUAL_PRESET:
             self._suppressed_manual_preset_changes.add(role)
             selector.value = _MANUAL_PRESET
@@ -855,7 +855,7 @@ class WorkflowRunnerScreen(Screen[None]):
             self.query_one(f"#{prefix}-model", Input).value = preset.model
         if preset.reasoning_effort is not None:
             self.query_one(f"#{prefix}-reasoning", Input).value = preset.reasoning_effort
-        permission = self.query_one(f"#{prefix}-permission", OrchestratorSelect)
+        permission = self.query_one(f"#{prefix}-permission", PrchefSelect)
         if permission.display:
             permission.value = (
                 preset.permission_mode
@@ -1067,7 +1067,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self, prefix: str, visible: bool, default: Any, value: Any
     ) -> None:
         label = self.query_one(f"#{prefix}-permission-label", Static)
-        selector = self.query_one(f"#{prefix}-permission", OrchestratorSelect)
+        selector = self.query_one(f"#{prefix}-permission", PrchefSelect)
         label.display = visible
         selector.display = visible
         if not visible:
@@ -1217,7 +1217,7 @@ class WorkflowRunnerScreen(Screen[None]):
             self.query_one(f"#{prefix}-{control_name}-source", Static).update(source)
 
     def _permission_mode(self, prefix: str) -> _PermissionMode | None:
-        selector = self.query_one(f"#{prefix}-permission", OrchestratorSelect)
+        selector = self.query_one(f"#{prefix}-permission", PrchefSelect)
         if not selector.display:
             return None
         value = selector.value
@@ -2421,5 +2421,5 @@ class WorkflowRunnerScreen(Screen[None]):
         self._refresh_task_statuses()
 
     def _selected(self, selector: str) -> str | None:
-        value = self.query_one(selector, OrchestratorSelect).value
+        value = self.query_one(selector, PrchefSelect).value
         return value if isinstance(value, str) else None

@@ -2,7 +2,7 @@
 
 Concurrent workflow executions share real, finite resources: local-model
 providers share one GPU's VRAM and each hosted provider has its own quota
-pool. The orchestrator therefore bounds how many agent calls one *named*
+pool. prchef therefore bounds how many agent calls one *named*
 provider instance may run at the same time. The name is the resource identity:
 one configured provider instance is expected to mean one real connection.
 

@@ -443,7 +443,7 @@ def test_litellm_role_runtime_materialization_preserves_backend_and_vertex_setti
                     "type": "litellm",
                     "model": "vertex_ai/gemini-3.8-flash",
                     "generation": {
-                        "vertex_project": "agents-orchestrator-507215",
+                        "vertex_project": "agents-prchef-507215",
                         "vertex_location": "global",
                     },
                 },
@@ -466,7 +466,7 @@ def test_litellm_role_runtime_materialization_preserves_backend_and_vertex_setti
         assert settings["type"] == "litellm"
         assert settings["model"] == "vertex_ai/gemini-3.8-flash"
         assert settings["generation"] == {
-            "vertex_project": "agents-orchestrator-507215",
+            "vertex_project": "agents-prchef-507215",
             "vertex_location": "global",
         }
 

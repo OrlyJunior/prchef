@@ -1,5 +1,5 @@
 task:
-  # Provider used by `orchestrator run --task-id ...`.
+  # Provider used by `prchef run --task-id ...`.
   # --trello-card and --github-issue explicitly select their providers.
   provider: github
 
@@ -37,7 +37,7 @@ defaults:
     #   # Persistent and external to every repository. Omit for
     #   # ~/.prchef/qdrant. Local mode is single-process only.
     #   path: C:/prchef/qdrant
-    # Server mode supports concurrent orchestrator processes instead:
+    # Server mode supports concurrent prchef processes instead:
     # qdrant:
     #   mode: server
     #   url: http://127.0.0.1:6333
@@ -107,7 +107,7 @@ defaults:
   #
   # It defaults to 1 (strictly sequential) when omitted, which is deliberately
   # conservative. Ceilings are read once at startup: changing one requires
-  # restarting `orchestrator run`/`tui`. Declare it only under
+  # restarting `prchef run`/`tui`. Declare it only under
   # `defaults.providers.<name>`; a `repositories.<key>.providers.<name>` entry
   # that sets `max_concurrency` is rejected with a configuration error.
   # Providers screen choices: Codex CLI (codex-cli), Claude Code (claude-code),
@@ -146,7 +146,7 @@ defaults:
     #   # effort: medium
     #   # Default for roles without a preset/TUI runtime override. `dontAsk` is
     #   # suitable for read-only roles; use `acceptEdits` only for a role
-    #   # permitted to edit the orchestrator-created workspace.
+    #   # permitted to edit prchef-created workspace.
     #   permission_mode: dontAsk
     #   bare_mode: false
     #   # max_turns: 12
@@ -184,7 +184,7 @@ defaults:
     cloud-api:
       type: litellm
       model: openai/gpt-4.1-mini
-      # Export this variable in the orchestrator process environment. The app's
+      # Export this variable in prchef process environment. The app's
       # ~/.prchef/.env does not export arbitrary API provider credentials.
       api_key_env: OPENAI_API_KEY
       # A hosted account has its own finite quota pool, independent of the

@@ -351,7 +351,7 @@ def test_cli_help_starts_from_an_arbitrary_directory_without_configuration(
     result = runner.invoke(main.app, ["--help"])
 
     assert result.exit_code == 0, result.output
-    assert "Autonomous development workflow" in result.output
+    assert "prchef workflow" in result.output
 
 
 def test_cli_providers_reports_config_discovery_failure(
@@ -634,7 +634,7 @@ def test_cli_launches_textual_tui_after_migrations(monkeypatch: Any, tmp_path: P
             nonlocal launched
             launched = True
 
-    monkeypatch.setattr(main, "OrchestratorApp", TuiApp)
+    monkeypatch.setattr(main, "PrchefApp", TuiApp)
 
     result = runner.invoke(main.app, ["tui", "--config", str(config)])
 

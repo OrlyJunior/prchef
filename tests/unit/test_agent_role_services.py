@@ -624,7 +624,7 @@ def test_every_workflow_implementer_path_uses_the_shared_request_builder(
     if path is _ImplementerPath.POLISH:
         assert kwargs["pull_request"] is pull_request
     assert request == provider.requests[0]
-    assert request.title == "Orchestrator implementation"
+    assert request.title == "Prchef implementation"
     assert request.workspace_path == tmp_path
     assert prompt_marker in request.instructions
     normalized = " ".join(request.instructions.split())

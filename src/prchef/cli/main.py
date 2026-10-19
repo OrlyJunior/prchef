@@ -61,7 +61,7 @@ from prchef.workspace.manager import WorkspaceManager
 # time. Textual is still a required project dependency, but this prevents an
 # incomplete environment from breaking commands such as ``--version`` before
 # the user has asked to launch the UI.
-OrchestratorApp: type[Any] | None = None
+PrchefApp: type[Any] | None = None
 
 
 class TextualDependencyError(RuntimeError):
@@ -69,8 +69,8 @@ class TextualDependencyError(RuntimeError):
 
 
 app = typer.Typer(
-    name="orchestrator",
-    help="Autonomous development workflow from Trello cards or GitHub Issues.",
+    name="prchef",
+    help="prchef workflow from Trello cards or GitHub Issues.",
     no_args_is_help=True,
 )
 
@@ -342,14 +342,14 @@ def _tui_task_provider(
     )
 
 
-def _orchestrator_app_type() -> type[Any]:
+def _prchef_app_type() -> type[Any]:
     """Load the Textual application only when the interactive command runs."""
 
-    global OrchestratorApp
-    if OrchestratorApp is not None:
-        return OrchestratorApp
+    global PrchefApp
+    if PrchefApp is not None:
+        return PrchefApp
     try:
-        from prchef.tui.app import OrchestratorApp as textual_app
+        from prchef.tui.app import PrchefApp as textual_app
     except ModuleNotFoundError as exc:
         if exc.name != "textual":
             raise
@@ -357,8 +357,8 @@ def _orchestrator_app_type() -> type[Any]:
             "The terminal UI requires the Textual dependency. "
             "Reinstall the project dependencies and try again."
         ) from exc
-    OrchestratorApp = textual_app
-    return OrchestratorApp
+    PrchefApp = textual_app
+    return PrchefApp
 
 
 def _read_debug_text(path: Path, label: str) -> str:
@@ -455,7 +455,7 @@ def tui(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     try:
-        application_type = _orchestrator_app_type()
+        application_type = _prchef_app_type()
     except TextualDependencyError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc

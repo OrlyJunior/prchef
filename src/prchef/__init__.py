@@ -1,6 +1,6 @@
-"""Autonomous development orchestrator."""
+"""prchef."""
 
 from importlib.metadata import version
 
-__version__ = version("autonomous-dev-orchestrator")
+__version__ = version("prchef")
 

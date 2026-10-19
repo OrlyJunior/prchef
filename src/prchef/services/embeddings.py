@@ -89,7 +89,7 @@ class FastEmbedEmbeddingProvider:
                     target=self._watch_download,
                     args=(cache, finished, initialized),
                     daemon=True,
-                    name="orchestrator-embedding-download-progress",
+                    name="prchef-embedding-download-progress",
                 )
                 watcher.start()
             try:

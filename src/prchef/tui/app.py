@@ -100,10 +100,10 @@ class InterruptedRecoveryChoice(ModalScreen[tuple[str, ...] | None]):
                                  f"resume {(item.resume_stage or item.current_stage).value}"
 
 
-class OrchestratorApp(App[None]):
+class PrchefApp(App[None]):
     """First-class terminal presentation over the existing orchestration core."""
 
-    TITLE = "Orchestrator"
+    TITLE = "prchef"
     SUB_TITLE = "Interactive workflow control"
     CSS = """
     #home, #workflow-runner, #execution-history, #execution-detail, #batch-detail,
@@ -363,7 +363,7 @@ class OrchestratorApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with VerticalScroll(id="home"):
-            yield Static("Orchestrator workflow control", classes="screen-title")
+            yield Static("prchef workflow control", classes="screen-title")
             yield Static(
                 "Browse configured repositories and tasks, select role providers, "
                 "start a workflow, or inspect persisted executions."

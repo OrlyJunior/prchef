@@ -112,7 +112,7 @@ class ExecutionDispatcher:
         self,
         *,
         max_workers: int = 1,
-        thread_name_prefix: str = "orchestrator-execution",
+        thread_name_prefix: str = "prchef-execution",
     ) -> None:
         if max_workers < 1:
             raise ValueError("Execution dispatcher needs at least one worker")

@@ -69,7 +69,7 @@ class LiteLLMAgentProvider:
         except ModuleNotFoundError as exc:
             raise ConfigurationError(
                 "LiteLLM is missing from this installation. Reinstall "
-                "`autonomous-dev-orchestrator` so its required dependencies are installed."
+                "`prchef` so its required dependencies are installed."
             ) from exc
 
     def _completion_kwargs(self, request: AgentRequest) -> dict[str, Any]:
@@ -173,7 +173,7 @@ def _messages(request: AgentRequest) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": "You are executing an orchestrator agent request. "
+            "content": "You are executing an prchef agent request. "
             + "\n".join(context),
         },
         {"role": "user", "content": request.instructions},

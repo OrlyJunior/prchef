@@ -128,7 +128,7 @@ def test_litellm_backend_is_preserved_for_independent_planner_and_reviewer_roles
                 "type": "litellm",
                 "model": "vertex_ai/gemini-3.8-flash",
                 "generation": {
-                    "vertex_project": "agents-orchestrator-507215",
+                    "vertex_project": "agents-prchef-507215",
                     "vertex_location": "global",
                 },
             },

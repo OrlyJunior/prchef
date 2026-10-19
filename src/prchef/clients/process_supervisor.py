@@ -1,7 +1,7 @@
 """POSIX process-tree supervisor that ``CommandClient`` runs each command under.
 
 Run as ``python -I -S process_supervisor.py STATUS_FD PARENT_PID COMMAND...``.
-The orchestrator never imports this module, so it uses only the standard library.
+prchef never imports this module, so it uses only the standard library.
 
 A process group cannot contain a command: any descendant can leave it with ``setsid``. On Linux
 the supervisor registers as a child subreaper, so orphans remain its descendants. On macOS it
@@ -165,7 +165,7 @@ class _Relay:
             try:
                 written = os.write(self.target, self._pending)
             except BrokenPipeError:
-                # The orchestrator stopped reading. Closing the source lets the command see a
+                # prchef stopped reading. Closing the source lets the command see a
                 # closed pipe, as it would when run directly.
                 self._pending.clear()
                 return False

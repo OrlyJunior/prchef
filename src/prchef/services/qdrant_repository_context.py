@@ -112,7 +112,7 @@ def canonical_path_identifier(path: Path) -> str:
 def repository_collection_name(repository_key: str, configured_root: Path) -> str:
     path_id = canonical_path_identifier(configured_root)
     digest = hashlib.sha256(f"{repository_key}\0{path_id}".encode()).hexdigest()[:32]
-    return f"orchestrator_repo_{digest}"
+    return f"prchef_repo_{digest}"
 
 
 def create_qdrant_client(settings: QdrantSettings) -> Any:

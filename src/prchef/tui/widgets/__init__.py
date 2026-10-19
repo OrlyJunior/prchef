@@ -1,16 +1,16 @@
-"""Reusable Textual widgets with Orchestrator-specific interaction behavior."""
+"""Reusable Textual widgets with prchef-specific interaction behavior."""
 
 from prchef.tui.widgets.batch_progress import BatchItemRow, BatchProgressView
 from prchef.tui.widgets.select import (
-    OrchestratorSelect,
+    PrchefSelect,
     RepositorySelect,
-    is_orchestrator_select_widget,
+    is_prchef_select_widget,
 )
 
 __all__ = [
     "BatchItemRow",
     "BatchProgressView",
-    "OrchestratorSelect",
+    "PrchefSelect",
     "RepositorySelect",
-    "is_orchestrator_select_widget",
+    "is_prchef_select_widget",
 ]

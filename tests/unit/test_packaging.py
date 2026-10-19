@@ -12,12 +12,13 @@ def test_core_dependencies_include_pyjwt_cryptography_support() -> None:
     assert "PyJWT[crypto]>=2.8,<3" in project["dependencies"]
 
 
-def test_packaging_exposes_the_standard_orchestrator_console_script() -> None:
+def test_packaging_exposes_the_standard_prchef_console_script() -> None:
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     with pyproject_path.open("rb") as pyproject_file:
         project = tomllib.load(pyproject_file)["project"]
 
-    assert project["scripts"]["orchestrator"] == "prchef.cli.main:app"
+    assert project["name"] == "prchef"
+    assert project["scripts"] == {"prchef": "prchef.cli.main:app"}
 
 
 def test_packaging_keeps_migrations_inside_the_prchef_package() -> None:

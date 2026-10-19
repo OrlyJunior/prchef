@@ -103,7 +103,7 @@ def test_windows_native_shim_is_resolved_without_shell_parsing(
 def test_windows_native_shim_can_run_from_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, suffix: str
 ) -> None:
-    command_name = f"orchestrator-test-shim-{suffix.removeprefix('.')}"
+    command_name = f"prchef-test-shim-{suffix.removeprefix('.')}"
     shim = tmp_path / f"{command_name}{suffix}"
     shim.write_text("@echo off\r\necho %~1\r\n", encoding="utf-8")
     monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path), os.environ.get("PATH", ""))))
@@ -805,8 +805,8 @@ def test_command_killed_by_a_signal_keeps_its_signal_status(tmp_path: Path) -> N
 
 
 def test_missing_executable_is_reported_as_before(tmp_path: Path) -> None:
-    with pytest.raises(CommandExecutionError, match="Executable not found: orchestrator-no-such"):
-        CommandClient().run(["orchestrator-no-such-tool"], cwd=tmp_path, timeout_seconds=60)
+    with pytest.raises(CommandExecutionError, match="Executable not found: prchef-no-such"):
+        CommandClient().run(["prchef-no-such-tool"], cwd=tmp_path, timeout_seconds=60)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions only")

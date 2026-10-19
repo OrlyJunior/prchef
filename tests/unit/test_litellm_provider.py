@@ -234,7 +234,7 @@ def test_unauthenticated_local_endpoint_maps_request_and_generation_options() ->
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are executing an orchestrator agent request. "
+                    "content": "You are executing an prchef agent request. "
                     "Request title: Agent task\nRepository: owner/repo\n"
                     "Revision: feature-branch\nWorkspace path: workspace",
                 },

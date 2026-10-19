@@ -84,7 +84,7 @@ class SpecService:
         result = self._provider.execute(
             AgentRequest(
                 instructions=prompt,
-                title="Orchestrator technical specification",
+                title="Prchef technical specification",
                 workspace_path=repository_path,
                 repository=repository_slug,
                 revision=base_branch,

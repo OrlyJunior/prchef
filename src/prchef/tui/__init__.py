@@ -4,14 +4,14 @@ from typing import Any
 
 from prchef.tui.bridge import WorkflowController, WorkflowLaunch
 
-__all__ = ["OrchestratorApp", "WorkflowController", "WorkflowLaunch"]
+__all__ = ["PrchefApp", "WorkflowController", "WorkflowLaunch"]
 
 
 def __getattr__(name: str) -> Any:
     """Avoid importing Textual when callers only need the controller layer."""
 
-    if name == "OrchestratorApp":
-        from prchef.tui.app import OrchestratorApp
+    if name == "PrchefApp":
+        from prchef.tui.app import PrchefApp
 
-        return OrchestratorApp
+        return PrchefApp
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -150,7 +150,7 @@ class _ProcessTreeSurvivedError(Exception):
 
 
 class _TreeSupervisor:
-    """The orchestrator's side of a POSIX command launched under ``process_supervisor.py``."""
+    """prchef's side of a POSIX command launched under ``process_supervisor.py``."""
 
     def __init__(self, status_fd: int) -> None:
         self._status_fd: int | None = status_fd

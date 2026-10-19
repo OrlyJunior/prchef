@@ -33,7 +33,7 @@ from prchef.tui.screens.execution_history import execution_status_label
 from prchef.tui.workflow_presentation import status_message, step_timeline_lines
 
 if TYPE_CHECKING:
-    from prchef.tui.app import OrchestratorApp
+    from prchef.tui.app import PrchefApp
 
 
 class ExecutionDetailRefreshRequested(Message):
@@ -99,7 +99,7 @@ class ExecutionDetailScreen(Screen[None]):
 
     @property
     def controller(self) -> WorkflowController:
-        return cast("OrchestratorApp", self.app).controller
+        return cast("PrchefApp", self.app).controller
 
     def on_mount(self) -> None:
         self._set_action_layout(self.size.width)

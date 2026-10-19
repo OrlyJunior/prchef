@@ -26,7 +26,7 @@ from prchef.tui.diagnostics import format_diagnostics_for_export
 from prchef.tui.widgets import BatchItemRow, BatchProgressView
 
 if TYPE_CHECKING:
-    from prchef.tui.app import OrchestratorApp
+    from prchef.tui.app import PrchefApp
 
 
 class BatchDetailScreen(Screen[None]):
@@ -45,7 +45,7 @@ class BatchDetailScreen(Screen[None]):
 
     @property
     def controller(self) -> WorkflowController:
-        return cast("OrchestratorApp", self.app).controller
+        return cast("PrchefApp", self.app).controller
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="batch-detail"):

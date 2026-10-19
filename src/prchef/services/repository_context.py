@@ -251,7 +251,7 @@ class RepositoryContextRequest:
 
 
 class RepositoryContextStrategy(Protocol):
-    """Orchestrator boundary for role-specific repository context."""
+    """Prchef boundary for role-specific repository context."""
 
     def render(self, request: RepositoryContextRequest) -> str:
         """Render the repository context block for one agent request."""
@@ -293,7 +293,7 @@ def semantic_fallback_diagnostic(exc: Exception) -> dict[str, str]:
     detail = " ".join(f"{type(item).__name__} {item}" for item in causes).casefold()
     if "no module" in detail or "is required for qdrant" in detail:
         reason = "The local semantic dependencies are unavailable."
-        remedy = "Reinstall the orchestrator with its default dependencies."
+        remedy = "Reinstall prchef with its default dependencies."
     elif any(word in detail for word in ("unsupported", "platform", "onnxruntime", "architecture")):
         reason = "The local embedding runtime is unsupported on this platform."
         remedy = "Use a supported Python platform or select strategy: heuristic."
@@ -367,7 +367,7 @@ def resolve_repository_context_strategy(
     on_diagnostic: Callable[[dict[str, str]], None] | None = None,
     cancellation_check: Callable[[], None] | None = None,
 ) -> RepositoryContextStrategy:
-    """Resolve a stable strategy name through the orchestrator-owned registry.
+    """Resolve a stable strategy name through prchef-owned registry.
 
     ``client_manager`` lets the composing process share one long-lived index
     client across concurrent executions; index-free strategies ignore it.

@@ -19,10 +19,10 @@ from prchef.config.provider_configuration import (
     reject_provider_credentials,
 )
 from prchef.tui.bridge import WorkflowController
-from prchef.tui.widgets import OrchestratorSelect, is_orchestrator_select_widget
+from prchef.tui.widgets import PrchefSelect, is_prchef_select_widget
 
 if TYPE_CHECKING:
-    from prchef.tui.app import OrchestratorApp
+    from prchef.tui.app import PrchefApp
 
 _FIELDS = {
     "codex-cli": ("command", "model", "reasoning_effort", "approval_policy",
@@ -125,7 +125,7 @@ class ProviderSettingsScreen(Screen[None]):
 
     @property
     def controller(self) -> WorkflowController:
-        return cast("OrchestratorApp", self.app).controller
+        return cast("PrchefApp", self.app).controller
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="provider-settings"):
@@ -154,7 +154,7 @@ class ProviderSettingsScreen(Screen[None]):
                 "restart to expand startup dispatcher capacity.", id="provider-restart",
             )
             yield Static("Provider", classes="field-label")
-            yield OrchestratorSelect([], prompt="No providers configured", id="provider-select")
+            yield PrchefSelect([], prompt="No providers configured", id="provider-select")
             with Horizontal(classes="screen-actions"):
                 yield Button("Add provider", id="add-provider", variant="success")
                 yield Button("Reload", id="reload-providers")
@@ -162,7 +162,7 @@ class ProviderSettingsScreen(Screen[None]):
                 yield Static("How should this agent run?", classes="field-label",
                              id="provider-run-question")
                 yield Static("Configuration key: type", classes="provider-key")
-                yield OrchestratorSelect(
+                yield PrchefSelect(
                     [("Codex CLI", "codex-cli"), ("Claude Code", "claude-code"),
                      ("Model API (LiteLLM)", "litellm")],
                     allow_blank=False, id="provider-type",
@@ -211,7 +211,7 @@ class ProviderSettingsScreen(Screen[None]):
         self.set_class(event.size.width <= 60, "-narrow")
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
-        if not is_orchestrator_select_widget(event.widget):
+        if not is_prchef_select_widget(event.widget):
             self.query_one("#provider-settings", VerticalScroll).scroll_to_widget(
                 event.widget, animate=False, top=True,
             )
@@ -233,7 +233,7 @@ class ProviderSettingsScreen(Screen[None]):
             self._providers = {}
             self._editing = None
             self._original = {}
-            selector = self.query_one("#provider-select", OrchestratorSelect)
+            selector = self.query_one("#provider-select", PrchefSelect)
             selector.set_options([], allow_blank=True)
             selector.disabled = True
             for action in ("save-provider", "remove-provider", "add-provider"):
@@ -244,7 +244,7 @@ class ProviderSettingsScreen(Screen[None]):
             return
         self._source = source
         self._providers = providers
-        selector = self.query_one("#provider-select", OrchestratorSelect)
+        selector = self.query_one("#provider-select", PrchefSelect)
         selector.disabled = False
         selector.set_options([(f"{name} ({value.get('type', 'unknown')})", name)
                               for name, value in providers.items()], allow_blank=True)
@@ -263,11 +263,11 @@ class ProviderSettingsScreen(Screen[None]):
         self._original = {}
         self.query_one("#provider-overrides", Static).update("")
         self.query_one("#save-provider", Button).disabled = self._source is None
-        self.query_one("#provider-select", OrchestratorSelect).clear()
+        self.query_one("#provider-select", PrchefSelect).clear()
         self.query_one("#provider-name", Input).disabled = False
         self.query_one("#provider-name", Input).value = ""
         self.query_one("#remove-provider", Button).disabled = True
-        self.query_one("#provider-type", OrchestratorSelect).value = "codex-cli"
+        self.query_one("#provider-type", PrchefSelect).value = "codex-cli"
         self._fill("codex-cli", PROVIDER_DEFAULTS["codex-cli"])
 
     def _edit(self, name: str) -> None:
@@ -302,7 +302,7 @@ class ProviderSettingsScreen(Screen[None]):
             self._status("Unsupported provider type; select a supported type to replace it.",
                          error=True)
         else:
-            self.query_one("#provider-type", OrchestratorSelect).value = kind
+            self.query_one("#provider-type", PrchefSelect).value = kind
             self._fill(kind, self._original)
         self.query_one("#remove-provider", Button).disabled = False
 
@@ -350,7 +350,7 @@ class ProviderSettingsScreen(Screen[None]):
         if event.input.id == "provider-model":
             self._update_visibility()
 
-    def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
+    def on_select_changed(self, event: PrchefSelect.Changed) -> None:
         if event.select.value != event.value or not isinstance(event.value, str):
             return
         if event.select.id == "provider-select" and event.value in self._providers:

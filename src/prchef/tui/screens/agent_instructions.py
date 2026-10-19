@@ -13,13 +13,13 @@ from textual.widgets import Button, Static, TextArea
 from prchef.models.agent import AgentRole
 from prchef.tui.bridge import WorkflowController
 from prchef.tui.widgets import (
-    OrchestratorSelect,
+    PrchefSelect,
     RepositorySelect,
-    is_orchestrator_select_widget,
+    is_prchef_select_widget,
 )
 
 if TYPE_CHECKING:
-    from prchef.tui.app import OrchestratorApp
+    from prchef.tui.app import PrchefApp
 
 
 class AgentInstructionsScreen(Screen[None]):
@@ -36,7 +36,7 @@ class AgentInstructionsScreen(Screen[None]):
             yield Static("Agent instructions", classes="screen-title")
             yield Static(
                 "Optional local Markdown guidance. It supplements task requirements and "
-                "orchestrator invariants; saving never stages or commits files."
+                "prchef invariants; saving never stages or commits files."
             )
             with Vertical(classes="workflow-form"):
                 yield RepositorySelect(id="agent-instructions-repository")
@@ -63,7 +63,7 @@ class AgentInstructionsScreen(Screen[None]):
 
     @property
     def controller(self) -> WorkflowController:
-        return cast("OrchestratorApp", self.app).controller
+        return cast("PrchefApp", self.app).controller
 
     def on_mount(self) -> None:
         try:
@@ -83,13 +83,13 @@ class AgentInstructionsScreen(Screen[None]):
         selector.focus()
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
-        if is_orchestrator_select_widget(event.widget):
+        if is_prchef_select_widget(event.widget):
             return
         self.query_one("#agent-instructions", VerticalScroll).scroll_to_widget(
             event.widget, animate=False, top=True
         )
 
-    def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
+    def on_select_changed(self, event: PrchefSelect.Changed) -> None:
         if (
             event.select.id == "agent-instructions-repository"
             and isinstance(event.value, str)
@@ -107,7 +107,7 @@ class AgentInstructionsScreen(Screen[None]):
         if selection is None:
             return
         repository = self.query_one(
-            "#agent-instructions-repository", OrchestratorSelect
+            "#agent-instructions-repository", PrchefSelect
         ).value
         if not isinstance(repository, str):
             self._status("Choose a repository before saving instructions.")

@@ -19,13 +19,13 @@ from prchef.models.repository_context import IndexLifecycleState, RepositoryInde
 from prchef.services.qdrant_repository_context import repository_index_error_message
 from prchef.tui.bridge import WorkflowController
 from prchef.tui.widgets import (
-    OrchestratorSelect,
+    PrchefSelect,
     RepositorySelect,
-    is_orchestrator_select_widget,
+    is_prchef_select_widget,
 )
 
 if TYPE_CHECKING:
-    from prchef.tui.app import OrchestratorApp
+    from prchef.tui.app import PrchefApp
 
 
 class DeleteRepositoryConfirmation(ModalScreen[bool]):
@@ -152,7 +152,7 @@ class RepositorySettingsScreen(Screen[None]):
 
     @property
     def controller(self) -> WorkflowController:
-        return cast("OrchestratorApp", self.app).controller
+        return cast("PrchefApp", self.app).controller
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="repository-settings"):
@@ -209,10 +209,10 @@ class RepositorySettingsScreen(Screen[None]):
                         yield Button("Clear index", variant="error", id="clear-index")
                     yield Static("Validation commands", classes="field-label")
                     yield Static(
-                        "Commands the orchestrator runs to verify changes before commit/PR. "
+                        "Commands prchef runs to verify changes before commit/PR. "
                         "Enter each command normally; argument boundaries are preserved in YAML."
                     )
-                    yield OrchestratorSelect(
+                    yield PrchefSelect(
                         [],
                         prompt="Select a validation command",
                         id="validation-command-list",
@@ -262,13 +262,13 @@ class RepositorySettingsScreen(Screen[None]):
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         # Scrolling a button on mouse-down can move it before mouse-up and turn
         # the first click into focus-only. Keyboard-focused inputs still scroll.
-        if isinstance(event.widget, Button) or is_orchestrator_select_widget(event.widget):
+        if isinstance(event.widget, Button) or is_prchef_select_widget(event.widget):
             return
         self.query_one("#repository-settings", VerticalScroll).scroll_to_widget(
             event.widget, animate=False, top=True
         )
 
-    def on_select_changed(self, event: OrchestratorSelect.Changed) -> None:
+    def on_select_changed(self, event: PrchefSelect.Changed) -> None:
         if event.select.id == "repository-picker" and isinstance(event.value, str):
             # RepositorySelect restores its configured value after mounting.
             # Do not let that deferred programmatic event overwrite a form the
@@ -504,7 +504,7 @@ class RepositorySettingsScreen(Screen[None]):
         self._error("")
 
     def _refresh_command_list(self, selected: int | None = None) -> None:
-        selector = self.query_one("#validation-command-list", OrchestratorSelect)
+        selector = self.query_one("#validation-command-list", PrchefSelect)
         options = [
             (f"{index + 1}. {shlex.join(command)}", index)
             for index, command in enumerate(self._commands)

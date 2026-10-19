@@ -224,7 +224,7 @@ Return exactly one JSON object:
         result = self._provider.execute(
             AgentRequest(
                 instructions=prompt,
-                title="Orchestrator code review",
+                title="Prchef code review",
                 workspace_path=repository_path,
                 repository=repository_slug,
                 revision=feature_branch,

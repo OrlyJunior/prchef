@@ -18,7 +18,7 @@ if not sqlalchemy_url.strip():
     config.set_main_option("sqlalchemy.url", resolve_database_url().replace("%", "%%"))
 
 if config.config_file_name is not None:
-    # Keep the orchestrator's application loggers enabled while Alembic
+    # Keep prchef's application loggers enabled while Alembic
     # configures its own handlers for migration output.
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 

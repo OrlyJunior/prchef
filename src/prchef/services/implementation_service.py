@@ -313,7 +313,7 @@ REPOSITORY SPEC:
 Use the repository spec only as supporting technical context.
 Do not invent requirements.
 Preserve the conventions of the target repository.
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+Do not commit, push, create a pull request, or merge; prchef owns those operations.
 """
         elif path is _ImplementerPath.EXPLICIT:
             assert prompt_input is not None
@@ -327,7 +327,7 @@ Do not commit, push, create a pull request, or merge; the orchestrator owns thos
 STRICT SAFETY RULES:
 Implement only the requested input in the configured workspace.
 {context}Do not commit, push, create a pull request, or merge;
-the orchestrator owns those operations.
+prchef owns those operations.
 """
             prompt = safe_prompt
         elif path is _ImplementerPath.VALIDATION:
@@ -345,7 +345,7 @@ VALIDATION FAILURES FROM THE CURRENT IMPLEMENTATION:
 
 {context}Correct the existing implementation in this workspace to address the validation failures.
 Do not start over or revert unrelated existing changes.
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+Do not commit, push, create a pull request, or merge; prchef owns those operations.
 """
         elif path is _ImplementerPath.REVIEW:
             assert task is not None and spec is not None and review is not None
@@ -364,7 +364,7 @@ REVIEWER CHANGE REQUESTS FOR THE CURRENT IMPLEMENTATION:
 review finding.
 Use the findings, blocking findings, and suggestions above as review feedback; do not start over
 or revert unrelated existing changes.
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+Do not commit, push, create a pull request, or merge; prchef owns those operations.
 """
         elif path is _ImplementerPath.CONTINUATION:
             assert task is not None and spec is not None and feedback is not None
@@ -383,7 +383,7 @@ OPERATOR FEEDBACK FOR CONTINUING THE CURRENT IMPLEMENTATION:
 {context}Continue the existing implementation in this workspace. Address the operator feedback
 without starting over or reverting unrelated existing changes. The workspace may contain retained
 changes from the prior terminal attempt; inspect its current state using your tools.
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+Do not commit, push, create a pull request, or merge; prchef owns those operations.
 """
         elif path is _ImplementerPath.POLISH:
             assert task is not None and spec is not None
@@ -431,13 +431,13 @@ comment, so include concise final-facing reasons only. Do not include private re
 commands, credentials, provider metadata, or raw tool output. If no concise reason is available,
 return an empty `skip_reasons` list.
 
-Do not commit, push, create a pull request, or merge; the orchestrator owns those operations.
+Do not commit, push, create a pull request, or merge; prchef owns those operations.
 """
         else:
             raise ValueError(f"Unknown implementer path: {path}")
         return AgentRequest(
             instructions=prompt,
-            title="Orchestrator implementation",
+            title="Prchef implementation",
             workspace_path=repository_path,
         )
 

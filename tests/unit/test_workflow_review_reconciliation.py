@@ -38,5 +38,5 @@ def test_identical_review_from_previous_attempt_is_not_reused() -> None:
     )
 
     assert len(published) == 2
-    assert "<!-- orchestrator-review:execution:20 -->" in published[0]
-    assert "<!-- orchestrator-review:execution:21 -->" in published[1]
+    assert "<!-- prchef-review:execution:20 -->" in published[0]
+    assert "<!-- prchef-review:execution:21 -->" in published[1]

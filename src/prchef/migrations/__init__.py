@@ -1,1 +1,1 @@
-"""Packaged Alembic migration scripts for orchestrator persistence."""
+"""Packaged Alembic migration scripts for prchef persistence."""

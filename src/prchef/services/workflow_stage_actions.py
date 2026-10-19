@@ -104,7 +104,7 @@ class StageActions:
         body = format_pull_request_review(review)
         review_step_id = self._repository.get_execution(execution_id).review_step_id
         if review_step_id is not None:
-            body += f"\n\n<!-- orchestrator-review:{execution_id}:{review_step_id} -->"
+            body += f"\n\n<!-- prchef-review:{execution_id}:{review_step_id} -->"
         try:
             if reconcile and review_step_id is None:
                 raise WorkflowError(
