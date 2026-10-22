@@ -1,6 +1,8 @@
 # prchef
 
-prchef turns a GitHub issue or Trello card into a reviewed pull request. It plans the change, implements it in an isolated Git worktree, runs your validation commands, opens a pull request, and performs an automated review. It never merges: the final decision is always yours.
+**prchef** turns a GitHub issue or Trello card into a reviewed pull request. It runs on your machine: it plans the change, implements it in an isolated Git worktree, runs your validation commands, opens a pull request, and performs an automated review. It never merges: the final decision is always yours.
+
+It works with the coding-agent CLIs you already use (Codex CLI, Claude Code) and with API or local models through LiteLLM, and aims to be provider-agnostic. API and local models currently plan and review; implementing code needs a CLI agent.
 
 ![Starting a workflow in the prchef terminal UI, then reviewing a completed execution with its detailed logs](docs/assets/prchef-tui-demo.gif)
 
