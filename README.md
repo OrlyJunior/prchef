@@ -297,7 +297,30 @@ We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.m
 
 Label pull requests Feature, Improvement or Bug (or skip-changelog for internal changes) so the generated release notes group them correctly.
 
-Install the development dependencies above, then run:
+For development, CI, and release builds, install the hashed dependencies first,
+then install the local project without resolving dependencies or creating an
+unlocked build environment:
+
+```sh
+python -m pip install --require-hashes --only-binary=:all: -r constraints-dev.txt
+python -m pip install --no-deps --no-build-isolation -e ".[dev]"
+```
+
+LiteLLM is pinned to `1.106.2` because `1.107.0` was a malicious release. Before
+bumping it, check the new version's security advisories and release notes, update
+the exact pin in `pyproject.toml` and the packaging tests, and regenerate
+`constraints-dev.txt` using `uv==0.13.5` in a temporary environment outside the
+repository. Advance the upload cutoff deliberately after that review:
+
+```sh
+uv pip compile pyproject.toml --extra dev --universal --python-version 3.11 --generate-hashes --only-binary :all: --default-index https://pypi.org/simple --exclude-newer 2026-10-22T00:00:00Z -o constraints-dev.txt
+```
+
+The file covers runtime, development, and build dependencies, including platform
+markers for the CI matrix. Review its version and hash changes before committing.
+End users installing the package do not need this file.
+
+Then run:
 
 ```sh
 python -m pytest

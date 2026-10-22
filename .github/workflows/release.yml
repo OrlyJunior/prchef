@@ -52,7 +52,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: constraints-dev.txt
       - name: Fetch release tags
         run: git fetch --force --tags origin develop
       - name: Compute next version
@@ -105,8 +105,8 @@ jobs:
           git push origin "refs/tags/$TAG"
       - name: Build distributions
         run: |
-          python -m pip install build
-          python -m build --sdist --wheel
+          python -m pip install --require-hashes --only-binary=:all: -r constraints-dev.txt
+          python -m build --no-isolation --sdist --wheel
       - name: Verify distribution names and versions
         env:
           TAG: ${{ steps.version.outputs.tag }}
