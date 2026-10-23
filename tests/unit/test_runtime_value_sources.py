@@ -5,12 +5,12 @@ from typing import Any
 
 import pytest
 
-from orchestrator.config.project_config import (
+from prchef.config.project_config import (
     ConfigurationError,
     ProjectConfig,
     ProjectConfigLoader,
 )
-from orchestrator.models.development_task import DevelopmentTask
+from prchef.models.development_task import DevelopmentTask
 
 
 def config(tmp_path: Path, provider: dict[str, Any]) -> ProjectConfig:
@@ -99,7 +99,7 @@ def test_runtime_sources_api_and_invalid_values_share_normal_validation(tmp_path
 
 def test_runtime_sources_include_repository_overrides_without_writing_yaml(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     original = (
         b"defaults:\n  providers:\n    agent: {type: claude-code, model: global}\n"
         b"  agents:\n    planner: {provider: agent}\n    implementer: {provider: agent}\n"

@@ -5,16 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.clients.factory import ClientFactory
-from orchestrator.config.project_config import (
+from prchef.clients.factory import ClientFactory
+from prchef.config.project_config import (
     ConfigurationError,
     LiteLLMProviderSettings,
     ProjectConfig,
     convert_legacy_vertex_provider,
 )
-from orchestrator.models import AgentRequest, AgentRole, StructuredOutputExpectation
-from orchestrator.providers.agent_provider import AgentProviderError
-from orchestrator.providers.litellm_provider import LiteLLMAgentProvider
+from prchef.models import AgentRequest, AgentRole, StructuredOutputExpectation
+from prchef.providers.agent_provider import AgentProviderError
+from prchef.providers.litellm_provider import LiteLLMAgentProvider
 
 
 @dataclass
@@ -234,7 +234,7 @@ def test_unauthenticated_local_endpoint_maps_request_and_generation_options() ->
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are executing an orchestrator agent request. "
+                    "content": "You are executing an prchef agent request. "
                     "Request title: Agent task\nRepository: owner/repo\n"
                     "Revision: feature-branch\nWorkspace path: workspace",
                 },

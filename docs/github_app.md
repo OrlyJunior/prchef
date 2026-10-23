@@ -1,6 +1,6 @@
 # GitHub Apps for planning, implementation, and review
 
-The orchestrator can use separate GitHub App installations for task discovery, implementation, and review. It signs
+prchef can use separate GitHub App installations for task discovery, implementation, and review. It signs
 a short-lived JWT and exchanges it for an installation token kept only in memory. Tokens, JWTs,
 and private key contents are never written to YAML, persistence, or logs.
 
@@ -11,7 +11,7 @@ and private key contents are never written to YAML, persistence, or logs.
    Add **Workflows: Read and write** only if the intended repository changes require it. Grant the
    reviewer App only **Pull requests: Read and write**.
 3. Generate an App private key and store the PEM outside the repository.
-4. Install each App only on repositories the orchestrator should operate on. Record the App ID and the
+4. Install each App only on repositories prchef should operate on. Record the App ID and the
    installation ID (the latter is visible in the installation settings URL or App installations API).
 
 Use a distinct App identity when GitHub disallows a PR author from approving or requesting changes
@@ -22,7 +22,7 @@ on its own pull request. Repository rules and the App's permissions still apply.
 Use exactly one key source. An absolute, protected `private_key_path` is preferred. An environment
 variable supports secret managers; literal `\n` sequences are converted to newlines.
 
-Merge this fragment into your existing global `orchestrator.yml`; keep your agent,
+Merge this fragment into your existing global `prchef.yml`; keep your agent,
 provider, and repository settings alongside it under the appropriate keys.
 
 ```yaml
@@ -53,9 +53,9 @@ defaults:
 When an App is configured, `app_id`, `installation_id`, and exactly one private-key source are
 required. `app` is the reviewer identity; `implementer_app` and `planner_app` are independent. Never commit the PEM
 or place it in versioned YAML or `.env.example`. Optionally configure `bot_name` and `bot_user_id`
-together for known commit attribution; otherwise the orchestrator resolves the App bot identity.
+together for known commit attribution; otherwise prchef resolves the App bot identity.
 
-The standard orchestrator installation already includes the PyJWT cryptography support required
+The standard prchef installation already includes the PyJWT cryptography support required
 to sign GitHub App JWTs. No separate `pip install "PyJWT[crypto]"` step is needed.
 
 Without `implementer_app`, commits, pushes, and PR creation retain ambient Git and `gh`
@@ -79,7 +79,7 @@ to use; checkouts without a Planner App continue to use `gh` when the origin is 
 
 The Textual TUI exposes all three roles under **GitHub Apps** (or `c`). It writes only App IDs,
 installation IDs, and private-key references to the selected repository's
-`repositories.<key>` entry in the resolved `orchestrator.yml`; it never accepts or writes private
+`repositories.<key>` entry in the resolved `prchef.yml`; it never accepts or writes private
 key contents or tokens. Clearing an identity inherited from `defaults` writes an explicit `null`
 for that repository, so the identity remains disabled there while other repositories keep the default.
 

@@ -28,7 +28,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from orchestrator.config.project_config import (
+from prchef.config.project_config import (
     AgentPresetConfig,
     AgentProviderSettings,
     ConfigurationError,
@@ -39,57 +39,57 @@ from orchestrator.config.project_config import (
     RepositoryConfiguration,
     RepositoryContextSettings,
 )
-from orchestrator.models.agent import AgentRole
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
-from orchestrator.models.human_interaction import HumanInteraction
-from orchestrator.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
-from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
-from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
-from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
-from orchestrator.models.workflow_step import WorkflowStep
-from orchestrator.services.qdrant_repository_context import RepositoryIndexOperationError
-from orchestrator.tui.app import OrchestratorApp
-from orchestrator.tui.batch_progress import BatchRowView, persisted_row
-from orchestrator.tui.bridge import (
+from prchef.models.agent import AgentRole
+from prchef.models.development_task import DevelopmentTask
+from prchef.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from prchef.models.human_interaction import HumanInteraction
+from prchef.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
+from prchef.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
+from prchef.models.workflow_event import WorkflowEvent, WorkflowEventKind
+from prchef.models.workflow_execution import WorkflowExecution
+from prchef.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
+from prchef.models.workflow_step import WorkflowStep
+from prchef.services.qdrant_repository_context import RepositoryIndexOperationError
+from prchef.tui.app import PrchefApp
+from prchef.tui.batch_progress import BatchRowView, persisted_row
+from prchef.tui.bridge import (
     WorkflowBatchLaunch,
     WorkflowController,
     WorkflowLaunch,
     _BatchRun,
 )
-from orchestrator.tui.diagnostics import format_diagnostics_for_export
-from orchestrator.tui.screens.agent_instructions import AgentInstructionsScreen
-from orchestrator.tui.screens.agent_presets import AgentPresetsScreen
-from orchestrator.tui.screens.batch_detail import BatchDetailScreen
-from orchestrator.tui.screens.execution_detail import ExecutionDetailScreen
-from orchestrator.tui.screens.execution_history import (
+from prchef.tui.diagnostics import format_diagnostics_for_export
+from prchef.tui.screens.agent_instructions import AgentInstructionsScreen
+from prchef.tui.screens.agent_presets import AgentPresetsScreen
+from prchef.tui.screens.batch_detail import BatchDetailScreen
+from prchef.tui.screens.execution_detail import ExecutionDetailScreen
+from prchef.tui.screens.execution_history import (
     ExecutionHistoryScreen,
     execution_status_label,
 )
-from orchestrator.tui.screens.github_app_settings import GitHubAppSettingsScreen
-from orchestrator.tui.screens.provider_settings import (
+from prchef.tui.screens.github_app_settings import GitHubAppSettingsScreen
+from prchef.tui.screens.provider_settings import (
     ProviderSettingsScreen,
     RemoveProviderConfirmation,
 )
-from orchestrator.tui.screens.repository_settings import (
+from prchef.tui.screens.repository_settings import (
     DeleteRepositoryConfirmation,
     RepositorySettingsScreen,
 )
-from orchestrator.tui.screens.task_selector import (
+from prchef.tui.screens.task_selector import (
     TaskRow,
     TaskSelector,
     TaskTableHeader,
 )
-from orchestrator.tui.screens.workflow_runner import (
+from prchef.tui.screens.workflow_runner import (
     FreshRunConfirmation,
     StopWorkflowConfirmation,
     WorkflowRunnerScreen,
 )
-from orchestrator.tui.widgets import (
+from prchef.tui.widgets import (
     BatchItemRow,
     BatchProgressView,
-    OrchestratorSelect,
+    PrchefSelect,
     RepositorySelect,
 )
 from tests.unit.tui_sync import settle_tui, wait_for_tui
@@ -97,7 +97,7 @@ from tests.unit.tui_sync import settle_tui, wait_for_tui
 
 def test_single_task_context_warning_stays_in_timeline_and_detailed_logs(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     payload = {
         "kind": "PROJECT_CONTEXT_TRUNCATED",
         "severity": "warning",
@@ -133,7 +133,7 @@ def test_embedding_progress_keeps_tui_controls_responsive(
     tmp_path: Path, batch_run: bool
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     entered = threading.Event()
     release = threading.Event()
 
@@ -228,7 +228,7 @@ def test_single_task_timeline_revises_human_blocked_attempt_and_keeps_retry(
     tmp_path: Path, stage: WorkflowStage
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -294,7 +294,7 @@ class _ScrollableSelectApp(App[None]):
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="select-viewport"):
             yield Static("", id="select-before")
-            yield OrchestratorSelect(
+            yield PrchefSelect(
                 [("One", "one"), ("Two", "two"), ("Three", "three")],
                 prompt="Choose a value",
                 id="viewport-select",
@@ -556,11 +556,11 @@ class _ConfigLoader:
             self.repository_entries = updated
         else:
             self.repository_entries[repository_key] = replacement
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def delete_repository(self, repository_key: str) -> Path:
         del self.repository_entries[repository_key]
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def load(self, task: DevelopmentTask, repository: str | None = None) -> ProjectConfig:
         assert task.repository == repository == "example"
@@ -576,7 +576,7 @@ class _ConfigLoader:
     ) -> Path:
         assert repository_key == "example"
         self.saved_github_apps = (repository_key, planner_app, implementer_app, reviewer_app)
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def save_agent_preset(
         self,
@@ -592,7 +592,7 @@ class _ConfigLoader:
         if name in presets and not overwrite:
             raise ValueError("preset already exists")
         presets[name] = preset
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def rename_agent_preset(
         self, repository_key: str, role: str, old_name: str, new_name: str
@@ -605,21 +605,21 @@ class _ConfigLoader:
         settings = getattr(self.config.agents, role)
         if settings.fallback_preset == old_name:
             settings.fallback_preset = new_name
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def delete_agent_preset(self, repository_key: str, role: str, name: str) -> Path:
         assert repository_key == "example"
         del self.config.agent_presets[role][name]
         if not self.config.agent_presets[role]:
             del self.config.agent_presets[role]
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
     def save_agent_fallback_preset(
         self, repository_key: str, role: str, preset_name: str | None
     ) -> Path:
         assert repository_key == "example"
         getattr(self.config.agents, role).fallback_preset = preset_name
-        return self._path / "orchestrator.yml"
+        return self._path / "prchef.yml"
 
 
 class _TaskProvider:
@@ -1387,7 +1387,7 @@ def test_controller_logs_tui_role_resolution_with_selected_backend(
             "type": "litellm",
             "model": "vertex_ai/gemini-3.8-flash",
             "generation": {
-                "vertex_project": "agents-orchestrator-507215",
+                "vertex_project": "agents-prchef-507215",
                 "vertex_location": "global",
             },
         }
@@ -1395,7 +1395,7 @@ def test_controller_logs_tui_role_resolution_with_selected_backend(
     config.agents.planner.provider = "vertex-gemini-litellm"
     config.agents.reviewer.provider = "vertex-gemini-litellm"
 
-    with caplog.at_level(logging.DEBUG, logger="orchestrator"):
+    with caplog.at_level(logging.DEBUG, logger="prchef"):
         controller.start_workflow(
             WorkflowLaunch(
                 repository="example",
@@ -1437,7 +1437,7 @@ def test_controller_rejects_runtime_options_not_supported_by_selected_provider(
 
 def test_textual_app_navigates_to_workflow_runner(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -1494,7 +1494,7 @@ def test_agent_instructions_save_cannot_follow_a_link_added_during_write(
             pytest.skip(f"Symlinks unavailable: {exc}")
         original_replace(source, destination)
 
-    monkeypatch.setattr("orchestrator.tui.bridge.os.replace", replace_after_link)
+    monkeypatch.setattr("prchef.tui.bridge.os.replace", replace_after_link)
     controller, _, _ = _controller(repository_path)
     controller.save_agent_instructions("example", AgentRole.PLANNER, "New guidance")
 
@@ -1518,7 +1518,7 @@ def test_agent_instructions_save_preserves_existing_file_mode(tmp_path: Path) ->
 
 def test_agent_instructions_navigation_uses_a_compact_distinct_control(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -1581,7 +1581,7 @@ def test_repository_select_defers_options_until_overlay_mounts(tmp_path: Path) -
 
 def test_main_navigation_reflows_compact_controls_without_content_sizing(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     navigation_ids = (
         "new-workflow",
         "history",
@@ -1619,7 +1619,7 @@ def test_main_navigation_reflows_compact_controls_without_content_sizing(tmp_pat
 
 def test_workflow_runner_navigation_reflows_compact_controls(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     navigation_ids = (
         "start-workflow",
         "workflow-history",
@@ -1657,7 +1657,7 @@ def test_workflow_runner_navigation_reflows_compact_controls(tmp_path: Path) -> 
 
 def test_main_navigation_controls_keep_their_destinations(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     destinations = (
         ("#new-workflow", WorkflowRunnerScreen),
         ("#history", ExecutionHistoryScreen),
@@ -1683,7 +1683,7 @@ def test_repository_settings_creates_repository_and_reorders_commands(
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 60)) as pilot:
@@ -1705,14 +1705,14 @@ def test_repository_settings_creates_repository_and_reorders_commands(
             screen.query_one("#add-validation-command", Button).press()
             await settle_tui(pilot)
             assert screen._commands == [["python", "-m", "pytest"]]
-            command.value = "python -m mypy 'src/orchestrator package'"
+            command.value = "python -m mypy 'src/prchef package'"
             screen.query_one("#add-validation-command", Button).press()
             await settle_tui(pilot)
             assert screen._commands == [
                 ["python", "-m", "pytest"],
-                ["python", "-m", "mypy", "src/orchestrator package"],
+                ["python", "-m", "mypy", "src/prchef package"],
             ]
-            screen.query_one("#validation-command-list", OrchestratorSelect).value = 1
+            screen.query_one("#validation-command-list", PrchefSelect).value = 1
             await settle_tui(pilot)
             screen.query_one("#move-validation-command-up", Button).press()
             await settle_tui(pilot)
@@ -1721,7 +1721,7 @@ def test_repository_settings_creates_repository_and_reorders_commands(
 
             settings = controller.repository_settings("owner/new-repository")
             assert settings.commands == [
-                ["python", "-m", "mypy", "src/orchestrator package"],
+                ["python", "-m", "mypy", "src/prchef package"],
                 ["python", "-m", "pytest"],
             ]
             assert controller.selected_repository == "owner/new-repository"
@@ -1743,7 +1743,7 @@ def test_repository_deletion_requires_confirmation_and_leaves_path(
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(100, 45)) as pilot:
@@ -1792,7 +1792,7 @@ def test_repository_settings_actions_remain_scrollable_on_small_terminal(
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(60, 15)) as pilot:
@@ -1817,7 +1817,7 @@ def test_repository_retry_budgets_edit_clear_validate_and_switch(tmp_path: Path)
     controller, _, _ = _controller(tmp_path)
     controller.save_repository("second", "second", True, [])
     controller.select_repository("example")
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(60, 15)) as pilot:
@@ -1914,7 +1914,7 @@ def test_repository_load_failure_disables_stale_editor_and_prevents_save(
         return original_settings(repository)
 
     monkeypatch.setattr(controller, "repository_settings", repository_settings)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(100, 45)) as pilot:
@@ -1968,7 +1968,7 @@ def test_index_action_failure_shows_diagnostic_and_remedy(
         controller, "_inspect_repository_index",
         lambda config: RepositoryIndexStatus(strategy="qdrant", state=IndexLifecycleState.READY),
     )
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     message = "Vector dimension mismatch: expected 2, got 3; rebuild the index."
 
     def fail(*args: Any, **kwargs: Any) -> None:
@@ -2044,7 +2044,7 @@ def test_repository_index_management_renders_independent_status_and_dispatches_a
         return status
 
     monkeypatch.setattr(controller, "_perform_repository_index_operation", refresh)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 60)) as pilot:
@@ -2105,7 +2105,7 @@ def test_repository_background_refresh_survives_reopen_and_retains_narrow_view_f
 
     monkeypatch.setattr(controller, "_inspect_repository_index", inspect)
     monkeypatch.setattr(controller, "_perform_repository_index_operation", refresh)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(42, 24)) as pilot:
@@ -2199,7 +2199,7 @@ def test_repository_switch_ignores_previous_refresh_completion(
                                      last_indexed_commit="previous-repository-result")
 
     monkeypatch.setattr(controller, "_perform_repository_index_operation", refresh)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 30)) as pilot:
@@ -2247,7 +2247,7 @@ def test_repository_index_requests_finish_registration_without_cancelling_previo
         controller, "_inspect_repository_index",
         lambda config: RepositoryIndexStatus(strategy="qdrant", state=IndexLifecycleState.READY),
     )
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     entered, release, replacement_entered = threading.Event(), threading.Event(), threading.Event()
 
     def request(
@@ -2303,7 +2303,7 @@ def test_workflow_repository_selector_refreshes_after_repository_settings_save(
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 60)) as pilot:
@@ -2340,7 +2340,7 @@ def test_tui_buttons_activate_on_initial_click(tmp_path: Path) -> None:
     """A pointer click should activate an action without a focus-setting click first."""
 
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -2362,7 +2362,7 @@ def test_tui_buttons_activate_on_initial_click(tmp_path: Path) -> None:
 
 def test_select_opens_on_first_click_and_restores_focus_when_closed(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -2379,7 +2379,7 @@ def test_select_opens_on_first_click_and_restores_focus_when_closed(tmp_path: Pa
     asyncio.run(drive())
 
 
-def test_orchestrator_select_keeps_overlay_visible_in_scrolled_viewport() -> None:
+def test_prchef_select_keeps_overlay_visible_in_scrolled_viewport() -> None:
     """A click or key press must reserve room for an overlay near a viewport edge."""
 
     application = _ScrollableSelectApp()
@@ -2387,7 +2387,7 @@ def test_orchestrator_select_keeps_overlay_visible_in_scrolled_viewport() -> Non
     async def drive() -> None:
         async with application.run_test(size=(80, 10)) as pilot:
             content = application.query_one("#select-viewport", VerticalScroll)
-            select = application.query_one("#viewport-select", OrchestratorSelect)
+            select = application.query_one("#viewport-select", PrchefSelect)
             await settle_tui(pilot)
             assert content.max_scroll_y > 0
 
@@ -2417,7 +2417,7 @@ def test_orchestrator_select_keeps_overlay_visible_in_scrolled_viewport() -> Non
 
 def test_select_focus_scrolls_the_control_into_view_on_small_terminals(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 20)) as pilot:
@@ -2550,7 +2550,7 @@ def test_workflow_runner_copies_complete_live_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     copied: list[str] = []
     monkeypatch.setattr(application, "copy_to_clipboard", copied.append)
 
@@ -2587,7 +2587,7 @@ def test_workflow_runner_detailed_logs_expand_the_main_scroll_region_and_collaps
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 200)) as pilot:
@@ -2671,7 +2671,7 @@ def test_workflow_runner_detailed_logs_expand_the_main_scroll_region_and_collaps
 
 def test_workflow_runner_shows_only_supported_runtime_controls(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -2710,7 +2710,7 @@ def test_workflow_runner_keeps_claude_permission_modes_and_effort_role_local(
     )
     for role in ("planner", "implementer", "reviewer"):
         getattr(config.agents, role).provider = "claude"
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -2758,7 +2758,7 @@ def test_workflow_runner_clarifies_configured_fallback_during_primary_override(
         "implementer": {"backup": AgentPresetConfig(provider="vertex", model="fallback-model")}
     }
     config.agents.implementer.fallback_preset = "backup"
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -2788,7 +2788,7 @@ def test_workflow_runner_selects_role_local_presets_without_crud_controls(tmp_pa
         },
         "reviewer": {"review": AgentPresetConfig(provider="reviewer")},
     }
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -2839,7 +2839,7 @@ def test_workflow_runner_preset_omitting_claude_effort_inherits_provider_default
             "edit": AgentPresetConfig(provider="claude", permission_mode="acceptEdits")
         }
     }
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -2884,7 +2884,7 @@ def test_workflow_runner_names_preset_on_provider_with_uneditable_generation(
     config.agent_presets = {
         "planner": {"coder": AgentPresetConfig(provider="ollama", model="ollama/qwen2.5-coder:14b")}
     }
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -2917,7 +2917,7 @@ def test_workflow_runner_applies_and_resets_reviewer_preset_independently(tmp_pa
             )
         },
     }
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -2955,7 +2955,7 @@ def test_agent_presets_screen_manages_all_role_presets(tmp_path: Path) -> None:
     config.agent_presets = {
         "implementer": {"deep": AgentPresetConfig(provider="implementer", model="old")}
     }
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3033,7 +3033,7 @@ def test_agent_presets_screen_manages_claude_permission_mode_and_effort(tmp_path
         {"type": "claude-code", "effort": "medium", "permission_mode": "dontAsk"}
     )
     config.agents.planner.provider = "claude"
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3043,7 +3043,7 @@ def test_agent_presets_screen_manages_claude_permission_mode_and_effort(tmp_path
             screen.query_one("#agent-presets-repository", Select).value = "example"
             await settle_tui(pilot)
 
-            permission = screen.query_one("#agent-preset-permission", OrchestratorSelect)
+            permission = screen.query_one("#agent-preset-permission", PrchefSelect)
             reasoning = screen.query_one("#agent-preset-reasoning", Input)
             assert permission.display is True
             assert reasoning.display is True
@@ -3071,8 +3071,8 @@ def test_agent_presets_screen_manages_claude_permission_mode_and_effort(tmp_path
 
             # A delayed provider event from an earlier switch must not reload
             # permission controls for a provider the selector no longer names.
-            provider_select = screen.query_one("#agent-preset-provider", OrchestratorSelect)
-            screen.on_select_changed(OrchestratorSelect.Changed(provider_select, "planner"))
+            provider_select = screen.query_one("#agent-preset-provider", PrchefSelect)
+            screen.on_select_changed(PrchefSelect.Changed(provider_select, "planner"))
             await settle_tui(pilot)
             assert permission.display is True
             assert permission.value == "acceptEdits"
@@ -3094,7 +3094,7 @@ def test_agent_presets_screen_omits_hidden_fields_when_switching_provider(
         {"type": "claude-code", "effort": "medium", "permission_mode": "dontAsk"}
     )
     config.agents.planner.provider = "claude"
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3106,7 +3106,7 @@ def test_agent_presets_screen_omits_hidden_fields_when_switching_provider(
 
             model = screen.query_one("#agent-preset-model", Input)
             reasoning = screen.query_one("#agent-preset-reasoning", Input)
-            permission = screen.query_one("#agent-preset-permission", OrchestratorSelect)
+            permission = screen.query_one("#agent-preset-permission", PrchefSelect)
             temperature = screen.query_one("#agent-preset-temperature", Input)
             max_tokens = screen.query_one("#agent-preset-max-output-tokens", Input)
 
@@ -3179,7 +3179,7 @@ def test_agent_presets_screen_reports_invalid_claude_permission_default(tmp_path
         {"type": "claude-code", "permission_mode": "invalid"}
     )
     config.agents.planner.provider = "claude"
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3190,7 +3190,7 @@ def test_agent_presets_screen_reports_invalid_claude_permission_default(tmp_path
             await settle_tui(pilot)
 
             assert screen.query_one(
-                "#agent-preset-permission", OrchestratorSelect
+                "#agent-preset-permission", PrchefSelect
             ).display is False
             status = str(screen.query_one("#agent-presets-status", Static).renderable)
             assert "Cannot load permission default for provider 'claude'" in status
@@ -3203,7 +3203,7 @@ def test_agent_presets_role_selector_shows_all_roles_and_supports_keyboard_and_m
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 24)) as pilot:
@@ -3251,7 +3251,7 @@ def test_workflow_runner_preselects_matching_configured_preset(tmp_path: Path) -
     controller.project_config("example").agent_presets = {
         "implementer": {"configured": AgentPresetConfig(provider="implementer")}
     }
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3269,7 +3269,7 @@ def test_workflow_runner_warns_when_a_preset_provider_is_missing(tmp_path: Path)
     controller.project_config("example").agent_presets = {
         "planner": {"retired": AgentPresetConfig(provider="missing-provider")}
     }
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3291,7 +3291,7 @@ def test_workflow_runner_expands_advanced_controls_and_preserves_overrides(
     tmp_path: Path,
 ) -> None:
     controller, service, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -3352,7 +3352,7 @@ def test_workflow_runner_role_configuration_uses_responsive_rows(tmp_path: Path)
     controller, _, _ = _controller(tmp_path)
 
     async def drive() -> None:
-        narrow_application = OrchestratorApp(controller)
+        narrow_application = PrchefApp(controller)
         async with narrow_application.run_test(size=(70, 50)) as pilot:
             await pilot.press("n")
             await settle_tui(pilot)
@@ -3365,7 +3365,7 @@ def test_workflow_runner_role_configuration_uses_responsive_rows(tmp_path: Path)
             assert row.size.width <= screen.size.width
             assert content.max_scroll_x == 0
 
-        wide_application = OrchestratorApp(controller)
+        wide_application = PrchefApp(controller)
         async with wide_application.run_test(size=(120, 50)) as pilot:
             await pilot.press("n")
             await settle_tui(pilot)
@@ -3388,7 +3388,7 @@ def test_workflow_runner_auto_loads_tasks_on_mount(tmp_path: Path) -> None:
         return [DevelopmentTask("42", task_provider, "Automatically loaded", "", "")]
 
     controller.list_tasks = list_tasks  # type: ignore[method-assign]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3413,13 +3413,13 @@ def test_workflow_runner_repository_selector_uses_configured_non_blank_options(
         ConfiguredRepository("example", tmp_path),
         ConfiguredRepository("other", tmp_path),
     ]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
             await settle_tui(pilot)
-            selector = application.screen.query_one("#repository", OrchestratorSelect)
+            selector = application.screen.query_one("#repository", PrchefSelect)
             options = selector._options
 
             assert [(str(label), value) for label, value in options] == [
@@ -3452,12 +3452,12 @@ def test_repository_select_populates_mounted_overlay_from_configured_repository(
 ) -> None:
     """A resolved repository key must be a real, visible Select choice everywhere."""
 
-    repository_key = "OrlyJunior/autonomous-development-orchestrator"
+    repository_key = "OrlyJunior/prchef"
     controller, _, _ = _controller(tmp_path)
     controller.repositories = lambda: [  # type: ignore[method-assign]
         ConfiguredRepository(repository_key, tmp_path)
     ]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3527,7 +3527,7 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
         return []
 
     controller.list_tasks = list_tasks  # type: ignore[method-assign]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3563,14 +3563,14 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
                 pilot,
                 lambda: isinstance(application.screen, AgentInstructionsScreen)
                 and application.screen.query_one(
-                    "#agent-instructions-repository", OrchestratorSelect
+                    "#agent-instructions-repository", PrchefSelect
                 ).value
                 == "other",
                 description="agent instructions repository selection",
             )
             assert (
                 application.screen.query_one(
-                    "#agent-instructions-repository", OrchestratorSelect
+                    "#agent-instructions-repository", PrchefSelect
                 ).value
                 == "other"
             )
@@ -3580,13 +3580,13 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
 
 def test_workflow_runner_lists_supported_provider_choices(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
             await pilot.press("n")
             await settle_tui(pilot)
-            selector = application.screen.query_one("#planner-provider", OrchestratorSelect)
+            selector = application.screen.query_one("#planner-provider", PrchefSelect)
 
             assert selector._options == [
                 ("implementer", "implementer"),
@@ -3607,7 +3607,7 @@ def test_workflow_runner_manual_refresh_tasks(tmp_path: Path) -> None:
         return []
 
     controller.list_tasks = list_tasks  # type: ignore[method-assign]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3630,7 +3630,7 @@ def test_workflow_runner_displays_inline_task_load_error(tmp_path: Path) -> None
         raise RuntimeError("credentials rejected")
 
     controller.list_tasks = list_tasks  # type: ignore[method-assign]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3647,7 +3647,7 @@ def test_workflow_runner_displays_inline_task_load_error(tmp_path: Path) -> None
 
 def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 20)) as pilot:
@@ -3685,14 +3685,14 @@ def test_tui_creates_updates_and_switches_agent_instruction_files(tmp_path: Path
         ConfiguredRepository("example", tmp_path),
         ConfiguredRepository("other", other_path),
     ]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 24)) as pilot:
             await pilot.press("i")
             assert isinstance(application.screen, AgentInstructionsScreen)
             screen = application.screen
-            repository = screen.query_one("#agent-instructions-repository", OrchestratorSelect)
+            repository = screen.query_one("#agent-instructions-repository", PrchefSelect)
             repository.value = "example"
             await settle_tui(pilot)
             for role in ("planner", "implementer", "reviewer"):
@@ -3761,7 +3761,7 @@ def test_execution_history_filters_execution_without_repository(tmp_path: Path) 
         "execution-2",
         "execution-1",
     ]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3791,7 +3791,7 @@ def test_execution_detail_replaces_raw_json_with_compact_summary(
     execution.review_snapshot = {"decision": "APPROVED", "findings": []}
     execution.spec_jules_session_url = "https://example/sessions/planner"
     execution.review_jules_session_url = "https://example/sessions/reviewer"
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(width, 24)) as pilot:
@@ -3832,7 +3832,7 @@ def test_execution_detail_summary_shows_only_existing_values_and_refreshes(
     tmp_path: Path, field: str, value: str, expected: str
 ) -> None:
     controller, _, repository = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3875,14 +3875,14 @@ def test_execution_detail_reconciles_history_execution_and_new_pr(
         started_at=datetime.now(UTC),
     )]
     monkeypatch.setattr(repository, "list_steps", lambda _id: steps)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.push_screen(ExecutionHistoryScreen())
             await settle_tui(pilot)
             application.screen.query_one(
-                "#execution-picker", OrchestratorSelect
+                "#execution-picker", PrchefSelect
             ).value = execution.id
             application.screen.query_one("#inspect-execution", Button).press()
             await settle_tui(pilot)
@@ -3919,7 +3919,7 @@ def test_execution_detail_matching_event_refreshes_durable_state(
 ) -> None:
     controller, service, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.RUNNING
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -3987,7 +3987,7 @@ def test_execution_detail_reopens_persisted_waiting_and_human_timeline(
         started_at=started,
     )]
     monkeypatch.setattr(repository, "list_steps", lambda _id: steps)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -4033,8 +4033,8 @@ def test_execution_detail_actions_reflow_without_diagnostic_overflow(
         payload={"output": "diagnostic" * 300},
     )]
     opened: list[str] = []
-    monkeypatch.setattr("orchestrator.tui.screens.execution_detail.webbrowser.open", opened.append)
-    application = OrchestratorApp(controller)
+    monkeypatch.setattr("prchef.tui.screens.execution_detail.webbrowser.open", opened.append)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(width, 24)) as pilot:
@@ -4120,7 +4120,7 @@ def test_execution_detail_loads_logs_only_when_expanded(
 
     monkeypatch.setattr(repository, "list_diagnostics", full_read)
     monkeypatch.setattr(repository, "list_diagnostics_after", incremental_read)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 24)) as pilot:
@@ -4183,7 +4183,7 @@ def test_execution_detail_log_toggle_stays_visible_above_compact_summary(tmp_pat
         category=DiagnosticCategory.RESPONSE,
         payload={"output": "expanded diagnostic"},
     )]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 24)) as pilot:
@@ -4241,9 +4241,9 @@ def test_execution_detail_open_and_refresh_do_not_fetch_task_or_context(
 
     controller._task_provider_factory = unexpected_call
     monkeypatch.setattr(
-        "orchestrator.services.project_context.load_project_context", unexpected_call
+        "prchef.services.project_context.load_project_context", unexpected_call
     )
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 24)) as pilot:
@@ -4273,7 +4273,7 @@ def test_execution_detail_cancel_visibility(
     repository.execution.status = status
     if requested:
         repository.execution.cancellation_requested_at = datetime.now(UTC)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -4318,13 +4318,13 @@ def test_execution_detail_cancel_is_visible_and_keyboard_reachable_with_long_dia
             payload={"output": "diagnostic" * 300},
         )
     ]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(36, 14)) as pilot:
             application.push_screen(ExecutionHistoryScreen())
             await settle_tui(pilot)
-            application.screen.query_one("#execution-picker", OrchestratorSelect).value = (
+            application.screen.query_one("#execution-picker", PrchefSelect).value = (
                 repository.execution.id
             )
             application.screen.query_one("#inspect-execution", Button).press()
@@ -4378,7 +4378,7 @@ def test_execution_detail_actions_and_diagnostics_stay_bounded_in_narrow_termina
         )
         for number in range(30)
     ]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(36, 14)) as pilot:
@@ -4473,7 +4473,7 @@ def test_execution_detail_confirms_durable_cancellation_and_refreshes(
         return original_cancel(execution_id)
 
     monkeypatch.setattr(controller, "cancel_workflow", cancel)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -4515,7 +4515,7 @@ def test_execution_detail_observes_requested_cancellation_settling(
     controller, _, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.RUNNING
     repository.execution.cancellation_requested_at = datetime.now(UTC)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -4552,7 +4552,7 @@ def test_execution_detail_cancel_error_keeps_active_control(
 
     monkeypatch.setattr(controller, "cancel_workflow", fail)
     monkeypatch.setattr(ExecutionDetailScreen, "notify", notify)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -4590,7 +4590,7 @@ def test_execution_detail_cancel_race_refreshes_controls(
 
     monkeypatch.setattr(controller, "cancel_workflow", cancel)
     monkeypatch.setattr(ExecutionDetailScreen, "notify", notify)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -4643,7 +4643,7 @@ def test_execution_detail_continuation_follows_status_not_completed_stage(
         str(tmp_path / workspace_path) if workspace_path is not None else None
     )
     repository.execution.working_branch = working_branch
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -4678,7 +4678,7 @@ def test_execution_detail_offers_planner_continuation_after_planning_quota_failu
             stage=WorkflowStage.GENERATE_SPEC,
         )
     ]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -4711,7 +4711,7 @@ def test_execution_detail_continuation_feedback_is_readable_beside_long_details(
         category=DiagnosticCategory.RESPONSE,
         payload={"output": "diagnostic" * 300},
     )]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(36, 14)) as pilot:
@@ -4742,7 +4742,7 @@ def test_execution_detail_offers_editable_terminal_continuation(tmp_path: Path) 
     repository.execution.status = WorkflowStatus.CHANGES_REQUESTED
     repository.execution.workspace_path = str(tmp_path / "worktree")
     repository.execution.working_branch = "workflow/12"
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -4836,7 +4836,7 @@ def test_execution_detail_refreshes_after_in_place_submission(
         "submit_continuation" if action == "continuation" else "submit_response",
         submit,
     )
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(36, 14)) as pilot:
@@ -4942,7 +4942,7 @@ def test_execution_detail_submission_refresh_uses_latest_persisted_status(
         return _Handle(WorkflowExecution(id=execution_id, status=WorkflowStatus.PENDING))
 
     monkeypatch.setattr(service, "submit_continuation", submit)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5018,7 +5018,7 @@ def test_batch_answer_and_other_event_finish_while_detail_ui_is_busy(
             submission_done.set()
 
     monkeypatch.setattr(controller, "submit_response", tracked_submit)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     def emit_other() -> None:
         try:
@@ -5108,7 +5108,7 @@ def test_execution_detail_reenables_continue_after_continuation_error(tmp_path: 
     repository.execution.workspace_path = str(tmp_path / "worktree")
     repository.execution.working_branch = "workflow/12"
     service.continuation_error = RuntimeError("workspace is unavailable")
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5138,7 +5138,7 @@ def test_execution_detail_checks_continuation_eligibility_once_per_status(
         return original_list(execution_id)
 
     monkeypatch.setattr(repository, "list_diagnostics", tracked_list)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5184,7 +5184,7 @@ def test_execution_detail_copies_all_persisted_detailed_logs(
             payload={"output": "\n".join(f"response line {number}" for number in range(400))},
         ),
     ]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     copied: list[str] = []
     monkeypatch.setattr(application, "copy_to_clipboard", copied.append)
 
@@ -5233,7 +5233,7 @@ def test_execution_detail_can_copy_after_terminal_initial_diagnostic_read_fails(
         return original_list(execution_id)
 
     monkeypatch.setattr(repository, "list_diagnostics", fail_once)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     copied: list[str] = []
     monkeypatch.setattr(application, "copy_to_clipboard", copied.append)
 
@@ -5276,7 +5276,7 @@ def test_execution_detail_appends_only_new_diagnostics_and_preserves_ui_state(
         category=DiagnosticCategory.RESPONSE,
         payload={"output": "old" * 200},
     )]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     copied: list[str] = []
     monkeypatch.setattr(application, "copy_to_clipboard", copied.append)
 
@@ -5345,7 +5345,7 @@ def test_execution_detail_reports_clipboard_failures_without_crashing(
             payload={"message": "validation failed"},
         )
     ]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     notifications: list[tuple[str, str | None]] = []
 
     def clipboard_failure(_: str) -> None:
@@ -5377,7 +5377,7 @@ def test_workflow_runner_submits_selected_task_id_in_workflow_launch(
     tmp_path: Path,
 ) -> None:
     controller, service, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 20)) as pilot:
@@ -5413,7 +5413,7 @@ def test_workflow_runner_start_with_nothing_selected_submits_nothing(
     tmp_path: Path,
 ) -> None:
     controller, service, repository = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5432,7 +5432,7 @@ def test_workflow_runner_refresh_preserves_selection_for_same_task_source(
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5469,7 +5469,7 @@ def test_workflow_runner_resume_does_not_reload_tasks_during_single_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5505,7 +5505,7 @@ def test_workflow_runner_keeps_tasks_when_execution_status_lookup_fails(
         raise RuntimeError("status database unavailable")
 
     monkeypatch.setattr(controller, "task_execution_status", fail_status_lookup)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5535,7 +5535,7 @@ def test_execution_history_reopens_persisted_batch_and_linked_execution(
         [DevelopmentTask("12", "github", "Persisted task", "", "https://example/12")],
     )
     repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5545,7 +5545,7 @@ def test_execution_history_reopens_persisted_batch_and_linked_execution(
             assert "1 persisted workflow batch(es)." in str(
                 history.query_one("#batch-history-summary", Static).renderable
             )
-            history.query_one("#batch-picker", OrchestratorSelect).value = batch.id
+            history.query_one("#batch-picker", PrchefSelect).value = batch.id
             history.query_one("#inspect-batch", Button).press()
             await settle_tui(pilot)
             assert isinstance(application.screen, BatchDetailScreen)
@@ -5583,7 +5583,7 @@ def test_execution_history_filter_does_not_reload_batches_or_execution_steps(
 
     monkeypatch.setattr(repository, "list_batches", list_batches)
     monkeypatch.setattr(repository, "list_steps", fail_step_load)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5619,7 +5619,7 @@ def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
     provider = _TaskProvider()
     provider.list_tasks = lambda limit=50: tasks  # type: ignore[method-assign]
     controller._task_provider_factory = lambda source, selected_repository: provider
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 20)) as pilot:
@@ -5670,7 +5670,7 @@ def test_fresh_run_confirmation_preserves_selection_and_starts_checked_task(
     repository.execution.task_id = "12"
     repository.execution.repository_ref = "example"
     repository.execution.status = WorkflowStatus.NEEDS_HUMAN
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5737,7 +5737,7 @@ def test_fresh_run_confirmation_omits_unchecked_prior_run_but_launches_new_task(
         DevelopmentTask("7", "github", "New", "", "https://example/7"),
     ]
     controller._task_provider_factory = lambda source, selected_repository: provider
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -5841,7 +5841,7 @@ def test_workflow_runner_drains_index_burst_before_later_stage_and_status(
     tmp_path: Path, batch_run: bool
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     batch = WorkflowBatch(
         id="batch-burst", repository="example", task_source="github",
         items=(WorkflowBatchItem(0, "12", "First"), WorkflowBatchItem(1, "7", "Second")),
@@ -5948,7 +5948,7 @@ def test_workflow_runner_reconciles_missed_stage_and_rejects_queued_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     execution = WorkflowExecution(
         id="execution-reconcile", current_stage=WorkflowStage.REVIEW,
         status=WorkflowStatus.APPROVED,
@@ -5997,7 +5997,7 @@ def test_workflow_runner_reconciles_live_batch_row_without_remounting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     execution = WorkflowExecution(
         id="execution-batch-reconcile", current_stage=WorkflowStage.REVIEW,
         status=WorkflowStatus.APPROVED,
@@ -6093,7 +6093,7 @@ def test_workflow_runner_batch_progress_renders_every_task_in_order(
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     batch = WorkflowBatch(
         id="batch-1",
         repository="example",
@@ -6142,7 +6142,7 @@ def test_workflow_runner_batch_progress_updates_only_the_targeted_row_and_marks_
     def mark_available(batch_id: str, provider: str) -> None:
         unavailable.discard(provider)
     controller.mark_batch_provider_available = mark_available  # type: ignore[method-assign]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     notifications: list[tuple[str, str | None]] = []
 
     def record_notification(
@@ -6259,7 +6259,7 @@ def test_workflow_runner_batch_row_expands_and_reveals_detailed_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     copied: list[str] = []
     monkeypatch.setattr(application, "copy_to_clipboard", copied.append)
     batch = WorkflowBatch(
@@ -6329,7 +6329,7 @@ def test_batch_rows_fit_content_and_last_row_remains_scrollable(
     tmp_path: Path, persisted: bool
 ) -> None:
     controller, _, repository = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     items = tuple(
         WorkflowBatchItem(position, str(position + 1), f"Task {position + 1}")
         for position in range(4)
@@ -6440,7 +6440,7 @@ def test_workflow_runner_batch_finished_keeps_final_rows_and_summary_visible(
     approved = WorkflowExecution(id="execution-1", status=WorkflowStatus.APPROVED)
     failed = WorkflowExecution(id="execution-2", status=WorkflowStatus.FAILED)
     repository.executions = [repository.execution, approved, failed]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     batch = WorkflowBatch(
         id="batch-1",
         repository="example",
@@ -6493,7 +6493,7 @@ def test_batch_detail_screen_renders_mixed_batch_and_supports_refresh(
         ],
     )
     repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -6556,7 +6556,7 @@ def test_closed_batch_detail_reconciles_after_execution_action(
     monkeypatch.setattr(
         service, "submit_continuation" if action == "continue" else "submit_response", submit
     )
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -6635,7 +6635,7 @@ def test_closed_batch_detail_reconciles_visible_row_without_remounting(
         return _Handle(repository.execution)
 
     monkeypatch.setattr(service, "submit_continuation", submit)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -6710,7 +6710,7 @@ def test_batch_detail_cancel_reconciles_human_blocked_row(
         [DevelopmentTask("12", "github", "First task", "", "https://example/12")],
     )
     repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -6742,7 +6742,7 @@ def test_batch_detail_refreshes_after_cancellation_from_execution_detail(tmp_pat
         [DevelopmentTask("12", "github", "First task", "", "https://example/12")],
     )
     repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -6792,7 +6792,7 @@ def test_detail_cancel_refreshes_still_running_batch_on_return(tmp_path: Path) -
     repository.record_batch_item_execution(batch.id, 0, repository.execution.id)
     repository.record_batch_item_execution(batch.id, 1, other.id)
     batch = repository.get_batch(batch.id)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -6862,7 +6862,7 @@ def test_execution_detail_hides_answer_for_legacy_human_cancellation(tmp_path: P
         prompt="Review finding?",
         requested_at=datetime.now(UTC),
     )]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -6923,7 +6923,7 @@ def test_live_batch_cancel_updates_only_selected_row(tmp_path: Path) -> None:
     repository.execution.status = WorkflowStatus.NEEDS_HUMAN
     other = WorkflowExecution(id="execution-2", status=WorkflowStatus.WAITING)
     repository.executions.append(other)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
     batch = WorkflowBatch(
         id="batch-1", repository="example", task_source="github",
         items=(
@@ -6976,7 +6976,7 @@ def test_batch_detail_screen_reports_batch_read_failure_without_crashing(
         raise RuntimeError("database unavailable")
 
     monkeypatch.setattr(repository, "get_batch", fail_get_batch)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -7001,7 +7001,7 @@ def test_batch_detail_screen_reports_empty_batch() -> None:
         client_factory=object(),  # type: ignore[arg-type]
         task_provider_factory=lambda source, repository: _TaskProvider(),
     )
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -7080,7 +7080,7 @@ def _row_text(row: TaskRow) -> str:
 
 def test_task_selector_renders_rows_as_an_aligned_truncated_table(tmp_path: Path) -> None:
     controller, _, _ = _backlog_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(100, 30)) as pilot:
@@ -7131,7 +7131,7 @@ def test_task_selector_rows_show_checked_unchecked_and_blocked_glyphs(
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _backlog_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(100, 30)) as pilot:
@@ -7164,7 +7164,7 @@ def test_task_checkbox_mouse_click_updates_selection_and_screen_on_first_click(
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(100, 60)) as pilot:
@@ -7247,7 +7247,7 @@ def test_later_task_checkbox_click_in_short_viewport_updates_on_first_click(
     tmp_path: Path,
 ) -> None:
     controller, _, _ = _backlog_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 20)) as pilot:
@@ -7291,7 +7291,7 @@ def test_later_task_checkbox_click_in_short_viewport_updates_on_first_click(
 
 def test_task_selector_separates_select_all_from_the_task_rows(tmp_path: Path) -> None:
     controller, _, _ = _backlog_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(100, 30)) as pilot:
@@ -7379,7 +7379,7 @@ def _labelled_controller(
     return controller, service, provider
 
 
-async def _wait_for_labelled_tasks(pilot: Any, application: OrchestratorApp) -> TaskSelector:
+async def _wait_for_labelled_tasks(pilot: Any, application: PrchefApp) -> TaskSelector:
     await wait_for_tui(
         pilot,
         lambda: len(application.screen.query(TaskRow)) == 5
@@ -7406,7 +7406,7 @@ def test_controller_distinguishes_unsupported_and_empty_label_catalogs(tmp_path:
 
 def test_task_label_filter_matches_exact_names_with_and_and_clears(tmp_path: Path) -> None:
     controller, _, _ = _labelled_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(100, 30)) as pilot:
@@ -7475,7 +7475,7 @@ def test_task_label_filter_matches_exact_names_with_and_and_clears(tmp_path: Pat
 
 def test_select_all_applies_only_to_shown_available_tasks(tmp_path: Path) -> None:
     controller, service, _ = _labelled_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(100, 30)) as pilot:
@@ -7559,7 +7559,7 @@ def test_task_label_filter_distinguishes_unsupported_empty_and_failed(
         controller, _, _ = _labelled_controller(
             tmp_path, label_error=RuntimeError("label scope missing")
         )
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(100, 30)) as pilot:
@@ -7598,7 +7598,7 @@ def test_task_label_filter_reconciles_on_refresh_and_resets_on_source_change(
     tmp_path: Path,
 ) -> None:
     controller, _, provider = _labelled_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(100, 30)) as pilot:
@@ -7659,13 +7659,13 @@ def test_task_label_filter_reconciles_on_refresh_and_resets_on_source_change(
 def test_execution_history_and_detail_display_cancelled_status(tmp_path: Path) -> None:
     controller, _, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.CANCELLED
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.push_screen(ExecutionHistoryScreen())
             await settle_tui(pilot)
-            picker = application.screen.query_one("#execution-picker", OrchestratorSelect)
+            picker = application.screen.query_one("#execution-picker", PrchefSelect)
             assert "CANCELLED" in str(picker._options)
 
             application.push_screen(ExecutionDetailScreen(repository.execution.id))
@@ -7680,7 +7680,7 @@ def test_execution_history_and_detail_display_cancelled_status(tmp_path: Path) -
 def test_workflow_runner_confirms_and_requests_cancellation(tmp_path: Path) -> None:
     controller, _, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.RUNNING
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -7730,7 +7730,7 @@ def test_workflow_runner_terminal_workflow_finished_resets_active_controls(
 ) -> None:
     controller, _, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.RUNNING
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -7819,7 +7819,7 @@ def test_workflow_runner_human_outcome_can_be_returned_to_and_answered(
         finished_at=interaction.requested_at,
     )
     monkeypatch.setattr(repository, "list_steps", lambda _execution_id: [review_step])
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -7905,7 +7905,7 @@ def test_workflow_runner_continue_action_opens_detail_and_reconciles_state(
 ) -> None:
     controller, _, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.CHANGES_REQUESTED
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(48, 16)) as pilot:
@@ -7971,7 +7971,7 @@ def test_workflow_runner_continue_action_opens_detail_and_reconciles_state(
 
 def test_workflow_runner_does_not_need_to_scroll_in_a_tall_terminal(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 200)) as pilot:
@@ -7992,7 +7992,7 @@ def test_secondary_screens_keep_content_in_scrollable_regions_in_small_terminals
         category=DiagnosticCategory.RESPONSE,
         payload={"output": f"response {number}"},
     ) for number in range(40)]
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(80, 20)) as pilot:
@@ -8091,7 +8091,7 @@ def test_stop_control_is_offered_for_every_active_status(
     tmp_path: Path, status: WorkflowStatus
 ) -> None:
     controller, _, _ = _controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -8116,7 +8116,7 @@ def test_stop_control_is_offered_for_every_active_status(
 def test_history_filters_and_renders_provider_waiting_executions(tmp_path: Path) -> None:
     controller, _, repository = _controller(tmp_path)
     repository.execution.status = WorkflowStatus.WAITING
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
@@ -8127,7 +8127,7 @@ def test_history_filters_and_renders_provider_waiting_executions(tmp_path: Path)
             # A WAITING execution is still listed and searchable by its status.
             screen.query_one("#history-filter", Input).value = "waiting"
             await settle_tui(pilot)
-            picker = screen.query_one("#execution-picker", OrchestratorSelect)
+            picker = screen.query_one("#execution-picker", PrchefSelect)
             assert "1 persisted workflow execution(s)." in str(
                 screen.query_one("#history-summary", Static).renderable
             )
@@ -8172,7 +8172,7 @@ def _provider_editor_controller(
 ) -> tuple[WorkflowController, _WorkflowService, Path]:
     controller, service, _ = _controller(tmp_path)
     (tmp_path / "checkout" / ".git").mkdir(parents=True)
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_text(
         "defaults:\n  providers: {}\n  task: {provider: github}\n"
         "  repository_context: {strategy: heuristic}\n  agents:\n"
@@ -8188,12 +8188,12 @@ def _provider_editor_controller(
 def test_provider_editor_types_crud_and_keyboard_scrolling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
 ) -> None:
-    from orchestrator.config.provider_configuration import PROVIDER_DEFAULTS
+    from prchef.config.provider_configuration import PROVIDER_DEFAULTS
 
-    monkeypatch.setattr("orchestrator.config.provider_configuration.shutil.which",
+    monkeypatch.setattr("prchef.config.provider_configuration.shutil.which",
                         lambda executable: "/fake/executable")
     controller, _, path = _provider_editor_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(42, 18)) as pilot:
@@ -8204,7 +8204,7 @@ def test_provider_editor_types_crud_and_keyboard_scrolling(
             assert "No providers" in str(screen.query_one("#provider-status", Static).renderable)
             assert not screen.query_one("#add-provider", Button).disabled
             assert screen.query_one("#remove-provider", Button).disabled
-            selector = screen.query_one("#provider-type", OrchestratorSelect)
+            selector = screen.query_one("#provider-type", PrchefSelect)
             if kind == "claude-code":
                 selector.focus()
                 await pilot.press("enter", "down", "enter")
@@ -8258,7 +8258,7 @@ def test_provider_editor_failed_save_retains_values_and_failed_load_disables_act
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller, _, path = _provider_editor_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -8266,7 +8266,7 @@ def test_provider_editor_failed_save_retains_values_and_failed_load_disables_act
             await settle_tui(pilot)
             screen = application.screen
             assert isinstance(screen, ProviderSettingsScreen)
-            screen.query_one("#provider-type", OrchestratorSelect).value = "litellm"
+            screen.query_one("#provider-type", PrchefSelect).value = "litellm"
             await settle_tui(pilot)
             screen.query_one("#provider-name", Input).value = "api"
             original = path.read_bytes()
@@ -8282,7 +8282,7 @@ def test_provider_editor_failed_save_retains_values_and_failed_load_disables_act
                 raise OSError("failure")
 
             with monkeypatch.context() as patch:
-                patch.setattr("orchestrator.config.provider_configuration.os.replace", fail_replace)
+                patch.setattr("prchef.config.provider_configuration.os.replace", fail_replace)
                 screen.query_one("#save-provider", Button).press()
                 await settle_tui(pilot)
             assert path.read_bytes() == original
@@ -8309,7 +8309,7 @@ def test_provider_editor_failed_reload_blocks_stale_selection_and_pending_remova
     controller, _, path = _provider_editor_controller(tmp_path)
     controller.save_provider("api", {"type": "litellm", "model": "one"}, create=True)
     original = path.read_bytes()
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -8317,7 +8317,7 @@ def test_provider_editor_failed_reload_blocks_stale_selection_and_pending_remova
             await settle_tui(pilot)
             screen = application.screen
             assert isinstance(screen, ProviderSettingsScreen)
-            selector = screen.query_one("#provider-select", OrchestratorSelect)
+            selector = screen.query_one("#provider-select", PrchefSelect)
             selector.value = "api"
             await settle_tui(pilot)
             screen.query_one("#remove-provider", Button).press()
@@ -8369,14 +8369,14 @@ def test_provider_editor_failed_reload_blocks_stale_selection_and_pending_remova
 
 def test_first_provider_can_be_selected_for_all_roles_and_submitted(tmp_path: Path) -> None:
     controller, service, path = _provider_editor_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.action_providers()
             await settle_tui(pilot)
             editor = application.screen
-            editor.query_one("#provider-type", OrchestratorSelect).value = "litellm"
+            editor.query_one("#provider-type", PrchefSelect).value = "litellm"
             await settle_tui(pilot)
             editor.query_one("#provider-name", Input).value = "api"
             editor.query_one("#provider-model", Input).value = "test/model"
@@ -8388,7 +8388,7 @@ def test_first_provider_can_be_selected_for_all_roles_and_submitted(tmp_path: Pa
             runner = application.screen
             assert isinstance(runner, WorkflowRunnerScreen)
             for _role, prefix in runner._role_fields():
-                selector = runner.query_one(f"#{prefix}-provider", OrchestratorSelect)
+                selector = runner.query_one(f"#{prefix}-provider", PrchefSelect)
                 assert not isinstance(selector.value, str)
                 assert "unavailable" in str(
                     runner.query_one(f"#{prefix}-summary", Static).renderable
@@ -8396,7 +8396,7 @@ def test_first_provider_can_be_selected_for_all_roles_and_submitted(tmp_path: Pa
                 selector.value = "api"
             await settle_tui(pilot)
             runner._restore_role_defaults(AgentRole.PLANNER, "planner")
-            assert runner.query_one("#planner-provider", OrchestratorSelect).value == "api"
+            assert runner.query_one("#planner-provider", PrchefSelect).value == "api"
             runner.query_one("#task-checkbox-0", TaskRow).value = True
             await settle_tui(pilot)
             runner.query_one("#start-workflow", Button).press()
@@ -8410,7 +8410,7 @@ def test_first_provider_can_be_selected_for_all_roles_and_submitted(tmp_path: Pa
 def test_provider_choices_refresh_on_launcher_return(tmp_path: Path) -> None:
     controller, _, _ = _provider_editor_controller(tmp_path)
     controller.save_provider("api", {"type": "litellm", "model": "one"}, create=True)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -8418,7 +8418,7 @@ def test_provider_choices_refresh_on_launcher_return(tmp_path: Path) -> None:
             await settle_tui(pilot)
             runner = application.screen
             for _, prefix in runner._role_fields():
-                runner.query_one(f"#{prefix}-provider", OrchestratorSelect).value = "api"
+                runner.query_one(f"#{prefix}-provider", PrchefSelect).value = "api"
             await settle_tui(pilot)
             runner.query_one("#planner-model", Input).value = "local-choice"
             application.action_providers()
@@ -8427,7 +8427,7 @@ def test_provider_choices_refresh_on_launcher_return(tmp_path: Path) -> None:
             controller.save_provider("api", {"type": "litellm", "model": "updated"})
             await pilot.press("escape")
             await settle_tui(pilot)
-            selector = runner.query_one("#planner-provider", OrchestratorSelect)
+            selector = runner.query_one("#planner-provider", PrchefSelect)
             assert selector.value == "api"
             assert runner.query_one("#planner-model", Input).value == "local-choice"
             assert runner.query_one("#reviewer-model", Input).value == "updated"
@@ -8441,10 +8441,10 @@ def test_provider_choices_refresh_on_launcher_return(tmp_path: Path) -> None:
 def test_provider_editor_warning_and_in_use_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("orchestrator.config.provider_configuration.shutil.which",
+    monkeypatch.setattr("prchef.config.provider_configuration.shutil.which",
                         lambda executable: None)
     controller, _, path = _provider_editor_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -8475,14 +8475,14 @@ def test_provider_editor_preserves_hidden_options_and_clears_changed_type(tmp_pa
         "type": "litellm", "model": "one", "generation": {"seed": 42},
         "temperature": 0.7,
     }, create=True)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.action_providers()
             await settle_tui(pilot)
             screen = application.screen
-            screen.query_one("#provider-select", OrchestratorSelect).value = "api"
+            screen.query_one("#provider-select", PrchefSelect).value = "api"
             await settle_tui(pilot)
             screen.query_one("#provider-model", Input).value = "two"
             screen.query_one("#save-provider", Button).press()
@@ -8490,7 +8490,7 @@ def test_provider_editor_preserves_hidden_options_and_clears_changed_type(tmp_pa
             values = controller.provider_settings()["api"]
             assert values["generation"] == {"seed": 42}
             assert values["temperature"] == 0.7
-            screen.query_one("#provider-type", OrchestratorSelect).value = "claude-code"
+            screen.query_one("#provider-type", PrchefSelect).value = "claude-code"
             await settle_tui(pilot)
             assert screen.query_one("#provider-model", Input).value == ""
             screen.query_one("#provider-model", Input).value = "claude-model"
@@ -8511,14 +8511,14 @@ def test_provider_editor_plain_choices_groups_hints_and_wrapping(
     from textual.widgets._collapsible import CollapsibleTitle
 
     controller, _, _ = _provider_editor_controller(tmp_path)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test(size=(width, 30)) as pilot:
             application.action_providers()
             await settle_tui(pilot)
             screen = application.screen
-            selector = screen.query_one("#provider-type", OrchestratorSelect)
+            selector = screen.query_one("#provider-type", PrchefSelect)
             assert selector._options == [
                 ("Codex CLI", "codex-cli"), ("Claude Code", "claude-code"),
                 ("Model API (LiteLLM)", "litellm"),
@@ -8573,14 +8573,14 @@ def test_provider_editor_vertex_template_preserves_hidden_options(tmp_path: Path
     controller.save_provider("api", {
         "type": "litellm", "model": "one", "generation": {"seed": 42}, "temperature": 0.7,
     }, create=True)
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.action_providers()
             await settle_tui(pilot)
             screen = application.screen
-            screen.query_one("#provider-select", OrchestratorSelect).value = "api"
+            screen.query_one("#provider-select", PrchefSelect).value = "api"
             await settle_tui(pilot)
             screen.query_one("#provider-vertex-template", Button).press()
             await settle_tui(pilot)
@@ -8618,14 +8618,14 @@ def test_provider_editor_repository_override_notice_keeps_override(tmp_path: Pat
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     data["repositories"]["example"]["providers"] = {"api": {"model": "repository-model"}}
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
             application.action_providers()
             await settle_tui(pilot)
             screen = application.screen
-            screen.query_one("#provider-select", OrchestratorSelect).value = "api"
+            screen.query_one("#provider-select", PrchefSelect).value = "api"
             await settle_tui(pilot)
             notice = str(screen.query_one("#provider-overrides", Static).renderable)
             assert "example" in notice and "concurrency stays global" in notice
@@ -8652,7 +8652,7 @@ def test_agent_presets_update_preserves_all_generation_options(tmp_path: Path) -
     config.agent_presets = {
         "planner": {"complete": AgentPresetConfig(provider="planner", generation=original)}
     }
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -8689,7 +8689,7 @@ def test_workflow_runner_preserves_hidden_preset_generation_after_manual_edits(
             provider="planner", model="preset-model", generation={**hidden, "temperature": 0.4},
         )}
     }
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -8734,7 +8734,7 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
             permission_mode="acceptEdits",
         )}
     original = config.model_dump()
-    application = OrchestratorApp(controller)
+    application = PrchefApp(controller)
 
     async def drive() -> None:
         async with application.run_test() as pilot:
@@ -8748,7 +8748,7 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
                 assert displayed("model") == "Effective: provider-model (provider)"
                 assert displayed("reasoning") == "Effective: low (provider)"
                 assert displayed("permission") == "Effective: dontAsk (default)"
-                screen.query_one(f"#{prefix}-preset", OrchestratorSelect).value = "focused"
+                screen.query_one(f"#{prefix}-preset", PrchefSelect).value = "focused"
                 await settle_tui(pilot)
                 assert displayed("model") == "Effective: preset-model (preset)"
                 assert displayed("reasoning") == "Effective: high (preset)"
@@ -8768,7 +8768,7 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
                 assert displayed("model") == "Effective: provider-model (provider)"
                 assert displayed("permission") == "Effective: dontAsk (default)"
             assert config.model_dump() == original
-            screen.query_one("#planner-provider", OrchestratorSelect).value = "planner"
+            screen.query_one("#planner-provider", PrchefSelect).value = "planner"
             await settle_tui(pilot)
             assert "Not applicable" in str(
                 screen.query_one("#planner-permission-source", Static).renderable

@@ -9,10 +9,10 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import event, inspect, text
 
-import orchestrator.repositories.workflow_repository as workflow_repository_module
-from orchestrator.config.database import build_engine, build_session_factory
-from orchestrator.config.project_config import ProjectConfigLoader, WorkspaceSettings
-from orchestrator.models import (
+import prchef.repositories.workflow_repository as workflow_repository_module
+from prchef.config.database import build_engine, build_session_factory
+from prchef.config.project_config import ProjectConfigLoader, WorkspaceSettings
+from prchef.models import (
     CodeReview,
     DevelopmentTask,
     DiagnosticCategory,
@@ -23,12 +23,12 @@ from orchestrator.models import (
     WorkflowStage,
     WorkflowStatus,
 )
-from orchestrator.repositories.workflow_repository import (
+from prchef.repositories.workflow_repository import (
     WorkflowRepository,
     _lock_fresh_run_admission,
 )
-from orchestrator.services.workflow_service import WorkflowService
-from orchestrator.workspace.manager import WorkspaceManager
+from prchef.services.workflow_service import WorkflowService
+from prchef.workspace.manager import WorkspaceManager
 
 
 @pytest.mark.parametrize(
@@ -41,7 +41,7 @@ def test_recover_interrupted_is_idempotent_and_cancellable(
     database_url = f"sqlite:///{(tmp_path / 'recovery.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -74,7 +74,7 @@ def test_recovery_uses_next_stage_after_completed_step(tmp_path: Path) -> None:
     database_url = f"sqlite:///{(tmp_path / 'checkpoint.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -96,7 +96,7 @@ def test_legacy_polish_and_completed_polish_push_keep_recoverable_checkpoints(
     database_url = f"sqlite:///{(tmp_path / 'polish-recovery.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -135,7 +135,7 @@ def test_pending_execution_persists_selected_runtime_in_creation_transaction(
     database_url = f"sqlite:///{(tmp_path / 'runtime-admission.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -160,7 +160,7 @@ def test_review_output_records_the_step_that_produced_it(tmp_path: Path) -> None
     database_url = f"sqlite:///{(tmp_path / 'review-provenance.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -183,7 +183,7 @@ def test_upgrade_recovers_legacy_active_execution(tmp_path: Path) -> None:
     database_url = f"sqlite:///{(tmp_path / 'legacy-active.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "0010")
@@ -211,7 +211,7 @@ def test_interrupted_batch_link_keeps_its_position(tmp_path: Path) -> None:
     database_url = f"sqlite:///{(tmp_path / 'batch-recovery.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -240,7 +240,7 @@ def test_repository_persists_execution_error_and_steps_after_alembic_upgrade(
     database_url = f"sqlite:///{database.as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -332,7 +332,7 @@ def test_cancelled_execution_persists_across_repository_restart(tmp_path: Path) 
     database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -359,7 +359,7 @@ def test_human_interactions_persist_response_and_resume_state(tmp_path: Path) ->
     database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -391,7 +391,7 @@ def test_execution_diagnostics_are_redacted_and_available_after_repository_resta
     database_url = f"sqlite:///{(tmp_path / 'workflow.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -419,7 +419,7 @@ def test_diagnostic_cursor_reads_new_rows_in_id_order_after_restart(tmp_path: Pa
     database_url = f"sqlite:///{(tmp_path / 'cursor.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -463,7 +463,7 @@ def test_migration_backfills_common_identity_for_existing_trello_execution(
     database_url = f"sqlite:///{(tmp_path / 'legacy.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "0002")
@@ -510,7 +510,7 @@ def _migrated_repository(tmp_path: Path, name: str) -> WorkflowRepository:
     database_url = f"sqlite:///{(tmp_path / name).as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -668,7 +668,7 @@ def test_workflow_batches_round_trip_order_links_and_restart(tmp_path: Path) -> 
     project_root = Path(__file__).resolve().parents[2]
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")
@@ -793,7 +793,7 @@ def test_repository_key_and_path_share_fresh_run_admission(tmp_path: Path) -> No
     repository = _migrated_repository(tmp_path, "repository-aliases.db")
     project = tmp_path / "project"
     project.mkdir()
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text(f"repositories:\n  example:\n    path: {project.as_posix()}\n")
     aliases = ProjectConfigLoader(config).repository_identity_aliases("example")
     path = str(project.resolve())
@@ -1108,7 +1108,7 @@ def test_failed_provider_read_infers_one_repository_from_key_and_path_history(
     repository = _migrated_repository(tmp_path, "inferred-repository-aliases.db")
     project = tmp_path / "project"
     project.mkdir()
-    config = tmp_path / "orchestrator.yml"
+    config = tmp_path / "prchef.yml"
     config.write_text(f"repositories:\n  example:\n    path: {project.as_posix()}\n")
 
     by_key = repository.create_execution("12", "github", repository_ref="example")
@@ -1153,14 +1153,14 @@ def test_fresh_runs_keep_separate_branch_and_worktree_records(tmp_path: Path) ->
         object(), tmp_path / "control", WorkspaceSettings(root=tmp_path / "worktrees")
     )  # type: ignore[arg-type]
     first = repository.create_execution("12", "github", repository_ref="example")
-    first_branch = WorkflowService._branch_name("orchestrator", "12", "Fix task", first.id)
+    first_branch = WorkflowService._branch_name("prchef", "12", "Fix task", first.id)
     first_path = manager.workspace_path(first.id)
     repository.record_branch(first.id, first_branch)
     repository.record_workspace(first.id, str(first_path))
     repository.update_status(first.id, WorkflowStatus.FAILED)
 
     second = repository.create_execution("12", "github", repository_ref="example")
-    second_branch = WorkflowService._branch_name("orchestrator", "12", "Fix task", second.id)
+    second_branch = WorkflowService._branch_name("prchef", "12", "Fix task", second.id)
     second_path = manager.workspace_path(second.id)
     repository.record_branch(second.id, second_branch)
     repository.record_workspace(second.id, str(second_path))
@@ -1179,7 +1179,7 @@ def test_workflow_batch_migration_downgrades_to_0008(tmp_path: Path) -> None:
     database_url = f"sqlite:///{(tmp_path / 'batch-downgrade.db').as_posix()}"
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option(
-        "script_location", str(project_root / "src" / "orchestrator" / "migrations")
+        "script_location", str(project_root / "src" / "prchef" / "migrations")
     )
     alembic_config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(alembic_config, "head")

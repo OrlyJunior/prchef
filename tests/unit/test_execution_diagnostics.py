@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from orchestrator.models.agent import AgentRequest, AgentResult, AgentRole
-from orchestrator.models.execution_diagnostic import DiagnosticCategory
-from orchestrator.providers.agent_provider import AgentProviderError
-from orchestrator.providers.diagnostic_provider import DiagnosticAgentProvider
+from prchef.models.agent import AgentRequest, AgentResult, AgentRole
+from prchef.models.execution_diagnostic import DiagnosticCategory
+from prchef.providers.agent_provider import AgentProviderError
+from prchef.providers.diagnostic_provider import DiagnosticAgentProvider
 
 
 class _Provider:

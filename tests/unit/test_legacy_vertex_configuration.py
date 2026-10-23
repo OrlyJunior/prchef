@@ -7,15 +7,15 @@ from typing import Any
 import pytest
 import yaml
 
-from orchestrator.clients.factory import ClientFactory
-from orchestrator.config.project_config import (
+from prchef.clients.factory import ClientFactory
+from prchef.config.project_config import (
     ConfigurationError,
     ProjectConfigLoader,
     convert_legacy_vertex_provider,
 )
-from orchestrator.models.agent import AgentRole
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.providers.litellm_provider import LiteLLMAgentProvider
+from prchef.models.agent import AgentRole
+from prchef.models.development_task import DevelopmentTask
+from prchef.providers.litellm_provider import LiteLLMAgentProvider
 
 
 def _loader(tmp_path: Path, definition: dict[str, Any]) -> tuple[ProjectConfigLoader, Path]:
@@ -31,7 +31,7 @@ def _loader(tmp_path: Path, definition: dict[str, Any]) -> tuple[ProjectConfigLo
         },
         "repositories": {"example": {"path": str(checkout)}},
     }
-    path = tmp_path / "orchestrator.yml"
+    path = tmp_path / "prchef.yml"
     path.write_text("# preserve me\n" + yaml.safe_dump(data), encoding="utf-8")
     return ProjectConfigLoader(path), path
 

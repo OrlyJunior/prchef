@@ -1,8 +1,8 @@
 import subprocess
 from pathlib import Path
 
-from orchestrator.models.repository_context import RepositorySourceFile
-from orchestrator.services.repository_documents import (
+from prchef.models.repository_context import RepositorySourceFile
+from prchef.services.repository_documents import (
     RepositorySourcePipeline,
     chunk_source_file,
 )

@@ -6,8 +6,8 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from orchestrator.clients.factory import ClientFactory
-from orchestrator.config.project_config import (
+from prchef.clients.factory import ClientFactory
+from prchef.config.project_config import (
     AgentPresetConfig,
     CodexCliProviderSettings,
     ConfigurationError,
@@ -17,9 +17,9 @@ from orchestrator.config.project_config import (
     ProviderSupportTier,
     resolve_global_config,
 )
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.services.repository_context import repository_context_strategy_names
-from orchestrator.workspace.manager import WorkspaceManager
+from prchef.models.development_task import DevelopmentTask
+from prchef.services.repository_context import repository_context_strategy_names
+from prchef.workspace.manager import WorkspaceManager
 
 
 def _validated_config(values: dict[str, object]) -> ProjectConfig:
@@ -98,7 +98,7 @@ def test_loader_resolves_default_local_index_for_registered_repository(tmp_path:
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         yaml.safe_dump({
             "defaults": {"roles": {"spec": "codex", "review": "codex"}},
@@ -115,11 +115,11 @@ def test_loader_resolves_default_local_index_for_registered_repository(tmp_path:
     assert config.repository_context.strategy == "qdrant"
     assert config.repository_context.qdrant.mode == "local"
     assert config.repository_context.qdrant.path == (
-        Path.home() / ".orchestrator" / "qdrant"
+        Path.home() / ".prchef" / "qdrant"
     ).resolve()
 
     manager = WorkspaceManager(ClientFactory().create(config).git, repository, config.workspace)
-    assert manager.workspace_root() == (Path.home() / ".orchestrator" / "workspaces").resolve()
+    assert manager.workspace_root() == (Path.home() / ".prchef" / "workspaces").resolve()
     assert not config.repository_context.qdrant.path.is_relative_to(manager.workspace_root())
 
 
@@ -133,7 +133,7 @@ def test_loader_preserves_workspace_root_override_precedence(
     entry: dict[str, object] = {"path": str(repository)}
     if repository_override:
         entry["workspace"] = {"root": "repository-workspaces"}
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(yaml.safe_dump({
         "defaults": {"roles": {"spec": "codex", "review": "codex"},
                      "workspace": {"root": "default-workspaces"}},
@@ -177,7 +177,7 @@ def test_repository_context_strategy_uses_defaults_and_repository_override(
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         yaml.safe_dump(
             {
@@ -215,7 +215,7 @@ def test_loader_wraps_unknown_repository_context_strategy_as_configuration_error
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         yaml.safe_dump(
             {
@@ -279,7 +279,7 @@ def test_loader_rejects_named_jules_provider_even_when_unused(
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         yaml.safe_dump(
             {
@@ -318,7 +318,7 @@ def test_explicit_legacy_jules_integration_is_rejected(tmp_path: Path) -> None:
             }
         )
 
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         "defaults:\n  roles: {spec: codex, review: codex}\n"
         "  integrations:\n    jules: {}\n",
@@ -344,7 +344,7 @@ def test_legacy_roles_require_explicit_supported_providers(
 
 
 def test_example_configuration_uses_first_class_litellm_and_codex(tmp_path: Path) -> None:
-    example_path = Path(__file__).resolve().parents[2] / "orchestrator.example.yml"
+    example_path = Path(__file__).resolve().parents[2] / "prchef.example.yml"
     example = yaml.safe_load(example_path.read_text(encoding="utf-8"))
 
     config = _validated_config({"path": tmp_path, **example["defaults"]})
@@ -357,7 +357,7 @@ def test_example_configuration_uses_first_class_litellm_and_codex(tmp_path: Path
 
 
 def test_example_agent_presets_block_keeps_every_preset_when_uncommented() -> None:
-    example_path = Path(__file__).resolve().parents[2] / "orchestrator.example.yml"
+    example_path = Path(__file__).resolve().parents[2] / "prchef.example.yml"
     lines = example_path.read_text(encoding="utf-8").splitlines()
     start = lines.index("  # agent_presets:")
     block: list[str] = []
@@ -443,7 +443,7 @@ def test_litellm_role_runtime_materialization_preserves_backend_and_vertex_setti
                     "type": "litellm",
                     "model": "vertex_ai/gemini-3.8-flash",
                     "generation": {
-                        "vertex_project": "agents-orchestrator-507215",
+                        "vertex_project": "agents-prchef-507215",
                         "vertex_location": "global",
                     },
                 },
@@ -466,7 +466,7 @@ def test_litellm_role_runtime_materialization_preserves_backend_and_vertex_setti
         assert settings["type"] == "litellm"
         assert settings["model"] == "vertex_ai/gemini-3.8-flash"
         assert settings["generation"] == {
-            "vertex_project": "agents-orchestrator-507215",
+            "vertex_project": "agents-prchef-507215",
             "vertex_location": "global",
         }
 
@@ -751,11 +751,11 @@ def test_agent_preset_supports_provider_generation_options(tmp_path: Path) -> No
 
 def test_workspace_root_is_configurable(tmp_path: Path) -> None:
     config = _validated_config(
-        {"path": tmp_path, "workspace": {"root": "C:/Git/orchestrator-workspaces"}}
+        {"path": tmp_path, "workspace": {"root": "C:/Git/prchef-workspaces"}}
     )
 
     assert str(config.workspace.root).replace("\\", "/").endswith(
-        "C:/Git/orchestrator-workspaces"
+        "C:/Git/prchef-workspaces"
     )
 
 
@@ -795,11 +795,11 @@ def test_repository_configuration_ignores_legacy_local_override_and_warns(
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
-    (repository / ".orchestrator.yml").write_text(
+    (repository / ".prchef.yml").write_text(
         "notifications:\n  enabled: false\n  channel: ignored\n",
         encoding="utf-8",
     )
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         """defaults:
   roles: {spec: codex, review: codex}
@@ -828,7 +828,7 @@ repositories:
 
     assert config.notifications.enabled is True
     assert config.notifications.channel == "desktop"
-    assert "Repository-local .orchestrator.yml is no longer supported and is ignored" in caplog.text
+    assert "Repository-local .prchef.yml is no longer supported and is ignored" in caplog.text
 
 
 def test_github_app_configuration_accepts_exactly_one_private_key_source(tmp_path: Path) -> None:
@@ -921,7 +921,7 @@ def test_tui_configuration_writer_updates_resolved_global_config_and_preserves_o
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
-    config_file = tmp_path / "alternate-orchestrator.yml"
+    config_file = tmp_path / "alternate-prchef.yml"
     loader = ProjectConfigLoader(config_file)
     config_file.write_text(
         """unrelated:
@@ -956,7 +956,7 @@ repositories:
     )
 
     assert saved == config_file
-    assert not (repository / ".orchestrator.yml").exists()
+    assert not (repository / ".prchef.yml").exists()
     content = saved.read_text(encoding="utf-8")
     assert "implementer_app:" in content
     assert "planner_app:" in content
@@ -992,7 +992,7 @@ def test_clearing_inherited_planner_app_disables_it_only_for_selected_repository
         repository = tmp_path / name
         repository.mkdir()
         (repository / ".git").mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         """unrelated: keep
 defaults:
@@ -1039,7 +1039,7 @@ def test_repository_crud_round_trips_commands_and_preserves_configuration(
 ) -> None:
     existing_path = tmp_path / "existing"
     existing_path.mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         """# global configuration comment
 defaults:
@@ -1066,7 +1066,7 @@ repositories:
         "created",
         "new/repository",
         True,
-        [["python", "-m", "pytest"], ["python", "-m", "mypy", "src/orchestrator"]],
+        [["python", "-m", "pytest"], ["python", "-m", "mypy", "src/prchef"]],
     )
     loader.save_repository(
         "renamed",
@@ -1089,7 +1089,7 @@ repositories:
         "auto_detect": True,
         "commands": [
             ["python", "-m", "pytest"],
-            ["python", "-m", "mypy", "src/orchestrator"],
+            ["python", "-m", "mypy", "src/prchef"],
         ],
     }
     settings = loader.repository_settings("created")
@@ -1105,7 +1105,7 @@ repositories:
 
 
 def test_invalid_repository_input_does_not_change_configuration(tmp_path: Path) -> None:
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     original = "repositories:\n  example:\n    path: repository\n"
     config_file.write_text(original, encoding="utf-8")
     loader = ProjectConfigLoader(config_file)
@@ -1117,7 +1117,7 @@ def test_invalid_repository_input_does_not_change_configuration(tmp_path: Path) 
 
 
 def test_repository_retry_budgets_resolve_defaults_and_zero_override(tmp_path: Path) -> None:
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         """defaults:
   review: {max_review_retries: 4}
@@ -1147,7 +1147,7 @@ repositories:
 
 
 def test_repository_retry_budgets_save_clear_and_rename_preserve_yaml(tmp_path: Path) -> None:
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         """# keep this comment
 defaults:
@@ -1205,7 +1205,7 @@ def test_loaded_workflow_config_keeps_budgets_after_repository_save(tmp_path: Pa
     repository = tmp_path / "repo"
     repository.mkdir()
     (repository / ".git").mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         """defaults:
   roles: {spec: codex, review: codex}
@@ -1232,7 +1232,7 @@ repositories:
 def test_repository_retry_budget_rejects_invalid_input_without_write(
     tmp_path: Path, invalid: object
 ) -> None:
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     original = "repositories:\n  example: {path: example}\n"
     config_file.write_text(original, encoding="utf-8")
     loader = ProjectConfigLoader(config_file)
@@ -1253,7 +1253,7 @@ def test_agent_preset_crud_persists_in_resolved_config_without_touching_provider
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         """defaults:
   roles: {spec: codex, review: codex}
@@ -1298,7 +1298,7 @@ repositories:
         }
     }
     assert persisted["defaults"]["providers"]["codex"]["type"] == "codex-cli"
-    assert not (repository / ".orchestrator.yml").exists()
+    assert not (repository / ".prchef.yml").exists()
     reloaded = loader.load(
         DevelopmentTask("1", "trello", "Task", "", "https://example.test/1", repository="example")
     )
@@ -1315,7 +1315,7 @@ def test_agent_fallback_preset_persistence_tracks_rename_and_explicit_disable(
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         """defaults:
   roles: {spec: codex, review: codex}
@@ -1523,7 +1523,7 @@ def test_explicit_agent_configuration_requires_every_role(tmp_path: Path) -> Non
 
 
 def test_loader_rejects_project_settings_misplaced_at_global_top_level(tmp_path: Path) -> None:
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         """task:\n  provider: github\nagents:\n  planner:\n    provider: vertex-gemini\n""",
         encoding="utf-8",
@@ -1545,17 +1545,17 @@ def test_global_config_discovery_uses_user_state_independently_of_the_working_di
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     for variable in (
-        "ORCHESTRATOR_CONFIG",
-        "ORCHESTRATOR_CONFIG_PATH",
-        "ORCHESTRATOR_CONFIG_FILE",
+        "PRCHEF_CONFIG",
+        "PRCHEF_CONFIG_PATH",
+        "PRCHEF_CONFIG_FILE",
     ):
         monkeypatch.delenv(variable, raising=False)
-    config_file = tmp_path / "home" / ".orchestrator" / "orchestrator.yml"
+    config_file = tmp_path / "home" / ".prchef" / "prchef.yml"
     config_file.parent.mkdir(parents=True)
     config_file.write_text("defaults: {}\n", encoding="utf-8")
     nested_working_directory = tmp_path / "one" / "two"
     nested_working_directory.mkdir(parents=True)
-    (tmp_path / "orchestrator.yml").write_text("defaults: {}\n", encoding="utf-8")
+    (tmp_path / "prchef.yml").write_text("defaults: {}\n", encoding="utf-8")
     monkeypatch.chdir(nested_working_directory)
 
     assert (
@@ -1569,7 +1569,7 @@ def test_global_config_discovery_does_not_use_a_repository_or_current_directory_
 ) -> None:
     working_directory = tmp_path / "repository" / "nested"
     working_directory.mkdir(parents=True)
-    (tmp_path / "repository" / "orchestrator.yml").write_text(
+    (tmp_path / "repository" / "prchef.yml").write_text(
         "defaults: {}\n", encoding="utf-8"
     )
 
@@ -1578,7 +1578,7 @@ def test_global_config_discovery_does_not_use_a_repository_or_current_directory_
             environ={}, cwd=working_directory, home=tmp_path / "home"
         )
 
-    assert str(tmp_path / "repository" / "orchestrator.yml") not in str(exc_info.value)
+    assert str(tmp_path / "repository" / "prchef.yml") not in str(exc_info.value)
 
 
 def test_global_config_discovery_does_not_use_the_installation_or_source_directory(
@@ -1586,7 +1586,7 @@ def test_global_config_discovery_does_not_use_the_installation_or_source_directo
 ) -> None:
     installation_directory = tmp_path / "checkout"
     installation_directory.mkdir()
-    (installation_directory / "orchestrator.yml").write_text(
+    (installation_directory / "prchef.yml").write_text(
         "defaults: {}\n", encoding="utf-8"
     )
 
@@ -1604,14 +1604,14 @@ def test_explicit_global_config_takes_precedence_over_environment_and_discovery(
 ) -> None:
     explicit = tmp_path / "explicit.yml"
     from_environment = tmp_path / "environment.yml"
-    discovered = tmp_path / "orchestrator.yml"
+    discovered = tmp_path / "prchef.yml"
     for config_file in (explicit, from_environment, discovered):
         config_file.write_text("defaults: {}\n", encoding="utf-8")
 
     assert (
         resolve_global_config(
             explicit,
-            environ={"ORCHESTRATOR_CONFIG": str(from_environment)},
+            environ={"PRCHEF_CONFIG": str(from_environment)},
             cwd=tmp_path,
         )
         == explicit.resolve()
@@ -1620,13 +1620,13 @@ def test_explicit_global_config_takes_precedence_over_environment_and_discovery(
 
 def test_environment_global_config_takes_precedence_over_cwd_discovery(tmp_path: Path) -> None:
     from_environment = tmp_path / "environment.yml"
-    discovered = tmp_path / "orchestrator.yml"
+    discovered = tmp_path / "prchef.yml"
     from_environment.write_text("defaults: {}\n", encoding="utf-8")
     discovered.write_text("defaults: {}\n", encoding="utf-8")
 
     assert (
         resolve_global_config(
-            environ={"ORCHESTRATOR_CONFIG_PATH": str(from_environment)}, cwd=tmp_path
+            environ={"PRCHEF_CONFIG_PATH": str(from_environment)}, cwd=tmp_path
         )
         == from_environment.resolve()
     )
@@ -1645,7 +1645,7 @@ def test_relative_environment_config_is_anchored_to_home_not_the_working_directo
 
     assert (
         resolve_global_config(
-            environ={"ORCHESTRATOR_CONFIG_PATH": "global.yml"},
+            environ={"PRCHEF_CONFIG_PATH": "global.yml"},
             cwd=working_directory,
             home=home,
         )
@@ -1655,7 +1655,7 @@ def test_relative_environment_config_is_anchored_to_home_not_the_working_directo
 
 def test_global_config_discovery_uses_user_config_locations(tmp_path: Path) -> None:
     user_config = (
-        tmp_path / "home" / ".config" / "orchestrator" / "orchestrator.yml"
+        tmp_path / "home" / ".config" / "prchef" / "prchef.yml"
     )
     user_config.parent.mkdir(parents=True)
     user_config.write_text("defaults: {}\n", encoding="utf-8")
@@ -1686,9 +1686,9 @@ def test_global_config_discovery_reports_every_searched_location(tmp_path: Path)
         )
 
     message = str(exc_info.value)
-    assert str(working_directory / "orchestrator.yml") not in message
+    assert str(working_directory / "prchef.yml") not in message
     assert (
-        str(tmp_path / "home" / ".config" / "orchestrator" / "orchestrator.yml")
+        str(tmp_path / "home" / ".config" / "prchef" / "prchef.yml")
         in message
     )
 
@@ -1746,7 +1746,7 @@ def test_loader_resolves_qdrant_identity_and_external_local_path(tmp_path: Path)
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         yaml.safe_dump(
             {
@@ -1896,7 +1896,7 @@ def _repository_concurrency_config(
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / ".git").mkdir()
-    config_file = tmp_path / "orchestrator.yml"
+    config_file = tmp_path / "prchef.yml"
     config_file.write_text(
         yaml.safe_dump(
             {

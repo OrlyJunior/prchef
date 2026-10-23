@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.models import WorkflowExecution, WorkflowStatus
-from orchestrator.services.workspace_cleaner import (
+from prchef.models import WorkflowExecution, WorkflowStatus
+from prchef.services.workspace_cleaner import (
     WorkspaceCleanupService,
     WorkspaceRetention,
 )
@@ -187,17 +187,22 @@ def test_index_deletion_runs_before_git_and_failure_preserves_worktree(tmp_path:
     assert retry.removed_count == 1
 
 
+@pytest.mark.parametrize("legacy_location", ["sibling", "old-state"])
 def test_cleanup_lists_both_defaults_and_removes_only_finished_recorded_workspaces(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_location: str,
 ) -> None:
     state = tmp_path / "user-state"
     monkeypatch.setattr(
-        "orchestrator.services.workspace_cleaner.default_state_directory", lambda: state
+        "prchef.services.workspace_cleaner.default_state_directory", lambda: state
     )
     control = tmp_path / "control"
     control.mkdir()
     root = state / "workspaces"
-    legacy = tmp_path / "orchestrator-workspaces" / control.name
+    legacy = (
+        tmp_path / "orchestrator-workspaces" / control.name
+        if legacy_location == "sibling"
+        else Path.home() / ".orchestrator" / "workspaces" / control.name
+    )
     current = root / control.name
     executions = [
         _execution(legacy / "old-approved", WorkflowStatus.APPROVED),

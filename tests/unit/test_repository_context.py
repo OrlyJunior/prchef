@@ -3,9 +3,9 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
-from orchestrator.config.project_config import RepositoryContextSettings
-from orchestrator.models.development_task import DevelopmentTask
-from orchestrator.services.repository_context import (
+from prchef.config.project_config import RepositoryContextSettings
+from prchef.models.development_task import DevelopmentTask
+from prchef.services.repository_context import (
     IGNORED_DIRECTORY_NAMES,
     MAX_CONTEXT_CHARS,
     HeuristicRepositoryContextStrategy,
@@ -106,7 +106,7 @@ def test_resolver_returns_heuristic_strategy() -> None:
 
 
 def test_resolver_constructs_qdrant_strategy_with_repository_identity(tmp_path: Path) -> None:
-    from orchestrator.services.qdrant_repository_context import (
+    from prchef.services.qdrant_repository_context import (
         QdrantRepositoryContextStrategy,
     )
 

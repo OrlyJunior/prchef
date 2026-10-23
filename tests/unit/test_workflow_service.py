@@ -6,15 +6,15 @@ from typing import Any
 
 import pytest
 
-import orchestrator.services.workflow_service as workflow_service_module
-from orchestrator.clients.exceptions import (
+import prchef.services.workflow_service as workflow_service_module
+from prchef.clients.exceptions import (
     CommandProcessTreeUnconfirmedError,
     CommandTimeoutError,
     GitClientError,
     GitHubClientError,
 )
-from orchestrator.config.project_config import AgentProviderSettings, GitHubAppSettings
-from orchestrator.models import (
+from prchef.config.project_config import AgentProviderSettings, GitHubAppSettings
+from prchef.models import (
     AgentRole,
     CodeReview,
     DevelopmentTask,
@@ -26,16 +26,16 @@ from orchestrator.models import (
     WorkflowStage,
     WorkflowStatus,
 )
-from orchestrator.models.execution_diagnostic import DiagnosticCategory
-from orchestrator.models.workflow_event import WorkflowEventKind
-from orchestrator.providers.agent_provider import AgentNeedsHumanError
-from orchestrator.runtime_logging import log_review_summary, log_spec_summary
-from orchestrator.services.notifications import NotificationService
-from orchestrator.services.project_context import MAX_PROJECT_CONTEXT_CHARS
-from orchestrator.services.repository_context import RepositoryContextRequest
-from orchestrator.services.task_provider import GitHubIssueTaskProvider, TrelloTaskProvider
-from orchestrator.services.workflow_service import WorkflowService
-from orchestrator.services.workflow_stage_sequencer import _DiagnosedRepositoryContext
+from prchef.models.execution_diagnostic import DiagnosticCategory
+from prchef.models.workflow_event import WorkflowEventKind
+from prchef.providers.agent_provider import AgentNeedsHumanError
+from prchef.runtime_logging import log_review_summary, log_spec_summary
+from prchef.services.notifications import NotificationService
+from prchef.services.project_context import MAX_PROJECT_CONTEXT_CHARS
+from prchef.services.repository_context import RepositoryContextRequest
+from prchef.services.task_provider import GitHubIssueTaskProvider, TrelloTaskProvider
+from prchef.services.workflow_service import WorkflowService
+from prchef.services.workflow_stage_sequencer import _DiagnosedRepositoryContext
 from tests.unit.fakes import (
     FakeClientFactory,
     FakeConfigLoader,
@@ -284,7 +284,7 @@ def test_semantic_progress_and_fallback_use_workflow_diagnostics(
     )
     strategy = service._sequencer._repository_context_strategy(config, execution.id)
 
-    with caplog.at_level(logging.DEBUG, logger="orchestrator.services.workflow_service"):
+    with caplog.at_level(logging.DEBUG, logger="prchef.services.workflow_service"):
         assert strategy.render(  # type: ignore[arg-type]
             SimpleNamespace(role="planner")
         ) == "LOCAL REPOSITORY CONTEXT"
@@ -316,7 +316,7 @@ def test_oversized_context_warns_in_fresh_and_resumed_role_prompts(
     service._stage_events._verbose = True
     factory.planner.ambiguous = True
     events = []
-    with caplog.at_level(logging.DEBUG, logger="orchestrator.services.workflow_service"):
+    with caplog.at_level(logging.DEBUG, logger="prchef.services.workflow_service"):
         paused = service.run("card-context-cap", event_listener=events.append)
         factory.planner.ambiguous = False
         resumed = service.respond_and_resume(
@@ -939,7 +939,7 @@ def test_workspace_branch_name_contains_execution_id_and_is_not_protected(workfl
     result = service.run("card-branch")
 
     assert result.working_branch is not None
-    assert result.working_branch.startswith("orchestrator/")
+    assert result.working_branch.startswith("prchef/")
     assert result.working_branch != "develop"
     assert result.working_branch.endswith("execution-1")
 
@@ -1569,7 +1569,7 @@ def test_existing_execution_keeps_legacy_workspace_after_default_changes(
 ) -> None:
     service, repository, _, factory = workflow
     config = service._config_loader.config
-    legacy_root = config.path.parent / "orchestrator-workspaces"
+    legacy_root = config.path.parent / "prchef-workspaces"
     config.workspace.root = legacy_root
     if mode == "human-answer":
         factory.planner.review_error = AgentNeedsHumanError("Please clarify.")
@@ -1592,7 +1592,7 @@ def test_existing_execution_keeps_legacy_workspace_after_default_changes(
     assert resumed.workspace_path == recorded
     assert repository.get_execution(paused.id).workspace_path == recorded
     assert factory.codex.workspace_path == Path(recorded)
-    assert not (Path.home() / ".orchestrator" / "workspaces").exists()
+    assert not (Path.home() / ".prchef" / "workspaces").exists()
 
 
 def test_review_correction_uses_validation_retry_handling(workflow) -> None:
@@ -1660,7 +1660,7 @@ def test_workflow_logs_stage_entry_and_completion(
     workflow, caplog: pytest.LogCaptureFixture
 ) -> None:
     service, _, _, _ = workflow
-    target_logger = logging.getLogger("orchestrator.services.workflow_service")
+    target_logger = logging.getLogger("prchef.services.workflow_service")
     target_logger.addHandler(caplog.handler)
     previous_propagation = target_logger.propagate
     target_logger.propagate = False
@@ -1689,7 +1689,7 @@ def test_verbose_workflow_logs_parsed_spec_and_review_summaries(
         FakeClientFactory(),
         verbose=True,
     )
-    target_logger = logging.getLogger("orchestrator.services.workflow_service")
+    target_logger = logging.getLogger("prchef.services.workflow_service")
     target_logger.addHandler(caplog.handler)
     previous_propagation = target_logger.propagate
     target_logger.propagate = False
@@ -1722,7 +1722,7 @@ def test_non_verbose_workflow_does_not_log_agent_summaries(
     workflow, caplog: pytest.LogCaptureFixture
 ) -> None:
     service, _, _, _ = workflow
-    target_logger = logging.getLogger("orchestrator.services.workflow_service")
+    target_logger = logging.getLogger("prchef.services.workflow_service")
     target_logger.addHandler(caplog.handler)
     previous_propagation = target_logger.propagate
     target_logger.propagate = False
@@ -1740,7 +1740,7 @@ def test_non_verbose_workflow_does_not_log_agent_summaries(
 def test_structured_summaries_are_bounded_and_redact_sensitive_text(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    target_logger = logging.getLogger("orchestrator.services.workflow_service")
+    target_logger = logging.getLogger("prchef.services.workflow_service")
     target_logger.addHandler(caplog.handler)
     previous_propagation = target_logger.propagate
     target_logger.propagate = False
@@ -1797,7 +1797,7 @@ def test_structured_summaries_are_bounded_and_redact_sensitive_text(
 
 
 def test_command_logging_redacts_github_api_review_body() -> None:
-    from orchestrator.runtime_logging import format_command
+    from prchef.runtime_logging import format_command
 
     assert format_command(["gh", "api", "-f", "body=GITHUB_TOKEN=secret"]) == (
         "gh api -f body=[REDACTED]"

@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.models.repository_context import EmbeddingIdentity
-from orchestrator.services.embeddings import FastEmbedEmbeddingProvider
+from prchef.models.repository_context import EmbeddingIdentity
+from prchef.services.embeddings import FastEmbedEmbeddingProvider
 
 
 @pytest.mark.parametrize("initialized", [False, True])
@@ -37,7 +37,7 @@ def test_download_completion_requires_initialized_model(
 
 
 def test_fastembed_receives_bounded_cpu_thread_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    import orchestrator.services.embeddings as embeddings
+    import prchef.services.embeddings as embeddings
 
     created: list[tuple[str, int]] = []
 

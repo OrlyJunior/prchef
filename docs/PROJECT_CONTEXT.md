@@ -28,7 +28,7 @@ tests and repository retrieval.
   stay concurrent. Workflows wait; screen actions try admission without overtaking them.
   Shutdown waits for admitted work. Provider ceilings have no cross-process coordination.
 - Startup marks orphaned active executions interrupted; resumption requires an explicit user choice.
-- Configuration comes only from a global `orchestrator.yml` (`defaults` deep-merged with
+- Configuration comes only from a global `prchef.yml` (`defaults` deep-merged with
   `repositories.<key>`). Repository-local configuration files are ignored. Discovery and
   persistence never depend on the current directory or a source checkout. Explicit CLI and
   environment paths precede user-global defaults; a missing explicitly selected file is an error.
@@ -52,7 +52,7 @@ tests and repository retrieval.
 - Provider commands, credentials, polling, and API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Role services are provider-neutral. Model-routing
   libraries (LiteLLM) are backends behind that boundary and never own workflow semantics.
-- Repository context retrieval is a separate orchestrator-owned strategy boundary (local Qdrant by
+- Repository context retrieval is a separate prchef-owned strategy boundary (local Qdrant by
   default for registered repositories, heuristic on semantic unavailability or explicit selection).
   Workflow services never import retrieval backends. Role files and this file are never indexed.
   Qdrant collections are repository-scoped; first retrieval builds the index. Linked roots never
@@ -87,7 +87,7 @@ tests and repository retrieval.
   and human-blocked worktrees need explicit inclusion; active and unmanaged paths are excluded.
   For Qdrant retrieval, cleanup removes a worktree's index points before its Git worktree;
   index deletion failure leaves the worktree available for retry.
-- Agents never commit, push, create PRs, or merge; the orchestrator owns Git and GitHub. A
+- Agents never commit, push, create PRs, or merge; prchef owns Git and GitHub. A
   reported successful implementation with no changes is a failure.
 - Commit and push refuse protected branches; push is only `--set-upstream origin <branch>`. The
   worktree must share a merge base with the recorded base commit before every commit and review;

@@ -1,7 +1,7 @@
 import pytest
 
-from orchestrator.services.exceptions import StructuredOutputError
-from orchestrator.services.structured_output import parse_json_object
+from prchef.services.exceptions import StructuredOutputError
+from prchef.services.structured_output import parse_json_object
 
 REAL_SESSION_1835452957112904409_FINAL_MESSAGE = (
     "I have completed the read-only technical specification and outputted the requested "

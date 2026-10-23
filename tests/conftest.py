@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.config.settings import Settings
+from prchef.config.settings import Settings
 
 
 @pytest.fixture(autouse=True)
@@ -14,5 +14,5 @@ def isolated_user_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     # Settings captures its dotenv path at import time, before fixtures run.
-    monkeypatch.setitem(Settings.model_config, "env_file", home / ".orchestrator" / ".env")
+    monkeypatch.setitem(Settings.model_config, "env_file", home / ".prchef" / ".env")
     return home

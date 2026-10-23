@@ -7,13 +7,13 @@ from typing import Any
 
 import pytest
 
-import orchestrator.services.debug_service as debug_service_module
-from orchestrator.clients.exceptions import (
+import prchef.services.debug_service as debug_service_module
+from prchef.clients.exceptions import (
     CommandProcessTreeUnconfirmedError,
     GitHubClientError,
 )
-from orchestrator.config.project_config import ProjectConfig
-from orchestrator.models import (
+from prchef.config.project_config import ProjectConfig
+from prchef.models import (
     AgentRole,
     DevelopmentTask,
     PullRequest,
@@ -21,14 +21,14 @@ from orchestrator.models import (
     ValidationResult,
     WorkflowExecution,
 )
-from orchestrator.services.debug_service import (
+from prchef.services.debug_service import (
     DebugInputs,
     DebugService,
     DebugStage,
     parse_debug_stage,
 )
-from orchestrator.services.project_context import MAX_PROJECT_CONTEXT_CHARS
-from orchestrator.services.repository_context import RepositoryContextRequest
+from prchef.services.project_context import MAX_PROJECT_CONTEXT_CHARS
+from prchef.services.repository_context import RepositoryContextRequest
 from tests.unit.fakes import FakeClientFactory, FakeConfigLoader, FakeTrelloClient
 
 
@@ -60,7 +60,7 @@ def _execution(tmp_path: Path) -> WorkflowExecution:
         task_source=task.source,
         repository=str(tmp_path),
         base_branch="develop",
-        working_branch="orchestrator/debug",
+        working_branch="prchef/debug",
         task_snapshot=asdict(task),
         spec_snapshot=asdict(_spec()),
         validation_snapshot=asdict(ValidationResult(success=True)),
@@ -70,7 +70,7 @@ def _execution(tmp_path: Path) -> WorkflowExecution:
                 url="https://github.example/pr/42",
                 title=task.title,
                 base_branch="develop",
-                head_branch="orchestrator/debug",
+                head_branch="prchef/debug",
             )
         ),
     )
@@ -373,7 +373,7 @@ def test_validation_debug_returns_result_without_persisting_snapshot(tmp_path: P
 def test_review_debug_reuses_all_persisted_inputs(tmp_path: Path) -> None:
     execution = _execution(tmp_path)
     service, factory = _service(tmp_path)
-    factory.git.current_branch = lambda: "orchestrator/debug"  # type: ignore[attr-defined]
+    factory.git.current_branch = lambda: "prchef/debug"  # type: ignore[attr-defined]
 
     result = service.execute(execution, DebugStage.REVIEW)
 
@@ -426,7 +426,7 @@ def test_review_debug_uses_configured_repository_context_strategy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, factory = _service(tmp_path)
-    factory.git.current_branch = lambda: "orchestrator/debug"  # type: ignore[attr-defined]
+    factory.git.current_branch = lambda: "prchef/debug"  # type: ignore[attr-defined]
     requests: list[RepositoryContextRequest] = []
 
     class Strategy:

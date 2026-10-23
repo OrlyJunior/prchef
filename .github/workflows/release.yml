@@ -52,7 +52,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: constraints-dev.txt
       - name: Fetch release tags
         run: git fetch --force --tags origin develop
       - name: Compute next version
@@ -105,9 +105,9 @@ jobs:
           git push origin "refs/tags/$TAG"
       - name: Build distributions
         run: |
-          python -m pip install build
-          python -m build --sdist --wheel
-      - name: Verify distribution versions
+          python -m pip install --require-hashes --only-binary=:all: -r constraints-dev.txt
+          python -m build --no-isolation --sdist --wheel
+      - name: Verify distribution names and versions
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
@@ -127,7 +127,10 @@ jobs:
               metadata_files = [name for name in wheel.namelist() if name.endswith(".dist-info/METADATA")]
               if len(metadata_files) != 1:
                   raise SystemExit("Wheel metadata is missing or ambiguous")
-              wheel_version = email.message_from_bytes(wheel.read(metadata_files[0]))["Version"]
+              wheel_metadata = email.message_from_bytes(wheel.read(metadata_files[0]))
+              wheel_version = wheel_metadata["Version"]
+              if "prchef/__init__.py" not in wheel.namelist():
+                  raise SystemExit("Wheel is missing the prchef package")
           with tarfile.open(sdists[0], "r:gz") as sdist:
               metadata_files = [item for item in sdist.getmembers() if item.name.endswith("/PKG-INFO")]
               if len(metadata_files) != 1:
@@ -135,12 +138,15 @@ jobs:
               source = sdist.extractfile(metadata_files[0])
               if source is None:
                   raise SystemExit("Cannot read sdist metadata")
-              sdist_version = email.message_from_bytes(source.read())["Version"]
+              sdist_metadata = email.message_from_bytes(source.read())
+              sdist_version = sdist_metadata["Version"]
+          if wheel_metadata["Name"] != "prchef" or sdist_metadata["Name"] != "prchef":
+              raise SystemExit("Wheel and sdist must both be named prchef")
           if wheel_version != expected or sdist_version != expected:
               raise SystemExit(
                   f"Expected version {expected}; wheel has {wheel_version}, sdist has {sdist_version}"
               )
-          print(f"Wheel and sdist both have version {expected}")
+          print(f"Wheel and sdist are named prchef and both have version {expected}")
           PY
       - name: Create GitHub Release
         env:

@@ -17,8 +17,8 @@ from typing import Any
 
 import pytest
 
-from orchestrator.config.project_config import ProjectConfig
-from orchestrator.models import (
+from prchef.config.project_config import ProjectConfig
+from prchef.models import (
     AgentRole,
     CodeReview,
     DevelopmentTask,
@@ -33,14 +33,14 @@ from orchestrator.models import (
     WorkflowStage,
     WorkflowStatus,
 )
-from orchestrator.models.agent import AgentRequest, AgentResult
-from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
-from orchestrator.providers.agent_provider import AgentProviderError
-from orchestrator.providers.concurrency import ProviderConcurrencyCoordinator
-from orchestrator.services.exceptions import WorkflowError
-from orchestrator.services.execution_dispatcher import ExecutionDispatcher
-from orchestrator.services.task_provider import TrelloTaskProvider
-from orchestrator.services.workflow_service import WorkflowService
+from prchef.models.agent import AgentRequest, AgentResult
+from prchef.models.workflow_event import WorkflowEvent, WorkflowEventKind
+from prchef.providers.agent_provider import AgentProviderError
+from prchef.providers.concurrency import ProviderConcurrencyCoordinator
+from prchef.services.exceptions import WorkflowError
+from prchef.services.execution_dispatcher import ExecutionDispatcher
+from prchef.services.task_provider import TrelloTaskProvider
+from prchef.services.workflow_service import WorkflowService
 from tests.unit.fakes import (
     FakeAgentProvider,
     FakeCodexClient,

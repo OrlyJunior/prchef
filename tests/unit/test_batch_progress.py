@@ -1,7 +1,7 @@
 """Unit tests for the shared batch progress projection.
 
-These exercise ``orchestrator.tui.batch_progress`` and
-``orchestrator.tui.workflow_presentation`` directly, without driving a
+These exercise ``prchef.tui.batch_progress`` and
+``prchef.tui.workflow_presentation`` directly, without driving a
 Textual screen, so the event-to-row mapping stays fast and deterministic.
 """
 
@@ -12,23 +12,23 @@ from typing import Any
 
 import pytest
 
-from orchestrator.models.agent import AgentRole
-from orchestrator.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
-from orchestrator.models.human_interaction import HumanInteraction
-from orchestrator.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
-from orchestrator.models.workflow_event import WorkflowEvent, WorkflowEventKind
-from orchestrator.models.workflow_execution import WorkflowExecution
-from orchestrator.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
-from orchestrator.models.workflow_step import WorkflowStep
-from orchestrator.tui.batch_progress import (
+from prchef.models.agent import AgentRole
+from prchef.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from prchef.models.human_interaction import HumanInteraction
+from prchef.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
+from prchef.models.workflow_event import WorkflowEvent, WorkflowEventKind
+from prchef.models.workflow_execution import WorkflowExecution
+from prchef.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
+from prchef.models.workflow_step import WorkflowStep
+from prchef.tui.batch_progress import (
     LiveBatchProgress,
     build_persisted_rows,
     category_for_execution,
     persisted_row,
     summarize,
 )
-from orchestrator.tui.diagnostics import format_diagnostics_for_export
-from orchestrator.tui.workflow_presentation import step_timeline_lines
+from prchef.tui.diagnostics import format_diagnostics_for_export
+from prchef.tui.workflow_presentation import step_timeline_lines
 
 
 def test_context_size_warning_appears_in_live_and_persisted_batch_rows() -> None:

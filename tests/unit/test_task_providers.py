@@ -7,13 +7,13 @@ from typing import Any
 import httpx
 import pytest
 
-from orchestrator.clients.command_client import CommandResult
-from orchestrator.clients.exceptions import GitHubClientError, TrelloClientError
-from orchestrator.clients.github_issue_client import GitHubIssueClient
-from orchestrator.clients.trello_client import TrelloClient
-from orchestrator.config.project_config import GitHubAppSettings
-from orchestrator.models import DevelopmentTask
-from orchestrator.services.task_provider import (
+from prchef.clients.command_client import CommandResult
+from prchef.clients.exceptions import GitHubClientError, TrelloClientError
+from prchef.clients.github_issue_client import GitHubIssueClient
+from prchef.clients.trello_client import TrelloClient
+from prchef.config.project_config import GitHubAppSettings
+from prchef.models import DevelopmentTask
+from prchef.services.task_provider import (
     GitHubIssueTaskProvider,
     LabelCatalogProvider,
     TrelloTaskProvider,

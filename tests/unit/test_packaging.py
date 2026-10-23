@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from importlib.metadata import version
 from pathlib import Path
 
 
@@ -12,16 +13,17 @@ def test_core_dependencies_include_pyjwt_cryptography_support() -> None:
     assert "PyJWT[crypto]>=2.8,<3" in project["dependencies"]
 
 
-def test_packaging_exposes_the_standard_orchestrator_console_script() -> None:
+def test_packaging_exposes_the_standard_prchef_console_script() -> None:
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     with pyproject_path.open("rb") as pyproject_file:
         project = tomllib.load(pyproject_file)["project"]
 
-    assert project["scripts"]["orchestrator"] == "orchestrator.cli.main:app"
+    assert project["name"] == "prchef"
+    assert project["scripts"] == {"prchef": "prchef.cli.main:app"}
 
 
-def test_packaging_keeps_migrations_inside_the_orchestrator_package() -> None:
-    package_root = Path(__file__).resolve().parents[2] / "src" / "orchestrator"
+def test_packaging_keeps_migrations_inside_the_prchef_package() -> None:
+    package_root = Path(__file__).resolve().parents[2] / "src" / "prchef"
 
     assert (package_root / "migrations" / "__init__.py").is_file()
     assert (package_root / "migrations" / "env.py").is_file()
@@ -35,8 +37,12 @@ def test_litellm_is_a_core_dependency_not_an_optional_extra() -> None:
     with pyproject_path.open("rb") as pyproject_file:
         project = tomllib.load(pyproject_file)["project"]
 
-    assert "litellm>=1.0.0" in project["dependencies"]
+    assert "litellm==1.106.2" in project["dependencies"]
     assert "litellm" not in project.get("optional-dependencies", {})
+
+
+def test_installed_litellm_matches_the_security_pin() -> None:
+    assert version("litellm") == "1.106.2"
 
 
 def test_qdrant_and_local_embeddings_are_core_dependencies() -> None:
@@ -51,7 +57,7 @@ def test_qdrant_and_local_embeddings_are_core_dependencies() -> None:
 def test_repository_context_documentation_covers_default_override_and_server_mode() -> None:
     root = Path(__file__).resolve().parents[2]
     readme = (root / "README.md").read_text(encoding="utf-8")
-    example = (root / "orchestrator.example.yml").read_text(encoding="utf-8")
+    example = (root / "prchef.example.yml").read_text(encoding="utf-8")
     context = (root / "docs" / "PROJECT_CONTEXT.md").read_text(encoding="utf-8")
 
     assert "strategy: heuristic" in readme and "strategy: heuristic" in example
