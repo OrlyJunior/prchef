@@ -1,6 +1,6 @@
 # prchef
 
-**prchef** turns a GitHub issue or Trello card into a reviewed pull request. It runs on your machine: it plans the change, implements it in an isolated Git worktree, runs your validation commands, opens a pull request, and performs an automated review. It never merges: the final decision is always yours.
+**prchef** turns a GitHub issue into a reviewed pull request. It runs on your machine: it plans the change, implements it in an isolated Git worktree, runs your validation commands, opens a pull request, and performs an automated review. It never merges: the final decision is always yours.
 
 It works with the coding-agent CLIs you already use (Codex CLI, Claude Code) and with API or local models through LiteLLM, and aims to be provider-agnostic. API and local models currently plan and review; implementing code needs a CLI agent.
 
@@ -66,7 +66,7 @@ Before the first run, create the parent directory and save your configuration in
 `prchef providers --config /absolute/path/to/prchef.yml`. Relative `--config`
 paths use the current directory; relative `PRCHEF_CONFIG*` paths use your home directory.
 
-The app loads its settings and Trello credentials from the optional `~/.prchef/.env` file. A repository-local `.env` is not loaded; [.env.example](.env.example) shows the format. The three configuration selectors above are read only from the process environment, not from `.env`.
+The app loads its settings and optional task-source credentials from the optional `~/.prchef/.env` file. A repository-local `.env` is not loaded; [.env.example](.env.example) shows the format. The three configuration selectors above are read only from the process environment, not from `.env`.
 
 API provider keys such as `OPENAI_API_KEY` must be in the process environment. The
 user-global `.env` file supplies the app's `PRCHEF_*` settings; it does not export
@@ -127,7 +127,7 @@ prchef runs validation commands separately.
 
 Optionally set `bare_mode: true` for reproducible runs that skip user hooks, plugins, skills, and MCP auto-discovery. [Bare mode requires an API key (`ANTHROPIC_API_KEY`) or supported cloud credentials](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode); it does not use subscription login credentials. The provider always passes [`--restricted`](https://code.claude.com/docs/en/cli-reference#cli-flags), which confines Claude Code's file tools to the supplied worktree with or without bare mode. See [prchef.example.yml](prchef.example.yml) for provider options.
 
-Credentials belong in environment variables or ambient `gh` authentication, never in YAML. For Trello, set `PRCHEF_TRELLO_API_KEY` and `PRCHEF_TRELLO_TOKEN`. Optional GitHub App identities are described in [GitHub App setup](docs/github_app.md).
+Credentials belong in environment variables or ambient `gh` authentication, never in YAML. Optional GitHub App identities are described in [GitHub App setup](docs/github_app.md).
 
 ## First run
 
@@ -157,7 +157,7 @@ The equivalent command for a GitHub issue:
 prchef run --github-issue ISSUE_NUMBER --repository owner/repository --config /absolute/path/to/prchef.yml
 ```
 
-For a Trello card, use `prchef run --trello-card CARD_ID --repository owner/repository --config /absolute/path/to/prchef.yml` after configuring its credentials. A card's `Repository` custom field can identify its configured repository when no explicit override is supplied.
+> **Experimental task source:** A Trello task source is implemented but **EXPERIMENTAL** because it has not been tested against a live Trello board. To try it, set `PRCHEF_TRELLO_API_KEY` and `PRCHEF_TRELLO_TOKEN`, then run `prchef run --trello-card CARD_ID --repository owner/repository --config /absolute/path/to/prchef.yml`. A card's `Repository` custom field can identify its configured repository when no explicit override is supplied.
 
 You can omit `--config` when the file is in one of the automatic discovery locations above.
 
@@ -225,7 +225,7 @@ dispatcher's startup capacity.
 
 | Command | What it does |
 | --- | --- |
-| `prchef run` | Run one GitHub issue (`--github-issue`), Trello card (`--trello-card`), or configured task provider ID (`--task-id`). |
+| `prchef run` | Run one GitHub issue (`--github-issue`) or configured task provider ID (`--task-id`); `--trello-card` (experimental) selects the experimental card source. |
 | `prchef tui` | Open the interactive launcher, settings, and execution history. |
 | `prchef respond EXECUTION_ID --message "..."` | Answer an agent's blocking question and resume that execution. |
 | `prchef show EXECUTION_ID` | Print a saved execution as JSON. |

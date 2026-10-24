@@ -1,7 +1,10 @@
 task:
   # Provider used by `prchef run --task-id ...`.
-  # --trello-card and --github-issue explicitly select their providers.
+  # --github-issue explicitly selects the GitHub provider.
   provider: github
+  # Experimental Trello task source (not tested against a live board):
+  # provider: trello
+  # --trello-card explicitly selects this experimental provider.
 
 defaults:
   # Persistent execution state is global, never repository-local. Relative paths
@@ -206,7 +209,7 @@ defaults:
       #   private_key_path: C:/secure/github-app-private-key.pem
       #   # Alternative: private_key_env: GITHUB_APP_PRIVATE_KEY
 
-# Trello uses the "Repository" custom field. For GitHub Issues, prefer owner/repo.
+# For GitHub Issues, use the owner/repository key of the local clone.
 repositories:
   owner/example-api:
     path: /absolute/path/to/example-api
