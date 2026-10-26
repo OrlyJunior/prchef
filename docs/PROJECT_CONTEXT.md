@@ -15,11 +15,10 @@ tests and repository retrieval.
   resume system.
 - Planning uses up to 12,000 characters of the task's newest comments. Resumed planning uses the
   persisted snapshot; other roles receive no separate comment section.
-- `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` are optional, local, ignored by this project's `.gitignore`
-  role guidance; each role receives only its own file. This file is shared by all roles. All of
-  them are supplementary: the task, repository state, and core invariants win. Role files load
-  from the configured checkout at execution time, with a control-checkout fallback for worktrees;
-  symlinked and non-regular files are ignored. All prompt context has explicit size bounds.
+- Optional local, gitignored `PLANNER.md`, `IMPLEMENTER.md`, and `REVIEWER.md` guide their
+  respective roles; this file is shared. Task, repository state, and core invariants take precedence.
+  Role files load from the configured checkout, falling back to the control checkout for worktrees;
+  symlinked and non-regular files are ignored. Prompt context has explicit size bounds.
 
 ## Operating model
 
@@ -45,10 +44,9 @@ tests and repository retrieval.
   validation. `providers`: role-neutral agent adapters. `clients`: transport, subprocess, Git.
   `repositories`: the only SQLAlchemy boundary. `cli`: composition and stdout/stderr contract.
   `tui`: presentation over the controller.
-- The TUI never implements workflow policy or a second state machine; its batch progress is a
-  read-side projection of durable state. Its default timeline summarizes observer events;
-  persisted detailed logs and clipboard exports retain redacted diagnostics. Live single-task and
-  batch timelines surface durable-context size warnings with actual and capped character counts.
+- The TUI projects durable workflow state without its own policy or state machine. Its timeline
+  summarizes events; detailed logs and clipboard exports retain redacted diagnostics. Live timelines
+  surface durable-context size warnings with actual and capped character counts.
 - Provider commands, credentials, polling, and API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Role services are provider-neutral. Model-routing
   libraries (LiteLLM) are backends behind that boundary and never own workflow semantics.
@@ -63,10 +61,9 @@ tests and repository retrieval.
 - The TUI may launch one task or an ordered persisted batch. Batch policy, cancellation, and
   admission live in `WorkflowController`/`WorkflowRepository`; batch progress is a projection.
   Batch items link to, but do not own, execution rows. Cancelling one item never cancels its peers.
-- Settings update selected global entries. Provider writes preserve unrelated YAML bytes and use
-  validated atomic replacement. Role-local runtime selections apply to one run, persist for
-  resumption, and never rewrite YAML defaults. Value/source displays reuse the configuration
-  submission seam.
+- Settings update global entries; provider writes preserve unrelated YAML bytes with validated
+  atomic replacement. Role-local runtime selections persist for resumption without rewriting YAML
+  defaults. Value/source displays reuse the configuration submission seam.
 - Schema changes require versioned Alembic migrations; never `create_all` at runtime.
 
 ## Workflow invariants
@@ -147,6 +144,8 @@ tests and repository retrieval.
 - Credentials never go in YAML or tracked files; API keys are environment-variable references.
 - Diagnostics are redacted before persistence and before observer delivery. Observer events are
   emitted only after persisted transitions and can never change workflow semantics.
+- Text redaction infers unknown secret values from explicit assignments, not whitespace alone;
+  recognized credential formats and sensitive structured fields remain independently protected.
 - Rendering durable context above its prompt cap records a warning diagnostic with the stripped
   character count, path, and cap. The prompt still uses the capped content. Diagnostics flow to
   `--verbose`, the live TUI timeline, and persisted detailed logs without including file contents.

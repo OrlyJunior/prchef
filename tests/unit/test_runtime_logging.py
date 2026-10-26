@@ -106,6 +106,57 @@ def test_ordinary_text_remains_readable(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "STEAM_API_KEY stays optional",
+        "STEAM_API_KEY is not used by this adapter",
+        "optional STEAM_API_KEY from process.env",
+        "Use client_secret only when needed.",
+        "The PASSWORD is optional; keep it.",
+        "A secret\tremains optional\nAPI_KEY\nis not used",
+        "token: optional",
+    ],
+)
+def test_key_names_in_prose_survive_all_text_boundaries(text: str) -> None:
+    assert redact_text(text) == text
+    assert redact_text(redact_text(text)) == text
+    assert redact_payload({"message": text}) == {"message": text}
+    assert summarize_text(text, limit=200) == " ".join(text.split())
+
+
+@pytest.mark.parametrize(
+    "name", ["API_KEY", "client_secret", "PASSWORD", "GH_TOKEN", "GITHUB_TOKEN"]
+)
+@pytest.mark.parametrize("separator", ["=", " :\t"])
+@pytest.mark.parametrize("value", ["x", "opaque-value-1234567890"])
+def test_specific_secret_assignments_remain_masked(name: str, separator: str, value: str) -> None:
+    assert redact_text(f"{name}{separator}{value}; next") == f"{name}=[REDACTED]; next"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("token: optional", "token: optional"),
+        ("token: " + "a" * 20, "token: " + "a" * 20),
+        ("token: " + "a" * 18 + "1", "token: " + "a" * 18 + "1"),
+        ("token: " + "a" * 19 + "1", "token=[REDACTED]"),
+        ("token: " + "a" * 19 + "-", "token=[REDACTED]"),
+        ("token=short", "token=[REDACTED]"),
+        # Unknown whitespace-only values are deliberately not inferred as secrets.
+        ("API_KEY opaque-value-1234567890", "API_KEY opaque-value-1234567890"),
+    ],
+)
+def test_generic_token_boundary_and_whitespace_narrowing(text: str, expected: str) -> None:
+    assert redact_text(text) == expected
+    assert redact_text(expected) == expected
+
+
+def test_pasted_recognized_token_is_masked_without_removing_prose() -> None:
+    text = "STEAM_API_KEY is not used; pasted " + _fake_token(body_length=36) + " for reference."
+    assert redact_text(text) == "STEAM_API_KEY is not used; pasted [REDACTED] for reference."
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "a" * 100_000,
         "a" * 100_000 + "_api_key",
         "API_KEY=" + " " * 100_000,
