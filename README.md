@@ -336,7 +336,7 @@ Database schema changes use versioned Alembic migrations in `src/prchef/migratio
 
 To publish a release, under **Actions → Release**, run the workflow on the `develop` branch and choose the `patch`, `minor`, or `major` increment.
 
-The first release tag is `v0.1.0`. Before later releases, update `project.version` in `pyproject.toml` to the version the workflow will select. The workflow checks that the built package version matches the tag.
+The first release tag is `v0.1.0`, regardless of the selected increment. For later releases, the workflow increments the numerically greatest canonical `vMAJOR.MINOR.PATCH` tag. Before running it, update `project.version` in `pyproject.toml` on `develop` to that expected version. The workflow checks the version and rejects existing or non-newer tags before creating a tag. If the versions disagree, update `project.version` or select the matching increment and rerun. It also checks that the built package versions match the tag.
 
 ## Changelog
 
