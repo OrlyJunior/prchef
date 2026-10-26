@@ -12,6 +12,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import inspect
+from typer.main import get_command
 from typer.testing import CliRunner
 
 import prchef
@@ -24,10 +25,48 @@ from prchef.models import WorkflowExecution, WorkflowStage, WorkflowStatus
 from prchef.services.workspace_cleaner import (
     CleanupWorkspace,
     WorkspaceCleanupReport,
+    WorkspaceCleanupService,
     WorkspaceRetention,
 )
 
 runner = CliRunner()
+
+
+def test_cleanup_help_matches_recovery_status_policy() -> None:
+    result = runner.invoke(main.app, ["cleanup-workspaces", "--help"])
+    assert result.exit_code == 0, result.output
+
+    command = get_command(main.app).commands["cleanup-workspaces"]
+    option = next(param for param in command.params if param.name == "include_failed")
+    documented = set(re.findall(r"\b[A-Z][A-Z_]+\b", option.help))
+    statuses = {status.value for status in WorkspaceCleanupService._RECOVERY_STATUSES}
+    assert documented == statuses
+    for status in statuses:
+        assert status in result.output
+    assert "active runs remain protected" in option.help
+
+
+@pytest.mark.parametrize(
+    ("command_name", "option_name"),
+    [("cleanup-workspaces", "dry_run"), ("debug", "from_execution")],
+)
+def test_saved_state_option_help_describes_recovery(command_name: str, option_name: str) -> None:
+    result = runner.invoke(main.app, [command_name, "--help"])
+    assert result.exit_code == 0, result.output
+
+    command = get_command(main.app).commands[command_name]
+    option = next(param for param in command.params if param.name == option_name)
+    help_text = option.help
+    assert "initialize or migrate" in help_text
+    assert "startup recovery" in help_text
+    assert "orphaned active executions INTERRUPTED" in help_text
+    assert "branches, commits, pull requests, or worktrees" in help_text
+    if command_name == "debug":
+        assert "even with --dry-run" in help_text
+        assert "Opening saved state does not change" in help_text
+        assert "read-only" not in help_text
+    else:
+        assert "The dry run does not change" in help_text
 
 
 def test_show_keeps_full_execution_json(monkeypatch: pytest.MonkeyPatch) -> None:

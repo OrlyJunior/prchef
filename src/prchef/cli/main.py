@@ -651,7 +651,12 @@ def debug(
             "--from-execution",
             "--execution-id",
             "-e",
-            help="Optional persisted execution used as read-only input defaults",
+            help=(
+                "Use a saved execution for input defaults. Opening saved state, even with "
+                "--dry-run, can initialize or migrate it and apply startup recovery, marking "
+                "orphaned active executions INTERRUPTED. Opening saved state does not change "
+                "branches, commits, pull requests, or worktrees."
+            ),
         ),
     ] = None,
     trello_card: Annotated[
@@ -860,13 +865,23 @@ def cleanup_workspaces(
     ] = None,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="List retention decisions without deleting worktrees"),
+        typer.Option(
+            "--dry-run",
+            help=(
+                "Preview retention decisions. Opening saved state can initialize or migrate it "
+                "and apply startup recovery, marking orphaned active executions INTERRUPTED. "
+                "The dry run does not change branches, commits, pull requests, or worktrees."
+            ),
+        ),
     ] = False,
     include_failed: Annotated[
         bool,
         typer.Option(
             "--include-failed",
-            help="Also clean FAILED and NEEDS_HUMAN workspaces; active runs remain protected",
+            help=(
+                "Also clean FAILED, CANCELLED, and NEEDS_HUMAN workspaces; "
+                "active runs remain protected"
+            ),
         ),
     ] = False,
     all_workspaces: Annotated[
