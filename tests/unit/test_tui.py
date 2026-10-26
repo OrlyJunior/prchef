@@ -8106,6 +8106,7 @@ def test_stop_control_is_offered_for_every_active_status(
     tmp_path: Path, status: WorkflowStatus
 ) -> None:
     controller, _, repository = _controller(tmp_path)
+    # Reconciliation reads persisted state; the fake must agree with the injected event.
     repository.execution.status = status
     application = PrchefApp(controller)
 
