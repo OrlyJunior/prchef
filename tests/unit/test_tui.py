@@ -4391,7 +4391,17 @@ def test_execution_detail_actions_and_diagnostics_stay_bounded_in_narrow_termina
             assert screen._reconcile_timer is not None
             screen._reconcile_timer.stop()  # Exercise the refresh race explicitly, without timing.
             screen.query_one("#execution-toggle-logs", Button).press()
-            await settle_tui(pilot)
+            await wait_for_tui(
+                pilot,
+                lambda: content.line_count > 0
+                and page.max_scroll_x == 0 and page.max_scroll_y > 0
+                and content.max_scroll_x > 0 and content.max_scroll_y == 0
+                and not content.show_vertical_scrollbar
+                and content.scrollable_content_region.height == content.line_count
+                and content.region.right <= application.size.width,
+                descendants=True,
+                description="diagnostic content and layout",
+            )
             assert page.max_scroll_x == 0
             assert page.max_scroll_y > 0
             assert content.max_scroll_x > 0
@@ -5654,8 +5664,13 @@ def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
             screen.query_one("#start-workflow", Button).press()
             await wait_for_tui(
                 pilot,
-                lambda: len(service.calls) == 2,
-                description="ordered batch submissions",
+                lambda: (
+                    len(service.calls) == 2
+                    and not screen._batch_running
+                    and "Batch finished:"
+                    in str(screen.query_one("#workflow-progress", Static).renderable)
+                ),
+                description="ordered batch completion",
             )
             assert [call[0] for call in service.calls] == ["12", "3"]
 
@@ -8090,7 +8105,8 @@ def test_live_status_message_names_the_provider_a_run_is_waiting_for() -> None:
 def test_stop_control_is_offered_for_every_active_status(
     tmp_path: Path, status: WorkflowStatus
 ) -> None:
-    controller, _, _ = _controller(tmp_path)
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = status
     application = PrchefApp(controller)
 
     async def drive() -> None:
@@ -8105,7 +8121,13 @@ def test_stop_control_is_offered_for_every_active_status(
                     status=status,
                 )
             )
-            await settle_tui(pilot)
+            screen._reconcile_active_execution()
+            await wait_for_tui(
+                pilot,
+                lambda: screen.query_one("#workflow-stop-actions", Horizontal).display
+                and not screen.query_one("#stop-workflow", Button).disabled,
+                description="active workflow stop controls after reconciliation",
+            )
 
             assert screen.query_one("#workflow-stop-actions", Horizontal).display is True
             assert screen.query_one("#stop-workflow", Button).disabled is False
@@ -8749,7 +8771,17 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
                 assert displayed("reasoning") == "Effective: low (provider)"
                 assert displayed("permission") == "Effective: dontAsk (default)"
                 screen.query_one(f"#{prefix}-preset", PrchefSelect).value = "focused"
-                await settle_tui(pilot)
+                screen._select_role_preset(role, prefix, "focused")
+                assert displayed("model") == "Effective: preset-model (preset)"
+                assert displayed("reasoning") == "Effective: high (preset)"
+                assert displayed("permission") == "Effective: acceptEdits (preset)"
+                await wait_for_tui(
+                    pilot,
+                    lambda: displayed("model") == "Effective: preset-model (preset)"
+                    and displayed("reasoning") == "Effective: high (preset)"
+                    and displayed("permission") == "Effective: acceptEdits (preset)",
+                    description=f"{prefix} preset sources",
+                )
                 assert displayed("model") == "Effective: preset-model (preset)"
                 assert displayed("reasoning") == "Effective: high (preset)"
                 assert displayed("permission") == "Effective: acceptEdits (preset)"

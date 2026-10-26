@@ -545,10 +545,14 @@ class WorkflowRunnerScreen(Screen[None]):
                     if suppressed_change in self._suppressed_preset_changes:
                         self._suppressed_preset_changes.remove(suppressed_change)
                         return
+                    if event.select.value != event.value:
+                        return
                     self._select_role_preset(role, prefix, event.value)
                 elif event.value is _MANUAL_PRESET:
                     if role in self._suppressed_manual_preset_changes:
                         self._suppressed_manual_preset_changes.remove(role)
+                        return
+                    if event.select.value != event.value:
                         return
                     self._restore_role_defaults(role, prefix)
                 return
@@ -778,7 +782,9 @@ class WorkflowRunnerScreen(Screen[None]):
         if repository is None:
             return
         try:
-            self.controller.provider_runtime_capabilities(repository, preset.provider)
+            capabilities = self.controller.provider_runtime_capabilities(
+                repository, preset.provider
+            )
         except Exception as exc:
             self.query_one(f"#{prefix}-preset-source", Static).update(
                 f"Selected preset {name!r} references unavailable provider "
@@ -791,6 +797,9 @@ class WorkflowRunnerScreen(Screen[None]):
             role, prefix, preset.provider, reset_to_defaults=True
         )
         self._set_preset_runtime_controls(prefix, preset)
+        values = self._runtime_values_from_controls(prefix)
+        self._update_role_summary(role, prefix, preset.provider, values, capabilities)
+        self._update_advanced_indicators(role, prefix, preset.provider, values)
         self._update_preset_source(role, prefix)
 
     def _restore_role_defaults(self, role: AgentRole, prefix: str) -> None:
@@ -1362,7 +1371,7 @@ class WorkflowRunnerScreen(Screen[None]):
         )
         self._load_tasks(repository, provider, token)
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, group="task-load")
     def _load_tasks(self, repository: str, provider: str, token: int) -> None:
         try:
             tasks = self.controller.list_tasks(repository=repository, task_provider=provider)

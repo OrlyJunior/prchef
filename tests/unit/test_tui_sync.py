@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from textual.worker import WorkerCancelled
 
-from tests.unit.tui_sync import _wait_for_workers
+from tests.unit.tui_sync import _screen_workers, _wait_for_workers, wait_for_tui
 
 
 class _Worker:
@@ -45,6 +46,34 @@ class _Worker:
         self.cancel_calls += 1
         self.is_cancelled = True
         self._release.set()
+
+
+def test_wait_for_tui_bounds_a_blocked_message_pump() -> None:
+    class Pilot:
+        async def pause(self) -> None:
+            await asyncio.Event().wait()
+
+    async def drive() -> None:
+        with pytest.raises(AssertionError, match="Timed out waiting for blocked UI"):
+            await wait_for_tui(
+                Pilot(), lambda: False, timeout=0.01, description="blocked UI"  # type: ignore[arg-type]
+            )
+
+    asyncio.run(drive())
+
+
+def test_screen_worker_scope_can_include_descendants() -> None:
+    screen = SimpleNamespace(parent=None)
+    child = SimpleNamespace(parent=screen)
+    other = SimpleNamespace(parent=None)
+    owned = _Worker(screen)
+    descendant = _Worker(child)
+    unrelated = _Worker(other)
+    pilot = SimpleNamespace(app=SimpleNamespace(
+        screen=screen, workers=[owned, descendant, unrelated]
+    ))
+    assert _screen_workers(pilot) == [owned]
+    assert _screen_workers(pilot, descendants=True) == [owned, descendant]
 
 
 def test_wait_for_workers_propagates_worker_failure() -> None:
