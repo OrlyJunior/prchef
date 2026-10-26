@@ -37,6 +37,7 @@ _PRIVATE_KEY_MARKER = re.compile(
 _SENSITIVE_FIELD_NAME = re.compile(
     r"(?i)(?:^|[_-])(?:api[_-]?key|token|secret|password|authorization|private[_-]?key)(?:$|[_-])"
 )
+_OPAQUE_TOKEN_CHARACTERS = frozenset(string.digits + string.punctuation)
 
 
 class UtcTimestampFormatter(logging.Formatter):
@@ -82,9 +83,10 @@ def _redact_private_keys(value: str) -> str:
 def _redact_header_value(match: re.Match[str]) -> str:
     name, separator, value = match.groups()
     # Generic token: values need an opaque shape: at least 20 characters and
-    # an ASCII digit or punctuation. Ordinary alphabetic prose is left intact.
+    # an ASCII digit or punctuation. This conservative heuristic leaves purely
+    # alphabetic values intact, but can mask long paths or URLs.
     if name.casefold() == "token" and separator.strip() == ":":
-        if len(value) < 20 or not any(c in string.digits + string.punctuation for c in value):
+        if len(value) < 20 or not any(c in _OPAQUE_TOKEN_CHARACTERS for c in value):
             return match.group(0)
     return f"{name}=[REDACTED]"
 

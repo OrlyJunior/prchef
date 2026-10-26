@@ -502,6 +502,7 @@ def test_rebuilt_task_and_answer_reach_planner_with_the_same_prose(tmp_path: Pat
     planner = SpecService(provider, Context())
     for candidate in (immediate_task, recovered_task):
         planner.generate(candidate, tmp_path, "owner/repo", "main", lambda _: None)
+    # Immediate context can still contain credentials; compare after masking them.
     assert redact_text(provider.prompts[0]) == redact_text(provider.prompts[1])
     assert provider.prompts[1].count("STEAM_API_KEY is not used; pasted [REDACTED]") == 2
 
@@ -539,6 +540,7 @@ def test_continuation_prompt_matches_rebuilt_snapshots_and_feedback(tmp_path: Pa
     immediate, recovered_call = provider.execute.call_args_list
     immediate_prompt = immediate.args[0].instructions
     recovered_prompt = recovered_call.args[0].instructions
+    # Only the recovered snapshot is necessarily masked before prompt construction.
     assert redact_text(immediate_prompt) == redact_text(recovered_prompt)
     assert recovered_prompt.count("STEAM_API_KEY is not used; pasted [REDACTED]") == 4
 
@@ -598,6 +600,7 @@ def test_review_answer_and_planning_retry_survive_repository_restart(tmp_path: P
             repository_slug="owner/repo", base_branch="main", feature_branch="feature",
             on_execution_started=lambda _: None,
         )
+    # Immediate context can still contain credentials; compare after masking them.
     assert redact_text(provider.review_prompts[0]) == redact_text(provider.review_prompts[1])
     assert "STEAM_API_KEY is not used; pasted [REDACTED]" in provider.review_prompts[1]
 
@@ -616,6 +619,7 @@ def test_review_answer_and_planning_retry_survive_repository_restart(tmp_path: P
     immediate_call, recovered_call = planning_provider.execute.call_args_list
     immediate_prompt = immediate_call.args[0].instructions
     recovered_prompt = recovered_call.args[0].instructions
+    # Only the recovered snapshot is necessarily masked before prompt construction.
     assert redact_text(immediate_prompt) == redact_text(recovered_prompt)
     assert "STEAM_API_KEY is not used; pasted [REDACTED]" in recovered_prompt
 
