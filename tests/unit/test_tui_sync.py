@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from textual.css.query import NoMatches
 from textual.worker import WorkerCancelled
 
 from tests.unit.tui_sync import _screen_workers, _wait_for_workers, wait_for_tui
@@ -58,6 +59,45 @@ def test_wait_for_tui_bounds_a_blocked_message_pump() -> None:
             await wait_for_tui(
                 Pilot(), lambda: False, timeout=0.01, description="blocked UI"  # type: ignore[arg-type]
             )
+
+    asyncio.run(drive())
+
+
+def test_wait_for_tui_bounds_an_unmet_predicate() -> None:
+    class Pilot:
+        app = SimpleNamespace(screen=object(), workers=[])
+
+        async def pause(self) -> None:
+            pass
+
+    async def drive() -> None:
+        with pytest.raises(AssertionError, match="Timed out waiting for missing state"):
+            await wait_for_tui(
+                Pilot(), lambda: False, timeout=0.01, description="missing state"  # type: ignore[arg-type]
+            )
+
+    asyncio.run(drive())
+
+
+def test_wait_for_tui_tolerates_a_temporarily_missing_widget() -> None:
+    class Pilot:
+        app = SimpleNamespace(screen=object(), workers=[])
+
+        async def pause(self) -> None:
+            pass
+
+    attempts = 0
+
+    def mounted() -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise NoMatches("not mounted yet")
+        return True
+
+    async def drive() -> None:
+        await wait_for_tui(Pilot(), mounted, description="widget mount")  # type: ignore[arg-type]
+        assert attempts == 2
 
     asyncio.run(drive())
 

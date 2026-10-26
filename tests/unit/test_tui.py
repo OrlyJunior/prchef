@@ -8751,10 +8751,13 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
     })
     for role in AgentRole:
         getattr(config.agents, role.value).provider = "claude"
-        config.agent_presets[role.value] = {"focused": AgentPresetConfig(
-            provider="claude", model="preset-model", reasoning_effort="high",
-            permission_mode="acceptEdits",
-        )}
+        config.agent_presets[role.value] = {
+            "focused": AgentPresetConfig(
+                provider="claude", model="preset-model", reasoning_effort="high",
+                permission_mode="acceptEdits",
+            ),
+            "older": AgentPresetConfig(provider="claude", model="older-model"),
+        }
     original = config.model_dump()
     application = PrchefApp(controller)
 
@@ -8775,6 +8778,11 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
                 assert displayed("model") == "Effective: preset-model (preset)"
                 assert displayed("reasoning") == "Effective: high (preset)"
                 assert displayed("permission") == "Effective: acceptEdits (preset)"
+                # A queued selection for an older value must not undo the current preset.
+                selector = screen.query_one(f"#{prefix}-preset", PrchefSelect)
+                screen.on_select_changed(PrchefSelect.Changed(selector, "older"))
+                assert screen._selected_presets[role] == "focused"
+                assert displayed("model") == "Effective: preset-model (preset)"
                 await wait_for_tui(
                     pilot,
                     lambda: displayed("model") == "Effective: preset-model (preset)"
