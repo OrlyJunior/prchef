@@ -10,6 +10,9 @@ and private key contents are never written to YAML, persistence, or logs.
 2. Grant the planner App **Issues: Read-only**. Grant the implementer App **Contents: Read and write** and **Pull requests: Read and write**.
    Add **Workflows: Read and write** only if the intended repository changes require it. Grant the
    reviewer App only **Pull requests: Read and write**.
+   Workflows permission is not requested by default. An HTTPS push using the implementer App can
+   fail for changes under `.github/workflows` without it; granting it lets the App change CI and
+   release workflows. See Troubleshooting in the README for a manual publishing alternative.
 3. Generate an App private key and store the PEM outside the repository.
 4. Install each App only on repositories prchef should operate on. Record the App ID and the
    installation ID (the latter is visible in the installation settings URL or App installations API).

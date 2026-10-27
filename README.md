@@ -18,6 +18,7 @@ Known limitations:
 - On macOS, recovery checks retained worktrees for surviving processes and leaves an execution interrupted until its worktree is idle.
 - SQLite is the default database, local Qdrant is single-process, and provider concurrency limits don't coordinate across processes.
 - Nothing is rolled back after a failure: a pushed branch or open pull request stays in place. Inspect the saved execution and its worktree before continuing.
+- If a push is refused after a commit, the commit remains in the retained worktree. Continuing from IMPLEMENT reruns the implementer instead of directly retrying the push; if it makes no new changes, continuation can fail before PUSH with `Implementation provider completed without changing files`.
 
 ## Before you run it
 
@@ -286,6 +287,8 @@ We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.m
   its `--dry-run` previews retention decisions. Existing worktrees are never migrated automatically.
 
 ## Troubleshooting
+
+- **`refusing to allow a GitHub App to create or update workflow ... without workflows permission`:** An HTTPS push using the implementer App can be refused when the task changes `.github/workflows` and the App lacks Workflows permission. SSH and pushes without an implementer App use ambient Git credentials, which may be authorized. Workflows permission is not requested by default; granting it lets the App change CI and release workflows. Grant it deliberately, or push the committed branch from the retained worktree with your own credentials using `git push --set-upstream origin <branch>`, then run `gh pr create`. If your push is refused for lack of the `workflow` scope, run `gh auth refresh -s workflow`.
 
 - **`GitHub CLI failed`:** check that `gh` is authenticated and has access to the target repository.
 - **`Executable not found: codex`, `claude`, or `gh`:** install the CLI and make sure it's on your `PATH`, or select a provider you have installed.
