@@ -44,6 +44,9 @@ def test_cleanup_help_matches_recovery_status_policy() -> None:
     for status in statuses:
         assert status in result.output
     assert "active runs remain protected" in option.help
+    alias = next(param for param in command.params if param.name == "all_workspaces")
+    assert "Alias for --include-failed" in alias.help
+    assert "active and unmanaged workspaces remain protected" in alias.help
 
 
 @pytest.mark.parametrize(
@@ -779,6 +782,64 @@ def test_pending_migrations_are_applied_to_configured_database(tmp_path: Path) -
     engine.dispose()
 
 
+@pytest.mark.parametrize("command_name", ["cleanup-workspaces", "debug"])
+def test_saved_state_commands_apply_migrations_and_startup_recovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command_name: str,
+) -> None:
+    control = tmp_path / "control"
+    (control / ".git").mkdir(parents=True)
+    config = tmp_path / "prchef.yml"
+    config.write_text(
+        "defaults:\n  roles: {spec: codex, review: codex}\n"
+        "repositories:\n  example: {path: control}\n",
+        encoding="utf-8",
+    )
+    for name in ("PRCHEF_DATABASE_URL", "PRCHEF_DATABASE_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(
+        database_url=f"sqlite:///{(tmp_path / 'state.db').as_posix()}",
+        database_path=None,
+    )
+    settings.config_file = config
+    main._apply_pending_migrations(settings)
+    repository = main._repository(settings)
+    execution = repository.create_execution("42", "github")
+    repository.update_status(execution.id, WorkflowStatus.RUNNING)
+    repository.start_step(execution.id, WorkflowStage.REVIEW)
+    assert repository.get_execution(execution.id).status is WorkflowStatus.RUNNING
+
+    migrations: list[Settings] = []
+    apply_migrations = main._apply_pending_migrations
+
+    def record_migrations(value: Settings) -> None:
+        migrations.append(value)
+        apply_migrations(value)
+
+    monkeypatch.setattr(main, "Settings", lambda: settings)
+    monkeypatch.setattr(main, "_apply_pending_migrations", record_migrations)
+    # No retained worktrees are needed to observe real database startup recovery.
+    monkeypatch.setattr(main.GitClient, "worktree_paths", lambda self: set())
+    if command_name == "debug":
+        arguments = [
+            "debug", "--from-execution", execution.id, "--stage", "task-loading",
+            "--repository", "owner/repository", "--dry-run",
+        ]
+    else:
+        arguments = ["cleanup-workspaces", "--repository", "example", "--dry-run"]
+    arguments.extend(["--config", str(config)])
+    result = runner.invoke(main.app, arguments)
+
+    assert result.exit_code == 0, result.output
+    assert migrations == [settings]
+    recovered = repository.get_execution(execution.id)
+    assert recovered.status is WorkflowStatus.INTERRUPTED
+    assert recovered.interrupted_from_status is WorkflowStatus.RUNNING
+    assert repository.list_steps(execution.id)[-1].status.value == "INTERRUPTED"
+    if command_name == "debug":
+        # This existing field describes the stage, excluding persistence startup.
+        assert json.loads(result.stdout)["execution_mutated"] is False
+
+
 def test_pending_migrations_accept_percent_in_database_url(tmp_path: Path) -> None:
     database_url = f"sqlite:///{(tmp_path / 'workflow%25.db').as_posix()}"
 
@@ -867,8 +928,9 @@ def test_cli_uses_default_provider_from_configuration(
 
 
 @pytest.mark.parametrize("context_strategy", ["heuristic", "qdrant"])
+@pytest.mark.parametrize("retention_flag", [None, "--include-failed", "--all"])
 def test_cli_cleanup_workspaces_reports_dry_run_candidates(
-    monkeypatch: Any, tmp_path: Path, context_strategy: str
+    monkeypatch: Any, tmp_path: Path, context_strategy: str, retention_flag: str | None
 ) -> None:
     control = tmp_path / "control"
     control.mkdir()
@@ -923,13 +985,13 @@ def test_cli_cleanup_workspaces_reports_dry_run_candidates(
     monkeypatch.setattr(main, "WorkspaceCleanupService", CleanupService)
     monkeypatch.setattr(main, "_migrated_repository", lambda settings: object())
 
-    result = runner.invoke(
-        main.app,
-        ["cleanup-workspaces", "--repository", "example", "--dry-run"],
-    )
+    arguments = ["cleanup-workspaces", "--repository", "example", "--dry-run"]
+    if retention_flag is not None:
+        arguments.append(retention_flag)
+    result = runner.invoke(main.app, arguments)
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["workspaces"][0]["retention"] == "CLEANABLE"
-    assert CleanupService.calls == [(True, False)]
+    assert CleanupService.calls == [(True, retention_flag is not None)]
     assert bool(IndexStrategy.created) == (context_strategy == "qdrant")
     assert (CleanupService.delete_callback is not None) == (context_strategy == "qdrant")
