@@ -1371,6 +1371,7 @@ class WorkflowRunnerScreen(Screen[None]):
         )
         self._load_tasks(repository, provider, token)
 
+    # Completion refreshes must not supersede the batch/workflow worker calling them.
     @work(thread=True, exclusive=True, group="task-load")
     def _load_tasks(self, repository: str, provider: str, token: int) -> None:
         try:

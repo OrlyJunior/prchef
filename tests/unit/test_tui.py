@@ -82,6 +82,7 @@ from prchef.tui.screens.task_selector import (
     TaskTableHeader,
 )
 from prchef.tui.screens.workflow_runner import (
+    _MANUAL_PRESET,
     FreshRunConfirmation,
     StopWorkflowConfirmation,
     WorkflowRunnerScreen,
@@ -5659,9 +5660,11 @@ def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
                 # is still active. Starting an exclusive worker in its group
                 # would cancel it before the callback can return.
                 worker = next(
-                    worker for worker in application.workers
-                    if worker.node is screen and worker.name == "_run_batch"
+                    (worker for worker in application.workers
+                     if worker.node is screen and worker.name == "_run_batch"),
+                    None,
                 )
+                assert worker is not None, "Task refresh must run before the batch worker exits"
                 batch_workers.append(worker)
                 refresh()
                 refresh_workers.extend(
@@ -5704,6 +5707,8 @@ def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
                 description="ordered batch completion",
             )
             assert [call[0] for call in service.calls] == ["12", "3"]
+            assert len(batch_workers) == 1, "Expected one batch completion refresh"
+            assert not batch_workers[0].is_cancelled, "Task refresh cancelled the batch worker"
             assert len(batch_workers) == 1 and refresh_workers
             await asyncio.wait_for(batch_workers[0].wait(), timeout=10)
             assert not batch_workers[0].is_cancelled
@@ -8804,13 +8809,20 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
             await settle_tui(pilot)
             screen = application.screen
             applied: list[tuple[AgentRole, str]] = []
+            restored: list[AgentRole] = []
             select_preset = screen._select_role_preset
+            restore_defaults = screen._restore_role_defaults
 
             def observe_preset(role: AgentRole, prefix: str, name: str) -> None:
                 applied.append((role, name))
                 select_preset(role, prefix, name)
 
+            def observe_restore(role: AgentRole, prefix: str) -> None:
+                restored.append(role)
+                restore_defaults(role, prefix)
+
             monkeypatch.setattr(screen, "_select_role_preset", observe_preset)
+            monkeypatch.setattr(screen, "_restore_role_defaults", observe_restore)
             for role, prefix in screen._role_fields():
                 def displayed(control: str, prefix: str = prefix) -> str:
                     return str(screen.query_one(f"#{prefix}-{control}-source", Static).renderable)
@@ -8819,7 +8831,9 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
                 assert displayed("reasoning") == "Effective: low (provider)"
                 assert displayed("permission") == "Effective: dontAsk (default)"
                 selector = screen.query_one(f"#{prefix}-preset", PrchefSelect)
+                restores_before_selection = len(restored)
                 selector.value = "older"
+                selector.value = _MANUAL_PRESET
                 selector.value = "focused"
                 screen._select_role_preset(role, prefix, "focused")
                 assert displayed("model") == "Effective: preset-model (preset)"
@@ -8835,6 +8849,9 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
                     description=f"{prefix} preset sources",
                 )
                 assert (role, "older") not in applied
+                assert len(restored) == restores_before_selection, (
+                    "Stale manual selection restored defaults"
+                )
                 assert screen._selected_presets[role] == "focused"
                 assert displayed("model") == "Effective: preset-model (preset)"
                 assert displayed("reasoning") == "Effective: high (preset)"

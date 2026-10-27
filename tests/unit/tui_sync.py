@@ -190,6 +190,8 @@ async def wait_for_tui(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     try:
+        # The deadline shares the remaining budget with worker waits; this
+        # outer bound also interrupts an unresponsive Pilot.pause().
         async with asyncio.timeout(timeout):
             while True:
                 remaining = deadline - loop.time()
