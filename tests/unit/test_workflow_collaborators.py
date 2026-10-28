@@ -53,8 +53,10 @@ def test_commit_message_preserves_fitting_subject(title: str) -> None:
             "Scaffold the Electron + React + TypeScript app with test,",
         ),
         ("A " + "x" * 70, "A"),
-        ("Meaning " + "x" * 40 + " AND, (With) THE! " + "tail" * 10,
-         "Meaning " + "x" * 40),
+        (
+            "Meaning " + "x" * 40 + " AND, (With) THE! " + "tail" * 10,
+            "Meaning " + "x" * 40,
+        ),
         ("and with the " * 10, "and with the and with the and with the and with the and with"),
     ],
 )
@@ -139,13 +141,15 @@ def test_commit_reconciliation_checks_subject_and_ancestry(
     config = SimpleNamespace(repository=SimpleNamespace(base_branch="main", protected_branches=[]))
     action = StageActions(repository, events)
     if accepted:
-        action._commit_changes("one", SimpleNamespace(git=git), task, "feature", config,
-                               reconcile=True)
+        action._commit_changes(
+            "one", SimpleNamespace(git=git), task, "feature", config, reconcile=True
+        )
         repository.record_commit.assert_called_once_with("one", head)
     else:
         with pytest.raises(WorkflowError, match="Cannot verify"):
-            action._commit_changes("one", SimpleNamespace(git=git), task, "feature", config,
-                                   reconcile=True)
+            action._commit_changes(
+                "one", SimpleNamespace(git=git), task, "feature", config, reconcile=True
+            )
         repository.record_commit.assert_not_called()
     git.ensure_merge_base.assert_called_once_with("base")
     git.commit_all.assert_not_called()
