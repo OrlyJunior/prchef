@@ -10,10 +10,159 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from prchef.clients import github_client
 from prchef.clients.command_client import CommandResult
 from prchef.clients.exceptions import GitHubClientError
 from prchef.clients.github_client import GitHubAppAuthenticator, GitHubClient
 from prchef.config.project_config import GitHubAppSettings
+
+
+@pytest.fixture(autouse=True)
+def isolate_bot_user_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(github_client, "_BOT_USER_IDS", {})
+
+
+def make_bot_authenticator(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+    *,
+    api_url: str = "https://api.github.com",
+    bot_name: str | None = None,
+    bot_user_id: int | None = None,
+) -> GitHubAppAuthenticator:
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "fake-private-key")
+    monkeypatch.setattr(github_client.jwt, "encode", lambda *args, **kwargs: "app-jwt")
+    return GitHubAppAuthenticator(
+        GitHubAppSettings(
+            app_id=123, installation_id=456, private_key_env="GITHUB_APP_PRIVATE_KEY",
+            api_url=api_url, bot_name=bot_name, bot_user_id=bot_user_id,
+        ),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now=lambda: datetime(2030, 1, 1, tzinfo=UTC),
+    )
+
+
+def test_bot_identity_resolves_and_caches_user_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/app"):
+            return httpx.Response(200, json={"slug": "implementer", "id": 123})
+        if request.method == "POST":
+            return httpx.Response(201, json={
+                "token": "installation-token", "expires_at": "2030-01-01T01:00:00Z",
+            })
+        return httpx.Response(200, json={"id": 987})
+
+    auth = make_bot_authenticator(monkeypatch, handler, api_url="https://example.com/api/v3")
+    expected = ("implementer[bot]", "987+implementer[bot]@users.noreply.github.com")
+    assert auth.bot_identity() == expected
+    assert auth.bot_identity() == expected
+    assert [r.url.path for r in requests] == [
+        "/api/v3/app", "/api/v3/app/installations/456/access_tokens",
+        "/api/v3/users/implementer[bot]",
+    ]
+    assert requests[2].url.raw_path.endswith(b"/users/implementer%5Bbot%5D")
+    assert requests[0].headers["authorization"] == "Bearer app-jwt"
+    assert requests[2].headers["authorization"] == "Bearer installation-token"
+    assert requests[2].headers["x-github-api-version"] == "2022-11-28"
+
+    recreated = make_bot_authenticator(monkeypatch, handler, api_url="https://example.com/api/v3/")
+    assert recreated.bot_identity() == expected
+    assert len(requests) == 4  # Only App metadata is needed by the new instance.
+
+    override = make_bot_authenticator(
+        monkeypatch, handler, api_url="https://example.com/api/v3",
+        bot_name="implementer[bot]", bot_user_id=555,
+    )
+    assert override.bot_identity() == (
+        "implementer[bot]", "555+implementer[bot]@users.noreply.github.com",
+    )
+    assert len(requests) == 4
+
+
+def test_bot_user_cache_isolated_by_endpoint_and_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    slug = "first"
+    lookups: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/app"):
+            return httpx.Response(200, json={"slug": slug, "id": 123})
+        if request.method == "POST":
+            return httpx.Response(201, json={
+                "token": "token", "expires_at": "2030-01-01T01:00:00Z",
+            })
+        lookups.append(str(request.url))
+        return httpx.Response(200, json={"id": len(lookups)})
+
+    assert make_bot_authenticator(monkeypatch, handler).bot_identity()[1].startswith("1+")
+    other = make_bot_authenticator(monkeypatch, handler, api_url="https://other.test/api")
+    assert other.bot_identity()[1].startswith("2+")
+    other_prefix = make_bot_authenticator(monkeypatch, handler, api_url="https://other.test/api/v3")
+    assert other_prefix.bot_identity()[1].startswith("3+")
+    slug = "second"
+    assert make_bot_authenticator(monkeypatch, handler).bot_identity()[1].startswith("4+")
+    assert len(lookups) == 4
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        ("network", "network error"), ("timeout", "network timeout"),
+        (403, "HTTP 403"), (404, "HTTP 404"), ("json", "invalid user response"),
+        ({}, "invalid user response"), ({"id": None}, "invalid user response"),
+        ({"id": True}, "invalid user response"), ({"id": "987"}, "invalid user response"),
+        ({"id": 0}, "invalid user response"), ({"id": -1}, "invalid user response"),
+        ([], "invalid user response"), ("token", "installation token acquisition failed"),
+    ],
+)
+def test_bot_user_lookup_failure_falls_back_and_recovers(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: Any, reason: str,
+) -> None:
+    failed = True
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/app"):
+            return httpx.Response(200, json={"slug": "implementer", "id": 123})
+        if request.method == "POST":
+            if failed and failure == "token":
+                return httpx.Response(403, text="secret-response-body")
+            return httpx.Response(201, json={
+                "token": "secret-token", "expires_at": "2030-01-01T01:00:00Z",
+            })
+        if not failed:
+            return httpx.Response(200, json={"id": 987})
+        if failure == "network":
+            raise httpx.ConnectError("secret exception", request=request)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("secret exception", request=request)
+        if isinstance(failure, int):
+            return httpx.Response(failure, text="secret-response-body")
+        if failure == "json":
+            return httpx.Response(200, text="secret-response-body")
+        return httpx.Response(200, json=failure)
+
+    auth = make_bot_authenticator(monkeypatch, handler)
+    expected = ("implementer[bot]", "123+implementer[bot]@users.noreply.github.com")
+    assert auth.bot_identity() == expected
+    count = len(requests)
+    assert auth.bot_identity() == expected
+    assert len(requests) == count
+    assert reason in caplog.text
+    assert "App ID" in caplog.text and "attribution and avatar may be incorrect" in caplog.text
+    assert len(caplog.records) == 1
+    assert "secret" not in caplog.text
+    failed = False
+    assert make_bot_authenticator(monkeypatch, handler).bot_identity()[1].startswith("987+")
+
+
+def test_bot_identity_preserves_app_metadata_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    auth = make_bot_authenticator(monkeypatch, lambda request: httpx.Response(403))
+    with pytest.raises(GitHubClientError, match="Could not resolve GitHub App bot identity"):
+        auth.bot_identity()
 
 
 class RecordingCommands:

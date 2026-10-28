@@ -56,7 +56,11 @@ defaults:
 When an App is configured, `app_id`, `installation_id`, and exactly one private-key source are
 required. `app` is the reviewer identity; `implementer_app` and `planner_app` are independent. Never commit the PEM
 or place it in versioned YAML or `.env.example`. Optionally configure `bot_name` and `bot_user_id`
-together for known commit attribution; otherwise prchef resolves the App bot identity.
+together for known commit attribution; this pair overrides automatic resolution. Otherwise,
+prchef looks up the App bot's user ID using the installation token and caches successful
+lookups in memory for the process, separately for each API endpoint and bot login. If that
+lookup fails, prchef logs a warning and uses the App ID in the commit email; GitHub attribution
+and the avatar may then be incorrect. Failure to discover the App identity itself remains an error.
 
 The standard prchef installation already includes the PyJWT cryptography support required
 to sign GitHub App JWTs. No separate `pip install "PyJWT[crypto]"` step is needed.

@@ -7,7 +7,9 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
+from threading import Lock
 from typing import Final, Protocol, cast
+from urllib.parse import quote
 
 import httpx
 
@@ -21,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 _GITHUB_API_VERSION: Final = "2022-11-28"
 _INSTALLATION_TOKEN_REFRESH_BUFFER: Final = timedelta(seconds=60)
+_BOT_USER_IDS: dict[tuple[str, str], int] = {}
+_BOT_USER_IDS_LOCK = Lock()
 
 
 class _JwtEncoder(Protocol):
@@ -136,7 +140,48 @@ class GitHubAppAuthenticator:
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             raise GitHubClientError("Could not resolve GitHub App bot identity") from exc
         bot_name = f"{slug}[bot]"
-        self._bot_identity = (bot_name, f"{app_id}+{bot_name}@users.noreply.github.com")
+        api_url = httpx.URL(self._settings.api_url).copy_with(userinfo=b"")
+        cache_key = (str(api_url).rstrip("/"), bot_name)
+        with _BOT_USER_IDS_LOCK:
+            user_id = _BOT_USER_IDS.get(cache_key)
+        if user_id is None:
+            try:
+                response = self._http.get(
+                    f"{self._settings.api_url}/users/{quote(bot_name, safe='')}",
+                    headers={
+                        "Accept": "application/vnd.github+json",
+                        "Authorization": f"Bearer {self.token()}",
+                        "X-GitHub-Api-Version": _GITHUB_API_VERSION,
+                    },
+                )
+                response.raise_for_status()
+                user_payload = response.json()
+                if not isinstance(user_payload, dict):
+                    raise ValueError("invalid user response")
+                user_id = user_payload.get("id")
+                if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+                    raise ValueError("invalid user ID")
+            except (GitHubClientError, httpx.HTTPError, ValueError) as exc:
+                if isinstance(exc, httpx.HTTPStatusError):
+                    reason = f"HTTP {exc.response.status_code}"
+                elif isinstance(exc, httpx.TimeoutException):
+                    reason = "network timeout"
+                elif isinstance(exc, httpx.HTTPError):
+                    reason = "network error"
+                elif isinstance(exc, GitHubClientError):
+                    reason = "installation token acquisition failed"
+                else:
+                    reason = "invalid user response"
+                logger.warning(
+                    "[github] Could not resolve bot user ID (%s); using the App ID. "
+                    "Commit attribution and avatar may be incorrect.",
+                    redact_text(reason),
+                )
+                user_id = app_id
+            else:
+                with _BOT_USER_IDS_LOCK:
+                    _BOT_USER_IDS[cache_key] = user_id
+        self._bot_identity = (bot_name, f"{user_id}+{bot_name}@users.noreply.github.com")
         return self._bot_identity
 
     def _app_jwt(self, now: datetime) -> str:

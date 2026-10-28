@@ -1,12 +1,17 @@
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
+from prchef.clients import github_client
 from prchef.clients.command_client import CommandClient, CommandResult
 from prchef.clients.exceptions import GitClientError
 from prchef.clients.git_client import GitClient
+from prchef.clients.github_client import GitHubAppAuthenticator
+from prchef.config.project_config import GitHubAppSettings
 from prchef.models.development_task import DevelopmentTask
 from prchef.services.repository_context import (
     HeuristicRepositoryContextStrategy,
@@ -39,6 +44,42 @@ class AppAuthenticator:
 
     def bot_identity(self) -> tuple[str, str]:
         return "implementer[bot]", "42+implementer[bot]@users.noreply.github.com"
+
+
+@pytest.mark.parametrize(("lookup_status", "expected_id"), [(200, 987), (403, 123)])
+def test_commit_uses_real_app_identity_with_lookup_or_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lookup_status: int, expected_id: int,
+) -> None:
+    monkeypatch.setattr(github_client, "_BOT_USER_IDS", {})
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "key")
+    monkeypatch.setattr(github_client.jwt, "encode", lambda *args, **kwargs: "jwt")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app":
+            return httpx.Response(200, json={"slug": "implementer", "id": 123})
+        if request.method == "POST":
+            return httpx.Response(201, json={
+                "token": "token", "expires_at": "2030-01-01T01:00:00Z",
+            })
+        return httpx.Response(lookup_status, json={"id": 987})
+
+    auth = GitHubAppAuthenticator(
+        GitHubAppSettings(
+            app_id=123, installation_id=456, private_key_env="GITHUB_APP_PRIVATE_KEY",
+        ),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now=lambda: datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    commands = RecordingCommands()
+    GitClient(commands, tmp_path, implementer_authenticator=auth).commit_all(
+        "feat: test", "feature/test", []
+    )
+    commit = next(call for call in commands.calls if call["command"][1] == "commit")
+    for role in ("AUTHOR", "COMMITTER"):
+        assert commit["env"][f"GIT_{role}_NAME"] == "implementer[bot]"
+        assert commit["env"][f"GIT_{role}_EMAIL"] == (
+            f"{expected_id}+implementer[bot]@users.noreply.github.com"
+        )
 
 
 @pytest.mark.parametrize("branch", ["main", "master", "develop", "release"])
