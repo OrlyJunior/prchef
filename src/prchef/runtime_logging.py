@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import string
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -11,10 +12,12 @@ if TYPE_CHECKING:
     from prchef.models.code_review import CodeReview
     from prchef.models.repository_spec import RepositorySpec
 
+# Unknown whitespace-separated values are not inferred as credentials; explicit
+# assignments and independently recognized token formats remain protected.
 _SENSITIVE_VALUE = re.compile(
     r"(?i)(?<![a-z0-9_-])(jules_api_key|orchestrator_jules_api_key|github_token|gh_token|"
     r"x-api-key|[a-z0-9_-]*(?:api[_-]?key|secret|password))"
-    r"(\s*+[=:]\s*+|\s++)([^\s,;]++)"
+    r"(\s*+[=:]\s*+)([^\s,;]++)"
 )
 _SENSITIVE_HEADER_VALUE = re.compile(
     r"(?i)(authorization|token)(\s*+[=:]\s*+)([^\s,;]++)"
@@ -34,6 +37,7 @@ _PRIVATE_KEY_MARKER = re.compile(
 _SENSITIVE_FIELD_NAME = re.compile(
     r"(?i)(?:^|[_-])(?:api[_-]?key|token|secret|password|authorization|private[_-]?key)(?:$|[_-])"
 )
+_OPAQUE_TOKEN_CHARACTERS = frozenset(string.digits + string.punctuation)
 
 
 class UtcTimestampFormatter(logging.Formatter):
@@ -76,6 +80,17 @@ def _redact_private_keys(value: str) -> str:
     return "".join(parts)
 
 
+def _redact_header_value(match: re.Match[str]) -> str:
+    name, separator, value = match.groups()
+    # Generic token: values need an opaque shape: at least 20 characters and
+    # an ASCII digit or punctuation. This conservative heuristic leaves purely
+    # alphabetic values intact, but can mask long paths or URLs.
+    if name.casefold() == "token" and separator.strip() == ":":
+        if len(value) < 20 or not any(c in _OPAQUE_TOKEN_CHARACTERS for c in value):
+            return match.group(0)
+    return f"{name}=[REDACTED]"
+
+
 def redact_text(value: str) -> str:
     """Remove common credential forms before text reaches a log handler."""
     # Redact authorization schemes first. Otherwise ``Authorization: Basic ...``
@@ -85,7 +100,7 @@ def redact_text(value: str) -> str:
     redacted = _BASIC_AUTHORIZATION.sub(r"\1Basic [REDACTED]", redacted)
     redacted = _BEARER.sub("Bearer [REDACTED]", redacted)
     redacted = _SENSITIVE_VALUE.sub(r"\1=[REDACTED]", redacted)
-    redacted = _SENSITIVE_HEADER_VALUE.sub(r"\1=[REDACTED]", redacted)
+    redacted = _SENSITIVE_HEADER_VALUE.sub(_redact_header_value, redacted)
     return _GITHUB_TOKEN.sub("[REDACTED]", redacted)
 
 

@@ -13,13 +13,17 @@ import prchef.repositories.workflow_repository as workflow_repository_module
 from prchef.config.database import build_engine, build_session_factory
 from prchef.config.project_config import ProjectConfigLoader, WorkspaceSettings
 from prchef.models import (
+    AgentResult,
     CodeReview,
     DevelopmentTask,
     DiagnosticCategory,
     ExecutionDiagnostic,
     PolishOutcome,
+    PullRequest,
+    RepositorySpec,
     ReviewDecision,
     StepStatus,
+    ValidationResult,
     WorkflowStage,
     WorkflowStatus,
 )
@@ -27,8 +31,14 @@ from prchef.repositories.workflow_repository import (
     WorkflowRepository,
     _lock_fresh_run_admission,
 )
+from prchef.runtime_logging import redact_text
+from prchef.services.implementation_service import ImplementationService
+from prchef.services.review_service import ReviewService
+from prchef.services.spec_service import SpecService
 from prchef.services.workflow_service import WorkflowService
+from prchef.services.workflow_stage_values import StageValues
 from prchef.workspace.manager import WorkspaceManager
+from tests.unit.fakes import FakeAgentProvider, FakeGitClient
 
 
 @pytest.mark.parametrize(
@@ -412,6 +422,206 @@ def test_execution_diagnostics_are_redacted_and_available_after_repository_resta
     assert diagnostics[0].category is DiagnosticCategory.VALIDATION
     assert diagnostics[0].payload["command"] == "pytest"
     assert diagnostics[0].payload["stderr"] == "Authorization=[REDACTED] [REDACTED]\n[REDACTED]"
+
+
+def test_prose_and_credentials_round_trip_through_workflow_storage(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "prose.db")
+    execution = repository.create_execution("prose")
+    original = "STEAM_API_KEY is not used; pasted ghp_ABC123xyz for reference."
+    expected = "STEAM_API_KEY is not used; pasted [REDACTED] for reference."
+    repository.update_task(execution.id, DevelopmentTask(
+        id="prose", source="trello", title="Task", description=original, url="https://example.test"
+    ))
+    repository.record_spec(execution.id, RepositorySpec(original, original))
+    repository.record_review(execution.id, CodeReview(
+        result=ReviewDecision.CHANGES_REQUESTED, summary=original, blocking_findings=[original]
+    ))
+    repository.record_diagnostic(ExecutionDiagnostic(
+        execution_id=execution.id, category=DiagnosticCategory.VALIDATION,
+        stage=WorkflowStage.IMPLEMENT,
+        payload={"kind": "MANUAL_CONTINUATION", "feedback": original},
+    ))
+    repository.request_human_input(execution.id, WorkflowStage.GENERATE_SPEC, original)
+    repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+    response = repository.respond_to_human_input(execution.id, original)
+
+    database_url = f"sqlite:///{(tmp_path / 'prose.db').as_posix()}"
+    restarted = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    persisted = restarted.get_execution(execution.id)
+    assert persisted.task_snapshot is not None
+    assert persisted.spec_snapshot is not None
+    assert persisted.review_snapshot is not None
+    assert persisted.task_snapshot["description"] == expected
+    assert persisted.spec_snapshot["technical_context"] == expected
+    assert persisted.review_snapshot["blocking_findings"] == [expected]
+    assert response.response == persisted.human_interactions[0].response == expected
+    assert persisted.human_interactions[0].prompt == expected
+    assert restarted.list_diagnostics(execution.id)[0].payload["feedback"] == expected
+
+
+def test_rebuilt_task_and_answer_reach_planner_with_the_same_prose(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "planner-prose.db")
+    execution = repository.create_execution("planner-prose")
+    prose = "STEAM_API_KEY is not used; pasted ghp_ABC123xyz for reference."
+    task = DevelopmentTask(
+        id="planner-prose", source="trello", title="Task", description=prose,
+        url="https://example.test",
+    )
+    repository.update_task(execution.id, task)
+    repository.request_human_input(execution.id, WorkflowStage.GENERATE_SPEC, "Clarify")
+    repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+    response = repository.respond_to_human_input(execution.id, prose)
+    restarted = WorkflowRepository(build_session_factory(build_engine(
+        f"sqlite:///{(tmp_path / 'planner-prose.db').as_posix()}"
+    )))
+    recovered = restarted.get_execution(execution.id)
+    immediate_task = StageValues._task_with_responses(
+        task, [(response.prompt, response.response or "")]
+    )
+    recovered_task = StageValues._task_with_responses(
+        StageValues._task_from_snapshot(recovered),
+        [
+            (recovered.human_interactions[0].prompt, recovered.human_interactions[0].response or "")
+        ],
+    )
+
+    class Context:
+        def render(self, request: object) -> str:
+            return ""
+
+    class Provider(FakeAgentProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompts: list[str] = []
+
+        def execute(self, request, *, on_started=None):
+            self.prompts.append(request.instructions)
+            return super().execute(request, on_started=on_started)
+
+    provider = Provider()
+    planner = SpecService(provider, Context())
+    for candidate in (immediate_task, recovered_task):
+        planner.generate(candidate, tmp_path, "owner/repo", "main", lambda _: None)
+    # Immediate context can still contain credentials; compare after masking them.
+    assert redact_text(provider.prompts[0]) == redact_text(provider.prompts[1])
+    assert provider.prompts[1].count("STEAM_API_KEY is not used; pasted [REDACTED]") == 2
+
+
+def test_continuation_prompt_matches_rebuilt_snapshots_and_feedback(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "continuation-prose.db")
+    execution = repository.create_execution("continuation-prose")
+    prose = "STEAM_API_KEY is not used; pasted ghp_ABC123xyz for reference."
+    task = DevelopmentTask(
+        id="continuation-prose", source="trello", title="Task", description=prose,
+        url="https://example.test",
+    )
+    spec = RepositorySpec(prose, prose)
+    repository.update_task(execution.id, task)
+    repository.record_spec(execution.id, spec)
+    repository.record_diagnostic(ExecutionDiagnostic(
+        execution_id=execution.id, category=DiagnosticCategory.WORKFLOW_EVENT,
+        stage=WorkflowStage.IMPLEMENT,
+        payload={"kind": "MANUAL_CONTINUATION", "feedback": prose},
+    ))
+    restarted = WorkflowRepository(build_session_factory(build_engine(
+        f"sqlite:///{(tmp_path / 'continuation-prose.db').as_posix()}"
+    )))
+    recovered = restarted.get_execution(execution.id)
+    assert recovered.spec_snapshot is not None
+    feedback = restarted.list_diagnostics(execution.id)[0].payload["feedback"]
+    provider = Mock()
+    provider.execute.return_value = AgentResult(output="Done")
+    implementer = ImplementationService(provider, FakeGitClient())
+    implementer.continue_implementation(task, spec, prose, tmp_path)
+    implementer.continue_implementation(
+        StageValues._task_from_snapshot(recovered), RepositorySpec(**recovered.spec_snapshot),
+        feedback, tmp_path,
+    )
+    immediate, recovered_call = provider.execute.call_args_list
+    immediate_prompt = immediate.args[0].instructions
+    recovered_prompt = recovered_call.args[0].instructions
+    # Only the recovered snapshot is necessarily masked before prompt construction.
+    assert redact_text(immediate_prompt) == redact_text(recovered_prompt)
+    assert recovered_prompt.count("STEAM_API_KEY is not used; pasted [REDACTED]") == 4
+
+
+def test_review_answer_and_planning_retry_survive_repository_restart(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "review-prose.db")
+    execution = repository.create_execution("review-prose")
+    prose = "STEAM_API_KEY is not used; pasted ghp_ABC123xyz for reference."
+    task = DevelopmentTask(
+        id="review-prose", source="trello", title="Task", description=prose,
+        url="https://example.test",
+    )
+    spec = RepositorySpec(prose, prose)
+    review = CodeReview(
+        result=ReviewDecision.NEEDS_HUMAN, summary=prose, blocking_findings=[prose]
+    )
+    repository.update_task(execution.id, task)
+    repository.record_spec(execution.id, spec)
+    repository.record_review(execution.id, review)
+    repository.request_human_input(
+        execution.id, WorkflowStage.REVIEW, StageValues._review_prompt(review)
+    )
+    repository.finish(execution.id, WorkflowStatus.NEEDS_HUMAN)
+    response = repository.respond_to_human_input(execution.id, prose)
+    repository.record_diagnostic(ExecutionDiagnostic(
+        execution_id=execution.id, category=DiagnosticCategory.WORKFLOW_EVENT,
+        stage=WorkflowStage.GENERATE_SPEC,
+        payload={"kind": "MANUAL_CONTINUATION", "feedback": prose},
+    ))
+    restarted = WorkflowRepository(build_session_factory(build_engine(
+        f"sqlite:///{(tmp_path / 'review-prose.db').as_posix()}"
+    )))
+    recovered = restarted.get_execution(execution.id)
+    assert recovered.spec_snapshot is not None
+    interaction = recovered.human_interactions[0]
+    immediate_task = StageValues._task_with_responses(
+        task, [(response.prompt, response.response or "")]
+    )
+    recovered_task = StageValues._task_with_responses(
+        StageValues._task_from_snapshot(recovered),
+        [(interaction.prompt, interaction.response or "")],
+    )
+
+    class Context:
+        def render(self, request: object) -> str:
+            return ""
+
+    provider = FakeAgentProvider()
+    reviewer = ReviewService(provider, Context())
+    for candidate, candidate_spec in (
+        (immediate_task, spec), (recovered_task, RepositorySpec(**recovered.spec_snapshot))
+    ):
+        reviewer.review(
+            task=candidate, spec=candidate_spec,
+            pull_request=PullRequest(1, "https://example.test/1", "Task", "main", "feature"),
+            diff="diff", validation=ValidationResult(success=True), repository_path=tmp_path,
+            repository_slug="owner/repo", base_branch="main", feature_branch="feature",
+            on_execution_started=lambda _: None,
+        )
+    # Immediate context can still contain credentials; compare after masking them.
+    assert redact_text(provider.review_prompts[0]) == redact_text(provider.review_prompts[1])
+    assert "STEAM_API_KEY is not used; pasted [REDACTED]" in provider.review_prompts[1]
+
+    feedback = restarted.list_diagnostics(execution.id)[0].payload["feedback"]
+    immediate_retry = StageValues._task_with_responses(
+        immediate_task, [("Continuation feedback for repeating planning:", prose)]
+    )
+    recovered_retry = StageValues._task_with_responses(
+        recovered_task, [("Continuation feedback for repeating planning:", feedback)]
+    )
+    planning_provider = FakeAgentProvider()
+    planning_provider.execute = Mock(wraps=planning_provider.execute)  # type: ignore[method-assign]
+    planner = SpecService(planning_provider, Context())
+    for candidate in (immediate_retry, recovered_retry):
+        planner.generate(candidate, tmp_path, "owner/repo", "main", lambda _: None)
+    immediate_call, recovered_call = planning_provider.execute.call_args_list
+    immediate_prompt = immediate_call.args[0].instructions
+    recovered_prompt = recovered_call.args[0].instructions
+    # Only the recovered snapshot is necessarily masked before prompt construction.
+    assert redact_text(immediate_prompt) == redact_text(recovered_prompt)
+    assert "STEAM_API_KEY is not used; pasted [REDACTED]" in recovered_prompt
 
 
 def test_diagnostic_cursor_reads_new_rows_in_id_order_after_restart(tmp_path: Path) -> None:

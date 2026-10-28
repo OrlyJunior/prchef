@@ -433,6 +433,7 @@ def test_planner_comments_are_bounded_supporting_context_only(tmp_path: Path) ->
         ("", "[empty]"),
         (None, "[unavailable: description could not be fetched]"),
         ("api_key=hunter2", "api_key=[REDACTED]"),
+        ("STEAM_API_KEY is not used; ghp_ABC123xyz", "STEAM_API_KEY is not used; [REDACTED]"),
         ("x" * 12_001, "[truncated to 12000 characters]"),
     ],
 )
@@ -684,6 +685,19 @@ def test_validation_failures_render_timeouts_alongside_completed_failures() -> N
     assert "Stderr captured before timeout:\napi_key=[REDACTED] waiting" in timed_out
     assert "hunter2" not in rendered
     assert "ruff" not in rendered
+
+
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_validation_output_keeps_prose_and_masks_pasted_token(timed_out: bool) -> None:
+    validation = ValidationResult(success=False, checks=[ValidationCheck(
+        name="pytest", command=["pytest"], success=False,
+        exit_code=None if timed_out else 1, timed_out=timed_out, timeout_seconds=600,
+        stderr="STEAM_API_KEY is not used; ghp_ABC123xyz",
+    )])
+
+    rendered = ImplementationService.render_validation_failures(validation)
+    assert "STEAM_API_KEY is not used; [REDACTED]" in rendered
+    assert "ghp_ABC123xyz" not in rendered
 
 
 def test_validation_correction_prompt_keeps_each_pytest_failure_and_full_summary(
