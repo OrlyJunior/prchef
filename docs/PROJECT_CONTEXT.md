@@ -115,8 +115,9 @@ tests and repository retrieval.
   workspace/branch can be continued from `IMPLEMENT`; an existing PR must still be open.
 - Configuration errors and explicit human-needed errors end as `NEEDS_HUMAN`; everything else
   ends as `FAILED`.
-- `debug` is diagnostics, not resume: it runs one boundary and never mutates executions, branches,
-  commits, or PRs.
+- `debug` stages leave executions, branches, commits, and PRs unchanged. Saved-state startup
+  can migrate data and mark orphaned active runs `INTERRUPTED`; `execution_mutated: false`
+  excludes startup.
 
 ## Concurrency and providers
 

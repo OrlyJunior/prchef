@@ -239,7 +239,10 @@ Run `prchef --help` or `prchef SUBCOMMAND --help` for the full option list.
 `show`, workflow commands, TUI startup, and cleanup initialize persistence and apply pending
 database migrations. Cleanup's `--dry-run` prevents worktree deletion; it does not make
 database access read-only. `debug --dry-run` avoids integrations, but adding
-`--from-execution` still opens persistence and applies migrations.
+`--from-execution` still opens persistence and applies migrations and startup recovery,
+which can mark orphaned active executions `INTERRUPTED`, as can cleanup's `--dry-run`.
+The debug JSON field `execution_mutated: false` describes the diagnostic stage itself;
+it does not include these startup changes.
 Cleanup's `--include-failed` (or `--all`) also includes cancelled and human-blocked executions;
 active, interrupted, and unmanaged worktrees remain protected.
 
