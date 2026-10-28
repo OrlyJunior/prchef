@@ -18,6 +18,7 @@ Known limitations:
 - On macOS, recovery checks retained worktrees for surviving processes and leaves an execution interrupted until its worktree is idle.
 - SQLite is the default database, local Qdrant is single-process, and provider concurrency limits don't coordinate across processes.
 - Nothing is rolled back after a failure: a pushed branch or open pull request stays in place. Inspect the saved execution and its worktree before continuing.
+- If a push is refused after a commit, the commit remains in the retained worktree. Continuing from IMPLEMENT reruns the implementer instead of directly retrying the push; if it makes no new changes, continuation can fail before PUSH with `Implementation provider completed without changing files`.
 
 ## Before you run it
 
@@ -287,6 +288,8 @@ We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.m
 
 ## Troubleshooting
 
+- **`refusing to allow a GitHub App to create or update workflow ... without workflows permission`:** An HTTPS push using the implementer App can be refused when the task changes `.github/workflows` and the App lacks Workflows permission. SSH and pushes without an implementer App use ambient Git credentials, which may be authorized. Workflows permission is not requested by default; granting it lets the App change CI and release workflows. Grant it deliberately, or push the committed branch from the retained worktree with your own credentials using `git push --set-upstream origin <branch>`, then run `gh pr create`. If your push is refused for lack of the `workflow` scope, run `gh auth refresh -s workflow`.
+
 - **`GitHub CLI failed`:** check that `gh` is authenticated and has access to the target repository.
 - **`Executable not found: codex`, `claude`, or `gh`:** install the CLI and make sure it's on your `PATH`, or select a provider you have installed.
 - **Claude Code authentication fails with `bare_mode: true`:** bare mode requires an API key or supported cloud credentials. For a Claude subscription, omit `bare_mode` or set it to `false` and authenticate with Claude Code outside prchef.
@@ -336,7 +339,7 @@ Database schema changes use versioned Alembic migrations in `src/prchef/migratio
 
 To publish a release, under **Actions → Release**, run the workflow on the `develop` branch and choose the `patch`, `minor`, or `major` increment.
 
-The first release tag is `v0.1.0`. Before later releases, update `project.version` in `pyproject.toml` to the version the workflow will select. The workflow checks that the built package version matches the tag.
+The first release tag is `v0.1.0`, regardless of the selected increment. For later releases, the workflow increments the numerically greatest canonical `vMAJOR.MINOR.PATCH` tag. Before running it, update `project.version` in `pyproject.toml` on `develop` to that expected version. The workflow checks the version and rejects existing or non-newer tags before creating a tag. If the versions disagree, update `project.version` or select the matching increment and rerun. It also checks that the built package versions match the tag.
 
 ## Changelog
 

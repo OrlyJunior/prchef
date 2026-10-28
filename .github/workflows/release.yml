@@ -55,7 +55,7 @@ jobs:
           cache-dependency-path: constraints-dev.txt
       - name: Fetch release tags
         run: git fetch --force --tags origin develop
-      - name: Compute next version
+      - name: Validate release version
         id: version
         env:
           BUMP: ${{ inputs.bump }}
@@ -64,11 +64,14 @@ jobs:
           import os
           import re
           import subprocess
+          import tomllib
 
           tags = subprocess.check_output(["git", "tag", "--list", "v*"], text=True).splitlines()
           pattern = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
           versions = [tuple(map(int, match.groups())) for tag in tags if (match := pattern.fullmatch(tag))]
           bump = os.environ["BUMP"]
+          if bump not in {"patch", "minor", "major"}:
+              raise SystemExit(f"Unsupported bump: {bump}")
           if not versions:
               next_version = (0, 1, 0)
           else:
@@ -79,9 +82,44 @@ jobs:
                   next_version = (major, minor + 1, 0)
               elif bump == "patch":
                   next_version = (major, minor, patch + 1)
-              else:
-                  raise SystemExit(f"Unsupported bump: {bump}")
-          tag = "v" + ".".join(map(str, next_version))
+          expected = ".".join(map(str, next_version))
+          tag = "v" + expected
+          remedy = (
+              f"Update project.version in pyproject.toml on develop to {expected} "
+              "or select the matching increment."
+          )
+          try:
+              with open("pyproject.toml", "rb") as pyproject:
+                  project = tomllib.load(pyproject).get("project", {})
+              declared = project.get("version") if isinstance(project, dict) else None
+          except (OSError, tomllib.TOMLDecodeError) as exc:
+              raise SystemExit(f"Cannot read project.version from pyproject.toml: {exc}. {remedy}")
+          version_pattern = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
+          match = version_pattern.fullmatch(declared) if isinstance(declared, str) else None
+          if not match:
+              raise SystemExit(
+                  f"Invalid or missing project.version in pyproject.toml: {declared!r}; "
+                  f"expected canonical MAJOR.MINOR.PATCH version {expected}. {remedy}"
+              )
+          declared_version = tuple(map(int, match.groups()))
+          latest = max(versions) if versions else None
+          latest_tag = "v" + ".".join(map(str, latest)) if latest else None
+          if f"v{declared}" in tags:
+              raise SystemExit(
+                  f"project.version {declared} already has tag v{declared}; "
+                  f"it is not newer than latest release tag {latest_tag}; "
+                  f"expected {expected}. {remedy}"
+              )
+          if latest is not None and declared_version <= latest:
+              raise SystemExit(
+                  f"project.version {declared} is not newer than latest release tag "
+                  f"{latest_tag}; expected {expected}. {remedy}"
+              )
+          if declared != expected:
+              raise SystemExit(
+                  f"project.version {declared} does not match expected {expected} "
+                  f"for increment {bump} (latest release tag: {latest_tag or 'none'}). {remedy}"
+              )
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"tag={tag}\n")
           print(f"Next release tag: {tag}")
