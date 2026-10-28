@@ -818,6 +818,174 @@ def _controller(tmp_path: Path) -> tuple[WorkflowController, _WorkflowService, _
     )
 
 
+def _recovery_executions() -> list[WorkflowExecution]:
+    return [
+        WorkflowExecution(
+            id="first", task_source="github", task_id="[Feature] [bold]text[/bold]",
+            status=WorkflowStatus.INTERRUPTED, current_stage=WorkflowStage.REVIEW,
+            resume_stage=WorkflowStage.GENERATE_SPEC,
+        ),
+        WorkflowExecution(
+            id="second", task_source="github", task_id="2",
+            status=WorkflowStatus.INTERRUPTED, current_stage=WorkflowStage.IMPLEMENT,
+        ),
+        WorkflowExecution(
+            id="third", task_source="github", task_id="3",
+            status=WorkflowStatus.INTERRUPTED,
+        ),
+    ]
+
+
+def _painted_recovery_row(application: PrchefApp, row: Button) -> str:
+    strips = application.screen._compositor.render_strips()
+    return "".join(
+        strips[y].crop(row.region.x, row.region.right).text
+        for y in range(row.region.y, row.region.bottom)
+    )
+
+
+def test_recovery_rows_render_literal_text_and_submit_visible_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.executions = _recovery_executions()
+    submitted: list[str] = []
+    monkeypatch.setattr(controller, "submit_interrupted", submitted.append)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 40)) as pilot:
+            await settle_tui(pilot)
+            screen = application.screen
+            rows = [screen.query_one(f"#recovery-item-{index}", Button) for index in range(3)]
+            literal = "github:[Feature] [bold]text[/bold] | resume GENERATE_SPEC"
+            assert f"[ ] {literal}" in _painted_recovery_row(application, rows[0])
+            assert "[ ] github:2 | resume IMPLEMENT" in _painted_recovery_row(application, rows[1])
+            assert "[ ] github:3 | resume LOAD_TASK" in _painted_recovery_row(application, rows[2])
+
+            assert await pilot.click(rows[0])
+            await settle_tui(pilot)
+            assert f"[x] {literal}" in _painted_recovery_row(application, rows[0])
+            assert rows[0].has_focus
+            await wait_for_tui(pilot, lambda: not rows[0].has_class("-active"))
+            await pilot.press("enter")
+            await settle_tui(pilot)
+            assert f"[ ] {literal}" in _painted_recovery_row(application, rows[0])
+
+            # Select in reverse order and leave the middle row unchecked.
+            assert await pilot.click(rows[2])
+            assert await pilot.click(rows[1])
+            await wait_for_tui(pilot, lambda: not rows[0].has_class("-active"))
+            assert await pilot.click(rows[0])
+            await wait_for_tui(pilot, lambda: not rows[1].has_class("-active"))
+            assert await pilot.click(rows[1])
+            await settle_tui(pilot)
+            assert f"[x] {literal}" in _painted_recovery_row(application, rows[0])
+            assert "[ ] github:2" in _painted_recovery_row(application, rows[1])
+            assert "[x] github:3" in _painted_recovery_row(application, rows[2])
+            assert await pilot.click("#recovery-selected")
+            await settle_tui(pilot)
+            assert submitted == ["first", "third"]
+
+    asyncio.run(drive())
+
+
+def test_recovery_row_marker_stays_visible_in_narrow_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    execution = _recovery_executions()[0]
+    execution.task_id += "-" + "long" * 40
+    repository.executions = [execution]
+    monkeypatch.setattr(controller, "submit_interrupted", lambda execution_id: None)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(60, 20)) as pilot:
+            await settle_tui(pilot)
+            row = application.screen.query_one("#recovery-item-0", Button)
+            for marker in ("[ ]", "[x]", "[ ]"):
+                painted = _painted_recovery_row(application, row)
+                assert f"{marker} github:[Feature] [bold]text[/bold]" in painted
+                row.focus()
+                await settle_tui(pilot)
+                assert row.has_focus
+                await wait_for_tui(pilot, lambda: not row.has_class("-active"))
+                await pilot.press("enter")
+                await settle_tui(pilot)
+
+    asyncio.run(drive())
+
+
+def test_recovery_rows_remain_keyboard_accessible_when_scrolled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.executions = [
+        WorkflowExecution(
+            id=f"execution-{index}", task_source="github", task_id=str(index),
+            status=WorkflowStatus.INTERRUPTED,
+        )
+        for index in range(8)
+    ]
+    submitted: list[str] = []
+    monkeypatch.setattr(controller, "submit_interrupted", submitted.append)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(60, 20)) as pilot:
+            await settle_tui(pilot)
+            screen = application.screen
+            row = screen.query_one("#recovery-item-7", Button)
+            row.focus()
+            await wait_for_tui(
+                pilot, lambda: row.has_focus and screen.can_view_entire(row),
+                description="focused recovery row after scrolling",
+            )
+            assert "[ ] github:7" in _painted_recovery_row(application, row)
+            await pilot.press("enter")
+            await settle_tui(pilot)
+            assert row.has_focus
+            assert "[x] github:7" in _painted_recovery_row(application, row)
+            selected = screen.query_one("#recovery-selected", Button)
+            selected.focus()
+            await settle_tui(pilot)
+            await pilot.press("enter")
+            await settle_tui(pilot)
+            assert submitted == ["execution-7"]
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [("recovery-selected", []), ("recovery-all", ["first", "second", "third"]),
+     ("recovery-later", [])],
+)
+def test_recovery_actions_submit_expected_executions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str, expected: list[str]
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.executions = _recovery_executions()
+    submitted: list[str] = []
+    monkeypatch.setattr(controller, "submit_interrupted", submitted.append)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 40)) as pilot:
+            await settle_tui(pilot)
+            if action != "recovery-selected":
+                assert await pilot.click("#recovery-item-1")
+                await settle_tui(pilot)
+                row = application.screen.query_one("#recovery-item-1", Button)
+                assert "[x] github:2" in _painted_recovery_row(application, row)
+            assert await pilot.click(f"#{action}")
+            await settle_tui(pilot)
+            assert submitted == expected
+
+    asyncio.run(drive())
+
+
 def test_controller_browses_selections_and_delegates_workflow_start(tmp_path: Path) -> None:
     controller, service, _ = _controller(tmp_path)
 
