@@ -72,14 +72,30 @@ def test_bot_identity_resolves_and_caches_user_id(monkeypatch: pytest.MonkeyPatc
     assert recreated.bot_identity() == expected
     assert len(requests) == 4  # Only App metadata is needed by the new instance.
 
+
+def test_bot_identity_override_wins_over_cached_user_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/app"):
+            return httpx.Response(200, json={"slug": "implementer", "id": 123})
+        if request.method == "POST":
+            return httpx.Response(201, json={
+                "token": "installation-token", "expires_at": "2030-01-01T01:00:00Z",
+            })
+        return httpx.Response(200, json={"id": 987})
+
+    assert make_bot_authenticator(monkeypatch, handler).bot_identity() == (
+        "implementer[bot]", "987+implementer[bot]@users.noreply.github.com",
+    )
+
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        pytest.fail(f"Override unexpectedly made an HTTP request: {request.url.path}")
+
     override = make_bot_authenticator(
-        monkeypatch, handler, api_url="https://example.com/api/v3",
-        bot_name="implementer[bot]", bot_user_id=555,
+        monkeypatch, unexpected_request, bot_name="implementer[bot]", bot_user_id=555,
     )
     assert override.bot_identity() == (
         "implementer[bot]", "555+implementer[bot]@users.noreply.github.com",
     )
-    assert len(requests) == 4
 
 
 def test_bot_user_cache_isolated_by_endpoint_and_login(monkeypatch: pytest.MonkeyPatch) -> None:
