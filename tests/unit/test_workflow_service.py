@@ -1,4 +1,5 @@
 import logging
+import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -86,6 +87,26 @@ def test_happy_path_finishes_approved_and_records_outputs(workflow) -> None:
         }
     ]
     assert all(step["status"] is StepStatus.SUCCEEDED for step in repository.steps.values())
+
+
+def test_long_title_preserves_pull_request_title_and_branch_slug(workflow, monkeypatch) -> None:
+    service, _, trello, _ = workflow
+    title = "A long title for a workflow with several words and extra details beyond the limit"
+    task = DevelopmentTask(
+        id="card-1", source="trello", title=title, description="", url="https://example.com"
+    )
+    monkeypatch.setattr(trello, "get_card", lambda _: task)
+
+    result = service.run("card-1")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert result.pull_request_snapshot is not None
+    assert result.pull_request_snapshot["title"] == title
+    assert result.working_branch is not None
+    assert re.fullmatch(
+        r"[^/]+/card-1-a-long-title-for-a-workflow-with-several-words-a-\d{14}-[\w-]{1,12}",
+        result.working_branch,
+    )
 
 
 def test_review_retry_fetches_changed_description_each_round(workflow) -> None:

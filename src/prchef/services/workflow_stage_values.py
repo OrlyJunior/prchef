@@ -29,8 +29,38 @@ class StageValues:
 
     @staticmethod
     def _commit_message(task: DevelopmentTask) -> str:
-        title = " ".join(task.title.split())[:72]
-        return f"feat: {title} ({task.id})"
+        title = " ".join(task.title.split())
+        prefix = "feat: "
+        suffix = f" ({task.id})"
+        subject = f"{prefix}{title}{suffix}"
+        if len(subject) <= 72:
+            return subject
+
+        budget = max(0, 72 - len(prefix) - len(suffix) - 1)
+        words = title.split()
+        fitting: list[str] = []
+        length = 0
+        for word in words:
+            next_length = length + len(word) + bool(fitting)
+            if next_length > budget:
+                break
+            fitting.append(word)
+            length = next_length
+
+        def is_connector(word: str) -> bool:
+            punctuation = "".join(
+                char for char in word if unicodedata.category(char).startswith("P")
+            )
+            return word.strip(punctuation).casefold() in {"and", "with", "the"}
+
+        if fitting:
+            if any(not is_connector(word) for word in fitting):
+                while is_connector(fitting[-1]):
+                    fitting.pop()
+            shortened = " ".join(fitting)
+        else:
+            shortened = words[0][:budget] if words else ""
+        return f"{prefix}{shortened}…{suffix}\n\n{task.title}"
 
     @staticmethod
     def _pull_request_body(
