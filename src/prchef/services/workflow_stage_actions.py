@@ -47,7 +47,7 @@ class StageActions:
                 if execution.commit_sha == head or (
                     head != (execution.commit_sha or execution.base_commit)
                     and execution_clients.git.head_commit_message()
-                    == StageValues._commit_message(task)
+                    == StageValues._commit_message(task).split("\n", 1)[0]
                     and (
                         (execution.commit_sha or execution.base_commit) is None
                         or execution_clients.git.head_parent_commit()

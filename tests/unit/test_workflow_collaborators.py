@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 from prchef.config.project_config import WorkspaceSettings
+from prchef.models.development_task import DevelopmentTask
 from prchef.models.validation_result import ValidationResult
 from prchef.models.workflow_event import WorkflowEventKind
 from prchef.models.workflow_execution import WorkflowExecution
@@ -20,6 +21,7 @@ from prchef.models.workflow_status import (
     WorkflowStage,
     WorkflowStatus,
 )
+from prchef.services.exceptions import WorkflowError
 from prchef.services.workflow_agent_runtime import WorkflowAgentRuntime
 from prchef.services.workflow_correction_policy import CorrectionPolicy
 from prchef.services.workflow_execution_lifecycle import ExecutionLifecycle
@@ -28,6 +30,130 @@ from prchef.services.workflow_stage_events import ExecutionRuntimes, StageEvents
 from prchef.services.workflow_stage_sequencer import StageSequencer
 from prchef.services.workflow_stage_values import StageValues
 from tests.unit.fakes import FakeConfigLoader
+
+
+def commit_task(title: str, task_id: str = "9") -> DevelopmentTask:
+    return DevelopmentTask(id=task_id, source="test", title=title, description="", url="")
+
+
+@pytest.mark.parametrize("title", ["A short task", "x" * 62])
+def test_commit_message_preserves_fitting_subject(title: str) -> None:
+    assert StageValues._commit_message(commit_task(title)) == f"feat: {title} (9)"
+
+
+@pytest.mark.parametrize(
+    ("title", "shortened"),
+    [
+        ("x" * 63, "x" * 61),
+        (
+            "Show the best price per game, with a ranking that separates official and unofficial",
+            "Show the best price per game, with a ranking that separates",
+        ),
+        (
+            "Scaffold the Electron + React + TypeScript app with test, lint and typecheck",
+            "Scaffold the Electron + React + TypeScript app with test,",
+        ),
+        ("A " + "x" * 70, "A"),
+        (
+            "Meaning " + "x" * 40 + " AND, (With) THE! " + "tail" * 10,
+            "Meaning " + "x" * 40,
+        ),
+        ("and with the " * 10, "and with the and with the and with the and with the and with"),
+    ],
+)
+def test_commit_message_shortens_at_word_boundaries(title: str, shortened: str) -> None:
+    message = StageValues._commit_message(commit_task(title))
+    subject, body = message.split("\n\n", 1)
+    assert subject == f"feat: {shortened}… (9)"
+    assert len(subject) <= 72
+    assert body == title
+
+
+@pytest.mark.parametrize("word", ["é", "界", "😀"])
+def test_commit_message_counts_unicode_characters(word: str) -> None:
+    title = word * 62
+    assert StageValues._commit_message(commit_task(title)) == f"feat: {title} (9)"
+    title += word
+    assert StageValues._commit_message(commit_task(title)) == (
+        f"feat: {word * 61}… (9)\n\n{title}"
+    )
+
+
+@pytest.mark.parametrize("id_length", [1, 30, 62, 63, 90])
+def test_commit_message_preserves_reference_for_every_budget(id_length: int) -> None:
+    task_id = "i" * id_length
+    title = "word " * 30
+    subject, body = StageValues._commit_message(commit_task(title, task_id)).split("\n\n", 1)
+    minimal = f"feat: … ({task_id})"
+    assert subject.endswith(f"… ({task_id})")
+    assert len(subject) <= max(72, len(minimal))
+    if id_length >= 62:
+        assert subject == minimal
+    assert body == title
+
+
+def test_commit_message_normalizes_only_subject_whitespace() -> None:
+    title = "  alpha\n\tbeta  " + "word  " * 20
+    subject, body = StageValues._commit_message(commit_task(title)).split("\n\n", 1)
+    assert subject.startswith("feat: alpha beta word word")
+    assert "  " not in subject
+    assert body == title
+
+
+def test_commit_stage_passes_complete_message() -> None:
+    task = commit_task("A long title " * 10)
+    repository, events, git = Mock(), Mock(), Mock()
+    repository.get_execution.return_value = SimpleNamespace(base_commit="base")
+    events._step.return_value = nullcontext()
+    git.commit_all.return_value = "sha"
+    config = SimpleNamespace(repository=SimpleNamespace(base_branch="main", protected_branches=[]))
+    StageActions(repository, events)._commit_changes(
+        "one", SimpleNamespace(git=git), task, "feature/task", config
+    )
+    git.commit_all.assert_called_once_with(StageValues._commit_message(task), "feature/task", [])
+    repository.record_commit.assert_called_once_with("one", "sha")
+
+
+@pytest.mark.parametrize(
+    ("recorded", "head", "matching_subject", "parent", "accepted"),
+    [
+        (None, "new", True, "base", True),
+        (None, "new", False, "base", False),
+        (None, "new", True, "other", False),
+        (None, "base", True, "base", False),
+        ("previous", "new", True, "previous", True),
+        ("previous", "new", True, "base", False),
+        ("new", "new", False, "other", True),
+    ],
+)
+def test_commit_reconciliation_checks_subject_and_ancestry(
+    recorded: str | None, head: str, matching_subject: bool, parent: str, accepted: bool
+) -> None:
+    task = commit_task("A long title " * 10)
+    repository, events, git = Mock(), Mock(), Mock()
+    repository.get_execution.return_value = SimpleNamespace(base_commit="base", commit_sha=recorded)
+    events._step.return_value = nullcontext()
+    git.changed_files.return_value = []
+    git.head_commit.return_value = head
+    git.head_commit_message.return_value = (
+        StageValues._commit_message(task).split("\n", 1)[0] if matching_subject else "wrong"
+    )
+    git.head_parent_commit.return_value = parent
+    config = SimpleNamespace(repository=SimpleNamespace(base_branch="main", protected_branches=[]))
+    action = StageActions(repository, events)
+    if accepted:
+        action._commit_changes(
+            "one", SimpleNamespace(git=git), task, "feature", config, reconcile=True
+        )
+        repository.record_commit.assert_called_once_with("one", head)
+    else:
+        with pytest.raises(WorkflowError, match="Cannot verify"):
+            action._commit_changes(
+                "one", SimpleNamespace(git=git), task, "feature", config, reconcile=True
+            )
+        repository.record_commit.assert_not_called()
+    git.ensure_merge_base.assert_called_once_with("base")
+    git.commit_all.assert_not_called()
 
 
 @pytest.mark.parametrize(
