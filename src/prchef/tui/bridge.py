@@ -640,6 +640,7 @@ class WorkflowController:
         original_key: str | None = None,
         review_retries: int | None | EllipsisType = ...,
         validation_retries: int | None | EllipsisType = ...,
+        base_branch: str | None | EllipsisType = ...,
     ) -> Path:
         """Persist repository settings and retain the resulting key as selected."""
 
@@ -651,6 +652,7 @@ class WorkflowController:
             original_key=original_key,
             review_retries=review_retries,
             validation_retries=validation_retries,
+            base_branch=base_branch,
         )
         self._selected_repository = repository_key.strip()
         self.repositories()
@@ -658,6 +660,16 @@ class WorkflowController:
 
     def repository_retry_defaults(self) -> tuple[int, int]:
         return self._config_loader.repository_retry_defaults()
+
+    def repository_base_branch_default(self) -> str:
+        return self._config_loader.repository_base_branch_default()
+
+    def probe_repository_branch(self, path: str, branch: str) -> str:
+        from prchef.clients.command_client import CommandClient
+        from prchef.clients.git_client import GitClient
+
+        git = GitClient(CommandClient(), self.resolve_repository_path(path))
+        return git.probe_remote_branch(branch)
 
     def delete_repository(self, repository: str) -> Path:
         """Delete repository configuration without performing filesystem operations."""

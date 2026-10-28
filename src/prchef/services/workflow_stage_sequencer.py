@@ -9,7 +9,9 @@ from prchef.clients.command_client import assert_worktree_idle
 from prchef.clients.exceptions import (
     CommandExecutionError,
     CommandProcessTreeUnconfirmedError,
+    GitClientError,
     GitHubClientError,
+    MissingRemoteBaseBranchError,
 )
 from prchef.clients.factory import ClientFactory, WorkflowClients
 from prchef.config.project_config import (
@@ -121,6 +123,16 @@ class StageSequencer:
         self._verbose = verbose
         self._repository_index_clients = repository_index_clients
         self._context_resolver = context_resolver
+
+    def _fetch_base(self, clients: WorkflowClients, branch: str) -> str:
+        try:
+            return clients.git.fetch_base(branch)
+        except MissingRemoteBaseBranchError as exc:
+            raise GitClientError(
+                f"Remote base branch {exc.branch!r} does not exist on origin. "
+                "Change it in Repositories or under repository.base_branch in "
+                f"{self._config_loader.configuration_path}."
+            ) from exc
 
     def _repository_context_strategy(
         self, config: ProjectConfig, execution_id: str | None = None
@@ -260,6 +272,8 @@ class StageSequencer:
 
             with self._events._step(execution.id, WorkflowStage.LOAD_CONFIG):
                 config = self._config_loader.load(task, repository_override)
+                if recovering:
+                    config = StageValues._execution_config(config, execution)
                 if provider_overrides or runtime_overrides:
                     config = config.with_agent_runtime_overrides(
                         provider_overrides,
@@ -281,7 +295,7 @@ class StageSequencer:
                 base_commit = (
                     execution.base_commit
                     if recovering and execution.base_commit
-                    else clients.git.fetch_base(config.repository.base_branch)
+                    else self._fetch_base(clients, config.repository.base_branch)
                 )
                 if base_commit != execution.base_commit:
                     self._repository.record_base_commit(execution.id, base_commit)
@@ -575,7 +589,9 @@ class StageSequencer:
             if answered:
                 task = StageValues._task_with_responses(task, answered)
             repository_ref = execution.repository_ref or execution.repository or None
-            config = self._config_loader.load(task, repository_ref)
+            config = StageValues._execution_config(
+                self._config_loader.load(task, repository_ref), execution
+            )
             providers, options = self._lifecycle._runtime_overrides_for_execution(execution.id)
             if providers or options:
                 config = config.with_agent_runtime_overrides(providers, options)
@@ -599,7 +615,7 @@ class StageSequencer:
                         repository_ref or str(config.path),
                     )
                     if not execution.base_commit:
-                        base_commit = clients.git.fetch_base(config.repository.base_branch)
+                        base_commit = self._fetch_base(clients, config.repository.base_branch)
                         self._repository.record_base_commit(execution.id, base_commit)
                 execution = self._repository.get_execution(execution.id)
                 stage = WorkflowStage.GENERATE_SPEC
@@ -1343,8 +1359,10 @@ class StageSequencer:
         config: ProjectConfig | None = None
         try:
             task = StageValues._task_from_snapshot(execution)
-            config = self._config_loader.load(
-                task, execution.repository_ref or execution.repository or None
+            config = StageValues._execution_config(
+                self._config_loader.load(
+                    task, execution.repository_ref or execution.repository or None
+                ), execution
             )
             provider_overrides, runtime_overrides = (
                 self._lifecycle._runtime_overrides_for_execution(execution_id)

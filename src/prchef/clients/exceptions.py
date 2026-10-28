@@ -47,5 +47,11 @@ class GitClientError(ExternalClientError):
     pass
 
 
+class MissingRemoteBaseBranchError(GitClientError):
+    def __init__(self, branch: str) -> None:
+        self.branch = branch
+        super().__init__(f"Remote base branch {branch!r} does not exist on origin.")
+
+
 class GitHubClientError(ExternalClientError):
     pass
