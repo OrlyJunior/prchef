@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from textual.app import App, ComposeResult
+from textual.css.query import NoMatches
+from textual.widget import Widget
 from textual.worker import WorkerCancelled
 
-from tests.unit.tui_sync import _wait_for_workers
+from tests.unit.tui_sync import _screen_workers, _wait_for_workers, wait_for_tui
 
 
 class _Worker:
@@ -45,6 +49,135 @@ class _Worker:
         self.cancel_calls += 1
         self.is_cancelled = True
         self._release.set()
+
+
+def test_wait_for_tui_bounds_a_blocked_message_pump() -> None:
+    class Pilot:
+        async def pause(self) -> None:
+            await asyncio.Event().wait()
+
+    async def drive() -> None:
+        with pytest.raises(AssertionError, match="Timed out waiting for blocked UI"):
+            await wait_for_tui(
+                Pilot(), lambda: False, timeout=0.01, description="blocked UI"  # type: ignore[arg-type]
+            )
+
+    asyncio.run(drive())
+
+
+def test_wait_for_tui_bounds_an_unmet_predicate() -> None:
+    class Pilot:
+        app = SimpleNamespace(screen=object(), workers=[])
+
+        async def pause(self) -> None:
+            pass
+
+    async def drive() -> None:
+        with pytest.raises(AssertionError, match="Timed out waiting for missing state"):
+            await wait_for_tui(
+                Pilot(), lambda: False, timeout=0.01, description="missing state"  # type: ignore[arg-type]
+            )
+
+    asyncio.run(drive())
+
+
+def test_wait_for_tui_tolerates_a_temporarily_missing_widget() -> None:
+    class Pilot:
+        app = SimpleNamespace(screen=object(), workers=[])
+
+        async def pause(self) -> None:
+            pass
+
+    attempts = 0
+
+    def mounted() -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise NoMatches("not mounted yet")
+        return True
+
+    async def drive() -> None:
+        await wait_for_tui(Pilot(), mounted, description="widget mount")  # type: ignore[arg-type]
+        assert attempts == 2
+
+    asyncio.run(drive())
+
+
+def test_screen_worker_scope_can_include_descendants() -> None:
+    screen = SimpleNamespace(parent=None)
+    child = SimpleNamespace(parent=screen)
+    other = SimpleNamespace(parent=None)
+    owned = _Worker(screen)
+    descendant = _Worker(child)
+    unrelated = _Worker(other)
+    pilot = SimpleNamespace(app=SimpleNamespace(
+        screen=screen, workers=[owned, descendant, unrelated]
+    ))
+    assert _screen_workers(pilot) == [owned]
+    assert _screen_workers(pilot, descendants=True) == [owned, descendant]
+
+
+def test_wait_for_tui_waits_for_a_descendant_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    class WorkerApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Widget(id="worker-owner")
+
+    async def drive() -> None:
+        application = WorkerApp()
+        async with application.run_test() as pilot:
+            child = application.query_one("#worker-owner", Widget)
+            release = asyncio.Event()
+            joined = asyncio.Event()
+            unrelated_release = asyncio.Event()
+            descendant = child.run_worker(release.wait())
+            unrelated = application.run_worker(unrelated_release.wait())
+            original_wait = descendant.wait
+
+            async def observe_wait() -> Any:
+                joined.set()
+                return await original_wait()
+
+            monkeypatch.setattr(descendant, "wait", observe_wait)
+            waiting = asyncio.create_task(wait_for_tui(
+                pilot, lambda: True, descendants=True, description="descendant layout"
+            ))
+            try:
+                assert descendant.node is child and child.parent is application.screen
+                # Even a true predicate must join the real child-owned worker.
+                await asyncio.wait_for(joined.wait(), timeout=10)
+                assert not waiting.done()
+                release.set()
+                await asyncio.wait_for(waiting, timeout=10)
+                assert descendant.is_finished
+                assert not unrelated.is_finished
+            finally:
+                waiting.cancel()
+                descendant.cancel()
+                unrelated.cancel()
+                await asyncio.gather(
+                    waiting, descendant.wait(), unrelated.wait(), return_exceptions=True
+                )
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize("error", [RuntimeError("descendant failed"), WorkerCancelled()])
+def test_wait_for_tui_propagates_descendant_worker_errors(error: BaseException) -> None:
+    class Pilot:
+        async def pause(self) -> None:
+            pass
+
+    async def drive() -> None:
+        screen = SimpleNamespace(parent=None)
+        descendant = _Worker(SimpleNamespace(parent=screen), error=error)
+        pilot = Pilot()
+        pilot.app = SimpleNamespace(screen=screen, workers=[descendant])
+        with pytest.raises(type(error)) as raised:
+            await wait_for_tui(pilot, lambda: True, descendants=True)  # type: ignore[arg-type]
+        assert raised.value is error
+
+    asyncio.run(drive())
 
 
 def test_wait_for_workers_propagates_worker_failure() -> None:

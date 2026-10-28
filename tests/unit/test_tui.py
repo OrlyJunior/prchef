@@ -82,6 +82,7 @@ from prchef.tui.screens.task_selector import (
     TaskTableHeader,
 )
 from prchef.tui.screens.workflow_runner import (
+    _MANUAL_PRESET,
     FreshRunConfirmation,
     StopWorkflowConfirmation,
     WorkflowRunnerScreen,
@@ -4055,7 +4056,12 @@ def test_execution_detail_actions_reflow_without_diagnostic_overflow(
             repository.diagnostics = long_diagnostics
             screen._refresh_execution()
             screen.query_one("#execution-toggle-logs", Button).press()
-            await settle_tui(pilot)
+            await wait_for_tui(
+                pilot,
+                lambda: screen.query_one("#execution-detailed-logs", Log).line_count > 0,
+                descendants=True,
+                description="diagnostics and action layout",
+            )
             assert positions == [
                 (button.virtual_region.x, button.virtual_region.y) for button in buttons
             ]
@@ -4391,7 +4397,17 @@ def test_execution_detail_actions_and_diagnostics_stay_bounded_in_narrow_termina
             assert screen._reconcile_timer is not None
             screen._reconcile_timer.stop()  # Exercise the refresh race explicitly, without timing.
             screen.query_one("#execution-toggle-logs", Button).press()
-            await settle_tui(pilot)
+            await wait_for_tui(
+                pilot,
+                lambda: content.line_count > 0
+                and page.max_scroll_x == 0 and page.max_scroll_y > 0
+                and content.max_scroll_x > 0 and content.max_scroll_y == 0
+                and not content.show_vertical_scrollbar
+                and content.scrollable_content_region.height == content.line_count
+                and content.region.right <= application.size.width,
+                descendants=True,
+                description="diagnostic content and layout",
+            )
             assert page.max_scroll_x == 0
             assert page.max_scroll_y > 0
             assert content.max_scroll_x > 0
@@ -5287,7 +5303,12 @@ def test_execution_detail_appends_only_new_diagnostics_and_preserves_ui_state(
             screen = application.screen
             assert isinstance(screen, ExecutionDetailScreen)
             screen.query_one("#execution-toggle-logs", Button).press()
-            await settle_tui(pilot)
+            await wait_for_tui(
+                pilot,
+                lambda: screen.query_one("#execution-detailed-logs", Log).line_count > 0,
+                descendants=True,
+                description="initial diagnostics",
+            )
             response = screen.query_one("#execution-human-response", TextArea)
             response.text = "My edited answer"
             response.focus()
@@ -5598,7 +5619,7 @@ def test_execution_history_filter_does_not_reload_batches_or_execution_steps(
 
 
 def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller, service, repository = _controller(tmp_path)
     repository.execution.task_source = "github"
@@ -5630,6 +5651,29 @@ def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
                 description="task checkboxes",
             )
             screen = application.screen
+            batch_workers: list[Any] = []
+            refresh_workers: list[Any] = []
+            refresh = screen._refresh_task_statuses
+
+            def observe_refresh() -> None:
+                # _batch_finished runs inside call_from_thread while this worker
+                # is still active. Starting an exclusive worker in its group
+                # would cancel it before the callback can return.
+                worker = next(
+                    (worker for worker in application.workers
+                     if worker.node is screen and worker.name == "_run_batch"),
+                    None,
+                )
+                assert worker is not None, "Task refresh must run before the batch worker exits"
+                batch_workers.append(worker)
+                refresh()
+                refresh_workers.extend(
+                    worker for worker in application.workers
+                    if worker.node is screen and worker.group == "task-load"
+                )
+                assert not worker.is_cancelled
+
+            monkeypatch.setattr(screen, "_refresh_task_statuses", observe_refresh)
             selector = screen.query_one("#task-selector", TaskSelector)
             first = screen.query_one("#task-checkbox-0", Checkbox)
             blocked = screen.query_one("#task-checkbox-1", Checkbox)
@@ -5654,10 +5698,22 @@ def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
             screen.query_one("#start-workflow", Button).press()
             await wait_for_tui(
                 pilot,
-                lambda: len(service.calls) == 2,
-                description="ordered batch submissions",
+                lambda: (
+                    len(service.calls) == 2
+                    and not screen._batch_running
+                    and "Batch finished:"
+                    in str(screen.query_one("#workflow-progress", Static).renderable)
+                ),
+                description="ordered batch completion",
             )
             assert [call[0] for call in service.calls] == ["12", "3"]
+            assert len(batch_workers) == 1, "Expected one batch completion refresh"
+            assert not batch_workers[0].is_cancelled, "Task refresh cancelled the batch worker"
+            assert len(batch_workers) == 1 and refresh_workers
+            await asyncio.wait_for(batch_workers[0].wait(), timeout=10)
+            assert not batch_workers[0].is_cancelled
+            for worker in refresh_workers:
+                await asyncio.wait_for(worker.wait(), timeout=10)
 
     asyncio.run(drive())
 
@@ -8090,7 +8146,9 @@ def test_live_status_message_names_the_provider_a_run_is_waiting_for() -> None:
 def test_stop_control_is_offered_for_every_active_status(
     tmp_path: Path, status: WorkflowStatus
 ) -> None:
-    controller, _, _ = _controller(tmp_path)
+    controller, _, repository = _controller(tmp_path)
+    # Reconciliation reads persisted state; the fake must agree with the injected event.
+    repository.execution.status = status
     application = PrchefApp(controller)
 
     async def drive() -> None:
@@ -8105,7 +8163,13 @@ def test_stop_control_is_offered_for_every_active_status(
                     status=status,
                 )
             )
-            await settle_tui(pilot)
+            screen._reconcile_active_execution()
+            await wait_for_tui(
+                pilot,
+                lambda: screen.query_one("#workflow-stop-actions", Horizontal).display
+                and not screen.query_one("#stop-workflow", Button).disabled,
+                description="active workflow stop controls after reconciliation",
+            )
 
             assert screen.query_one("#workflow-stop-actions", Horizontal).display is True
             assert screen.query_one("#stop-workflow", Button).disabled is False
@@ -8720,7 +8784,7 @@ def test_workflow_runner_preserves_hidden_preset_generation_after_manual_edits(
 
 
 def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_payload(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller, _, _ = _controller(tmp_path)
     config = controller.project_config("example")
@@ -8729,10 +8793,13 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
     })
     for role in AgentRole:
         getattr(config.agents, role.value).provider = "claude"
-        config.agent_presets[role.value] = {"focused": AgentPresetConfig(
-            provider="claude", model="preset-model", reasoning_effort="high",
-            permission_mode="acceptEdits",
-        )}
+        config.agent_presets[role.value] = {
+            "focused": AgentPresetConfig(
+                provider="claude", model="preset-model", reasoning_effort="high",
+                permission_mode="acceptEdits",
+            ),
+            "older": AgentPresetConfig(provider="claude", model="older-model"),
+        }
     original = config.model_dump()
     application = PrchefApp(controller)
 
@@ -8741,6 +8808,21 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
             application.action_new_workflow()
             await settle_tui(pilot)
             screen = application.screen
+            applied: list[tuple[AgentRole, str]] = []
+            restored: list[AgentRole] = []
+            select_preset = screen._select_role_preset
+            restore_defaults = screen._restore_role_defaults
+
+            def observe_preset(role: AgentRole, prefix: str, name: str) -> None:
+                applied.append((role, name))
+                select_preset(role, prefix, name)
+
+            def observe_restore(role: AgentRole, prefix: str) -> None:
+                restored.append(role)
+                restore_defaults(role, prefix)
+
+            monkeypatch.setattr(screen, "_select_role_preset", observe_preset)
+            monkeypatch.setattr(screen, "_restore_role_defaults", observe_restore)
             for role, prefix in screen._role_fields():
                 def displayed(control: str, prefix: str = prefix) -> str:
                     return str(screen.query_one(f"#{prefix}-{control}-source", Static).renderable)
@@ -8748,8 +8830,29 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
                 assert displayed("model") == "Effective: provider-model (provider)"
                 assert displayed("reasoning") == "Effective: low (provider)"
                 assert displayed("permission") == "Effective: dontAsk (default)"
-                screen.query_one(f"#{prefix}-preset", PrchefSelect).value = "focused"
-                await settle_tui(pilot)
+                selector = screen.query_one(f"#{prefix}-preset", PrchefSelect)
+                restores_before_selection = len(restored)
+                selector.value = "older"
+                selector.value = _MANUAL_PRESET
+                selector.value = "focused"
+                screen._select_role_preset(role, prefix, "focused")
+                assert displayed("model") == "Effective: preset-model (preset)"
+                assert displayed("reasoning") == "Effective: high (preset)"
+                assert displayed("permission") == "Effective: acceptEdits (preset)"
+                # A queued selection for an older value must not undo the current preset.
+                await wait_for_tui(
+                    pilot,
+                    lambda role=role: applied.count((role, "focused")) >= 2
+                    and displayed("model") == "Effective: preset-model (preset)"
+                    and displayed("reasoning") == "Effective: high (preset)"
+                    and displayed("permission") == "Effective: acceptEdits (preset)",
+                    description=f"{prefix} preset sources",
+                )
+                assert (role, "older") not in applied
+                assert len(restored) == restores_before_selection, (
+                    "Stale manual selection restored defaults"
+                )
+                assert screen._selected_presets[role] == "focused"
                 assert displayed("model") == "Effective: preset-model (preset)"
                 assert displayed("reasoning") == "Effective: high (preset)"
                 assert displayed("permission") == "Effective: acceptEdits (preset)"

@@ -21,7 +21,7 @@ from textual.worker import Worker, WorkerCancelled
 DEFAULT_TIMEOUT = 10.0
 
 
-def _screen_workers(pilot: Pilot[Any]) -> list[Worker[Any]]:
+def _screen_workers(pilot: Pilot[Any], *, descendants: bool = False) -> list[Worker[Any]]:
     """Return workers owned by the screen currently under test.
 
     Textual keeps one manager at application level.  Filtering by the worker's
@@ -30,7 +30,18 @@ def _screen_workers(pilot: Pilot[Any]) -> list[Worker[Any]]:
     """
 
     screen = pilot.app.screen
-    return [worker for worker in pilot.app.workers if worker.node is screen]
+
+    def belongs(worker: Worker[Any]) -> bool:
+        node = worker.node
+        while node is not None:
+            if node is screen:
+                return True
+            if not descendants:
+                return False
+            node = node.parent
+        return False
+
+    return [worker for worker in pilot.app.workers if belongs(worker)]
 
 
 def _was_superseded(
@@ -131,7 +142,11 @@ async def _wait_for_workers(
 
 
 async def settle_tui(
-    pilot: Pilot[Any], *, timeout: float = DEFAULT_TIMEOUT, description: str = "current screen"
+    pilot: Pilot[Any],
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    description: str = "current screen",
+    descendants: bool = False,
 ) -> None:
     """Wait for a current screen's mount, workers, and queued callbacks to settle."""
 
@@ -142,7 +157,7 @@ async def settle_tui(
         # after observing no worker closes the window where mount work queues a
         # worker after the first idle pass.
         await pilot.pause()
-        workers = _screen_workers(pilot)
+        workers = _screen_workers(pilot, descendants=descendants)
         if workers:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -151,12 +166,12 @@ async def settle_tui(
                 workers,
                 timeout=remaining,
                 description=description,
-                refresh_workers=lambda: _screen_workers(pilot),
+                refresh_workers=lambda: _screen_workers(pilot, descendants=descendants),
             )
             continue
 
         await pilot.pause()
-        if not _screen_workers(pilot):
+        if not _screen_workers(pilot, descendants=descendants):
             return
         if loop.time() >= deadline:
             raise AssertionError(f"Timed out waiting for {description} to settle")
@@ -168,24 +183,29 @@ async def wait_for_tui(
     *,
     timeout: float = DEFAULT_TIMEOUT,
     description: str = "expected TUI state",
+    descendants: bool = False,
 ) -> None:
     """Wait until a concrete rendered, mounted, or selected state is true."""
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            raise AssertionError(f"Timed out waiting for {description}")
-        await settle_tui(pilot, timeout=remaining, description=description)
-        try:
-            matched = predicate()
-        except NoMatches:
-            # Query-based predicates are useful for waiting on a freshly-pushed
-            # screen. Treat an as-yet unmounted target as an unmet condition.
-            matched = False
-        if matched:
-            return
-        # Yield without adding a wall-clock delay, allowing a just-posted UI
-        # callback to start its next message-pump turn.
-        await asyncio.sleep(0)
+    try:
+        # The deadline shares the remaining budget with worker waits; this
+        # outer bound also interrupts an unresponsive Pilot.pause().
+        async with asyncio.timeout(timeout):
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise AssertionError(f"Timed out waiting for {description}")
+                await settle_tui(
+                    pilot, timeout=remaining, description=description, descendants=descendants
+                )
+                try:
+                    matched = predicate()
+                except NoMatches:
+                    matched = False
+                if matched:
+                    return
+                await asyncio.sleep(0)
+    except TimeoutError as exc:
+        raise AssertionError(f"Timed out waiting for {description}") from exc
