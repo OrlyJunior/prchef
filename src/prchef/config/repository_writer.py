@@ -34,9 +34,13 @@ def _check_keys(node: Node) -> None:
     if isinstance(node, MappingNode):
         seen: set[str] = set()
         for key, value in node.value:
-            if not isinstance(key, yaml.ScalarNode) or key.value in seen or key.value == "<<":
+            if not isinstance(key, yaml.ScalarNode):
+                raise ConfigurationError("Cannot safely edit YAML with complex keys.")
+            if key.value == "<<":
+                raise ConfigurationError("Cannot safely edit YAML with merge keys.")
+            if key.value in seen:
                 raise ConfigurationError(
-                    "Cannot safely edit YAML with duplicate, complex, or merge keys."
+                    f"Cannot safely edit YAML with duplicate key {key.value!r}."
                 )
             seen.add(key.value)
             _check_keys(value)
@@ -54,10 +58,12 @@ def write_repository(
         if any(isinstance(token, (AliasToken, AnchorToken)) for token in yaml.scan(text)):
             raise ConfigurationError("Cannot safely edit YAML with anchors or aliases.")
         root = yaml.compose(text)
-        data = yaml.safe_load(text)
-        if not isinstance(root, MappingNode) or not isinstance(data, dict):
+        if not isinstance(root, MappingNode):
             raise ConfigurationError("Global configuration must be a YAML mapping.")
         _check_keys(root)
+        data = yaml.safe_load(text)
+        if not isinstance(data, dict):
+            raise ConfigurationError("Global configuration must be a YAML mapping.")
         newline = "\r\n" if "\r\n" in text else "\n"
         match = next(((k, v) for k, v in root.value if k.value == "repositories"), None)
         if match is None:

@@ -154,6 +154,39 @@ def test_repository_writer_detects_concurrent_change(tmp_path: Path) -> None:
     assert path.read_bytes() == changed
 
 
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        (b"repositories: {}\nother: 1\nother: 2\n", "duplicate key 'other'"),
+        (b"repositories: {}\nother: {<<: {value: 1}}\n", "merge keys"),
+        (b"repositories: {}\n? [complex, key]\n: value\n", "complex keys"),
+    ],
+)
+def test_repository_writer_identifies_unsafe_keys(
+    tmp_path: Path, source: bytes, message: str
+) -> None:
+    path = tmp_path / "config.yml"
+    path.write_bytes(source)
+    with pytest.raises(ConfigurationError, match=message):
+        write_repository(path, source, "one", "one", {"path": "new"})
+    assert path.read_bytes() == source
+
+
+def test_repository_writer_preserves_flow_mapping_siblings(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    prefix = b"before: 'keep' # comment\nrepositories: {"
+    suffix = b", 'other key': {path: 'other'}} # keep\nafter: [one, two]\n"
+    source = prefix + b'"one key": {path: old}' + suffix
+    path.write_bytes(source)
+
+    write_repository(path, source, "one key", "one key", {"path": "new"})
+
+    actual = path.read_bytes()
+    assert actual.startswith(prefix)
+    assert actual.endswith(suffix)
+    assert yaml.safe_load(actual)["repositories"]["one key"] == {"path": "new"}
+
+
 def test_repository_writer_rejects_invalid_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
