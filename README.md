@@ -152,6 +152,12 @@ prchef tui --config /absolute/path/to/prchef.yml
 
 On the home screen, choose **Repositories** → **Add repository** → **Save repository** to register a local checkout, if it isn't already in your configuration. For GitHub Issues, use its `owner/repository` key and select an existing open issue. Then choose **Start workflow**, select the repository and task provider, pick a task, and start it. Saved settings remain in the same global YAML file.
 
+In **Repositories**, set the base branch for future runs and their pull requests. The editor
+shows whether the value comes from defaults or this repository; **Use default base branch**
+removes the repository override when you save. After saving, prchef checks the exact branch on
+`origin` in the background and reports whether it exists or could not be checked. This check is
+advisory and does not prevent saving. Existing executions keep their recorded base.
+
 The equivalent command for a GitHub issue:
 
 ```sh

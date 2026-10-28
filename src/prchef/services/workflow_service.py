@@ -444,8 +444,10 @@ class WorkflowService:
         task = StageValues._task_from_snapshot(execution)
         if stage is WorkflowStage.IMPLEMENT and not execution.spec_snapshot:
             raise WorkflowError("Cannot continue: the original repository spec was not persisted")
-        config = self._config_loader.load(
-            task, execution.repository_ref or execution.repository or None
+        config = StageValues._execution_config(
+            self._config_loader.load(
+                task, execution.repository_ref or execution.repository or None
+            ), execution
         )
         provider_overrides, runtime_overrides = self._lifecycle._runtime_overrides_for_execution(
             execution_id

@@ -5,6 +5,7 @@ import unicodedata
 from dataclasses import asdict
 from datetime import UTC, datetime
 
+from prchef.config.project_config import ProjectConfig
 from prchef.models.code_review import CodeReview
 from prchef.models.development_task import DevelopmentTask
 from prchef.models.repository_spec import RepositorySpec
@@ -15,6 +16,13 @@ from prchef.services.exceptions import WorkflowError
 
 class StageValues:
     """Build immutable names, prompts, and snapshot values used at stage boundaries."""
+
+    @staticmethod
+    def _execution_config(config: ProjectConfig, execution: WorkflowExecution) -> ProjectConfig:
+        if not execution.base_branch:
+            return config
+        repository = config.repository.model_copy(update={"base_branch": execution.base_branch})
+        return config.model_copy(update={"repository": repository})
 
     @staticmethod
     def _branch_name(prefix: str, card_id: str, title: str, execution_id: str) -> str:

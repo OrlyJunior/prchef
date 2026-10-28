@@ -61,9 +61,9 @@ tests and repository retrieval.
 - The TUI may launch one task or an ordered persisted batch. Batch policy, cancellation, and
   admission live in `WorkflowController`/`WorkflowRepository`; batch progress is a projection.
   Batch items link to, but do not own, execution rows. Cancelling one item never cancels its peers.
-- Settings update global entries; provider writes preserve unrelated YAML bytes with validated
-  atomic replacement. Role-local runtime selections persist for resumption without rewriting YAML
-  defaults. Value/source displays reuse the configuration submission seam.
+- Settings update global entries; provider and repository writes preserve unrelated YAML bytes via
+  validated atomic replacement. Role-local runtime selections persist without rewriting defaults.
+  Value/source displays reuse the configuration submission seam.
 - Schema changes require versioned Alembic migrations; never `create_all` at runtime.
 
 ## Workflow invariants
@@ -75,7 +75,8 @@ tests and repository retrieval.
   waiting for the UI. A `WORKFLOW_FINISHED` event ends live TUI controls
   for every terminal status, including `CHANGES_REQUESTED`.
 - A blocking planning ambiguity ends as `NEEDS_HUMAN` before any branch or worktree exists.
-- A fresh execution records one fetched base commit before planning. Planning reads a temporary
+- A fresh execution records one fetched base commit and branch before planning; resumed work retains
+  both despite configuration changes. Planning reads a temporary
   snapshot of that commit; its linked worktree starts there. The control checkout is never
   switched, cleaned, stashed, or reset.
   Worktrees are retained on every outcome; removal happens only through the explicit cleanup

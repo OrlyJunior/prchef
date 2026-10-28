@@ -15,6 +15,7 @@ from textual.events import DescendantFocus, Resize
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Input, Static
 
+from prchef.config.project_config import ConfigurationError, validate_base_branch
 from prchef.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
 from prchef.services.qdrant_repository_context import repository_index_error_message
 from prchef.tui.bridge import WorkflowController
@@ -115,7 +116,8 @@ class RepositorySettingsScreen(Screen[None]):
     #repository-path-warning { color: $warning; }
     #repository-errors, #index-errors { color: $error; }
     #index-errors.-activity { color: $warning; }
-    #review-budget-error, #validation-budget-error { color: $error; }
+    #review-budget-error, #validation-budget-error, #base-branch-error { color: $error; }
+    #base-branch-check { color: $warning; }
     #review-budget-actions, #validation-budget-actions { height: auto; }
     #validation-command-actions, #repository-actions, #index-actions {
         height: auto;
@@ -149,6 +151,12 @@ class RepositorySettingsScreen(Screen[None]):
         self._index_view_mounted = False
         self._budget_original: dict[str, tuple[int, bool, int]] = {}
         self._cleared_budgets: set[str] = set()
+        self._base_original: tuple[str, bool, str] = ("develop", False, "develop")
+        self._base_cleared = False
+        self._branch_check_token = 0
+        self._branch_check_subject: tuple[str, str, str] | None = None
+        self._branch_check_inputs: dict[str, str] = {}
+        self._branch_check_auto_detect = True
 
     @property
     def controller(self) -> WorkflowController:
@@ -178,6 +186,16 @@ class RepositorySettingsScreen(Screen[None]):
                         id="repository-path",
                     )
                     yield Static("", id="repository-path-warning")
+                    yield Static("Base branch", classes="field-label")
+                    yield Static(
+                        "Future runs and their pull requests use this branch; "
+                        "existing executions retain their recorded base."
+                    )
+                    yield Static("", id="base-branch-source")
+                    yield Input(id="base-branch", placeholder="develop")
+                    yield Static("", id="base-branch-error")
+                    yield Button("Use default base branch", id="clear-base-branch")
+                    yield Static("", id="base-branch-check")
                     yield Checkbox(
                         "Automatically detect validation commands",
                         value=True,
@@ -252,6 +270,7 @@ class RepositorySettingsScreen(Screen[None]):
     def on_unmount(self) -> None:
         self._index_view_mounted = False
         self._index_status_token += 1
+        self._branch_check_token += 1
 
     def on_resize(self, event: Resize) -> None:
         self._set_layout_mode(event.size.width)
@@ -286,8 +305,15 @@ class RepositorySettingsScreen(Screen[None]):
                 )
 
     def on_input_changed(self, event: Input.Changed) -> None:
+        if (self._branch_check_subject is not None and event.input.id in self._branch_check_inputs
+                and event.value != self._branch_check_inputs[event.input.id]):
+            self._invalidate_branch_check()
         if event.input.id == "repository-path":
             self._update_path_warning(event.value)
+        elif event.input.id == "base-branch":
+            if self._base_cleared and event.value != self._base_original[2]:
+                self._base_cleared = False
+            self._validate_base_branch()
         elif event.input.id in ("review-budget", "validation-budget"):
             kind = event.input.id.removesuffix("-budget")
             if kind in self._budget_original:
@@ -296,6 +322,16 @@ class RepositorySettingsScreen(Screen[None]):
                 ):
                     self._cleared_budgets.remove(kind)
                 self._validate_budget(kind)
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if (event.checkbox.id == "repository-auto-detect" and self._branch_check_subject is not None
+                and event.value != self._branch_check_auto_detect):
+            self._invalidate_branch_check()
+
+    def _invalidate_branch_check(self) -> None:
+        self._branch_check_token += 1
+        self._branch_check_subject = None
+        self.query_one("#base-branch-check", Static).update("")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         actions: dict[str, Callable[[], None]] = {
@@ -312,6 +348,7 @@ class RepositorySettingsScreen(Screen[None]):
             "clear-index": lambda: self._start_index_action("clear"),
             "clear-review-budget": lambda: self._clear_budget("review"),
             "clear-validation-budget": lambda: self._clear_budget("validation"),
+            "clear-base-branch": self._clear_base_branch,
         }
         action = actions.get(event.button.id or "")
         if action is not None:
@@ -338,6 +375,10 @@ class RepositorySettingsScreen(Screen[None]):
         self._load_repository(selected)
 
     def _load_repository(self, repository: str) -> None:
+        if repository != self._editing_key:
+            self._branch_check_token += 1
+            self._branch_check_subject = None
+            self.query_one("#base-branch-check", Static).update("")
         try:
             settings = self.controller.repository_settings(repository)
             self.controller.select_repository(repository)
@@ -351,6 +392,8 @@ class RepositorySettingsScreen(Screen[None]):
         self.query_one("#repository-key", Input).value = settings.key
         self.query_one("#repository-path", Input).value = settings.path
         self.query_one("#repository-auto-detect", Checkbox).value = settings.auto_detect
+        self._set_base_branch(settings.base_branch, settings.base_branch_overridden,
+                              settings.inherited_base_branch)
         self._set_budgets(
             (
                 settings.review_retries,
@@ -374,6 +417,9 @@ class RepositorySettingsScreen(Screen[None]):
         self._status(f"Editing repository {repository!r}.")
 
     def _new_repository(self) -> None:
+        self._branch_check_token += 1
+        self._branch_check_subject = None
+        self.query_one("#base-branch-check", Static).update("")
         self.query_one("#repository-editor-pane", Vertical).disabled = False
         self._creating_repository = True
         self._editing_key = None
@@ -384,6 +430,7 @@ class RepositorySettingsScreen(Screen[None]):
         self.query_one("#repository-auto-detect", Checkbox).value = True
         try:
             review_default, validation_default = self.controller.repository_retry_defaults()
+            base_default = self.controller.repository_base_branch_default()
         except Exception as exc:
             self._disable_editor()
             self._error(f"Cannot load default correction budgets: {exc}")
@@ -392,6 +439,7 @@ class RepositorySettingsScreen(Screen[None]):
             (review_default, False, review_default),
             (validation_default, False, validation_default),
         )
+        self._set_base_branch(base_default, False, base_default)
         self.query_one("#validation-command-input", Input).value = ""
         self.query_one("#delete-repository", Button).disabled = True
         self._index_status_token += 1
@@ -420,6 +468,7 @@ class RepositorySettingsScreen(Screen[None]):
         for input_id in (
             "repository-key",
             "repository-path",
+            "base-branch",
             "review-budget",
             "validation-budget",
             "validation-command-input",
@@ -427,6 +476,9 @@ class RepositorySettingsScreen(Screen[None]):
             self.query_one(f"#{input_id}", Input).value = ""
         for status_id in (
             "repository-path-warning",
+            "base-branch-source",
+            "base-branch-error",
+            "base-branch-check",
             "review-budget-source",
             "review-budget-error",
             "validation-budget-source",
@@ -460,6 +512,7 @@ class RepositorySettingsScreen(Screen[None]):
         command = self._command_from_input()
         if command is None:
             return
+        self._invalidate_branch_check()
         self._commands.append(command)
         self._selected_command = None
         self.query_one("#validation-command-input", Input).value = ""
@@ -473,6 +526,7 @@ class RepositorySettingsScreen(Screen[None]):
         command = self._command_from_input()
         if command is None:
             return
+        self._invalidate_branch_check()
         self._commands[self._selected_command] = command
         self._refresh_command_list(self._selected_command)
         self._error("")
@@ -481,6 +535,7 @@ class RepositorySettingsScreen(Screen[None]):
         if self._selected_command is None:
             self._error("Select a validation command to remove.")
             return
+        self._invalidate_branch_check()
         del self._commands[self._selected_command]
         self._selected_command = None
         self.query_one("#validation-command-input", Input).value = ""
@@ -495,6 +550,7 @@ class RepositorySettingsScreen(Screen[None]):
         if destination < 0 or destination >= len(self._commands):
             self._error("The selected command cannot move farther in that direction.")
             return
+        self._invalidate_branch_check()
         self._commands[self._selected_command], self._commands[destination] = (
             self._commands[destination],
             self._commands[self._selected_command],
@@ -641,6 +697,12 @@ class RepositorySettingsScreen(Screen[None]):
         validation_valid, validation_retries = self._budget_update("validation")
         if not review_valid or not validation_valid:
             return
+        if not self._validate_base_branch():
+            return
+        branch = self.query_one("#base-branch", Input).value
+        branch_update = None if self._base_cleared else (
+            ... if branch == self._base_original[0] else branch
+        )
         try:
             saved = self.controller.save_repository(
                 key,
@@ -650,6 +712,7 @@ class RepositorySettingsScreen(Screen[None]):
                 original_key=self._editing_key,
                 review_retries=review_retries,
                 validation_retries=validation_retries,
+                base_branch=branch_update,
             )
         except Exception as exc:
             self._error(f"Cannot save repository: {exc}")
@@ -660,6 +723,75 @@ class RepositorySettingsScreen(Screen[None]):
         self._refresh_repositories(key)
         action = "Created" if previous is None else "Saved"
         self._status(f"{action} repository {key!r} in {saved}.")
+        self._branch_check_token += 1
+        token = self._branch_check_token
+        self._branch_check_subject = (key, path, branch)
+        self._branch_check_inputs = {
+            name: self.query_one(f"#{name}", Input).value
+            for name in ("repository-key", "repository-path", "base-branch", "review-budget",
+                         "validation-budget", "validation-command-input")
+        }
+        self._branch_check_auto_detect = self.query_one("#repository-auto-detect", Checkbox).value
+        self.query_one("#base-branch-check", Static).update("Saved; checking the remote branch…")
+        self._check_remote_branch(key, path, branch, token)
+
+    def _set_base_branch(self, effective: str, overridden: bool, inherited: str) -> None:
+        self._base_original = (effective, overridden, inherited)
+        self._base_cleared = False
+        self.query_one("#base-branch", Input).value = effective
+        self._validate_base_branch()
+
+    def _clear_base_branch(self) -> None:
+        self._invalidate_branch_check()
+        self._base_cleared = True
+        self.query_one("#base-branch", Input).value = self._base_original[2]
+        self._validate_base_branch()
+
+    def _validate_base_branch(self) -> bool:
+        value = self.query_one("#base-branch", Input).value
+        error = self.query_one("#base-branch-error", Static)
+        source = self.query_one("#base-branch-source", Static)
+        try:
+            validate_base_branch(value)
+        except ConfigurationError as exc:
+            error.update(str(exc))
+            source.update("")
+            return False
+        error.update("")
+        effective, overridden, inherited = self._base_original
+        if self._base_cleared:
+            source.update(f"Inherited from defaults: {inherited} (pending save)")
+        elif value == effective:
+            origin = "overridden for this repository" if overridden else "inherited from defaults"
+            source.update(f"Effective: {effective} ({origin})")
+        else:
+            source.update(f"Pending repository override: {value}")
+        return True
+
+    @work(thread=True)
+    def _check_remote_branch(self, key: str, path: str, branch: str, token: int) -> None:
+        try:
+            result = self.controller.probe_repository_branch(path, branch)
+        except Exception:
+            result = "unavailable"
+        self.app.call_later(self._receive_remote_branch, key, path, branch, token, result)
+
+    def _receive_remote_branch(
+        self, key: str, path: str, branch: str, token: int, result: str
+    ) -> None:
+        if (not self._index_view_mounted or token != self._branch_check_token
+                or self._editing_key != key
+                or self.query_one("#repository-path", Input).value.strip() != path
+                or self.query_one("#base-branch", Input).value != branch):
+            return
+        messages = {
+            "found": f"Remote branch {branch!r} exists on origin.",
+            "missing": f"Warning: branch {branch!r} does not exist on origin.",
+            "unavailable": f"Unable to check branch {branch!r} on origin.",
+        }
+        self.query_one("#base-branch-check", Static).update(
+            messages.get(result, messages["unavailable"])
+        )
 
     def _set_budgets(
         self, review: tuple[int, bool, int], validation: tuple[int, bool, int]
@@ -671,6 +803,7 @@ class RepositorySettingsScreen(Screen[None]):
             self._validate_budget(kind)
 
     def _clear_budget(self, kind: str) -> None:
+        self._invalidate_branch_check()
         self._cleared_budgets.add(kind)
         inherited = self._budget_original[kind][2]
         self.query_one(f"#{kind}-budget", Input).value = str(inherited)
