@@ -106,6 +106,9 @@ class RepositoryConfiguration:
     validation_retries: int = 2
     validation_retries_overridden: bool = False
     inherited_validation_retries: int = 2
+    base_branch: str = "develop"
+    base_branch_overridden: bool = False
+    inherited_base_branch: str = "develop"
 
     @property
     def path_exists(self) -> bool:
@@ -117,6 +120,17 @@ class RepositorySettings(BaseModel):
     base_branch: str = "develop"
     protected_branches: list[str] = Field(default_factory=lambda: ["main", "master", "develop"])
     branch_prefix: str = "prchef"
+
+
+def validate_base_branch(value: str) -> str:
+    """Validate a literal branch name using Git's refname restrictions."""
+    if (not isinstance(value, str) or not value or value.startswith(("-", "/"))
+            or value.endswith(("/", ".")) or value in {"@", "HEAD"} or ".." in value
+            or "@{" in value or "//" in value
+            or any(ord(c) < 32 or ord(c) == 127 or c in " ~^:?*[\\" for c in value)
+            or any(part.startswith(".") or part.endswith(".lock") for part in value.split("/"))):
+        raise ConfigurationError("Base branch must be a valid, non-empty literal Git branch name.")
+    return value
 
 
 class EmbeddingSettings(BaseModel):
@@ -1541,6 +1555,10 @@ class ProjectConfigLoader:
         default_review = defaults.get("review", {}) if isinstance(defaults, dict) else {}
         repository_validation = repository.get("validation", {})
         repository_review = repository.get("review", {})
+        default_repository = defaults.get("repository", {}) if isinstance(defaults, dict) else {}
+        repository_options = repository.get("repository", {})
+        if not isinstance(default_repository, dict) or not isinstance(repository_options, dict):
+            raise ConfigurationError("Repository settings must be a mapping")
         if not isinstance(default_validation, dict):
             raise ConfigurationError("'defaults.validation' must be a mapping")
         if not isinstance(repository_validation, dict):
@@ -1574,7 +1592,23 @@ class ProjectConfigLoader:
             validation_retries=validation.max_validation_retries,
             validation_retries_overridden="max_validation_retries" in repository_validation,
             inherited_validation_retries=inherited_validation.max_validation_retries,
+            base_branch=RepositorySettings.model_validate(
+                _deep_merge(default_repository, repository_options)
+            ).base_branch,
+            base_branch_overridden="base_branch" in repository_options,
+            inherited_base_branch=RepositorySettings.model_validate(default_repository).base_branch,
         )
+
+    def repository_base_branch_default(self) -> str:
+        configuration = _load_yaml(self._config_file, required=True)
+        defaults = configuration.get("defaults", {})
+        if not isinstance(defaults, dict) or not isinstance(defaults.get("repository", {}), dict):
+            raise ConfigurationError("Default repository settings must be a mapping")
+        return RepositorySettings.model_validate(defaults.get("repository", {})).base_branch
+
+    @property
+    def configuration_path(self) -> Path:
+        return self._config_file
 
     def repository_retry_defaults(self) -> tuple[int, int]:
         """Return review and validation budgets after YAML and schema defaults."""
@@ -1626,6 +1660,7 @@ class ProjectConfigLoader:
         original_key: str | None = None,
         review_retries: int | None | EllipsisType = ...,
         validation_retries: int | None | EllipsisType = ...,
+        base_branch: str | None | EllipsisType = ...,
     ) -> Path:
         """Create or update one repository entry in the global configuration.
 
@@ -1687,7 +1722,16 @@ class ProjectConfigLoader:
         except ValueError as exc:
             raise ConfigurationError(f"Invalid repository validation settings: {exc}") from exc
 
-        configuration = _load_yaml_for_update(self._config_file)
+        try:
+            source = self._config_file.read_bytes()
+        except OSError as exc:
+            raise ConfigurationError(f"Cannot read configuration: {exc}") from exc
+        try:
+            configuration = yaml.safe_load(source.decode("utf-8-sig")) or {}
+        except (UnicodeError, yaml.YAMLError) as exc:
+            raise ConfigurationError(f"Cannot read configuration: {exc}") from exc
+        if not isinstance(configuration, dict):
+            raise ConfigurationError("Configuration root must be a mapping")
         self._reject_misplaced_project_settings(configuration)
         repositories = configuration.setdefault("repositories", {})
         if not isinstance(repositories, dict):
@@ -1708,6 +1752,23 @@ class ProjectConfigLoader:
             )
         repository_validation["auto_detect"] = validation.auto_detect
         repository_validation["commands"] = deepcopy(validation.commands)
+
+        if base_branch is not ...:
+            options = repository.get("repository")
+            if options is not None and not isinstance(options, dict):
+                raise ConfigurationError("Repository settings must be a mapping")
+            if base_branch is None:
+                validate_base_branch(self.repository_base_branch_default())
+                if options is not None:
+                    options.pop("base_branch", None)
+                    if not options:
+                        repository.pop("repository")
+            else:
+                validate_base_branch(base_branch)
+                if options is None:
+                    options = {}
+                    repository["repository"] = options
+                options["base_branch"] = base_branch
 
         for mapping_name, field_name, value in (
             ("review", "max_review_retries", review_retries),
@@ -1733,6 +1794,10 @@ class ProjectConfigLoader:
 
         defaults = configuration.get("defaults", {})
         candidate = _deep_merge(defaults, repository) if isinstance(defaults, dict) else repository
+        effective_repository = candidate.get("repository", {})
+        if not isinstance(effective_repository, dict):
+            raise ConfigurationError("Repository settings must be a mapping")
+        validate_base_branch(effective_repository.get("base_branch", "develop"))
         candidate["path"] = Path(normalized_path)
         try:
             ProjectConfig.model_validate(candidate)
@@ -1751,7 +1816,9 @@ class ProjectConfigLoader:
             repositories.update(ordered_entries)
         else:
             repositories[normalized_key] = repository
-        return self._write_configuration(configuration)
+        from prchef.config.repository_writer import write_repository
+
+        return write_repository(self._config_file, source, source_key, normalized_key, repository)
 
     def delete_repository(self, repository_key: str) -> Path:
         """Remove only a global configuration entry; never touch its directory."""

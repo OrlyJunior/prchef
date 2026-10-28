@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -54,6 +55,8 @@ class InterruptedRecoveryChoice(ModalScreen[tuple[str, ...] | None]):
     #recovery-dialog { width: 100%; max-width: 82; height: 80%;
                        padding: 1 2; border: round $warning; }
     #recovery-items { height: 1fr; overflow-y: auto; }
+    #recovery-items Button { width: 100%; min-width: 0; content-align: left middle;
+                             text-align: left; }
     #recovery-actions { height: auto; }
     """
 
@@ -61,6 +64,15 @@ class InterruptedRecoveryChoice(ModalScreen[tuple[str, ...] | None]):
         super().__init__()
         self.executions = executions
         self.selected: set[str] = set()
+
+    def _item_label(self, execution: WorkflowExecution) -> Text:
+        mark = "[x]" if execution.id in self.selected else "[ ]"
+        stage = execution.resume_stage or execution.current_stage
+        return Text(
+            f"{mark} {execution.task_source}:{execution.task_id} | resume {stage.value}",
+            no_wrap=True,
+            overflow="ellipsis",
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="recovery-dialog"):
@@ -71,8 +83,7 @@ class InterruptedRecoveryChoice(ModalScreen[tuple[str, ...] | None]):
             with VerticalScroll(id="recovery-items"):
                 for index, execution in enumerate(self.executions):
                     yield Button(
-                        f"[ ] {execution.task_source}:{execution.task_id} | "
-                        f"resume { (execution.resume_stage or execution.current_stage).value}",
+                        self._item_label(execution),
                         id=f"recovery-item-{index}",
                     )
             with Horizontal(id="recovery-actions"):
@@ -92,12 +103,9 @@ class InterruptedRecoveryChoice(ModalScreen[tuple[str, ...] | None]):
             item = self.executions[int(button_id.removeprefix("recovery-item-"))]
             if item.id in self.selected:
                 self.selected.remove(item.id)
-                mark = "[ ]"
             else:
                 self.selected.add(item.id)
-                mark = "[x]"
-            event.button.label = f"{mark} {item.task_source}:{item.task_id} | " \
-                                 f"resume {(item.resume_stage or item.current_stage).value}"
+            event.button.label = self._item_label(item)
 
 
 class PrchefApp(App[None]):

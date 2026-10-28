@@ -13,6 +13,7 @@ from prchef.clients.exceptions import (
     CommandTimeoutError,
     GitClientError,
     GitHubClientError,
+    MissingRemoteBaseBranchError,
 )
 from prchef.config.project_config import AgentProviderSettings, GitHubAppSettings
 from prchef.models import (
@@ -107,6 +108,64 @@ def test_long_title_preserves_pull_request_title_and_branch_slug(workflow, monke
         r"[^/]+/card-1-a-long-title-for-a-workflow-with-several-words-a-\d{14}-[\w-]{1,12}",
         result.working_branch,
     )
+
+
+def test_planning_resume_retains_recorded_base_when_configuration_changes(
+    workflow, tmp_path: Path
+) -> None:
+    service, _, _, factory = workflow
+    factory.planner.ambiguous = True
+    paused = service.run("card-original-base")
+    assert paused.status is WorkflowStatus.NEEDS_HUMAN
+    service._config_loader.config.repository.base_branch = "main"
+    factory.planner.ambiguous = False
+
+    resumed = service.respond_and_resume(paused.id, "Use the existing behavior.")
+    assert resumed.status is WorkflowStatus.APPROVED
+    assert resumed.base_branch == "develop"
+    assert resumed.base_commit == paused.base_commit
+    assert resumed.pull_request_snapshot["base_branch"] == "develop"
+    assert factory.planner.spec_starting_branch == "develop"
+    assert factory.git.fetch_calls == 1
+    assert set(factory.git.merge_base_calls) == {paused.base_commit}
+
+    service._config_loader.config.workspace.root = tmp_path.parent / f"{tmp_path.name}-fresh"
+    fresh = service.run("card-new-base")
+    assert fresh.base_branch == "main"
+    assert fresh.pull_request_snapshot["base_branch"] == "main"
+    assert factory.git.fetch_calls == 2
+
+
+def test_missing_base_guidance_uses_resolved_configuration_path(workflow, tmp_path: Path) -> None:
+    service, _, _, factory = workflow
+    service._config_loader.configuration_path = tmp_path / "custom-config.yml"
+
+    def missing(branch: str) -> str:
+        raise MissingRemoteBaseBranchError(branch)
+
+    factory.git.fetch_base = missing
+    failed = service.run("card-missing-base")
+    assert failed.status is WorkflowStatus.FAILED
+    assert failed.error_message is not None
+    for expected in ("develop", "Repositories", "repository.base_branch", "custom-config.yml"):
+        assert expected in failed.error_message
+
+
+def test_manual_continuation_creates_pr_against_recorded_branch(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.github.error = RuntimeError("PR creation failed")
+    failed = service.run("card-base-continuation")
+    assert failed.status is WorkflowStatus.FAILED
+    service._config_loader.config.repository.base_branch = "main"
+    factory.github.error = None
+
+    resumed = service.continue_execution(failed.id, "Retry the pull request.")
+    assert resumed.status is WorkflowStatus.APPROVED
+    assert resumed.base_branch == "develop"
+    assert resumed.base_commit == failed.base_commit
+    assert resumed.pull_request_snapshot["base_branch"] == "develop"
+    assert factory.git.fetch_calls == 1
+    assert set(factory.git.merge_base_calls) == {failed.base_commit}
 
 
 def test_review_retry_fetches_changed_description_each_round(workflow) -> None:

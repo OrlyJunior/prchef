@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Protocol
 
 from prchef.clients.command_client import CommandClient, CommandResult
-from prchef.clients.exceptions import GitClientError
+from prchef.clients.exceptions import (
+    CommandExecutionError,
+    GitClientError,
+    MissingRemoteBaseBranchError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +98,36 @@ class GitClient:
 
     def fetch_base(self, base_branch: str) -> str:
         logger.info("[git] Fetching base branch: origin/%s", base_branch)
-        self._git("fetch", "origin", base_branch)
+        try:
+            self._git("fetch", "origin", base_branch)
+        except GitClientError:
+            if self.probe_remote_branch(base_branch) == "missing":
+                raise MissingRemoteBaseBranchError(base_branch) from None
+            raise
         return self._git("rev-parse", "--verify", f"origin/{base_branch}^{{commit}}").stdout.strip()
+
+    def probe_remote_branch(self, branch: str) -> str:
+        """Read the exact remote ref without changing Git state or prompting."""
+        if not self._path.is_dir() or not (self._path / ".git").exists():
+            return "unavailable"
+        environment = dict(os.environ)
+        environment.update({
+            "GIT_TERMINAL_PROMPT": "0",
+            "GCM_INTERACTIVE": "Never",
+            "SSH_ASKPASS_REQUIRE": "never",
+        })
+        try:
+            result = self._commands.run(
+                ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch}"],
+                cwd=self._path, input_text="", timeout_seconds=15, env=environment,
+            )
+        except (CommandExecutionError, OSError):
+            return "unavailable"
+        if not result.success:
+            return "unavailable"
+        ref = f"refs/heads/{branch}"
+        found = any(line.split()[-1:] == [ref] for line in result.stdout.splitlines())
+        return "found" if found else "missing"
 
     @contextmanager
     def planning_snapshot(self, base_commit: str) -> Iterator[Path]:

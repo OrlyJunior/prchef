@@ -29,6 +29,7 @@ from prchef.services.workflow_stage_actions import StageActions
 from prchef.services.workflow_stage_events import ExecutionRuntimes, StageEvents
 from prchef.services.workflow_stage_sequencer import StageSequencer
 from prchef.services.workflow_stage_values import StageValues
+from tests.unit.fakes import FakeConfigLoader
 
 
 def commit_task(title: str, task_id: str = "9") -> DevelopmentTask:
@@ -226,6 +227,39 @@ def test_interrupted_recovery_uses_recorded_legacy_workspace(
     if exists:
         git.create_worktree.assert_not_called()
         git.attach_existing_worktree.assert_not_called()
+
+
+def test_interrupted_planning_keeps_recorded_branch_and_commit(tmp_path: Path) -> None:
+    config = FakeConfigLoader(tmp_path).config
+    config.repository.base_branch = "main"
+    execution = WorkflowExecution(
+        id="one", status=WorkflowStatus.INTERRUPTED,
+        resume_stage=WorkflowStage.GENERATE_SPEC, base_branch="develop", base_commit="base-sha",
+        task_snapshot={"id": "task", "source": "test", "title": "Task",
+                       "description": "", "url": ""},
+    )
+    repository = Mock()
+    loader = Mock()
+    loader.load.return_value = config
+    git = Mock()
+    git.github_repository.return_value = "owner/repo"
+    clients = SimpleNamespace(git=git)
+    factory = Mock()
+    factory.create.return_value = clients
+    lifecycle = Mock()
+    lifecycle._runtime_overrides_for_execution.return_value = ({}, {})
+    sequencer = StageSequencer(
+        repository, Mock(), loader, factory, Mock(), Mock(), Mock(), lifecycle, Mock()
+    )
+    sequencer._repository_context_strategy = Mock()
+    sequencer._resume_planning = Mock(return_value=execution)
+
+    assert sequencer._execute_interrupted(execution) is execution
+    resumed_config = sequencer._resume_planning.call_args.args[2]
+    assert resumed_config.repository.base_branch == "develop"
+    assert config.repository.base_branch == "main"
+    assert execution.base_commit == "base-sha"
+    git.fetch_base.assert_not_called()
 
 
 def test_stage_events_persist_before_delivery_and_isolate_execution_state() -> None:

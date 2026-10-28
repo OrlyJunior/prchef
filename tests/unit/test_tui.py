@@ -498,6 +498,9 @@ class _ConfigLoader:
     def repository_retry_defaults(self) -> tuple[int, int]:
         return 1, 2
 
+    def repository_base_branch_default(self) -> str:
+        return "develop"
+
     def resolve_repository_path(self, path: str) -> Path:
         candidate = Path(path)
         return candidate if candidate.is_absolute() else self._path / candidate
@@ -511,6 +514,7 @@ class _ConfigLoader:
         original_key: str | None = None,
         review_retries: int | None | EllipsisType = ...,
         validation_retries: int | None | EllipsisType = ...,
+        base_branch: str | None | EllipsisType = ...,
     ) -> Path:
         source_key = original_key or repository_key
         if source_key != repository_key and repository_key in self.repository_entries:
@@ -546,6 +550,10 @@ class _ConfigLoader:
             review_retries_overridden=review_overridden,
             validation_retries=validation_value,
             validation_retries_overridden=validation_overridden,
+            base_branch=(old.base_branch if old else "develop") if base_branch is ...
+            else (base_branch or "develop"),
+            base_branch_overridden=(old.base_branch_overridden if old else False)
+            if base_branch is ... else base_branch is not None,
         )
         if source_key in self.repository_entries:
             updated = {
@@ -808,6 +816,174 @@ def _controller(tmp_path: Path) -> tuple[WorkflowController, _WorkflowService, _
         service,
         repository,
     )
+
+
+def _recovery_executions() -> list[WorkflowExecution]:
+    return [
+        WorkflowExecution(
+            id="first", task_source="github", task_id="[Feature] [bold]text[/bold]",
+            status=WorkflowStatus.INTERRUPTED, current_stage=WorkflowStage.REVIEW,
+            resume_stage=WorkflowStage.GENERATE_SPEC,
+        ),
+        WorkflowExecution(
+            id="second", task_source="github", task_id="2",
+            status=WorkflowStatus.INTERRUPTED, current_stage=WorkflowStage.IMPLEMENT,
+        ),
+        WorkflowExecution(
+            id="third", task_source="github", task_id="3",
+            status=WorkflowStatus.INTERRUPTED,
+        ),
+    ]
+
+
+def _painted_recovery_row(application: PrchefApp, row: Button) -> str:
+    strips = application.screen._compositor.render_strips()
+    return "".join(
+        strips[y].crop(row.region.x, row.region.right).text
+        for y in range(row.region.y, row.region.bottom)
+    )
+
+
+def test_recovery_rows_render_literal_text_and_submit_visible_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.executions = _recovery_executions()
+    submitted: list[str] = []
+    monkeypatch.setattr(controller, "submit_interrupted", submitted.append)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 40)) as pilot:
+            await settle_tui(pilot)
+            screen = application.screen
+            rows = [screen.query_one(f"#recovery-item-{index}", Button) for index in range(3)]
+            literal = "github:[Feature] [bold]text[/bold] | resume GENERATE_SPEC"
+            assert f"[ ] {literal}" in _painted_recovery_row(application, rows[0])
+            assert "[ ] github:2 | resume IMPLEMENT" in _painted_recovery_row(application, rows[1])
+            assert "[ ] github:3 | resume LOAD_TASK" in _painted_recovery_row(application, rows[2])
+
+            assert await pilot.click(rows[0])
+            await settle_tui(pilot)
+            assert f"[x] {literal}" in _painted_recovery_row(application, rows[0])
+            assert rows[0].has_focus
+            await wait_for_tui(pilot, lambda: not rows[0].has_class("-active"))
+            await pilot.press("enter")
+            await settle_tui(pilot)
+            assert f"[ ] {literal}" in _painted_recovery_row(application, rows[0])
+
+            # Select in reverse order and leave the middle row unchecked.
+            assert await pilot.click(rows[2])
+            assert await pilot.click(rows[1])
+            await wait_for_tui(pilot, lambda: not rows[0].has_class("-active"))
+            assert await pilot.click(rows[0])
+            await wait_for_tui(pilot, lambda: not rows[1].has_class("-active"))
+            assert await pilot.click(rows[1])
+            await settle_tui(pilot)
+            assert f"[x] {literal}" in _painted_recovery_row(application, rows[0])
+            assert "[ ] github:2" in _painted_recovery_row(application, rows[1])
+            assert "[x] github:3" in _painted_recovery_row(application, rows[2])
+            assert await pilot.click("#recovery-selected")
+            await settle_tui(pilot)
+            assert submitted == ["first", "third"]
+
+    asyncio.run(drive())
+
+
+def test_recovery_row_marker_stays_visible_in_narrow_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    execution = _recovery_executions()[0]
+    execution.task_id += "-" + "long" * 40
+    repository.executions = [execution]
+    monkeypatch.setattr(controller, "submit_interrupted", lambda execution_id: None)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(60, 20)) as pilot:
+            await settle_tui(pilot)
+            row = application.screen.query_one("#recovery-item-0", Button)
+            for marker in ("[ ]", "[x]", "[ ]"):
+                painted = _painted_recovery_row(application, row)
+                assert f"{marker} github:[Feature] [bold]text[/bold]" in painted
+                row.focus()
+                await settle_tui(pilot)
+                assert row.has_focus
+                await wait_for_tui(pilot, lambda: not row.has_class("-active"))
+                await pilot.press("enter")
+                await settle_tui(pilot)
+
+    asyncio.run(drive())
+
+
+def test_recovery_rows_remain_keyboard_accessible_when_scrolled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.executions = [
+        WorkflowExecution(
+            id=f"execution-{index}", task_source="github", task_id=str(index),
+            status=WorkflowStatus.INTERRUPTED,
+        )
+        for index in range(8)
+    ]
+    submitted: list[str] = []
+    monkeypatch.setattr(controller, "submit_interrupted", submitted.append)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(60, 20)) as pilot:
+            await settle_tui(pilot)
+            screen = application.screen
+            row = screen.query_one("#recovery-item-7", Button)
+            row.focus()
+            await wait_for_tui(
+                pilot, lambda: row.has_focus and screen.can_view_entire(row),
+                description="focused recovery row after scrolling",
+            )
+            assert "[ ] github:7" in _painted_recovery_row(application, row)
+            await pilot.press("enter")
+            await settle_tui(pilot)
+            assert row.has_focus
+            assert "[x] github:7" in _painted_recovery_row(application, row)
+            selected = screen.query_one("#recovery-selected", Button)
+            selected.focus()
+            await settle_tui(pilot)
+            await pilot.press("enter")
+            await settle_tui(pilot)
+            assert submitted == ["execution-7"]
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [("recovery-selected", []), ("recovery-all", ["first", "second", "third"]),
+     ("recovery-later", [])],
+)
+def test_recovery_actions_submit_expected_executions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str, expected: list[str]
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.executions = _recovery_executions()
+    submitted: list[str] = []
+    monkeypatch.setattr(controller, "submit_interrupted", submitted.append)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 40)) as pilot:
+            await settle_tui(pilot)
+            if action != "recovery-selected":
+                assert await pilot.click("#recovery-item-1")
+                await settle_tui(pilot)
+                row = application.screen.query_one("#recovery-item-1", Button)
+                assert "[x] github:2" in _painted_recovery_row(application, row)
+            assert await pilot.click(f"#{action}")
+            await settle_tui(pilot)
+            assert submitted == expected
+
+    asyncio.run(drive())
 
 
 def test_controller_browses_selections_and_delegates_workflow_start(tmp_path: Path) -> None:
@@ -1899,6 +2075,94 @@ def test_repository_retry_budgets_edit_clear_validate_and_switch(tmp_path: Path)
             )
 
     asyncio.run(drive())
+
+
+def test_repository_base_branch_editor_and_stale_check(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(60, 15)) as pilot:
+            await pilot.press("r")
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, RepositorySettingsScreen)
+            branch = screen.query_one("#base-branch", Input)
+            assert branch.value == "develop"
+            assert "inherited" in str(screen.query_one("#base-branch-source", Static).renderable)
+            branch.focus()
+            await wait_for_tui(
+                pilot,
+                lambda: screen.query_one("#repository-settings", VerticalScroll).scroll_y > 0,
+                description="base branch input in the narrow viewport",
+            )
+            branch.value = "main"
+            await settle_tui(pilot)
+            assert "Pending repository override" in str(
+                screen.query_one("#base-branch-source", Static).renderable
+            )
+            screen.query_one("#save-repository", Button).press()
+            await settle_tui(pilot)
+            assert controller.repository_settings("example").base_branch == "main"
+            token = screen._branch_check_token
+            path = screen.query_one("#repository-path", Input).value
+            branch.value = "invalid..branch"
+            await settle_tui(pilot)
+            assert "valid" in str(screen.query_one("#base-branch-error", Static).renderable)
+            screen._receive_remote_branch("example", path, "main", token, "missing")
+            assert "Warning" not in str(screen.query_one("#base-branch-check", Static).renderable)
+            screen.query_one("#save-repository", Button).press()
+            await settle_tui(pilot)
+            assert controller.repository_settings("example").base_branch == "main"
+            screen.query_one("#clear-base-branch", Button).press()
+            await settle_tui(pilot)
+            screen.query_one("#save-repository", Button).press()
+            await settle_tui(pilot)
+            assert not controller.repository_settings("example").base_branch_overridden
+
+    asyncio.run(drive())
+
+
+def test_repository_remote_check_runs_in_background_and_discards_late_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def probe(path: str, branch: str) -> str:
+        started.set()
+        release.wait(timeout=10)
+        finished.set()
+        return "missing"
+
+    monkeypatch.setattr(controller, "probe_repository_branch", probe)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(60, 15)) as pilot:
+            await pilot.press("r")
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, RepositorySettingsScreen)
+            branch = screen.query_one("#base-branch", Input)
+            branch.value = "main"
+            screen.query_one("#save-repository", Button).press()
+            assert await asyncio.to_thread(started.wait, 5)
+            assert controller.repository_settings("example").base_branch == "main"
+            assert "checking" in str(screen.query_one("#base-branch-check", Static).renderable)
+            branch.value = "new-branch"
+            await pilot.pause()
+            release.set()
+            await settle_tui(pilot)
+            assert finished.is_set()
+            assert "Warning" not in str(screen.query_one("#base-branch-check", Static).renderable)
+
+    try:
+        asyncio.run(drive())
+    finally:
+        release.set()
 
 
 def test_repository_load_failure_disables_stale_editor_and_prevents_save(
