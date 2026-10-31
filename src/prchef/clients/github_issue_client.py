@@ -9,7 +9,11 @@ from typing import Any
 import httpx
 
 from prchef.clients.command_client import CommandClient, CommandResult
-from prchef.clients.exceptions import GitHubClientError
+from prchef.clients.exceptions import (
+    ExternalClientError,
+    GitHubClientError,
+    PartialGitHubIssueListError,
+)
 from prchef.clients.github_client import GitHubAppAuthenticator
 from prchef.config.project_config import GitHubAppSettings
 
@@ -114,52 +118,56 @@ class GitHubIssueClient:
             raise GitHubClientError("GitHub issue comments response contains invalid comments")
         return [item["body"] for item in payload]
 
-    def list_issues(self, repository: str, *, limit: int = 50) -> list[dict[str, Any]]:
-        """Return open issues from a repository for interactive task selection."""
-
-        normalized_repository = self._normalize_repository(repository)
-        if limit <= 0:
+    def list_issues(
+        self, repository: str, *, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Read validated REST pages, retaining a prefix on discovery failure."""
+        repository = self._normalize_repository(repository)
+        if limit is not None and limit <= 0:
             raise GitHubClientError("GitHub issue list limit must be positive")
-        if self._planner_app is not None:
-            issues: list[dict[str, Any]] = []
-            page = 1
-            while len(issues) < limit:
-                payload = self._api_get(
-                    f"repos/{normalized_repository}/issues",
-                    params={"state": "open", "per_page": 100, "page": page},
-                )
+        issues: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        page = 1
+        while True:
+            try:
+                path = f"repos/{repository}/issues"
+                if self._planner_app is not None:
+                    payload = self._api_get(path, params={
+                        "state": "open", "sort": "created", "direction": "desc",
+                        "per_page": 100, "page": page,
+                    })
+                else:
+                    result = self._run(
+                        "api", f"{path}?state=open&sort=created&direction=desc"
+                        f"&per_page=100&page={page}",
+                    )
+                    try:
+                        payload = json.loads(result.stdout)
+                    except (ValueError, TypeError) as exc:
+                        raise GitHubClientError(
+                            "GitHub CLI returned invalid issue list JSON"
+                        ) from exc
                 if not isinstance(payload, list):
-                    raise GitHubClientError("GitHub API issue list response must be a JSON array")
+                    raise GitHubClientError("GitHub issue list response must be a JSON array")
+                validated: list[dict[str, Any]] = []
                 for item in payload:
                     if not isinstance(item, dict):
-                        raise GitHubClientError("GitHub API issue list contains an invalid issue")
+                        raise GitHubClientError("GitHub issue list contains an invalid issue")
                     if "pull_request" not in item:
-                        issues.append(self._normalize_issue(item))
-                        if len(issues) == limit:
-                            break
-                if len(payload) < 100:
-                    break
-                page += 1
-            return issues
-        result = self._run(
-            "issue",
-            "list",
-            "--repo",
-            normalized_repository,
-            "--state",
-            "open",
-            "--limit",
-            str(limit),
-            "--json",
-            "number,title,body,url,labels,state,author,milestone",
-        )
-        try:
-            payload = json.loads(result.stdout)
-        except (ValueError, TypeError) as exc:
-            raise GitHubClientError("GitHub CLI returned invalid issue list JSON") from exc
-        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
-            raise GitHubClientError("GitHub CLI issue list response must be a JSON array")
-        return payload
+                        validated.append(self._normalize_issue(item))
+            except ExternalClientError as exc:
+                raise PartialGitHubIssueListError(str(exc), issues) from exc
+            # Publish only whole validated pages. Raw length determines exhaustion:
+            # even a page consisting entirely of pull requests may have a successor.
+            for issue in validated:
+                if issue["number"] not in seen:
+                    seen.add(issue["number"])
+                    issues.append(issue)
+                    if limit is not None and len(issues) == limit:
+                        return issues
+            if len(payload) < 100:
+                return issues
+            page += 1
 
     def list_labels(self, repository: str) -> list[dict[str, Any]]:
         """Return the repository's complete label catalog for interactive task filtering."""
