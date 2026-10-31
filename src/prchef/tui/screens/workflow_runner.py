@@ -30,6 +30,7 @@ from prchef.models.workflow_status import (
     WorkflowStatus,
 )
 from prchef.runtime_logging import redact_payload, redact_text
+from prchef.services.task_provider import PartialTaskListError
 from prchef.tui.batch_progress import (
     BatchRowView,
     LiveBatchProgress,
@@ -1374,11 +1375,21 @@ class WorkflowRunnerScreen(Screen[None]):
     # Completion refreshes must not supersede the batch/workflow worker calling them.
     @work(thread=True, exclusive=True, group="task-load")
     def _load_tasks(self, repository: str, provider: str, token: int) -> None:
+        incomplete = ""
         try:
             tasks = self.controller.list_tasks(repository=repository, task_provider=provider)
+        except PartialTaskListError as exc:
+            tasks = exc.tasks
+            incomplete = str(exc) or "Could not load remaining tasks"
         except Exception as exc:
             self.app.call_from_thread(self._task_loading_failed, str(exc), token)
             return
+        history: set[str] | None = None
+        history_error = ""
+        try:
+            history = self.controller.task_execution_history(repository, provider)
+        except Exception as exc:
+            history_error = str(exc) or type(exc).__name__
         # Labels share the task request token, so a stale catalog is discarded
         # with its tasks. A failed lookup is reported rather than treated as
         # a provider without label support.
@@ -1391,7 +1402,8 @@ class WorkflowRunnerScreen(Screen[None]):
         except Exception as exc:
             label_error = str(exc) or type(exc).__name__
         self.app.call_from_thread(
-            self._set_available_tasks, tasks, provider, token, labels, label_error
+            self._set_available_tasks, tasks, provider, token, labels, label_error,
+            history, history_error, incomplete
         )
 
     def _set_available_tasks(
@@ -1401,34 +1413,67 @@ class WorkflowRunnerScreen(Screen[None]):
         token: int,
         labels: tuple[str, ...] | None = None,
         label_error: str = "",
+        history: set[str] | None = None,
+        history_error: str = "",
+        incomplete: str = "",
     ) -> None:
         if token == self._task_load_token:
             repository = self._selected("#repository")
-            try:
-                executions = (
-                    self.controller.task_execution_status(repository, provider, tasks)
-                    if repository is not None
-                    else {}
-                )
-            except Exception as exc:
-                executions = {}
-                self.notify(
-                    f"Tasks loaded, but execution statuses are unavailable: {exc}",
-                    severity="warning",
-                )
             self.query_one("#task-selector", TaskSelector).set_tasks(
                 tasks,
                 provider=provider,
-                executions=executions,
                 labels=labels,
                 label_error=label_error,
+                history=history,
+                history_error=history_error,
+                incomplete=incomplete,
+                load_page_status=True,
             )
             if repository is not None:
                 self._task_context = (repository, provider)
 
+    def on_task_selector_page_changed(self, event: TaskSelector.PageChanged) -> None:
+        event.stop()
+        selector = self.query_one("#task-selector", TaskSelector)
+        if event.generation != selector._page_generation:
+            return
+        repository = self._selected("#repository")
+        provider = self._selected("#task-provider")
+        if repository is not None and provider is not None:
+            self._load_page_status(
+                repository, provider, self._task_load_token, event.generation, event.tasks
+            )
+
+    @work(thread=True, exclusive=True, group="task-page-status")
+    def _load_page_status(
+        self, repository: str, provider: str, token: int, generation: int,
+        tasks: tuple[DevelopmentTask, ...],
+    ) -> None:
+        error = ""
+        try:
+            executions = self.controller.task_execution_status(repository, provider, list(tasks))
+        except Exception as exc:
+            executions = {}
+            error = str(exc)
+        self.app.call_from_thread(
+            self._set_page_status, repository, provider, token, generation, executions, error
+        )
+
+    def _set_page_status(
+        self, repository: str, provider: str, token: int, generation: int,
+        executions: dict[str, WorkflowExecution], error: str,
+    ) -> None:
+        selector = self.query_one("#task-selector", TaskSelector)
+        if (token != self._task_load_token
+                or self._task_context != (repository, provider)
+                or generation != selector._page_generation):
+            return
+        selector.set_page_executions(generation, executions, lookup_failed=bool(error))
+        if error:
+            self.notify(f"Execution statuses are unavailable: {error}", severity="warning")
+
     def _task_loading_failed(self, message: str, token: int) -> None:
         if token == self._task_load_token:
-            self._task_context = None
             self.query_one("#task-selector", TaskSelector).set_error(message)
 
     def _start_selected_workflow(

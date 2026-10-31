@@ -60,7 +60,7 @@ from prchef.services.qdrant_repository_context import (
     repository_index_error_message,
 )
 from prchef.services.repository_context import resolve_repository_context_strategy
-from prchef.services.task_provider import LabelCatalogProvider, TaskProvider
+from prchef.services.task_provider import LabelCatalogProvider, PartialTaskListError, TaskProvider
 from prchef.services.workflow_service import WorkflowService
 
 TaskProviderFactory = Callable[[str, str], TaskProvider]
@@ -696,10 +696,10 @@ class WorkflowController:
         )
 
     def list_tasks(
-        self, *, repository: str, task_provider: str, limit: int = 50
+        self, *, repository: str, task_provider: str, limit: int | None = None
     ) -> list[DevelopmentTask]:
         provider = self._task_provider_factory(task_provider, repository)
-        return provider.list_tasks(limit=limit)
+        return provider.list_tasks() if limit is None else provider.list_tasks(limit=limit)
 
     def list_task_labels(
         self, *, repository: str, task_provider: str
@@ -813,15 +813,21 @@ class WorkflowController:
             },
         )
 
-        tasks_by_id = {
-            task.id: task
-            for task in self.list_tasks(
-                repository=launch.repository,
-                task_provider=launch.task_provider,
+        incomplete = False
+        try:
+            tasks = self.list_tasks(
+                repository=launch.repository, task_provider=launch.task_provider,
             )
-        }
+        except PartialTaskListError as exc:
+            tasks = exc.tasks
+            incomplete = True
+        tasks_by_id = {task.id: task for task in tasks}
         missing = [task_id for task_id in task_ids if task_id not in tasks_by_id]
         if missing:
+            if incomplete:
+                raise ValueError(
+                    "Incomplete task verification; refresh and retry: " + ", ".join(missing)
+                )
             raise ValueError(f"Selected tasks are no longer open: {', '.join(missing)}")
         existing = self._executions_for_tasks(
             launch.task_provider, list(task_ids), launch.repository
@@ -1221,6 +1227,15 @@ class WorkflowController:
                 ]
             ).casefold()
         ]
+
+    def task_execution_history(self, repository: str, task_provider: str) -> set[str]:
+        """Task identities with any earlier execution, without hydrating details."""
+        if isinstance(self._repository, WorkflowRepository):
+            aliases = self._config_loader.repository_identity_aliases(repository)
+            return self._repository.task_ids_with_executions(
+                task_provider, repository, repository_aliases=aliases
+            )
+        return self._repository.task_ids_with_executions(task_provider, repository)
 
     def task_execution_status(
         self,
