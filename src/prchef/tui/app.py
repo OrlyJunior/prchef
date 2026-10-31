@@ -419,9 +419,11 @@ class PrchefApp(App[None]):
         self._set_home_layout_mode(self.size.width)
         count = self.controller.other_instance_execution_count()
         if count:
+            subject = "execution appears" if count == 1 else "executions appear"
+            verb = "was" if count == 1 else "were"
             self.notify(
-                f"{count} executions appear to be running in another instance "
-                "and were left unchanged.",
+                f"{count} {subject} to be running in another instance "
+                f"and {verb} left unchanged.",
                 timeout=15,
             )
         interrupted = self.controller.interrupted_executions()

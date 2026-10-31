@@ -162,9 +162,13 @@ def _migrated_repository(settings: Settings) -> WorkflowRepository:
         recover()
     skipped = len(getattr(repository, "live_owner_execution_ids", ()))
     if skipped:
+        subject = "execution appears" if skipped == 1 else "executions appear"
+        verb = "was" if skipped == 1 else "were"
         logger.info(
-            "%s executions appear to be running in another instance and were left unchanged.",
+            "%s %s to be running in another instance and %s left unchanged.",
             skipped,
+            subject,
+            verb,
         )
     return repository
 

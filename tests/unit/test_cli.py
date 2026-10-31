@@ -875,8 +875,10 @@ def test_pending_migrations_accept_percent_in_database_url(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("command_name", ["show", "cleanup-workspaces", "debug"])
+@pytest.mark.parametrize("live_count", [1, 2])
 def test_saved_state_commands_preserve_live_owners_and_recover_orphans(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command_name: str,
+    live_count: int,
 ) -> None:
     control = tmp_path / "control"
     (control / ".git").mkdir(parents=True)
@@ -893,6 +895,8 @@ def test_saved_state_commands_preserve_live_owners_and_recover_orphans(
     live_repository = main._repository(settings)
     live_repository.register_owner("live")
     live = live_repository.create_execution("live")
+    for index in range(1, live_count):
+        live_repository.create_execution(f"live-{index}")
     live_repository.start_step(live.id, WorkflowStage.REVIEW)
     before = live_repository.get_execution(live.id)
     before_steps = live_repository.list_steps(live.id)
@@ -913,7 +917,12 @@ def test_saved_state_commands_preserve_live_owners_and_recover_orphans(
     result = runner.invoke(main.app, [*arguments, "--config", str(config)])
     assert result.exit_code == 0, result.output
     json.loads(result.stdout)
-    assert "appear to be running in another instance" in result.stderr
+    subject = "1 execution appears" if live_count == 1 else "2 executions appear"
+    verb = "was" if live_count == 1 else "were"
+    assert (
+        f"{subject} to be running in another instance and {verb} left unchanged."
+        in result.stderr
+    )
     assert live_repository.get_execution(live.id) == before
     assert live_repository.list_steps(live.id) == before_steps
     assert live_repository.get_execution(legacy.id).status is WorkflowStatus.INTERRUPTED
