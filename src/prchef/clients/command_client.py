@@ -148,6 +148,10 @@ def _partial_output(value: bytes | str | None) -> str:
 class _ProcessTreeSurvivedError(Exception):
     """A timed-out command's process tree could not be confirmed terminated."""
 
+    def __init__(self, stdout: str = "", stderr: str = "") -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+
 
 class _TreeSupervisor:
     """prchef's side of a POSIX command launched under ``process_supervisor.py``."""
@@ -540,7 +544,10 @@ def _run_process(
         else:
             stdout, stderr = process.communicate(input_text, timeout=timeout_seconds)
         if _stopping:
-            raise CommandInterruptedError("Application is closing")
+            interrupted = CommandInterruptedError("Application is closing")
+            interrupted.stdout = _partial_output(stdout)
+            interrupted.stderr = _partial_output(stderr)
+            raise interrupted
         if isinstance(containment, _TreeSupervisor):
             containment.raise_spawn_error(process, command)
         command_returncode = (
@@ -548,7 +555,7 @@ def _run_process(
             if isinstance(containment, _TreeSupervisor)
             and containment.completed_code is not None else process.returncode
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as timeout_exc:
         stopped = _terminate_process_tree(process, containment)
         partial_stdout: bytes | str | None
         partial_stderr: bytes | str | None
@@ -562,8 +569,19 @@ def _run_process(
                 partial_stdout, partial_stderr, drained = exc.stdout, exc.stderr, False
         else:
             partial_stdout, partial_stderr, drained = _drain_terminated_process(process)
+        # communicate() snapshots overlap; use the longer complete snapshot, never concatenate.
+        initial_stdout = _partial_output(timeout_exc.stdout)
+        initial_stderr = _partial_output(timeout_exc.stderr)
+        partial_stdout = _partial_output(partial_stdout)
+        partial_stderr = _partial_output(partial_stderr)
+        if initial_stdout.startswith(partial_stdout):
+            partial_stdout = initial_stdout
+        if initial_stderr.startswith(partial_stderr):
+            partial_stderr = initial_stderr
         if not (stopped and drained and _stop_confirmed(process, containment)):
-            raise _ProcessTreeSurvivedError from None
+            raise _ProcessTreeSurvivedError(
+                _partial_output(partial_stdout), _partial_output(partial_stderr)
+            ) from None
         raise subprocess.TimeoutExpired(
             list(command), timeout_seconds, output=partial_stdout, stderr=partial_stderr
         ) from None
@@ -694,10 +712,13 @@ class CommandClient:
         except _ProcessTreeSurvivedError as exc:
             # Deliberately not a CommandTimeoutError: callers must not treat this as a completed,
             # correctable failure while part of the command may still be running.
-            raise CommandProcessTreeUnconfirmedError(
+            error = CommandProcessTreeUnconfirmedError(
                 f"Command timed out after {timeout_seconds}s and its process tree could not be "
                 f"confirmed terminated: {format_command(command)}"
-            ) from exc
+            )
+            error.stdout = exc.stdout
+            error.stderr = exc.stderr
+            raise error from exc
         except OSError as exc:
             raise CommandExecutionError(f"Cannot execute {format_command(command)}: {exc}") from exc
         finally:

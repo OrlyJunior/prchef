@@ -90,6 +90,12 @@ installation IDs, and private-key references to the selected repository's
 key contents or tokens. Clearing an identity inherited from `defaults` writes an explicit `null`
 for that repository, so the identity remains disabled there while other repositories keep the default.
 
+A role may be empty or have a complete App ID, installation ID, and one private-key reference.
+Saving reports the role and invalid or missing fields, and checks that a private-key file path
+names an existing file without reading its contents. Environment references are not resolved at
+save time. Settings, the launcher, and the run timeline show each role as `GitHub App` or
+`ambient gh login`; this describes the configured source, not a verified connection or account.
+
 ## Review behavior
 
 - `APPROVED` publishes `APPROVE`, including non-blocking suggestions.

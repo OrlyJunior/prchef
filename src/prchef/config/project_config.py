@@ -1944,6 +1944,18 @@ class ProjectConfigLoader:
         references. Private key contents and installation tokens are neither
         accepted nor serialized here.
         """
+        for role, settings in (("Planner", planner_app), ("Implementer", implementer_app),
+                               ("Reviewer", reviewer_app)):
+            if settings is not None and settings.private_key_path is not None:
+                try:
+                    if not settings.private_key_path.is_file():
+                        raise ConfigurationError(
+                            f"{role}: private key file path must name an existing file"
+                        )
+                except OSError:
+                    raise ConfigurationError(
+                        f"{role}: cannot access private key file path"
+                    ) from None
         configuration = _load_yaml(self._config_file, required=True)
         self._reject_misplaced_project_settings(configuration)
         repositories = configuration.setdefault("repositories", {})

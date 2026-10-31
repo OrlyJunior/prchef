@@ -2023,3 +2023,22 @@ def test_provider_concurrency_name_of_a_plain_provider_is_itself(tmp_path: Path)
     )
 
     assert config.provider_concurrency_name("planner-provider") == "planner-provider"
+
+@pytest.mark.parametrize("role", ["planner", "implementer", "reviewer"])
+@pytest.mark.parametrize("directory", [False, True])
+def test_app_save_rejects_missing_or_directory_key_without_writing(
+    tmp_path: Path, role: str, directory: bool
+) -> None:
+    config_file = tmp_path / "prchef.yml"
+    original = b"repositories:\n  example:\n    path: .\n"
+    config_file.write_bytes(original)
+    key = tmp_path / "key"
+    if directory:
+        key.mkdir()
+    app = GitHubAppSettings(app_id=1, installation_id=2, private_key_path=key)
+    roles = {"planner_app": GitHubAppSettings(), "implementer_app": GitHubAppSettings(),
+             "reviewer_app": GitHubAppSettings()}
+    roles[f"{role}_app"] = app
+    with pytest.raises(ConfigurationError, match=role.title()):
+        ProjectConfigLoader(config_file).save_github_app_settings("example", **roles)
+    assert config_file.read_bytes() == original

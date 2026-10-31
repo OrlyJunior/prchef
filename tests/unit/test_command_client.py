@@ -1384,3 +1384,63 @@ def test_codex_client_preserves_non_sandbox_execution_errors(tmp_path: Path) -> 
     assert not result.success
     assert not result.workspace_changes_may_exist
     assert result.error_message == "permission denied: output.txt"
+
+class _HashableProcess(SimpleNamespace):
+    __hash__ = object.__hash__
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_timeout_retains_overlapping_output_snapshots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, confirmed: bool
+) -> None:
+    initial = b'{"type":"turn.completed","usage":{"input_tokens":3}}\n'
+    final = initial + b'extra\xff'
+    process = _HashableProcess(
+        communicate=lambda *args, **kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired("tool", 1, output=initial, stderr=b"before")
+        ),
+        poll=lambda: 0,
+        pid=123,
+    )
+    monkeypatch.setattr(command_client, "_stopping", False)
+    monkeypatch.setattr(command_client, "_start_process", lambda *a, **k: (process, None))
+    monkeypatch.setattr(command_client, "_terminate_process_tree", lambda *a: True)
+    monkeypatch.setattr(
+        command_client, "_drain_terminated_process", lambda *a: (final, b"before after", True)
+    )
+    monkeypatch.setattr(command_client, "_stop_confirmed", lambda *a: confirmed)
+    expected = CommandTimeoutError if confirmed else CommandProcessTreeUnconfirmedError
+    with pytest.raises(expected) as caught:
+        CommandClient().run(["tool"], cwd=tmp_path, timeout_seconds=1)
+    assert caught.value.stdout == final.decode("utf-8", errors="replace")
+    assert caught.value.stderr == "before after"
+    usage = CodexClient._structured_execution_signals(caught.value.stdout).usage
+    assert usage == {"input_tokens": 3}
+    assert process not in command_client._active_commands
+
+
+def test_shutdown_interruption_retains_communicated_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from prchef.clients.exceptions import CommandInterruptedError
+
+    def communicate(*args: Any, **kwargs: Any) -> tuple[bytes, bytes]:
+        monkeypatch.setattr(command_client, "_stopping", True)
+        return b'output\xff', b'error\xff'
+
+    process = _HashableProcess(communicate=communicate, poll=lambda: 0, pid=123)
+    monkeypatch.setattr(command_client, "_stopping", False)
+    monkeypatch.setattr(command_client, "_start_process", lambda *a, **k: (process, None))
+    terminated: list[object] = []
+    reaped: list[object] = []
+    monkeypatch.setattr(
+        command_client, "_terminate_process_tree", lambda p, c: terminated.append(p)
+    )
+    monkeypatch.setattr(command_client, "_reap_interrupted_process", lambda p: reaped.append(p))
+    with pytest.raises(CommandInterruptedError) as caught:
+        CommandClient().run(["tool"], cwd=tmp_path)
+    assert caught.value.stdout == "output\ufffd"
+    assert caught.value.stderr == "error\ufffd"
+    assert terminated == [process]
+    assert reaped == [process]
+    assert process not in command_client._active_commands

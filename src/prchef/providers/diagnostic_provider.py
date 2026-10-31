@@ -31,12 +31,14 @@ class DiagnosticAgentProvider:
         provider_config: Mapping[str, Any],
         record: DiagnosticRecorder,
         cancellation_check: Callable[[], None] | None = None,
+        retain_cancelled_usage: bool = False,
     ) -> None:
         self._provider = provider
         self._role = role
         self._provider_config = dict(provider_config)
         self._record = record
         self._cancellation_check = cancellation_check
+        self._retain_cancelled_usage = retain_cancelled_usage
 
     def execute(
         self, request: AgentRequest, *, on_started: AgentStartedCallback | None = None
@@ -60,7 +62,18 @@ class DiagnosticAgentProvider:
             )
             raise
         if self._cancellation_check is not None:
-            self._cancellation_check()
+            try:
+                self._cancellation_check()
+            except Exception as exc:
+                if self._retain_cancelled_usage and result.metadata:
+                    self._record(
+                        DiagnosticCategory.ERROR, self._role,
+                        self._sanitize({"operation": "agent_provider.execute",
+                                        "error_type": type(exc).__name__, "message": str(exc),
+                                        "provider_metadata": dict(result.metadata),
+                                        "provider": self._provider_config}),
+                    )
+                raise
         self._record(DiagnosticCategory.RESPONSE, self._role, self._response_payload(result))
         return result
 

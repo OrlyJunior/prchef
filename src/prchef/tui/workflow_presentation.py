@@ -19,6 +19,17 @@ from prchef.models.workflow_status import StepStatus, WorkflowStage, WorkflowSta
 from prchef.models.workflow_step import WorkflowStep
 
 
+def github_identity_summary(planner: bool, implementer: bool, reviewer: bool) -> str:
+    """Describe authentication sources without exposing credentials or identifiers."""
+    def source(configured: bool) -> str:
+        return "GitHub App" if configured else "ambient gh login"
+
+    return (
+        f"GitHub identities: Planner: {source(planner)} · "
+        f"Implementer: {source(implementer)} · Reviewer: {source(reviewer)}"
+    )
+
+
 def is_index_progress(event: WorkflowEvent) -> bool:
     return (
         event.kind is WorkflowEventKind.DIAGNOSTIC
@@ -179,6 +190,11 @@ def timeline_message(
         return f"↳ {event.message or 'Agent fallback activated'}"
     if event.kind == WorkflowEventKind.DIAGNOSTIC:
         payload = event.payload or {}
+        if payload.get("kind") == "GITHUB_IDENTITIES":
+            return github_identity_summary(
+                payload.get("planner") is True, payload.get("implementer") is True,
+                payload.get("reviewer") is True,
+            )
         if payload.get("kind") == "REPOSITORY_INDEX_PROGRESS":
             return f"Semantic index: {payload.get('message', 'working')}"
         if payload.get("kind") == "REPOSITORY_CONTEXT_FALLBACK":
