@@ -2714,10 +2714,11 @@ def test_github_app_compact_summary_hides_identifiers() -> None:
     unconfigured = GitHubAppSettings()
 
     assert WorkflowRunnerScreen.github_app_summary(configured, configured, configured) == (
-        "GitHub Apps: Planner ✓ · Implementer ✓ · Reviewer ✓"
+        "GitHub identities: Planner: GitHub App · Implementer: GitHub App · Reviewer: GitHub App"
     )
     assert WorkflowRunnerScreen.github_app_summary(unconfigured, configured, unconfigured) == (
-        "GitHub Apps: Planner — · Implementer ✓ · Reviewer —"
+        "GitHub identities: Planner: ambient gh login · Implementer: GitHub App · "
+        "Reviewer: ambient gh login"
     )
     assert "12" not in WorkflowRunnerScreen.github_app_summary(
         configured, configured, unconfigured
@@ -9142,3 +9143,36 @@ def test_workflow_runner_shows_runtime_sources_for_each_role_without_changing_pa
             )
 
     asyncio.run(drive())
+
+@pytest.mark.parametrize("role", ["planner", "implementer", "reviewer"])
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        ({"app-id": "1", "installation-id": "2"}, "private key environment variable"),
+        ({"installation-id": "2", "key-env": "KEY"}, "App ID"),
+        ({"app-id": "1", "key-env": "KEY"}, "installation ID"),
+        ({"app-id": "bad", "installation-id": "2", "key-env": "KEY"}, "positive integer"),
+        ({"app-id": "0", "installation-id": "2", "key-env": "KEY"}, "positive integer"),
+        ({"app-id": "1", "installation-id": "2", "key-env": "KEY", "key-path": "x"}, "either"),
+        ({"api-url": "ftp://example"}, "API URL"),
+        ({"bot-name": "bot"}, "both bot"),
+    ],
+)
+def test_github_app_form_validation_is_role_specific(
+    monkeypatch: pytest.MonkeyPatch, role: str, fields: dict[str, str], expected: str
+) -> None:
+    from types import SimpleNamespace
+
+    screen = GitHubAppSettingsScreen()
+    monkeypatch.setattr(
+        screen, "query_one",
+        lambda selector, *args: SimpleNamespace(
+            value=fields.get(selector.removeprefix(f"#{role}-"), "")
+        ),
+    )
+    with pytest.raises(ValueError) as caught:
+        screen._settings(role)
+    assert role.title() in str(caught.value)
+    assert expected in str(caught.value)
+    assert "validation error" not in str(caught.value)
+    assert "bad" not in str(caught.value)

@@ -235,6 +235,15 @@ class StageSequencer:
             )
             return None
 
+    def _record_github_identities(self, execution_id: str, config: ProjectConfig) -> None:
+        github = config.integrations.github
+        self._events._record_diagnostic(
+            execution_id, DiagnosticCategory.WORKFLOW_EVENT,
+            {"kind": "GITHUB_IDENTITIES", "planner": github.planner_app.is_configured,
+             "implementer": github.implementer_app.is_configured,
+             "reviewer": github.app.is_configured},
+        )
+
     def _execute_workflow(
         self,
         execution: WorkflowExecution,
@@ -290,6 +299,7 @@ class StageSequencer:
                     config.path,
                     config.repository.base_branch,
                 )
+                self._record_github_identities(execution.id, config)
                 clients = self._client_factory.create(config)
                 repository_slug = clients.git.github_repository()
                 base_commit = (
@@ -595,6 +605,7 @@ class StageSequencer:
             providers, options = self._lifecycle._runtime_overrides_for_execution(execution.id)
             if providers or options:
                 config = config.with_agent_runtime_overrides(providers, options)
+            self._record_github_identities(execution.id, config)
             clients = self._client_factory.create(config)
             repository_slug = clients.git.github_repository()
             context = self._repository_context_strategy(config, execution.id)
@@ -1369,6 +1380,7 @@ class StageSequencer:
             )
             if provider_overrides or runtime_overrides:
                 config = config.with_agent_runtime_overrides(provider_overrides, runtime_overrides)
+            self._record_github_identities(execution.id, config)
             clients = self._client_factory.create(config)
             repository_slug = clients.git.github_repository()
             repository_context_strategy = self._repository_context_strategy(config, execution.id)
@@ -1439,6 +1451,7 @@ class StageSequencer:
             self._lifecycle._start_admitted(execution_id)
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
+        self._record_github_identities(execution_id, config)
         repository_slug = clients.git.github_repository()
         repository_context_strategy = self._repository_context_strategy(config, execution_id)
         return self._implement_and_review(
@@ -1469,6 +1482,7 @@ class StageSequencer:
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         try:
+            self._record_github_identities(execution_id, config)
             repository_slug = clients.git.github_repository()
             repository_context_strategy = self._repository_context_strategy(config, execution_id)
             # Earlier answers still apply to the repeated planning attempt.

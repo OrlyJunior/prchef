@@ -822,3 +822,28 @@ def test_human_pause_after_failed_attempt_keeps_failure_in_both_projections() ->
         WorkflowBatchItem(0, "task-1", "Task 1", execution.id), controller  # type: ignore[arg-type]
     ).timeline
     assert timeline == ("✓ Specification generated", "✗ Generating specification failed: blocked")
+
+
+def test_identity_diagnostic_survives_live_and_persisted_batch_reconciliation() -> None:
+    payload = {"kind": "GITHUB_IDENTITIES", "planner": True, "implementer": False,
+               "reviewer": True}
+    progress = LiveBatchProgress(_batch(1))
+    progress.apply(WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.EXECUTION_CREATED,
+        payload={"batch_position": 0},
+    ))
+    progress.apply(WorkflowEvent(execution_id="execution-1", kind=WorkflowEventKind.DIAGNOSTIC,
+                                 payload={**payload, "batch_position": 0}))
+    execution = WorkflowExecution(id="execution-1", status=WorkflowStatus.RUNNING)
+    progress.reconcile_execution(0, execution, steps=[])
+    expected = ("GitHub identities: Planner: GitHub App · Implementer: ambient gh login · "
+                "Reviewer: GitHub App")
+    assert expected in progress.rows()[0].timeline
+    controller = _Controller()
+    controller.executions["execution-1"] = (execution, [])
+    controller.diagnostics["execution-1"] = [ExecutionDiagnostic(
+        execution_id="execution-1", category=DiagnosticCategory.WORKFLOW_EVENT, payload=payload,
+    )]
+    row = persisted_row(WorkflowBatchItem(0, "task-0", "Task 0", "execution-1"),
+                        controller)  # type: ignore[arg-type]
+    assert expected in row.timeline

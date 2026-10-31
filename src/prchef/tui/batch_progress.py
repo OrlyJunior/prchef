@@ -255,6 +255,7 @@ class LiveBatchProgress:
                     "! docs/PROJECT_CONTEXT.md",
                     "! Semantic context unavailable",
                     "Provider ",
+                    "GitHub identities: ",
                     "↳",
                 ))
             ]
@@ -554,6 +555,7 @@ def persisted_row(
             if diagnostic.payload.get("kind") in {
                 "PROVIDER_QUOTA_EXHAUSTED",
                 "PROJECT_CONTEXT_TRUNCATED",
+                "GITHUB_IDENTITIES",
                 "REPOSITORY_CONTEXT_FALLBACK",
             }:
                 message = timeline_message(

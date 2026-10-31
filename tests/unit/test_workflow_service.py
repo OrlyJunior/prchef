@@ -1917,3 +1917,23 @@ def test_pull_request_only_references_cross_repository_issue() -> None:
 
     assert "Related issue: product/backlog#42" in body
     assert "Closes" not in body
+
+
+def test_identity_diagnostic_is_persisted_before_delivery_and_pr(workflow) -> None:
+    service, repository, _, _ = workflow
+    events = []
+
+    def observe(event) -> None:
+        if (event.payload or {}).get("kind") == "GITHUB_IDENTITIES":
+            assert any(d.payload == event.payload for d in repository.diagnostics)
+        events.append(event)
+
+    result = service.run("card-identities", event_listener=observe)
+    assert result.status is WorkflowStatus.APPROVED
+    identity = next(i for i, event in enumerate(events)
+                    if (event.payload or {}).get("kind") == "GITHUB_IDENTITIES")
+    assert events[identity].payload == {"kind": "GITHUB_IDENTITIES", "planner": False,
+                                       "implementer": False, "reviewer": False}
+    pr = next(i for i, event in enumerate(events)
+              if event.kind.value == "STAGE_STARTED" and event.stage is WorkflowStage.CREATE_PR)
+    assert identity < pr

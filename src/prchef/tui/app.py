@@ -198,6 +198,7 @@ class PrchefApp(App[None]):
     .task-row:focus { background: $accent 40%; }
     .task-row:disabled { color: $text-muted; }
     #task-hint { margin-top: 1; }
+    #github-app-summary, #github-app-identity-summary, #github-app-status { height: auto; }
     .github-app-roles { width: 100%; height: auto; }
     .github-app-role { width: 100%; height: auto; margin-bottom: 1; }
     .screen-actions { margin-top: 1; height: auto; }
