@@ -1404,6 +1404,38 @@ def test_workflow_batch_migration_downgrades_to_0008(tmp_path: Path) -> None:
     assert "workflow_executions" in tables
 
 
+def test_codex_usage_persists_after_repository_restart(tmp_path: Path) -> None:
+    from prchef.clients.codex_client import CodexClient
+    from prchef.models.agent import AgentRole
+    from prchef.providers.codex_provider import CodexAgentProvider
+    from prchef.providers.diagnostic_provider import DiagnosticAgentProvider
+    from tests.codex_usage_fixtures import CAPTURE, USAGE, Commands, request
+
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{(tmp_path / 'codex-usage.db').as_posix()}"
+    config = Config(str(project_root / "alembic.ini"))
+    config.set_main_option("script_location", str(project_root / "src" / "prchef" / "migrations"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    repository = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    execution = repository.create_execution("codex-usage")
+    provider = DiagnosticAgentProvider(
+        CodexAgentProvider(CodexClient(Commands(CAPTURE), ["codex", "exec"], 10)),  # type: ignore[arg-type]
+        role=AgentRole.IMPLEMENTER,
+        provider_config={},
+        record=lambda category, role, payload: repository.record_diagnostic(
+            ExecutionDiagnostic(
+                execution_id=execution.id, category=category, role=role, payload=payload
+            )
+        ),
+    )
+    provider.execute(request(tmp_path))
+    restarted = WorkflowRepository(build_session_factory(build_engine(database_url)))
+    response = restarted.list_diagnostics(execution.id)[-1].payload
+    assert response["usage"] == USAGE
+    assert response["provider_metadata"] == USAGE
+
+
 def test_history_presence_scopes_source_repository_aliases_and_legacy_rows(tmp_path: Path) -> None:
     repository = _migrated_repository(tmp_path, "history-presence.db")
     expected = set()

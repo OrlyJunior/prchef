@@ -83,6 +83,7 @@ class WorkflowAgentRuntime:
                 cancellation_check=lambda: self._events._raise_if_cancellation_requested(
                     execution_id
                 ),
+                retain_cancelled_usage=provider_settings.get("type") == "codex-cli",
             ),
             config=config,
             provider_name=configured,
@@ -123,6 +124,7 @@ class WorkflowAgentRuntime:
                     cancellation_check=lambda: self._events._raise_if_cancellation_requested(
                         execution_id
                     ),
+                    retain_cancelled_usage=fallback_settings.get("type") == "codex-cli",
                 ),
                 config=fallback_config,
                 provider_name=fallback_configured,

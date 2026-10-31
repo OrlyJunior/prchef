@@ -5,7 +5,7 @@ import logging
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -26,8 +26,18 @@ class _StructuredFailure:
     command: str | None = None
 
 
+@dataclass(slots=True)
+class CodexImplementationResult(ImplementationResult):
+    metadata: dict[str, int] = field(default_factory=dict)
+
+
+_TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+                 "output_tokens", "reasoning_output_tokens")
+
+
 @dataclass(frozen=True, slots=True)
 class _CodexExecutionSignals:
+    usage: dict[str, int] = field(default_factory=dict)
     file_change_count: int = 0
     failed_command_count: int = 0
     turn_completed: bool = False
@@ -87,7 +97,7 @@ class CodexClient:
         prompt: str,
         repository_path: Path,
         output_schema: Mapping[str, Any] | None = None,
-    ) -> ImplementationResult:
+    ) -> CodexImplementationResult:
         with tempfile.TemporaryDirectory(prefix="prchef-codex-") as temp_root:
             output_file = Path(temp_root) / "last-message.txt"
             schema_file: Path | None = None
@@ -118,6 +128,13 @@ class CodexClient:
                     heartbeat_interval_seconds=60.0,
                 )
             except Exception as exc:
+                stdout = getattr(exc, "stdout", "")
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stdout, str):
+                    usage = self._structured_execution_signals(stdout).usage
+                    if usage:
+                        setattr(exc, "metadata", usage)  # noqa: B010
                 logger.error(
                     "[codex] Failed (%s after %s)",
                     type(exc).__name__,
@@ -160,7 +177,8 @@ class CodexClient:
                     format_duration(result.duration_seconds),
                     detail or "no output",
                 )
-            return ImplementationResult(
+            return CodexImplementationResult(
+                metadata=signals.usage,
                 success=result.success and failure is None,
                 summary=summary,
                 error_message=None
@@ -176,6 +194,7 @@ class CodexClient:
     @staticmethod
     def _structured_execution_signals(stdout: str) -> _CodexExecutionSignals:
         """Read Codex JSONL events without interpreting command output as an error."""
+        usage: dict[str, int] = {}
         file_change_count = 0
         failed_command_count = 0
         turn_completed = False
@@ -194,6 +213,12 @@ class CodexClient:
             event_type = CodexClient._string_field(event, "type")
             if event_type == "turn.completed":
                 turn_completed = True
+                reported = event.get("usage")
+                if isinstance(reported, dict):
+                    for key in _TOKEN_FIELDS:
+                        value = reported.get(key)
+                        if type(value) is int and value >= 0:
+                            usage[key] = usage.get(key, 0) + value
             item = event.get("item")
             item_mapping = item if isinstance(item, dict) else None
             item_type = CodexClient._string_field(item_mapping, "type")
@@ -226,6 +251,7 @@ class CodexClient:
                 terminal_failure = terminal_failure or failure
 
         return _CodexExecutionSignals(
+            usage=usage,
             file_change_count=file_change_count,
             failed_command_count=failed_command_count,
             turn_completed=turn_completed,
@@ -498,3 +524,4 @@ class CodexClient:
                 continue
             filtered.append(argument)
         return filtered
+
