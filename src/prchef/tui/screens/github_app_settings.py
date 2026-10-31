@@ -126,9 +126,16 @@ class GitHubAppSettingsScreen(Screen[None]):
                 self.query_one("#github-app-status", Static), animate=False
             )
             return
-        planner, implementer, reviewer = self.controller.github_app_settings(repository)
-        self._show_summary(planner, implementer, reviewer)
-        self._status(f"Saved App references to {config_path}.")
+        try:
+            planner, implementer, reviewer = self.controller.github_app_settings(repository)
+            self._show_summary(planner, implementer, reviewer)
+        except Exception:
+            self.query_one("#github-app-identity-summary", Static).update(
+                "GitHub identities: summary unavailable"
+            )
+            self._status(f"Saved App references to {config_path}, but could not refresh summary.")
+        else:
+            self._status(f"Saved App references to {config_path}.")
         self.query_one("#github-app-settings", VerticalScroll).scroll_to_widget(
             self.query_one("#github-app-status", Static), animate=False
         )

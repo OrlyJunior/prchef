@@ -3943,6 +3943,36 @@ def test_tui_inspects_and_saves_independent_github_app_references(tmp_path: Path
     asyncio.run(drive())
 
 
+def test_github_app_save_reports_summary_refresh_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 20)) as pilot:
+            await pilot.press("c")
+            application.screen.query_one("#github-app-repository").value = "example"
+            await settle_tui(pilot)
+
+            def fail_refresh(repository: str) -> tuple[GitHubAppSettings, ...]:
+                raise RuntimeError("refresh failed")
+
+            monkeypatch.setattr(controller, "github_app_settings", fail_refresh)
+            application.screen.query_one("#save-github-apps", Button).focus()
+            await settle_tui(pilot)
+            await pilot.press("enter")
+            status = str(application.screen.query_one("#github-app-status").renderable)
+            assert "Saved App references" in status
+            assert "could not refresh summary" in status
+            assert "summary unavailable" in str(
+                application.screen.query_one("#github-app-identity-summary").renderable
+            )
+            assert controller._config_loader.saved_github_apps is not None
+
+    asyncio.run(drive())
+
+
 def test_tui_creates_updates_and_switches_agent_instruction_files(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     other_path = tmp_path / "other"
