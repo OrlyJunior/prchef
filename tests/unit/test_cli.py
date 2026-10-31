@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import tomllib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,11 +18,13 @@ from typer.testing import CliRunner
 
 import prchef
 from prchef.cli import main
+from prchef.clients import command_client
 from prchef.clients.command_client import CommandResult
 from prchef.config.database import build_engine
 from prchef.config.project_config import ProjectConfigLoader
 from prchef.config.settings import Settings
 from prchef.models import WorkflowExecution, WorkflowStage, WorkflowStatus
+from prchef.repositories.orm_models import ExecutionOwnerEntity
 from prchef.services.workspace_cleaner import (
     CleanupWorkspace,
     WorkspaceCleanupReport,
@@ -30,6 +33,13 @@ from prchef.services.workspace_cleaner import (
 )
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def isolated_command_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CliRunner invokes application shutdown inside the pytest process. Keep the
+    # real shutdown latch within each test, then restore it as process exit would.
+    monkeypatch.setattr(command_client, "_stopping", False)
 
 
 def test_cleanup_help_matches_recovery_status_policy() -> None:
@@ -475,10 +485,24 @@ class StubDebugService:
         }
 
 
+class _OwnerRepositoryStub:
+    def register_owner(self, owner_id: str) -> None:
+        pass
+
+    def refresh_owner(self, owner_id: str) -> None:
+        pass
+
+    def interrupt_owned_and_end(self) -> None:
+        pass
+
+    def stop_session_writes(self) -> None:
+        pass
+
+
 def _stub_runtime(monkeypatch: Any) -> None:
     StubWorkflowService.calls.clear()
     monkeypatch.setattr(main, "WorkflowService", StubWorkflowService)
-    monkeypatch.setattr(main, "_repository", lambda settings: object())
+    monkeypatch.setattr(main, "_repository", lambda settings: _OwnerRepositoryStub())
     monkeypatch.setattr(main, "_apply_pending_migrations", lambda settings: None)
     monkeypatch.setattr(
         main,
@@ -628,7 +652,7 @@ def test_cli_respond_uses_same_execution_and_service_logic(monkeypatch: Any) -> 
         },
     )
 
-    class Repository:
+    class Repository(_OwnerRepositoryStub):
         def get_execution(self, execution_id: str) -> WorkflowExecution:
             assert execution_id == execution.id
             return execution
@@ -848,6 +872,111 @@ def test_pending_migrations_accept_percent_in_database_url(tmp_path: Path) -> No
     engine = build_engine(database_url)
     assert "workflow_executions" in inspect(engine).get_table_names()
     engine.dispose()
+
+
+@pytest.mark.parametrize("command_name", ["show", "cleanup-workspaces", "debug"])
+@pytest.mark.parametrize("live_count", [1, 2])
+def test_saved_state_commands_preserve_live_owners_and_recover_orphans(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command_name: str,
+    live_count: int,
+) -> None:
+    control = tmp_path / "control"
+    (control / ".git").mkdir(parents=True)
+    config = tmp_path / "prchef.yml"
+    config.write_text(
+        "defaults:\n  roles: {spec: codex, review: codex}\n"
+        "repositories:\n  example: {path: control}\n", encoding="utf-8",
+    )
+    for name in ("PRCHEF_DATABASE_URL", "PRCHEF_DATABASE_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(database_url=f"sqlite:///{(tmp_path / 'state.db').as_posix()}")
+    settings.config_file = config
+    main._apply_pending_migrations(settings)
+    live_repository = main._repository(settings)
+    live_repository.register_owner("live")
+    live = live_repository.create_execution("live")
+    for index in range(1, live_count):
+        live_repository.create_execution(f"live-{index}")
+    live_repository.start_step(live.id, WorkflowStage.REVIEW)
+    before = live_repository.get_execution(live.id)
+    before_steps = live_repository.list_steps(live.id)
+    legacy = main._repository(settings).create_execution("legacy")
+    stale_repository = main._repository(settings)
+    stale_repository._clock = lambda: datetime.now(UTC) - timedelta(seconds=600)
+    stale_repository.register_owner("stale")
+    stale = stale_repository.create_execution("stale")
+    monkeypatch.setattr(main, "Settings", lambda: settings)
+    monkeypatch.setattr(main.GitClient, "worktree_paths", lambda self: set())
+    if command_name == "show":
+        arguments = ["show", live.id]
+    elif command_name == "debug":
+        arguments = ["debug", "--from-execution", live.id, "--stage", "task-loading",
+                     "--repository", "owner/repository", "--dry-run"]
+    else:
+        arguments = ["cleanup-workspaces", "--repository", "example", "--dry-run"]
+    result = runner.invoke(main.app, [*arguments, "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    json.loads(result.stdout)
+    subject = "1 execution appears" if live_count == 1 else "2 executions appear"
+    verb = "was" if live_count == 1 else "were"
+    assert (
+        f"{subject} to be running in another instance and {verb} left unchanged."
+        in result.stderr
+    )
+    assert live_repository.get_execution(live.id) == before
+    assert live_repository.list_steps(live.id) == before_steps
+    assert live_repository.get_execution(legacy.id).status is WorkflowStatus.INTERRUPTED
+    assert live_repository.get_execution(stale.id).status is WorkflowStatus.INTERRUPTED
+
+
+@pytest.mark.parametrize("entry_point", ["run", "respond"])
+def test_execution_cli_registers_owner_before_work_and_ends_it_on_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, entry_point: str,
+) -> None:
+    config = tmp_path / "prchef.yml"
+    config.write_text("defaults: {}\n", encoding="utf-8")
+    for name in ("PRCHEF_DATABASE_URL", "PRCHEF_DATABASE_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(database_url=f"sqlite:///{(tmp_path / 'runtime.db').as_posix()}")
+    settings.config_file = config
+    main._apply_pending_migrations(settings)
+    repository = main._repository(settings)
+    existing = repository.create_execution("old")
+    task = {"id": "old", "source": "trello", "title": "Task", "description": "", "url": ""}
+    repository.update_task(existing.id, main.DevelopmentTask(**task))
+    repository.request_human_input(existing.id, WorkflowStage.GENERATE_SPEC, "Which base?")
+    repository.finish(existing.id, WorkflowStatus.NEEDS_HUMAN)
+    _stub_runtime(monkeypatch)
+    monkeypatch.setattr(main, "_migrated_repository", lambda _settings: repository)
+
+    class Service:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def run(self, task_id: str, repository_ref: str | None) -> WorkflowExecution:
+            assert repository.owner_id is not None
+            execution = repository.create_execution(task_id)
+            assert execution.owner_id == repository.owner_id
+            repository.finish(execution.id, WorkflowStatus.APPROVED)
+            return repository.get_execution(execution.id)
+
+        def respond_and_resume(self, execution_id: str, response: str) -> WorkflowExecution:
+            assert repository.owner_id is not None
+            repository.respond_to_human_input(execution_id, response)
+            assert repository.get_execution(execution_id).owner_id == repository.owner_id
+            repository.finish(execution_id, WorkflowStatus.APPROVED)
+            return repository.get_execution(execution_id)
+
+    monkeypatch.setattr(main, "WorkflowService", Service)
+    arguments = (["run", "--trello-card", "new"] if entry_point == "run"
+                 else ["respond", existing.id, "--message", "main"])
+    result = runner.invoke(main.app, arguments)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "APPROVED"
+    assert command_client._stopping
+    with repository._sessions() as session:
+        owner = session.get(ExecutionOwnerEntity, repository.owner_id)
+        assert owner is not None and owner.ended_at is not None
 
 
 def test_manual_alembic_upgrade_uses_global_persistence_configuration_outside_cwd(
