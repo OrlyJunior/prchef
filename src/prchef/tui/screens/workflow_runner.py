@@ -50,6 +50,7 @@ from prchef.tui.widgets import (
 from prchef.tui.workflow_presentation import (
     STAGE_ROLES,
     clear_index_progress,
+    concise_error,
     github_identity_summary,
     is_active_index_line,
     is_index_progress,
@@ -363,14 +364,14 @@ class WorkflowRunnerScreen(Screen[None]):
                                             classes="default-indicator",
                                             id=f"{prefix}-max-output-tokens-source",
                                         )
-            yield Static("No workflow running.", id="workflow-progress")
+            yield Static("No workflow running.", id="workflow-progress", markup=False)
             yield BatchProgressView(id="batch-progress")
             with Horizontal(classes="screen-actions", id="workflow-stop-actions"):
                 yield Button("Stop workflow", variant="error", id="stop-workflow")
-            yield Static("", id="workflow-events")
+            yield Static("", id="workflow-events", markup=False)
             with Vertical(id="workflow-outcome"):
                 yield Static("", id="workflow-outcome-title")
-                yield Static("", id="workflow-outcome-message")
+                yield Static("", id="workflow-outcome-message", markup=False)
                 with Horizontal(classes="screen-actions", id="workflow-outcome-actions"):
                     yield Button("Answer…", id="outcome-answer-later")
                     yield Button("Continue…", variant="primary", id="outcome-continue")
@@ -2203,6 +2204,8 @@ class WorkflowRunnerScreen(Screen[None]):
                 self.query_one("#outcome-continue", Button).display = True
             else:
                 message = "No continuation is available for this failure."
+            if execution.error_message:
+                message = f"{concise_error(execution.error_message)}\n{message}"
         elif status is WorkflowStatus.APPROVED:
             outcome_class = "completed"
             title = "Workflow completed"

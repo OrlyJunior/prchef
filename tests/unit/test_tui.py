@@ -9216,6 +9216,56 @@ def test_github_app_form_validation_is_role_specific(
 
 
 
+def test_failed_outcome_shows_literal_concise_error_and_keeps_controls(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    execution = repository.execution
+    execution.status = WorkflowStatus.FAILED
+    execution.error_message = "[error] " + "x" * 180 + "\nfull details"
+    execution.workspace_path = str(tmp_path / "worktree")
+    execution.working_branch = "workflow/12"
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(48, 16)) as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id=execution.id,
+                kind=WorkflowEventKind.STAGE_FAILED,
+                stage=WorkflowStage.IMPLEMENT,
+                message=execution.error_message,
+            ))
+            progress = screen.query_one("#workflow-progress", Static)
+            assert progress.markup is False
+            assert "[error]" in str(progress.renderable)
+            screen._workflow_finished(execution)
+            await settle_tui(pilot)
+            message = screen.query_one("#workflow-outcome-message", Static)
+            summary, guidance = str(message.renderable).split("\n")
+            assert summary == execution.error_message[:140] + "… See detailed logs."
+            assert "continuation is available" in guidance
+            assert message.markup is False
+            scroll = screen.query_one("#workflow-runner", VerticalScroll)
+            for widget_id in ("outcome-continue", "toggle-workflow-logs"):
+                button = screen.query_one(f"#{widget_id}", Button)
+                assert button.display
+                button.focus()
+                await wait_for_tui(
+                    pilot, lambda button=button: screen.can_view_partial(button),
+                    description=f"focused {widget_id} in the runner viewport",
+                )
+                assert scroll.scroll_y > 0
+            execution.workspace_path = None
+            execution.working_branch = None
+            screen._workflow_finished(execution)
+            assert screen.query_one("#outcome-continue", Button).display is False
+            assert "No continuation" in str(message.renderable)
+
+    asyncio.run(drive())
+
+
 def _pagination_tasks(count: int = 125) -> list[DevelopmentTask]:
     return [DevelopmentTask(
         str(number), "github", f"Task {number}", "", f"https://example/{number}",
