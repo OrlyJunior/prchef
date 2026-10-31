@@ -1409,7 +1409,7 @@ def test_codex_usage_persists_after_repository_restart(tmp_path: Path) -> None:
     from prchef.models.agent import AgentRole
     from prchef.providers.codex_provider import CodexAgentProvider
     from prchef.providers.diagnostic_provider import DiagnosticAgentProvider
-    from tests.unit.test_codex_usage import CAPTURE, USAGE, Commands, request
+    from tests.codex_usage_fixtures import CAPTURE, USAGE, Commands, request
 
     project_root = Path(__file__).resolve().parents[2]
     database_url = f"sqlite:///{(tmp_path / 'codex-usage.db').as_posix()}"

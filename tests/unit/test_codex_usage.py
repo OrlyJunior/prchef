@@ -6,42 +6,17 @@ from pathlib import Path
 import pytest
 
 from prchef.clients.codex_client import CodexClient
-from prchef.clients.command_client import CommandResult
 from prchef.clients.exceptions import (
     CommandInterruptedError,
     CommandProcessTreeUnconfirmedError,
     CommandTimeoutError,
 )
-from prchef.models.agent import AgentRequest, AgentRole
+from prchef.models.agent import AgentRole
 from prchef.models.execution_diagnostic import DiagnosticCategory
 from prchef.providers.agent_provider import AgentProviderError
 from prchef.providers.codex_provider import CodexAgentProvider
 from prchef.providers.diagnostic_provider import DiagnosticAgentProvider
-
-CAPTURE = """{"type":"thread.started","thread_id":"01a18f2a-bb54-75d3-b556-84be340cb06a"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"ok"}}
-{"type":"turn.completed","usage":{"input_tokens":17372,"cached_input_tokens":13312,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}
-"""
-USAGE = {
-    "input_tokens": 17372,
-    "cached_input_tokens": 13312,
-    "cache_write_input_tokens": 0,
-    "output_tokens": 5,
-    "reasoning_output_tokens": 0,
-}
-
-
-class Commands:
-    def __init__(self, output: str, exit_code: int = 0, error: Exception | None = None):
-        self.output, self.exit_code, self.error = output, exit_code, error
-
-    def run(self, *args, **kwargs):
-        if self.error:
-            raise self.error
-        return CommandResult(
-            command=[], exit_code=self.exit_code, stdout=self.output, stderr="", duration_seconds=0
-        )
+from tests.codex_usage_fixtures import CAPTURE, USAGE, Commands, request
 
 
 def wrapped(commands: Commands, events: list, **kwargs):
@@ -54,9 +29,6 @@ def wrapped(commands: Commands, events: list, **kwargs):
         **kwargs,
     )
 
-
-def request(path: Path) -> AgentRequest:
-    return AgentRequest(title="test", instructions="test", workspace_path=path)
 
 
 def test_captured_stream_through_diagnostics(tmp_path: Path) -> None:
@@ -148,3 +120,26 @@ def test_cancelled_result_records_error_only_when_enabled(tmp_path: Path) -> Non
         )
         if enabled:
             assert events[-1][2]["provider_metadata"] == USAGE
+
+@pytest.mark.parametrize("invalid", [None, "1", 1.5, True, -1, {"nested": 1}, [1]])
+def test_invalid_usage_values_keep_valid_siblings(invalid: object) -> None:
+    event = json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": invalid, "output_tokens": 2, "future_tokens": 99,
+    }})
+    stream = CAPTURE + event + '\n{"type":"turn.completed","usage":'
+    assert CodexClient._structured_execution_signals(stream).usage == {
+        **USAGE, "output_tokens": 7,
+    }
+
+
+@pytest.mark.parametrize("tail", [
+    '{"type":"turn.failed","error":{"message":"failed"}}',
+    '{"type":"error","message":"failed"}',
+])
+def test_client_nonzero_exit_after_structured_failure_keeps_usage(
+    tmp_path: Path, tail: str
+) -> None:
+    client = CodexClient(Commands(CAPTURE + tail, exit_code=1), ["codex", "exec"], 10)  # type: ignore[arg-type]
+    result = client.implement("test", tmp_path)
+    assert not result.success
+    assert result.metadata == USAGE
