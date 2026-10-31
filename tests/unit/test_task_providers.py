@@ -48,8 +48,8 @@ class StubIssueClient:
             "milestone": {"title": "V2"},
         }
 
-    def list_issues(self, repository: str, *, limit: int = 50) -> list[dict[str, Any]]:
-        assert limit == 50
+    def list_issues(self, repository: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+        assert limit is None
         return [self.get_issue(repository, "42")]
 
     def list_labels(self, repository: str) -> list[dict[str, Any]]:
@@ -215,7 +215,8 @@ def test_github_issue_client_lists_open_issues_for_task_browser(tmp_path: Path) 
         CommandResult(
             command=[],
             exit_code=0,
-            stdout=json.dumps([{"number": 7, "title": "Interactive task", "labels": []}]),
+            stdout=json.dumps([{"number": 7, "title": "Interactive task", "labels": [],
+                                "html_url": "https://example/7", "state": "open"}]),
             stderr="",
             duration_seconds=0.1,
         )
@@ -223,22 +224,13 @@ def test_github_issue_client_lists_open_issues_for_task_browser(tmp_path: Path) 
 
     issues = GitHubIssueClient(commands, cwd=tmp_path).list_issues("owner/api", limit=25)  # type: ignore[arg-type]
 
-    assert issues == [{"number": 7, "title": "Interactive task", "labels": []}]
-    assert commands.calls == [
-        [
-            "gh",
-            "issue",
-            "list",
-            "--repo",
-            "owner/api",
-            "--state",
-            "open",
-            "--limit",
-            "25",
-            "--json",
-            "number,title,body,url,labels,state,author,milestone",
-        ]
-    ]
+    assert issues[0]["number"] == 7
+    assert issues[0]["url"] == "https://example/7"
+    assert issues[0]["state"] == "OPEN"
+    assert commands.calls == [[
+        "gh", "api", "repos/owner/api/issues?state=open&sort=created&direction=desc"
+        "&per_page=100&page=1",
+    ]]
 
 
 def test_github_issue_client_lists_complete_paginated_label_catalog(tmp_path: Path) -> None:
@@ -533,3 +525,147 @@ def test_github_issue_client_rejects_invalid_repository(
         client.get_issue(repository, "42")
 
     assert commands.calls == []
+
+
+def _rest_issue(number: int) -> dict[str, Any]:
+    return {"number": number, "title": f"Issue {number}", "body": None,
+            "html_url": f"https://example/issues/{number}", "state": "open",
+            "labels": [{"name": "bug"}], "user": {"login": "author"}}
+
+
+def _paged_client(
+    tmp_path: Path, auth: str, pages: list[Any], *, failure: str = "",
+) -> tuple[GitHubIssueClient, list[int]]:
+    requests: list[int] = []
+
+    def response(page: int) -> str:
+        requests.append(page)
+        if page == len(pages) and failure == "json":
+            return "{invalid"
+        return json.dumps(pages[page - 1])
+
+    class Commands:
+        def run(self, command: list[str], **kwargs: Any) -> CommandResult:
+            assert command[:2] == ["gh", "api"]
+            assert command[2].startswith(
+                "repos/owner/api/issues?state=open&sort=created&direction=desc&per_page=100&page="
+            )
+            page = int(command[2].split("page=")[-1])
+            body = response(page)
+            failed = page == len(pages) and failure == "transport"
+            return CommandResult(
+                command, 1 if failed else 0, body, "Offline" if failed else "", 0.0
+            )
+
+    class Token:
+        def token(self) -> str:
+            return "installation-token"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "github.example"
+        assert request.url.path == "/api/v3/repos/owner/api/issues"
+        assert request.headers["Authorization"] == "Bearer installation-token"
+        assert request.url.params["state"] == "open"
+        assert request.url.params["sort"] == "created"
+        assert request.url.params["direction"] == "desc"
+        assert request.url.params["per_page"] == "100"
+        page = int(request.url.params["page"])
+        body = response(page)
+        failed = page == len(pages) and failure == "transport"
+        return httpx.Response(503 if failed else 200, text=body)
+
+    options: dict[str, Any] = {}
+    if auth == "app":
+        options = {
+            "planner_app": GitHubAppSettings(
+                app_id=1, installation_id=2, private_key_env="KEY",
+                api_url="https://github.example/api/v3",
+            ),
+            "authenticator": Token(),
+            "http_client": httpx.Client(transport=httpx.MockTransport(respond)),
+        }
+    return GitHubIssueClient(Commands(), cwd=tmp_path, **options), requests  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("auth", ["gh", "app"])
+@pytest.mark.parametrize("count", [0, 68, 100, 125, 200])
+def test_issue_discovery_exhausts_pages(tmp_path: Path, auth: str, count: int) -> None:
+    raw = [_rest_issue(number) for number in range(count, 0, -1)]
+    pages = [raw[start:start + 100] for start in range(0, count, 100)]
+    if count % 100 == 0:
+        pages.append([])
+    client, requests = _paged_client(tmp_path, auth, pages)
+    tasks = GitHubIssueTaskProvider(client, "owner/api").list_tasks()
+    assert [task.id for task in tasks] == [str(number) for number in range(count, 0, -1)]
+    assert requests == list(range(1, count // 100 + 2))
+    assert all(task.metadata["state"] == "OPEN" for task in tasks)
+    assert all(task.metadata["author"] == "author" for task in tasks)
+    assert all(task.metadata["labels"] == ["bug"] for task in tasks)
+    assert all("comments" not in task.metadata for task in tasks)
+
+
+@pytest.mark.parametrize("auth", ["gh", "app"])
+def test_issue_discovery_passes_pull_request_only_pages_and_deduplicates(
+    tmp_path: Path, auth: str,
+) -> None:
+    prs = [{"pull_request": {}} for _ in range(100)]
+    mixed = [_rest_issue(3), *prs[:98], _rest_issue(2)]
+    client, requests = _paged_client(
+        tmp_path, auth, [prs, mixed, [_rest_issue(2), _rest_issue(1)]]
+    )
+    assert [issue["number"] for issue in client.list_issues("owner/api")] == [3, 2, 1]
+    assert requests == [1, 2, 3]
+
+
+@pytest.mark.parametrize("auth", ["gh", "app"])
+@pytest.mark.parametrize("failure", ["transport", "json", "entry", "shape"])
+def test_later_issue_page_failure_retains_only_validated_pages(
+    tmp_path: Path, auth: str, failure: str,
+) -> None:
+    from prchef.services.task_provider import PartialTaskListError
+
+    first = [_rest_issue(number) for number in range(1, 101)]
+    last: Any = [_rest_issue(101), {"number": "invalid"}] if failure == "entry" else {}
+    client, requests = _paged_client(tmp_path, auth, [first, last], failure=failure)
+    with pytest.raises(PartialTaskListError) as raised:
+        GitHubIssueTaskProvider(client, "owner/api").list_tasks()
+    assert len(raised.value.tasks) == 100
+    assert raised.value.tasks[-1].id == "100"
+    assert requests == [1, 2]
+    assert str(raised.value)
+
+
+@pytest.mark.parametrize("auth", ["gh", "app"])
+def test_explicit_issue_limit_still_supported(tmp_path: Path, auth: str) -> None:
+    client, requests = _paged_client(tmp_path, auth, [[_rest_issue(n) for n in range(100)]])
+    assert len(client.list_issues("owner/api", limit=10)) == 10
+    assert requests == [1]
+
+
+@pytest.mark.parametrize("auth", ["gh", "app"])
+@pytest.mark.parametrize("interrupted_page", [1, 2])
+def test_issue_discovery_preserves_shutdown_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, auth: str, interrupted_page: int,
+) -> None:
+    from prchef.clients.exceptions import CommandInterruptedError
+
+    client, requests = _paged_client(
+        tmp_path, auth, [[_rest_issue(n) for n in range(100)], []]
+    )
+    method = "_api_get" if auth == "app" else "_run"
+    read = getattr(client, method)
+    interruption = CommandInterruptedError("Application stopping")
+    calls = 0
+
+    def interrupted_read(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == interrupted_page:
+            raise interruption
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(client, method, interrupted_read)
+    with pytest.raises(CommandInterruptedError) as raised:
+        GitHubIssueTaskProvider(client, "owner/api").list_tasks()
+    assert raised.value is interruption
+    assert requests == list(range(1, interrupted_page))

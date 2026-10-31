@@ -1434,3 +1434,27 @@ def test_codex_usage_persists_after_repository_restart(tmp_path: Path) -> None:
     response = restarted.list_diagnostics(execution.id)[-1].payload
     assert response["usage"] == USAGE
     assert response["provider_metadata"] == USAGE
+
+
+def test_history_presence_scopes_source_repository_aliases_and_legacy_rows(tmp_path: Path) -> None:
+    repository = _migrated_repository(tmp_path, "history-presence.db")
+    expected = set()
+    for index, status in enumerate(WorkflowStatus):
+        task_id = str(index)
+        expected.add(task_id)
+        execution = repository.create_execution(task_id, "github", repository_ref="example")
+        repository.update_status(execution.id, status)
+    # Duplicate histories still return only one identity.
+    duplicate = repository.create_execution("0", "github")
+    repository.update_project(duplicate.id, "example", "main")
+    repository.create_execution("alias", "github", repository_ref="/old/path")
+    legacy = repository.create_execution("legacy", "github")
+    repository.update_project(legacy.id, "legacy-name", "main")
+    repository.create_execution("other-repo", "github", repository_ref="other")
+    repository.create_execution("other-source", "trello", repository_ref="example")
+    assert repository.task_ids_with_executions("github", "example") == expected
+    assert repository.task_ids_with_executions(
+        "github", "example", repository_aliases=("/old/path", "legacy-name")
+    ) == expected | {"alias", "legacy"}
+    assert repository.task_ids_with_executions("trello", "example") == {"other-source"}
+    assert repository.task_ids_with_executions("github", "missing") == set()

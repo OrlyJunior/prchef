@@ -168,7 +168,16 @@ class PrchefApp(App[None]):
         padding: 0 1;
         border: round $primary;
     }
-    #available-tasks { width: 100%; height: auto; }
+    /* Bound the rows; pagination shares the existing refresh row. */
+    #available-tasks { width: 100%; height: auto; max-height: 12; overflow-x: hidden; }
+    #task-pagination { width: 100%; height: 3; }
+    #task-pagination Button { min-width: 10; width: 10; }
+    #task-page-indicator { width: 1fr; min-width: 13; content-align: center middle; }
+    #task-pagination #refresh-tasks { width: 16; }
+    #task-pagination #task-next { width: 8; min-width: 8; }
+    #task-page-size { width: 20; margin-left: 1; }
+    #task-error { height: auto; color: $warning; }
+    #task-hint { height: auto; }
     .task-select-all {
         width: 100%;
         /* Auto height leaves room for the separator the bottom border draws
@@ -367,6 +376,7 @@ class PrchefApp(App[None]):
     def __init__(self, controller: WorkflowController, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.controller = controller
+        self.task_page_size = 25
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)

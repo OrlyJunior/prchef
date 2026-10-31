@@ -266,6 +266,25 @@ class WorkflowRepository:
                 raise KeyError(f"Workflow batch not found: {batch_id}")
             session.delete(entity)
 
+    def task_ids_with_executions(
+        self,
+        task_source: str,
+        repository: str,
+        repository_aliases: Sequence[str] = (),
+    ) -> set[str]:
+        """Read history presence in one query without loading execution relationships."""
+        references = _repository_references(repository, repository_aliases)
+        with self._sessions() as session:
+            return set(session.scalars(
+                select(WorkflowExecutionEntity.task_id).distinct().where(
+                    WorkflowExecutionEntity.task_source == task_source,
+                    or_(
+                        WorkflowExecutionEntity.repository_ref.in_(references),
+                        WorkflowExecutionEntity.repository.in_(references),
+                    ),
+                )
+            ).all())
+
     def executions_for_tasks(
         self,
         task_source: str,
