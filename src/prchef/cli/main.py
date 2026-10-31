@@ -13,7 +13,7 @@ from alembic.config import Config
 from sqlalchemy.exc import OperationalError
 
 import prchef
-from prchef.clients.command_client import CommandClient
+from prchef.clients.command_client import CommandClient, interrupt_active_commands
 from prchef.clients.exceptions import GitClientError
 from prchef.clients.factory import ClientFactory
 from prchef.clients.git_client import GitClient
@@ -43,6 +43,7 @@ from prchef.services.debug_service import (
     parse_debug_stage,
 )
 from prchef.services.execution_dispatcher import ExecutionDispatcher
+from prchef.services.execution_owner import ExecutionOwnerHeartbeat
 from prchef.services.qdrant_repository_context import (
     QdrantClientManager,
     QdrantRepositoryContextStrategy,
@@ -159,6 +160,12 @@ def _migrated_repository(settings: Settings) -> WorkflowRepository:
     recover = getattr(repository, "recover_interrupted", None)
     if callable(recover):
         recover()
+    skipped = len(getattr(repository, "live_owner_execution_ids", ()))
+    if skipped:
+        logger.info(
+            "%s executions appear to be running in another instance and were left unchanged.",
+            skipped,
+        )
     return repository
 
 
@@ -186,6 +193,21 @@ def _execution_dispatcher(coordinator: ProviderConcurrencyCoordinator) -> Execut
     """Size the worker pool from the configured ceilings, not from user input."""
 
     return ExecutionDispatcher(max_workers=coordinator.total_capacity())
+
+
+def _shutdown_execution_runtime(
+    repository: WorkflowRepository, dispatcher: ExecutionDispatcher,
+    owner: ExecutionOwnerHeartbeat, index_clients: QdrantClientManager,
+) -> None:
+    try:
+        repository.stop_session_writes()
+        dispatcher.shutdown(wait=False, interrupt=True)
+        interrupt_active_commands()
+    finally:
+        try:
+            owner.close()
+        finally:
+            index_clients.close()
 
 
 def _config_loader(config_file: Path | None) -> ProjectConfigLoader:
@@ -465,6 +487,7 @@ def tui(
     # One long-lived index client per configured store: local Qdrant takes an
     # exclusive lock, so concurrent executions must share it.
     index_clients = QdrantClientManager()
+    execution_owner = ExecutionOwnerHeartbeat(workflow_repository)
     controller = WorkflowController(
         workflow_repository=workflow_repository,
         config_loader=config_loader,
@@ -476,12 +499,17 @@ def tui(
         dispatcher=dispatcher,
         provider_coordinator=coordinator,
         repository_index_clients=index_clients,
+        execution_owner=execution_owner,
     )
     try:
+        execution_owner.start()
         application_type(controller).run()
     finally:
-        controller.shutdown_for_exit()
-        index_clients.close()
+        try:
+            controller.shutdown_for_exit()
+        finally:
+            execution_owner.close()
+            index_clients.close()
 
 
 @app.command()
@@ -542,7 +570,9 @@ def run(
         provider_coordinator=coordinator,
         repository_index_clients=index_clients,
     )
+    execution_owner = ExecutionOwnerHeartbeat(workflow_repository)
     try:
+        execution_owner.start()
         execution = service.run(selected_id, repository)
     except ValueError as exc:
         typer.echo(str(exc), err=True)
@@ -551,8 +581,7 @@ def run(
         typer.echo(f"Database access failed after migrations: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     finally:
-        dispatcher.shutdown(wait=False)
-        index_clients.close()
+        _shutdown_execution_runtime(workflow_repository, dispatcher, execution_owner, index_clients)
     _print_execution(execution)
     _print_final_summary(execution)
     if execution.status not in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:
@@ -624,11 +653,12 @@ def respond(
         provider_coordinator=coordinator,
         repository_index_clients=index_clients,
     )
+    execution_owner = ExecutionOwnerHeartbeat(workflow_repository)
     try:
+        execution_owner.start()
         result = service.respond_and_resume(execution_id, message)
     finally:
-        dispatcher.shutdown(wait=False)
-        index_clients.close()
+        _shutdown_execution_runtime(workflow_repository, dispatcher, execution_owner, index_clients)
     _print_execution(result)
     _print_final_summary(result)
     if result.status not in {WorkflowStatus.APPROVED, WorkflowStatus.CHANGES_REQUESTED}:

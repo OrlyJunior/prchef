@@ -22,11 +22,14 @@ tests and repository retrieval.
 
 ## Operating model
 
-- In-memory dispatch queues are process-scoped; SQLite is the default. Local Qdrant is single-process.
-  Retrieval, indexing, and cleanup share admission per canonical local store; server operations
-  stay concurrent. Workflows wait; screen actions try admission without overtaking them.
-  Shutdown waits for admitted work. Provider ceilings have no cross-process coordination.
-- Startup marks orphaned active executions interrupted; resumption requires an explicit user choice.
+- Dispatch and provider limits are process-local; SQLite is default and local Qdrant single-process.
+  Retrieval, indexing and cleanup share per-store admission; servers stay concurrent. Workflows
+  wait, screen actions cannot overtake, and shutdown waits for admitted index work.
+- Active admission atomically records an instance owner. Startup recovery uses database heartbeats
+  on one machine; live-owned work stays untouched. Recovery serializes with heartbeat, admission
+  and completion; shutdown interrupts only local ownership. Bounded liveness can expire stalled
+  owners. Legacy ownerless rows retain orphan recovery; close old versions before upgrading.
+  Interrupted work requires explicit resumption; retained-worktree process guards still apply.
 - Configuration comes only from a global `prchef.yml` (`defaults` deep-merged with
   `repositories.<key>`). Repository-local configuration files are ignored. Discovery and
   persistence never depend on the current directory or a source checkout. Explicit CLI and
@@ -44,9 +47,8 @@ tests and repository retrieval.
   validation. `providers`: role-neutral agent adapters. `clients`: transport, subprocess, Git.
   `repositories`: the only SQLAlchemy boundary. `cli`: composition and stdout/stderr contract.
   `tui`: presentation over the controller.
-- The TUI projects durable workflow state without its own policy or state machine. Its timeline
-  summarizes events; detailed logs and clipboard exports retain redacted diagnostics. Live timelines
-  surface durable-context size warnings with actual and capped character counts.
+- The TUI projects durable state without its own policy or state machine; logs and exports
+  retain redacted diagnostics.
 - Provider commands, credentials, polling, and API shapes stay below
   `AgentProvider.execute(AgentRequest)`. Role services are provider-neutral. Model-routing
   libraries (LiteLLM) are backends behind that boundary and never own workflow semantics.
@@ -56,8 +58,7 @@ tests and repository retrieval.
   Qdrant collections are repository-scoped; first retrieval builds the index. Linked roots never
   update provenance. Exact text and embedding identity key reusable vectors across roots; root
   inventories own source points, while vectors survive temporary cleanup. Schema changes rebuild.
-- Every execution, response, and continuation enters through one submission seam. Scheduling
-  features must use it rather than adding their own concurrency.
+- Executions, responses and continuations share one submission seam; scheduling cannot bypass it.
 - The TUI may launch one task or an ordered persisted batch. Batch policy, cancellation, and
   admission live in `WorkflowController`/`WorkflowRepository`; batch progress is a projection.
   Batch items link to, but do not own, execution rows. Cancelling one item never cancels its peers.
@@ -113,9 +114,8 @@ tests and repository retrieval.
   workspace/branch can be continued from `IMPLEMENT`; an existing PR must still be open.
 - Configuration errors and explicit human-needed errors end as `NEEDS_HUMAN`; everything else
   ends as `FAILED`.
-- `debug` stages leave executions, branches, commits, and PRs unchanged. Saved-state startup
-  can migrate data and mark orphaned active runs `INTERRUPTED`; `execution_mutated: false`
-  excludes startup.
+- `debug` never changes workflow artifacts; `execution_mutated: false` excludes saved-state
+  migrations and startup recovery.
 
 ## Concurrency and providers
 

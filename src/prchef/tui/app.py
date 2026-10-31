@@ -417,6 +417,13 @@ class PrchefApp(App[None]):
 
     def on_mount(self) -> None:
         self._set_home_layout_mode(self.size.width)
+        count = self.controller.other_instance_execution_count()
+        if count:
+            self.notify(
+                f"{count} executions appear to be running in another instance "
+                "and were left unchanged.",
+                timeout=15,
+            )
         interrupted = self.controller.interrupted_executions()
         if interrupted:
             self.push_screen(InterruptedRecoveryChoice(interrupted), self._resume_choice)

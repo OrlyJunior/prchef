@@ -16,6 +16,7 @@ from prchef.models.agent import AgentRole
 from prchef.models.code_review import CodeReview
 from prchef.models.development_task import DevelopmentTask
 from prchef.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from prchef.models.execution_owner import OWNER_STALE_AFTER_SECONDS
 from prchef.models.human_interaction import HumanInteraction
 from prchef.models.implementation_result import ImplementationResult
 from prchef.models.pull_request import PullRequest
@@ -35,6 +36,7 @@ from prchef.models.workflow_status import (
 from prchef.models.workflow_step import WorkflowStep
 from prchef.repositories.orm_models import (
     ExecutionDiagnosticEntity,
+    ExecutionOwnerEntity,
     HumanInteractionEntity,
     WorkflowBatchEntity,
     WorkflowBatchItemEntity,
@@ -113,10 +115,60 @@ def _lock_fresh_run_admission(session: Session, task_source: str, task_id: str) 
         )
 
 
+def _lock_ownership_state(session: Session) -> None:
+    """Reserve writes before reading liveness, admission or completion state.
+
+    SQLite's reservation serializes all writers. PostgreSQL uses a shared
+    transaction advisory lock for these short ownership/state transactions.
+    Never hold this lock across workflow work or external calls.
+    """
+    dialect = session.get_bind().dialect.name
+    if dialect == "sqlite":
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    elif dialect == "postgresql":
+        session.connection().exec_driver_sql("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        session.execute(text("SELECT pg_advisory_xact_lock(7263686566)"))
+    else:
+        raise RuntimeError(f"Execution ownership requires a database lock for {dialect}")
+
+
 class WorkflowRepository:
-    def __init__(self, session_factory: Callable[[], Session]) -> None:
+    def __init__(
+        self, session_factory: Callable[[], Session], *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._sessions = session_factory
         self._interrupting = False
+        self._clock = clock or _utcnow
+        self.owner_id: str | None = None
+        self.live_owner_execution_ids: tuple[str, ...] = ()
+
+    def register_owner(self, owner_id: str) -> None:
+        """Persist the initial heartbeat before enabling this instance's admissions."""
+        with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
+            if self._interrupting or self.owner_id is not None:
+                raise RuntimeError("Execution owner already registered or closing")
+            session.add(ExecutionOwnerEntity(id=owner_id, last_heartbeat_at=self._clock()))
+        self.owner_id = owner_id
+
+    def refresh_owner(self, owner_id: str) -> None:
+        with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
+            session.execute(
+                update(ExecutionOwnerEntity)
+                .where(ExecutionOwnerEntity.id == owner_id, ExecutionOwnerEntity.ended_at.is_(None))
+                .values(last_heartbeat_at=self._clock())
+            )
+
+    def _admission_owner(self, session: Session) -> str | None:
+        if self._interrupting:
+            raise WorkflowInterruptedError("Application is closing")
+        if self.owner_id is not None:
+            owner = session.get(ExecutionOwnerEntity, self.owner_id)
+            if owner is None or owner.ended_at is not None:
+                raise WorkflowInterruptedError("Execution owner has ended")
+        return self.owner_id
 
     def stop_session_writes(self) -> None:
         """Prevent in-flight workers from reviving rows during UI shutdown."""
@@ -134,6 +186,10 @@ class WorkflowRepository:
             latest = None
             if repository_ref:
                 _lock_fresh_run_admission(session, task_source, task_id)
+                if session.get_bind().dialect.name == "postgresql":
+                    # Fresh admission already set isolation; join the ownership
+                    # lock before reading state without setting isolation again.
+                    session.execute(text("SELECT pg_advisory_xact_lock(7263686566)"))
                 references = _repository_references(repository_ref, repository_aliases)
                 latest = session.scalars(
                     select(WorkflowExecutionEntity)
@@ -156,6 +212,9 @@ class WorkflowRepository:
                         f"Task {task_id} already has a {latest.status} execution "
                         f"in repository {redact_text(repository_ref)}"
                     )
+            else:
+                _lock_ownership_state(session)
+            owner_id = self._admission_owner(session)
             # Assign the ordering timestamp inside the admission transaction, after
             # the locked latest-run read. A queued caller must not insert a new
             # PENDING row with a timestamp older than a run it just observed.
@@ -168,6 +227,7 @@ class WorkflowRepository:
             legacy_trello_id = task_id if task_source == "trello" else ""
             entity = WorkflowExecutionEntity(
                 id=str(uuid.uuid4()),
+                owner_id=owner_id,
                 task_source=task_source,
                 task_id=task_id,
                 task_url="",
@@ -421,14 +481,39 @@ class WorkflowRepository:
 
     def recover_interrupted(self) -> list[WorkflowExecution]:
         """Reconcile orphaned work once, in one transaction, before presenting state."""
+        return self._interrupt_active(local_shutdown=False)
+
+    def interrupt_owned_and_end(self) -> list[WorkflowExecution]:
+        """Intentional shutdown affects only this instance, regardless of heartbeat age."""
+        if self.owner_id is None:
+            return []
+        return self._interrupt_active(local_shutdown=True)
+
+    def _interrupt_active(self, *, local_shutdown: bool) -> list[WorkflowExecution]:
         with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
+            now = self._clock()
+            statement = select(WorkflowExecutionEntity).where(
+                WorkflowExecutionEntity.status.in_(_ACTIVE_STATUS_VALUES)
+            )
+            if local_shutdown:
+                statement = statement.where(WorkflowExecutionEntity.owner_id == self.owner_id)
             entities = session.scalars(
-                select(WorkflowExecutionEntity).where(
-                    WorkflowExecutionEntity.status.in_(_ACTIVE_STATUS_VALUES)
-                )
+                statement
             ).all()
-            now = _utcnow()
+            recovered: list[WorkflowExecutionEntity] = []
+            skipped: list[str] = []
             for entity in entities:
+                owner = (session.get(ExecutionOwnerEntity, entity.owner_id)
+                         if entity.owner_id is not None else None)
+                if (
+                    not local_shutdown and owner is not None and owner.ended_at is None
+                    and (_aware(now) - _aware(owner.last_heartbeat_at)).total_seconds()
+                    <= OWNER_STALE_AFTER_SECONDS
+                ):
+                    skipped.append(entity.id)
+                    continue
+                recovered.append(entity)
                 entity.interrupted_from_status = entity.status
                 latest_step = max(entity.steps, key=lambda step: step.id, default=None)
                 if entity.resume_mode is None:
@@ -470,12 +555,21 @@ class WorkflowRepository:
                     if step.status == StepStatus.RUNNING.value:
                         step.status = StepStatus.INTERRUPTED.value
                         step.finished_at = now
+            if local_shutdown:
+                owner = session.get(ExecutionOwnerEntity, self.owner_id)
+                if owner is not None and owner.ended_at is None:
+                    owner.ended_at = now
             session.flush()
-            return [self._to_domain(entity) for entity in entities]
+            result = [self._to_domain(entity) for entity in recovered]
+        if not local_shutdown:
+            self.live_owner_execution_ids = tuple(skipped)
+        return result
 
     def queue_interrupted(self, execution_id: str) -> WorkflowExecution:
         """Atomically admit an interrupted row without changing its durable checkpoint."""
         with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
+            owner_id = self._admission_owner(session)
             result = cast(CursorResult[Any], session.execute(
                 update(WorkflowExecutionEntity)
                 .where(
@@ -483,7 +577,7 @@ class WorkflowRepository:
                     WorkflowExecutionEntity.status == WorkflowStatus.INTERRUPTED.value,
                 )
                 .values(status=WorkflowStatus.PENDING.value, updated_at=_utcnow(),
-                        error_message=None)
+                        error_message=None, owner_id=owner_id)
             ))
             if not result.rowcount:
                 raise ValueError(f"Execution {execution_id} is not interrupted")
@@ -717,6 +811,8 @@ class WorkflowRepository:
         if not response:
             raise ValueError("Human response must not be empty")
         with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
+            owner_id = self._admission_owner(session)
             now = _utcnow()
             queued = cast(
                 CursorResult[Any],
@@ -729,6 +825,7 @@ class WorkflowRepository:
                     )
                     .values(
                         status=WorkflowStatus.PENDING.value,
+                        owner_id=owner_id,
                         error_message=None,
                         finished_at=None,
                         updated_at=now,
@@ -757,6 +854,9 @@ class WorkflowRepository:
 
     def resume_execution(self, execution_id: str) -> None:
         def mutate(entity: WorkflowExecutionEntity) -> None:
+            if entity.status in _ACTIVE_STATUS_VALUES and entity.owner_id != self.owner_id:
+                raise ValueError(f"Execution {execution_id} is already active in another instance")
+            entity.owner_id = self.owner_id
             entity.status = WorkflowStatus.RUNNING.value
             entity.error_message = None
             entity.finished_at = None
@@ -777,6 +877,9 @@ class WorkflowRepository:
                 or entity.cancellation_requested_at is not None
             ):
                 raise ValueError(f"Execution {execution_id} has been cancelled")
+            if entity.status in _ACTIVE_STATUS_VALUES:
+                raise ValueError(f"Execution {execution_id} is already active")
+            entity.owner_id = self.owner_id
             entity.status = WorkflowStatus.PENDING.value
             entity.error_message = None
             entity.finished_at = None
@@ -810,6 +913,7 @@ class WorkflowRepository:
                 else_=WorkflowStage.COMPLETED.value,
             )
         with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
             result = cast(
                 CursorResult[Any],
                 session.execute(
@@ -922,11 +1026,13 @@ class WorkflowRepository:
         operation: Callable[[WorkflowExecutionEntity], None],
     ) -> None:
         with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
             entity = session.get(WorkflowExecutionEntity, execution_id)
             if entity is None:
                 raise KeyError(f"Workflow execution not found: {execution_id}")
             if self._interrupting:
                 raise WorkflowInterruptedError("Application is closing")
+            self._admission_owner(session)
             operation(entity)
             entity.updated_at = _utcnow()
 
@@ -934,6 +1040,7 @@ class WorkflowRepository:
     def _to_domain(entity: WorkflowExecutionEntity) -> WorkflowExecution:
         return WorkflowExecution(
             id=entity.id,
+            owner_id=entity.owner_id,
             task_source=entity.task_source,
             task_id=entity.task_id,
             task_url=entity.task_url,

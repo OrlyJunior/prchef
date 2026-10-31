@@ -851,6 +851,52 @@ def _painted_recovery_row(application: PrchefApp, row: Button) -> str:
     )
 
 
+@pytest.mark.parametrize("recovery_action", [None, "all", "selected"])
+def test_startup_explains_live_owners_and_never_offers_them_for_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery_action: str | None,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    foreign = WorkflowExecution(id="foreign", status=WorkflowStatus.RUNNING, owner_id="other")
+    repository.executions = [foreign]
+    monkeypatch.setattr(repository, "live_owner_execution_ids", (foreign.id,), raising=False)
+    if recovery_action is not None:
+        repository.executions.extend(_recovery_executions())
+    submitted: list[str] = []
+    monkeypatch.setattr(controller, "submit_interrupted", submitted.append)
+    application = PrchefApp(controller)
+    notifications: list[str] = []
+    notify = application.notify
+
+    def record_notice(message: str, **kwargs: Any) -> None:
+        notifications.append(message)
+        notify(message, **kwargs)
+
+    monkeypatch.setattr(application, "notify", record_notice)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 40)) as pilot:
+            await settle_tui(pilot)
+            assert notifications == [
+                "1 executions appear to be running in another instance and were left unchanged."
+            ]
+            assert controller.active_execution_count() == 0
+            if recovery_action is None:
+                assert not application.screen.query("#recovery-all")
+                await pilot.press("ctrl+q")
+            else:
+                assert len(application.screen.query("#recovery-items Button")) == 3
+                if recovery_action == "selected":
+                    await pilot.click("#recovery-item-0")
+                    await settle_tui(pilot)
+                await pilot.click(f"#recovery-{recovery_action}")
+                await settle_tui(pilot)
+                assert submitted == (["first"] if recovery_action == "selected"
+                                     else ["first", "second", "third"])
+            assert foreign.status is WorkflowStatus.RUNNING
+
+    asyncio.run(drive())
+
+
 def test_recovery_rows_render_literal_text_and_submit_visible_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
