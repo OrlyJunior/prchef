@@ -640,3 +640,32 @@ def test_explicit_issue_limit_still_supported(tmp_path: Path, auth: str) -> None
     client, requests = _paged_client(tmp_path, auth, [[_rest_issue(n) for n in range(100)]])
     assert len(client.list_issues("owner/api", limit=10)) == 10
     assert requests == [1]
+
+
+@pytest.mark.parametrize("auth", ["gh", "app"])
+@pytest.mark.parametrize("interrupted_page", [1, 2])
+def test_issue_discovery_preserves_shutdown_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, auth: str, interrupted_page: int,
+) -> None:
+    from prchef.clients.exceptions import CommandInterruptedError
+
+    client, requests = _paged_client(
+        tmp_path, auth, [[_rest_issue(n) for n in range(100)], []]
+    )
+    method = "_api_get" if auth == "app" else "_run"
+    read = getattr(client, method)
+    interruption = CommandInterruptedError("Application stopping")
+    calls = 0
+
+    def interrupted_read(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == interrupted_page:
+            raise interruption
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(client, method, interrupted_read)
+    with pytest.raises(CommandInterruptedError) as raised:
+        GitHubIssueTaskProvider(client, "owner/api").list_tasks()
+    assert raised.value is interruption
+    assert requests == list(range(1, interrupted_page))

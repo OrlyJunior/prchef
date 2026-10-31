@@ -1468,7 +1468,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 or self._task_context != (repository, provider)
                 or generation != selector._page_generation):
             return
-        selector.set_page_executions(generation, executions)
+        selector.set_page_executions(generation, executions, lookup_failed=bool(error))
         if error:
             self.notify(f"Execution statuses are unavailable: {error}", severity="warning")
 

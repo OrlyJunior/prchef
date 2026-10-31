@@ -16,6 +16,7 @@ from prchef.clients.exceptions import (
 )
 from prchef.clients.github_client import GitHubAppAuthenticator
 from prchef.config.project_config import GitHubAppSettings
+from prchef.models.workflow_interruption import WorkflowInterruptedError
 
 
 class GitHubIssueClient:
@@ -155,6 +156,8 @@ class GitHubIssueClient:
                         raise GitHubClientError("GitHub issue list contains an invalid issue")
                     if "pull_request" not in item:
                         validated.append(self._normalize_issue(item))
+            except WorkflowInterruptedError:
+                raise
             except ExternalClientError as exc:
                 raise PartialGitHubIssueListError(str(exc), issues) from exc
             # Publish only whole validated pages. Raw length determines exhaustion:

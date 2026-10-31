@@ -390,8 +390,9 @@ class TaskSelector(Vertical):
         )
         self._load_page_status = load_page_status
         self.query_one("#task-error", Static).update(
-            (f"Incomplete task list: {len(self._tasks)} tasks loaded. {incomplete}. "
-             "Refresh tasks to retry." if incomplete else "")
+            (f"Incomplete task list: {len(self._tasks)} tasks loaded. "
+             "Could not load remaining tasks. Refresh tasks to retry. "
+             f"Details: {incomplete}" if incomplete else "")
             + (f" Execution history unavailable: {history_error}. Select all is disabled."
                if history_error else "")
         )
@@ -428,14 +429,17 @@ class TaskSelector(Vertical):
             self.post_message(self.PageChanged(self._page_generation, self.page_tasks))
 
     def set_page_executions(
-        self, generation: int, executions: Mapping[str, WorkflowExecution]
+        self, generation: int, executions: Mapping[str, WorkflowExecution],
+        *, lookup_failed: bool = False,
     ) -> None:
         if generation != self._page_generation:
             return
         self._status_pending = False
-        ids = {task.id for task in self.page_tasks}
-        for task_id in ids:
-            self._executions.pop(task_id, None)
+        # A failed lookup cannot establish that earlier executions are absent.
+        # Retain cached status for availability and fresh-run confirmation.
+        if not lookup_failed:
+            for task in self.page_tasks:
+                self._executions.pop(task.id, None)
         self._executions.update(executions)
         newly_seen = self._never_run.intersection(executions)
         history_changed = bool(newly_seen)
@@ -735,10 +739,13 @@ class TaskSelector(Vertical):
         """Display a task-loading failure without interrupting the launcher."""
 
         self._incomplete = True
+        self.set_page_executions(self._page_generation, {}, lookup_failed=True)
         self._sync_header_and_hint()
         self.query_one("#refresh-tasks", Button).disabled = False
         self.query_one("#task-error", Static).update(
-            f"Incomplete task list: could not load tasks: {message}. Refresh tasks to retry."
+            f"Incomplete task list: {len(self._tasks)} tasks loaded. "
+            "Could not load remaining tasks. Refresh tasks to retry. "
+            f"Details: {message}"
         )
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:

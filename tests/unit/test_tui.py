@@ -9264,6 +9264,99 @@ def test_task_pagination_navigation_selection_and_bounded_work(
     asyncio.run(drive())
 
 
+def test_task_pagination_failed_status_lookup_keeps_cached_executions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    provider = _LabelledTaskProvider(_pagination_tasks(68), ["bug", "Bug", "common"])
+    controller._task_provider_factory = lambda source, repository: provider
+    repository.executions = [replace(
+        repository.execution, id=f"prior-{task_id}", task_source="github", task_id=task_id,
+        repository_ref="example", status=status,
+    ) for task_id, status in [("1", WorkflowStatus.FAILED), ("26", WorkflowStatus.APPROVED)]]
+    application = PrchefApp(controller)
+
+    def failed_lookup(*args: Any, **kwargs: Any) -> dict[str, WorkflowExecution]:
+        raise RuntimeError("status database unavailable")
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            selector = screen.query_one(TaskSelector)
+            screen.query_one("#task-checkbox-0", TaskRow).value = True
+            await settle_tui(pilot)
+            screen.query_one("#task-next", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#task-checkbox-25", TaskRow).disabled
+
+            monkeypatch.setattr(controller, "task_execution_status", failed_lookup)
+            screen.query_one("#task-previous", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#task-checkbox-0", TaskRow).value
+            assert selector.selected_previous_executions["1"].status is WorkflowStatus.FAILED
+            screen.query_one("#task-next", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#task-checkbox-25", TaskRow).disabled
+            assert "APPROVED" in str(screen.query_one("#task-checkbox-25", TaskRow).label)
+
+            screen.query_one("#start-workflow", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, FreshRunConfirmation)
+            assert [task.id for task, _ in application.screen.previous] == ["1"]
+
+    asyncio.run(drive())
+
+
+def test_task_pagination_failed_refresh_reenables_preserved_pending_rows(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    provider = _LabelledTaskProvider(_pagination_tasks(68), ["bug", "Bug", "common"])
+    controller._task_provider_factory = lambda source, repository: provider
+    repository.executions = [replace(
+        repository.execution, task_source="github", task_id="2", repository_ref="example",
+        status=WorkflowStatus.APPROVED,
+    )]
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            selector = screen.query_one(TaskSelector)
+            screen.query_one("#task-checkbox-0", TaskRow).value = True
+            await settle_tui(pilot)
+
+            # Supersede a pending status request before its queued event is handled.
+            selector._present_page()
+            stale_generation = selector._page_generation
+            assert selector._status_pending
+            assert all(row.disabled for _, row in selector._rows)
+            selector.set_tasks_loading(provider="github", preserve_selection=True)
+            selector.set_error("Offline.")
+            await settle_tui(pilot)
+            assert not selector._status_pending
+            assert not screen.query_one("#task-checkbox-0", TaskRow).disabled
+            assert screen.query_one("#task-checkbox-0", TaskRow).value
+            assert screen.query_one("#task-checkbox-1", TaskRow).disabled
+            assert not screen.query_one("#task-checkbox-2", TaskRow).disabled
+            assert selector.selected_task_ids == ("1",)
+            assert not screen.query_one("#refresh-tasks", Button).disabled
+            assert str(screen.query_one("#task-error").renderable) == (
+                "Incomplete task list: 68 tasks loaded. Could not load remaining tasks. "
+                "Refresh tasks to retry. Details: Offline."
+            )
+            selector.set_page_executions(stale_generation, {})
+            assert screen.query_one("#task-checkbox-1", TaskRow).disabled
+            screen.query_one("#refresh-tasks", Button).press()
+            await settle_tui(pilot)
+            assert selector.selected_task_ids == ("1",)
+            assert str(screen.query_one("#task-error").renderable) == ""
+
+    asyncio.run(drive())
+
+
 def test_task_pagination_filter_select_all_and_session_size(tmp_path: Path) -> None:
     controller, _, repository = _controller(tmp_path)
     tasks = _pagination_tasks()
