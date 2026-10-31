@@ -50,6 +50,7 @@ from prchef.tui.widgets import (
 from prchef.tui.workflow_presentation import (
     STAGE_ROLES,
     clear_index_progress,
+    github_identity_summary,
     is_active_index_line,
     is_index_progress,
     is_index_ready,
@@ -470,6 +471,8 @@ class WorkflowRunnerScreen(Screen[None]):
             self._reconcile_active_execution()
         repository = self._selected("#repository")
         provider = self._selected("#task-provider")
+        if repository is not None:
+            self._load_github_app_summary(repository)
         # Textual also resumes a newly mounted screen before the repository's
         # Changed event initializes role selections. Refresh only initialized roles.
         if (
@@ -1257,12 +1260,8 @@ class WorkflowRunnerScreen(Screen[None]):
     def github_app_summary(planner: Any, implementer: Any, reviewer: Any) -> str:
         """Return a launcher-safe summary without exposing App identifiers."""
 
-        planner_status = "✓" if planner.is_configured else "—"
-        implementer_status = "✓" if implementer.is_configured else "—"
-        reviewer_status = "✓" if reviewer.is_configured else "—"
-        return (
-            f"GitHub Apps: Planner {planner_status} · Implementer {implementer_status}"
-            f" · Reviewer {reviewer_status}"
+        return github_identity_summary(
+            planner.is_configured, implementer.is_configured, reviewer.is_configured
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -2265,7 +2264,8 @@ class WorkflowRunnerScreen(Screen[None]):
         supplemental = [
             line for line in self._event_lines
             if line.startswith((
-                "! docs/PROJECT_CONTEXT.md", "! Semantic context unavailable", "Provider ", "↳"
+                "! docs/PROJECT_CONTEXT.md", "! Semantic context unavailable", "Provider ", "↳",
+                "GitHub identities: "
             ))
         ]
         if (

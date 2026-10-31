@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from pydantic import ValidationError
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import DescendantFocus
@@ -17,6 +18,7 @@ from prchef.tui.widgets import (
     RepositorySelect,
     is_prchef_select_widget,
 )
+from prchef.tui.workflow_presentation import github_identity_summary
 
 if TYPE_CHECKING:
     from prchef.tui.app import PrchefApp
@@ -34,6 +36,10 @@ class GitHubAppSettingsScreen(Screen[None]):
                 "Only App IDs and private-key references are stored. "
                 "Never paste private keys or tokens."
             )
+            yield Static("", id="github-app-identity-summary")
+            yield Static(
+                "Select a repository to inspect its App identities.", id="github-app-status"
+            )
             with Vertical(classes="workflow-form"):
                 yield RepositorySelect(id="github-app-repository")
                 with Vertical(classes="github-app-roles"):
@@ -46,9 +52,7 @@ class GitHubAppSettingsScreen(Screen[None]):
                                 placeholder="Private key environment variable",
                                 id=f"{role}-key-env",
                             )
-                            yield Input(
-                                placeholder="Private key file path", id=f"{role}-key-path"
-                            )
+                            yield Input(placeholder="Private key file path", id=f"{role}-key-path")
                             yield Input(placeholder="GitHub API URL", id=f"{role}-api-url")
                             yield Input(placeholder="Bot login override", id=f"{role}-bot-name")
                             yield Input(
@@ -60,9 +64,6 @@ class GitHubAppSettingsScreen(Screen[None]):
                         variant="success",
                         id="save-github-apps",
                     )
-            yield Static(
-                "Select a repository to inspect its App identities.", id="github-app-status"
-            )
 
     @property
     def controller(self) -> WorkflowController:
@@ -99,6 +100,7 @@ class GitHubAppSettingsScreen(Screen[None]):
             except Exception as exc:
                 self._status(f"Cannot load GitHub App configuration: {exc}")
                 return
+            self._show_summary(planner, implementer, reviewer)
             self._populate("planner", planner)
             self._populate("implementer", implementer)
             self._populate("reviewer", reviewer)
@@ -120,8 +122,23 @@ class GitHubAppSettingsScreen(Screen[None]):
             )
         except Exception as exc:
             self._status(f"Cannot save GitHub App configuration: {exc}")
+            self.query_one("#github-app-settings", VerticalScroll).scroll_to_widget(
+                self.query_one("#github-app-status", Static), animate=False
+            )
             return
-        self._status(f"Saved App references to {config_path}.")
+        try:
+            planner, implementer, reviewer = self.controller.github_app_settings(repository)
+            self._show_summary(planner, implementer, reviewer)
+        except Exception:
+            self.query_one("#github-app-identity-summary", Static).update(
+                "GitHub identities: summary unavailable"
+            )
+            self._status(f"Saved App references to {config_path}, but could not refresh summary.")
+        else:
+            self._status(f"Saved App references to {config_path}.")
+        self.query_one("#github-app-settings", VerticalScroll).scroll_to_widget(
+            self.query_one("#github-app-status", Static), animate=False
+        )
 
     def _populate(self, role: str, settings: GitHubAppSettings) -> None:
         self.query_one(f"#{role}-app-id", Input).value = str(settings.app_id or "")
@@ -147,7 +164,60 @@ class GitHubAppSettingsScreen(Screen[None]):
             "bot_name": self.query_one(f"#{role}-bot-name", Input).value.strip() or None,
             "bot_user_id": self.query_one(f"#{role}-bot-user-id", Input).value.strip() or None,
         }
-        return GitHubAppSettings.model_validate(values)
+        messages = []
+        required = (
+            values["app_id"],
+            values["installation_id"],
+            values["private_key_env"] or values["private_key_path"],
+        )
+        if any(required):
+            if not required[0]:
+                messages.append("provide an App ID")
+            if not required[1]:
+                messages.append("provide an installation ID")
+            if not required[2]:
+                messages.append(
+                    "provide a private key environment variable or a private key file path"
+                )
+        if values["private_key_env"] and values["private_key_path"]:
+            messages.append(
+                "choose either a private key environment variable or a private key file path"
+            )
+        if bool(values["bot_name"]) != bool(values["bot_user_id"]):
+            messages.append("provide both bot login and bot user ID overrides")
+        try:
+            settings = GitHubAppSettings.model_validate(values)
+        except ValidationError as exc:
+            fields = {error["loc"][0] for error in exc.errors() if error["loc"]}
+            for field, message in (
+                ("app_id", "App ID must be a positive integer"),
+                ("installation_id", "installation ID must be a positive integer"),
+                ("bot_user_id", "bot user ID must be a positive integer"),
+                ("api_url", "API URL must use http or https"),
+                ("private_key_env", "invalid private key environment variable"),
+                ("private_key_path", "invalid private key file path"),
+                ("bot_name", "invalid bot login override"),
+            ):
+                if field in fields:
+                    messages.append(message)
+            if not messages:
+                messages.append("check the App credential fields")
+            raise ValueError(f"{role.title()}: {'; '.join(messages)}") from None
+        if messages:
+            raise ValueError(f"{role.title()}: {'; '.join(messages)}")
+        return settings
+
+    def _show_summary(
+        self,
+        planner: GitHubAppSettings,
+        implementer: GitHubAppSettings,
+        reviewer: GitHubAppSettings,
+    ) -> None:
+        self.query_one("#github-app-identity-summary", Static).update(
+            github_identity_summary(
+                planner.is_configured, implementer.is_configured, reviewer.is_configured
+            )
+        )
 
     def _status(self, message: str) -> None:
         self.query_one("#github-app-status", Static).update(message)

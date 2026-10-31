@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from prchef.config.project_config import WorkspaceSettings
+from prchef.config.project_config import IntegrationsSettings, WorkspaceSettings
 from prchef.models.development_task import DevelopmentTask
 from prchef.models.validation_result import ValidationResult
 from prchef.models.workflow_event import WorkflowEventKind
@@ -185,6 +185,7 @@ def test_interrupted_recovery_uses_recorded_legacy_workspace(
     config = SimpleNamespace(
         path=control, workspace=WorkspaceSettings(),
         repository=SimpleNamespace(base_branch="develop", protected_branches=["develop"]),
+        integrations=IntegrationsSettings(),
     )
     repository = Mock()
     repository.list_steps.return_value = []
