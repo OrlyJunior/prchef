@@ -12,9 +12,15 @@ class CommandExecutionError(ExternalClientError):
 class CommandInterruptedError(WorkflowInterruptedError, CommandExecutionError):
     """The application is stopping an owned command tree."""
 
+    stdout: str = ""
+    stderr: str = ""
+
 
 class CommandProcessTreeUnconfirmedError(CommandExecutionError):
     """A timed-out command may still have a running process or descendant."""
+
+    stdout: str = ""
+    stderr: str = ""
 
 
 class CommandTimeoutError(CommandExecutionError):

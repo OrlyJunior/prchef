@@ -29,9 +29,11 @@ class CodexAgentProvider:
             raise AgentProviderError(
                 "Codex provider quota, rate limit, or temporary capacity was exhausted.",
                 category=retryable,
+                metadata=getattr(result, "metadata", {}),
             )
         return AgentResult(
             output=result.summary,
+            metadata=getattr(result, "metadata", {}),
             success=result.success,
             error_message=result.error_message,
             workspace_changes_may_exist=result.workspace_changes_may_exist,
