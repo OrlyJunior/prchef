@@ -379,6 +379,13 @@ class _Repository:
         del execution_id
         self.execution.repository_ref = repository
 
+    def task_ids_with_executions(
+        self, task_source: str, repository: str,
+    ) -> set[str]:
+        return {execution.task_id for execution in self.executions
+                if execution.task_source == task_source
+                and repository in {execution.repository, execution.repository_ref}}
+
     def executions_for_tasks(
         self, task_source: str, task_ids: list[str], repository: str
     ) -> dict[str, WorkflowExecution]:
@@ -3662,7 +3669,7 @@ def test_workflow_runner_auto_loads_tasks_on_mount(tmp_path: Path) -> None:
             screen = application.screen
             assert task_loads == [("example", "github")]
             assert screen.query_one("#task-selector", TaskSelector).selected_task_ids == ()
-            assert "Selected 0 of 1 available github tasks." in str(
+            assert "Selected 0 of 1 github tasks." in str(
                 screen.query_one("#task-hint").renderable
             )
             assert len(screen.query("#task-id")) == 0
@@ -7407,7 +7414,7 @@ def test_task_selector_renders_rows_as_an_aligned_truncated_table(tmp_path: Path
             await pilot.press("n")
             await wait_for_tui(
                 pilot,
-                lambda: len(application.screen.query(TaskRow)) == 33,
+                lambda: len(application.screen.query(TaskRow)) == 25,
                 description="backlog task rows",
             )
             await settle_tui(pilot)
@@ -7458,7 +7465,7 @@ def test_task_selector_rows_show_checked_unchecked_and_blocked_glyphs(
             await pilot.press("n")
             await wait_for_tui(
                 pilot,
-                lambda: len(application.screen.query(TaskRow)) == 33,
+                lambda: len(application.screen.query(TaskRow)) == 25,
                 description="backlog task rows",
             )
             await settle_tui(pilot)
@@ -7512,7 +7519,7 @@ def test_task_checkbox_mouse_click_updates_selection_and_screen_on_first_click(
             await settle_tui(pilot)
             assert row.value is True
             assert selector.selected_task_ids == ("12",)
-            assert "Selected 1 of 1 available github tasks." in str(
+            assert "Selected 1 of 1 github tasks." in str(
                 screen.query_one("#task-hint", Static).renderable
             )
             assert painted_glyph() == "[x]"
@@ -7524,7 +7531,7 @@ def test_task_checkbox_mouse_click_updates_selection_and_screen_on_first_click(
             await settle_tui(pilot)
             assert row.value is False
             assert selector.selected_task_ids == ()
-            assert "Selected 0 of 1 available github tasks." in str(
+            assert "Selected 0 of 1 github tasks." in str(
                 screen.query_one("#task-hint", Static).renderable
             )
             assert painted_glyph() == "[ ]"
@@ -7574,7 +7581,7 @@ def test_later_task_checkbox_click_in_short_viewport_updates_on_first_click(
             await pilot.press("n")
             await wait_for_tui(
                 pilot,
-                lambda: len(application.screen.query(TaskRow)) == 33,
+                lambda: len(application.screen.query(TaskRow)) == 25,
                 description="backlog task rows",
             )
             screen = application.screen
@@ -7618,7 +7625,7 @@ def test_task_selector_separates_select_all_from_the_task_rows(tmp_path: Path) -
             await pilot.press("n")
             await wait_for_tui(
                 pilot,
-                lambda: len(application.screen.query(TaskRow)) == 33,
+                lambda: len(application.screen.query(TaskRow)) == 25,
                 description="backlog task rows",
             )
             await settle_tui(pilot)
@@ -7630,7 +7637,7 @@ def test_task_selector_separates_select_all_from_the_task_rows(tmp_path: Path) -
             assert not isinstance(select_all, TaskRow)
             assert select_all.has_class("task-select-all")
             assert select_all not in list(
-                screen.query_one("#available-tasks", Vertical).children
+                screen.query_one("#available-tasks", VerticalScroll).children
             )
             assert select_all.styles.text_style.bold is True
             assert select_all.styles.border_bottom[0] != ""
@@ -7747,7 +7754,7 @@ def test_task_label_filter_matches_exact_names_with_and_and_clears(tmp_path: Pat
                 description="single label filter",
             )
             assert selector.visible_task_ids == ("1", "2", "7")
-            assert screen.query_one("#task-checkbox-2", TaskRow).display is False
+            assert not screen.query("#task-checkbox-2")
             assert screen.query_one("#task-checkbox-0", TaskRow).display is True
 
             # Several labels must all be present on a shown task.
@@ -7772,7 +7779,7 @@ def test_task_label_filter_matches_exact_names_with_and_and_clears(tmp_path: Pat
             hint = str(screen.query_one("#task-hint", Static).renderable)
             assert "No loaded github tasks have every selected label" in hint
             assert "No open github tasks were returned." not in hint
-            assert screen.query_one("#task-table-header", TaskTableHeader).display is False
+            assert not screen.query(TaskTableHeader)
             assert screen.query_one("#select-all-tasks", Checkbox).disabled is True
 
             clear = screen.query_one("#clear-task-label-filter", Button)
@@ -7786,7 +7793,7 @@ def test_task_label_filter_matches_exact_names_with_and_and_clears(tmp_path: Pat
             assert selector.visible_task_ids == ("1", "2", "3", "4", "7")
             assert all(row.display for row in screen.query(TaskRow))
             assert screen.query_one("#clear-task-label-filter", Button).disabled is True
-            assert "Selected 0 of 4 available github tasks." in str(
+            assert "Selected 0 of 5 github tasks." in str(
                 screen.query_one("#task-hint", Static).renderable
             )
 
@@ -7844,7 +7851,7 @@ def test_select_all_applies_only_to_shown_available_tasks(tmp_path: Path) -> Non
                 lambda: selector.selected_task_ids == ("3",),
                 description="unselect all shown tasks",
             )
-            assert screen.query_one("#task-checkbox-2", TaskRow).value is True
+            assert "3" in selector.selected_task_ids
 
             screen.query_one("#clear-task-label-filter", Button).press()
             await wait_for_tui(
@@ -9191,4 +9198,499 @@ def test_failed_outcome_shows_literal_concise_error_and_keeps_controls(tmp_path:
             assert screen.query_one("#outcome-continue", Button).display is False
             assert "No continuation" in str(message.renderable)
 
+    asyncio.run(drive())
+
+
+def _pagination_tasks(count: int = 125) -> list[DevelopmentTask]:
+    return [DevelopmentTask(
+        str(number), "github", f"Task {number}", "", f"https://example/{number}",
+        metadata={"labels": ["common", "bug" if number % 2 else "Bug"]},
+    ) for number in range(1, count + 1)]
+
+
+@pytest.mark.parametrize("size,width", [(10, 80), (25, 100), (50, 120)])
+def test_task_pagination_navigation_selection_and_bounded_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, size: int, width: int,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    provider = _LabelledTaskProvider(_pagination_tasks(), ["bug", "Bug", "common"])
+    controller._task_provider_factory = lambda source, repository: provider
+    loads = []
+    queries = []
+    created = []
+    row_init = TaskRow.__init__
+
+    def create_row(row: TaskRow, *args: Any, **kwargs: Any) -> None:
+        created.append(kwargs["number"])
+        row_init(row, *args, **kwargs)
+
+    monkeypatch.setattr(TaskRow, "__init__", create_row)
+    list_tasks = controller.list_tasks
+    status = controller.task_execution_status
+
+    def load(**kwargs: Any) -> list[DevelopmentTask]:
+        loads.append(kwargs)
+        return list_tasks(**kwargs)
+
+    def page_status(repository: str, source: str, tasks: list[DevelopmentTask]):
+        queries.append(tuple(task.id for task in tasks))
+        assert len(tasks) <= size
+        return status(repository, source, tasks)
+
+    monkeypatch.setattr(controller, "list_tasks", load)
+    # Model a session that already chose this page size.
+    application = PrchefApp(controller)
+    application.task_page_size = size
+    monkeypatch.setattr(controller, "task_execution_status", page_status)
+
+    async def drive() -> None:
+        async with application.run_test(size=(width, 30)) as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            selector = screen.query_one(TaskSelector)
+            assert len(screen.query(TaskRow)) == size
+            assert len(created) == size
+            assert selector.visible_task_ids == tuple(str(n) for n in range(1, size + 1))
+            assert screen.query_one("#task-previous", Button).disabled
+            first = screen.query_one("#task-checkbox-0", TaskRow)
+            first.value = True
+            await settle_tui(pilot)
+
+            # Ordinary page turns must never walk the catalog or recompute its filter.
+            def forbidden(*args: Any, **kwargs: Any) -> Any:
+                raise AssertionError("page turn rescanned catalog")
+
+            class GuardedCatalog(list[DevelopmentTask]):
+                def __iter__(self):
+                    raise AssertionError("page turn iterated catalog")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(selector, "_tasks", GuardedCatalog(selector._tasks))
+                patch.setattr(selector, "_matches_label_filter", forbidden)
+                patch.setattr(selector, "_sync_header_and_hint", forbidden)
+                next_button = screen.query_one("#task-next", Button)
+                next_button.focus()
+                await settle_tui(pilot)
+                await wait_for_tui(pilot, lambda: screen.can_view_entire(next_button))
+                assert await pilot.click(next_button)
+                await settle_tui(pilot)
+                assert selector.visible_task_ids[0] == str(size + 1)
+                assert len(created) == size * 2
+                assert "Page 2 of" in str(screen.query_one("#task-page-indicator").renderable)
+            screen.query_one(f"#task-checkbox-{size}", TaskRow).value = True
+            await settle_tui(pilot)
+            assert selector.selected_task_ids == ("1", str(size + 1))
+            assert "Selected 2 of 125" in str(screen.query_one("#task-hint").renderable)
+            previous = screen.query_one("#task-previous", Button)
+            previous.focus()
+            await pilot.press("enter")
+            await settle_tui(pilot)
+            assert screen.query_one("#task-checkbox-0", TaskRow).value
+            # Old row events are ignored after replacement.
+            selector.on_checkbox_changed(Checkbox.Changed(first, False))
+            assert selector.selected_task_ids == ("1", str(size + 1))
+
+            while not screen.query_one("#task-next", Button).disabled:
+                screen.query_one("#task-next", Button).press()
+                await settle_tui(pilot)
+            assert len(screen.query(TaskRow)) == (125 % size or size)
+            assert selector.visible_task_ids[-1] == "125"
+            assert len(loads) == 1
+            assert all(len(ids) <= size for ids in queries)
+            assert screen.query_one("#available-tasks", VerticalScroll).size.height <= 12
+            assert screen.query_one("#workflow-runner", VerticalScroll).max_scroll_x == 0
+
+            # Every size choice keeps the selection and returns to the first page.
+            monkeypatch.setattr(controller, "task_execution_status", status)
+            for new_size in ((25, 10, 50) if size == 10 else (10, 25, 50)):
+                screen.query_one("#task-page-size", PrchefSelect).value = str(new_size)
+                await settle_tui(pilot)
+                assert selector._page == 0
+                assert len(screen.query(TaskRow)) == new_size
+                assert selector.selected_task_ids == ("1", str(size + 1))
+            assert str(screen.query_one("#start-workflow", Button).label) == "Start workflow (2)"
+
+    asyncio.run(drive())
+
+
+def test_task_pagination_failed_status_lookup_keeps_cached_executions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    provider = _LabelledTaskProvider(_pagination_tasks(68), ["bug", "Bug", "common"])
+    controller._task_provider_factory = lambda source, repository: provider
+    repository.executions = [replace(
+        repository.execution, id=f"prior-{task_id}", task_source="github", task_id=task_id,
+        repository_ref="example", status=status,
+    ) for task_id, status in [("1", WorkflowStatus.FAILED), ("26", WorkflowStatus.APPROVED)]]
+    application = PrchefApp(controller)
+
+    def failed_lookup(*args: Any, **kwargs: Any) -> dict[str, WorkflowExecution]:
+        raise RuntimeError("status database unavailable")
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            selector = screen.query_one(TaskSelector)
+            screen.query_one("#task-checkbox-0", TaskRow).value = True
+            await settle_tui(pilot)
+            screen.query_one("#task-next", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#task-checkbox-25", TaskRow).disabled
+
+            monkeypatch.setattr(controller, "task_execution_status", failed_lookup)
+            screen.query_one("#task-previous", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#task-checkbox-0", TaskRow).value
+            assert selector.selected_previous_executions["1"].status is WorkflowStatus.FAILED
+            screen.query_one("#task-next", Button).press()
+            await settle_tui(pilot)
+            assert screen.query_one("#task-checkbox-25", TaskRow).disabled
+            assert "APPROVED" in str(screen.query_one("#task-checkbox-25", TaskRow).label)
+
+            screen.query_one("#start-workflow", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, FreshRunConfirmation)
+            assert [task.id for task, _ in application.screen.previous] == ["1"]
+
+    asyncio.run(drive())
+
+
+def test_task_pagination_failed_refresh_reenables_preserved_pending_rows(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    provider = _LabelledTaskProvider(_pagination_tasks(68), ["bug", "Bug", "common"])
+    controller._task_provider_factory = lambda source, repository: provider
+    repository.executions = [replace(
+        repository.execution, task_source="github", task_id="2", repository_ref="example",
+        status=WorkflowStatus.APPROVED,
+    )]
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            selector = screen.query_one(TaskSelector)
+            screen.query_one("#task-checkbox-0", TaskRow).value = True
+            await settle_tui(pilot)
+
+            # Supersede a pending status request before its queued event is handled.
+            selector._present_page()
+            stale_generation = selector._page_generation
+            assert selector._status_pending
+            assert all(row.disabled for _, row in selector._rows)
+            selector.set_tasks_loading(provider="github", preserve_selection=True)
+            selector.set_error("Offline.")
+            await settle_tui(pilot)
+            assert not selector._status_pending
+            assert not screen.query_one("#task-checkbox-0", TaskRow).disabled
+            assert screen.query_one("#task-checkbox-0", TaskRow).value
+            assert screen.query_one("#task-checkbox-1", TaskRow).disabled
+            assert not screen.query_one("#task-checkbox-2", TaskRow).disabled
+            assert selector.selected_task_ids == ("1",)
+            assert not screen.query_one("#refresh-tasks", Button).disabled
+            assert str(screen.query_one("#task-error").renderable) == (
+                "Incomplete task list: 68 tasks loaded. Could not load remaining tasks. "
+                "Refresh tasks to retry. Details: Offline."
+            )
+            selector.set_page_executions(stale_generation, {})
+            assert screen.query_one("#task-checkbox-1", TaskRow).disabled
+            screen.query_one("#refresh-tasks", Button).press()
+            await settle_tui(pilot)
+            assert selector.selected_task_ids == ("1",)
+            assert str(screen.query_one("#task-error").renderable) == ""
+
+    asyncio.run(drive())
+
+
+def test_task_pagination_filter_select_all_and_session_size(tmp_path: Path) -> None:
+    controller, _, repository = _controller(tmp_path)
+    tasks = _pagination_tasks()
+    provider = _LabelledTaskProvider(tasks, ["bug", "Bug", "common"])
+    controller._task_provider_factory = lambda source, repository: provider
+    statuses = [WorkflowStatus.RUNNING, WorkflowStatus.INTERRUPTED, WorkflowStatus.APPROVED,
+                WorkflowStatus.FAILED, WorkflowStatus.CANCELLED, WorkflowStatus.NEEDS_HUMAN,
+                WorkflowStatus.CHANGES_REQUESTED]
+    repository.executions = [replace(
+        repository.execution, id=f"prior-{index}", task_source="github", task_id=str(26 + index),
+        repository_ref="example", status=status,
+    ) for index, status in enumerate(statuses)]
+    controller.interrupted_executions = lambda: []  # type: ignore[method-assign]
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            selector = screen.query_one(TaskSelector)
+            header = screen.query_one("#select-all-tasks", Checkbox)
+            header.value = True
+            await settle_tui(pilot)
+            assert len(selector.selected_task_ids) == 125 - len(statuses)
+            assert "125" in selector.selected_task_ids  # never visited
+            assert not set(str(n) for n in range(26, 33)) & set(selector.selected_task_ids)
+            header.value = False
+            await settle_tui(pilot)
+            screen.query_one("#task-checkbox-0", TaskRow).value = True
+            await settle_tui(pilot)
+            screen.query_one("#task-next", Button).press()
+            await settle_tui(pilot)
+            for index, status in enumerate(statuses):
+                row = screen.query_one(f"#task-checkbox-{25 + index}", TaskRow)
+                assert row.disabled == (index < 3)
+                assert status.value in str(row.label)
+            screen.query_one("#task-checkbox-28", TaskRow).value = True  # failed rerun
+            await settle_tui(pilot)
+            screen.query_one("#task-label-list", SelectionList).select("Bug")
+            await settle_tui(pilot)
+            assert selector._page == 0
+            assert selector.page_count == 3
+            assert selector.visible_task_ids == tuple(str(n) for n in range(2, 51, 2))
+            assert selector.selected_task_ids == ("1", "29")
+            assert "2 selected task(s) hidden" in str(screen.query_one("#task-hint").renderable)
+            header.value = True
+            await settle_tui(pilot)
+            assert "124" in selector.selected_task_ids
+            assert "26" not in selector.selected_task_ids
+            assert "125" not in selector.selected_task_ids
+            screen.query_one("#task-label-list", SelectionList).select("bug")
+            await settle_tui(pilot)
+            assert selector.page_count == 1 and selector.visible_task_ids == ()
+            assert "No loaded" in str(screen.query_one("#task-hint").renderable)
+            selector.clear_label_filter()
+            await settle_tui(pilot)
+            screen.query_one("#task-page-size", PrchefSelect).value = "10"
+            await settle_tui(pilot)
+            assert application.task_page_size == 10
+            assert selector.selected_previous_executions["29"].status is WorkflowStatus.FAILED
+            screen.query_one("#start-workflow", Button).press()
+            await settle_tui(pilot)
+            assert isinstance(application.screen, FreshRunConfirmation)
+            assert [task.id for task, _ in application.screen.previous] == ["29"]
+            application.pop_screen()
+            application.pop_screen()
+            await settle_tui(pilot)
+            await pilot.press("n")
+            await settle_tui(pilot)
+            assert application.screen.query_one(TaskSelector)._page_size == 10
+            assert len(application.screen.query(TaskRow)) == 10
+    asyncio.run(drive())
+    assert PrchefApp(controller).task_page_size == 25
+
+
+def test_task_pagination_partial_worker_retry_and_stale_completions(tmp_path: Path) -> None:
+    from prchef.services.task_provider import PartialTaskListError
+
+    controller, _, _ = _controller(tmp_path)
+    tasks = _pagination_tasks()
+    provider = _LabelledTaskProvider(tasks, ["bug", "Bug", "common"])
+    controller._task_provider_factory = lambda source, repository: provider
+    attempts = []
+    refresh_entered = threading.Event()
+    refresh_release = threading.Event()
+
+    def load(**kwargs: Any) -> list[DevelopmentTask]:
+        attempts.append(kwargs)
+        if len(attempts) == 2:
+            refresh_entered.set()
+            assert refresh_release.wait(timeout=10)
+        if len(attempts) < 3:
+            raise PartialTaskListError("Offline", tasks[:100])
+        return tasks
+
+    controller.list_tasks = load  # type: ignore[method-assign]
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            selector = screen.query_one(TaskSelector)
+            warning = str(screen.query_one("#task-error").renderable)
+            assert "Incomplete task list: 100 tasks loaded" in warning
+            screen.query_one("#task-checkbox-0", TaskRow).value = True
+            await settle_tui(pilot)
+            screen.query_one("#task-next", Button).press()
+            await settle_tui(pilot)
+            old_generation = selector._page_generation
+            screen.query_one("#task-label-list", SelectionList).select("bug")
+            await settle_tui(pilot)
+            assert str(screen.query_one("#task-error").renderable) == warning
+            screen._set_page_status("example", "github", screen._task_load_token,
+                                    old_generation, {}, "stale failure")
+            assert selector.visible_task_ids[0] == "1"
+            screen.query_one("#refresh-tasks", Button).press()
+            try:
+                assert await asyncio.to_thread(refresh_entered.wait, 10)
+                await pilot.pause()
+                assert screen.query_one("#refresh-tasks", Button).disabled
+                assert "Loading available" in str(screen.query_one("#task-hint").renderable)
+                assert str(screen.query_one("#task-error").renderable) == warning
+                assert selector.selected_task_ids == ("1",)
+            finally:
+                refresh_release.set()
+            await settle_tui(pilot)
+            assert selector.selected_task_ids == ("1",)
+            assert "Incomplete task list" in str(screen.query_one("#task-error").renderable)
+            screen.query_one("#refresh-tasks", Button).press()
+            await settle_tui(pilot)
+            assert selector.selected_task_ids == ("1",)
+            assert str(screen.query_one("#task-error").renderable) == ""
+            assert "Selected 1 of 125" in str(screen.query_one("#task-hint").renderable)
+            screen._set_available_tasks([], "github", screen._task_load_token - 1)
+            assert selector.selected_task_ids == ("1",)
+            assert len(selector._tasks) == 125
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_batch_revalidates_old_tasks_and_distinguishes_partial_absence(
+    tmp_path: Path, incomplete: bool,
+) -> None:
+    from prchef.services.task_provider import PartialTaskListError
+
+    controller, service, _ = _controller(tmp_path)
+    tasks = _pagination_tasks()
+
+    def load(**kwargs: Any) -> list[DevelopmentTask]:
+        if incomplete:
+            raise PartialTaskListError("Offline", tasks[:110])
+        return tasks
+
+    controller.list_tasks = load  # type: ignore[method-assign]
+    launch = WorkflowBatchLaunch(
+        repository="example", task_provider="github", task_ids=("51", "101"), agent_providers={}
+    )
+    batch = controller.start_batch(launch)
+    assert batch is not None
+    assert [item.task_id for item in batch.items] == ["51", "101"]
+    assert [call[0] for call in service.calls] == ["51", "101"]
+    if incomplete:
+        with pytest.raises(ValueError, match="Incomplete task verification"):
+            controller.start_batch(replace(launch, task_ids=("125",)))
+
+
+@pytest.mark.parametrize("width,height", [(80, 20), (100, 30), (120, 40)])
+def test_task_pagination_controls_mouse_keyboard_and_visibility(
+    tmp_path: Path, width: int, height: int,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    provider = _LabelledTaskProvider(_pagination_tasks(), ["bug", "Bug", "common"])
+    controller._task_provider_factory = lambda source, repository: provider
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(width, height)) as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            selector = screen.query_one(TaskSelector)
+            size_select = screen.query_one("#task-page-size", PrchefSelect)
+            pagination = screen.query_one("#task-pagination", Horizontal)
+            content = screen.query_one("#workflow-runner", VerticalScroll)
+            start_y = screen.query_one("#start-workflow", Button).region.y + content.scroll_offset.y
+            # The entire compact group fits without a horizontal or vertical scroll.
+            assert screen.can_view_entire(pagination)
+            assert [option[1] for option in size_select._options] == ["10", "25", "50"]
+            for index, size in enumerate((10, 25, 50)):
+                await pilot.click(size_select)
+                await settle_tui(pilot)
+                overlay = size_select.query_one("SelectOverlay")
+                assert size_select.expanded
+                viewport = screen.query_one("#workflow-runner", VerticalScroll)
+                await wait_for_tui(
+                    pilot, lambda overlay=overlay, viewport=viewport: (
+                        overlay.region.bottom <= viewport.content_region.bottom
+                    )
+                )
+                assert await pilot.click(overlay, offset=(2, index + 1))
+                await settle_tui(pilot)
+                assert size_select.value == str(size)
+                assert selector._page == 0
+                assert len(screen.query(TaskRow)) == size
+                start_position = (
+                    screen.query_one("#start-workflow", Button).region.y + content.scroll_offset.y
+                )
+                assert start_position <= start_y
+                assert screen.focused is size_select
+                assert screen.can_view_entire(pagination)
+                assert screen.query_one("#available-tasks", VerticalScroll).size.height <= 12
+                screen.query_one("#task-next", Button).focus()
+                await pilot.press("space")
+                await settle_tui(pilot)
+                assert selector._page == 1
+                screen.query_one("#task-previous", Button).focus()
+                await pilot.press("enter")
+                await settle_tui(pilot)
+                assert selector._page == 0
+            size_select.focus()
+            await pilot.press("enter", "home", "enter")
+            await settle_tui(pilot)
+            assert selector._page_size == 10
+            start = screen.query_one("#start-workflow", Button)
+            start.focus()
+            await wait_for_tui(pilot, lambda: screen.can_view_entire(start))
+            history = screen.query_one("#workflow-history", Button)
+            history.focus()
+            await wait_for_tui(pilot, lambda: screen.can_view_entire(history))
+            assert screen.query_one("#workflow-runner", VerticalScroll).max_scroll_x == 0
+    asyncio.run(drive())
+
+
+def test_task_pagination_history_failure_disables_select_all_only(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+
+    def unavailable(*args: Any) -> set[str]:
+        raise RuntimeError("database unavailable")
+
+    controller.task_execution_history = unavailable  # type: ignore[method-assign]
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            assert screen.query_one("#select-all-tasks", Checkbox).disabled
+            error = str(screen.query_one("#task-error").renderable)
+            assert "Execution history unavailable" in error
+            row = screen.query_one(TaskRow)
+            assert not row.disabled
+            row.value = True
+            await settle_tui(pilot)
+            assert screen.query_one(TaskSelector).selected_task_ids == ("12",)
+    asyncio.run(drive())
+
+
+def test_task_pagination_launches_selected_pages_in_source_order(tmp_path: Path) -> None:
+    controller, service, _ = _controller(tmp_path)
+    provider = _LabelledTaskProvider(_pagination_tasks(), ["bug", "Bug", "common"])
+    controller._task_provider_factory = lambda source, repository: provider
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            for page in range(5):
+                if page in (0, 2, 4):
+                    screen.query_one(f"#task-checkbox-{page * 25}", TaskRow).value = True
+                    await settle_tui(pilot)
+                if page < 4:
+                    screen.query_one("#task-next", Button).press()
+                    await settle_tui(pilot)
+            assert screen.query_one(TaskSelector).selected_task_ids == ("1", "51", "101")
+            screen.query_one("#task-page-size", PrchefSelect).value = "10"
+            await settle_tui(pilot)
+            assert "Selected 3 of 125" in str(screen.query_one("#task-hint").renderable)
+            screen.query_one("#start-workflow", Button).press()
+            await wait_for_tui(pilot, lambda: len(service.calls) == 3 and not screen._batch_running)
+            assert [call[0] for call in service.calls] == ["1", "51", "101"]
     asyncio.run(drive())

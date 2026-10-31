@@ -1,3 +1,5 @@
+from typing import Any
+
 from prchef.models.workflow_interruption import WorkflowInterruptedError
 
 
@@ -55,3 +57,11 @@ class MissingRemoteBaseBranchError(GitClientError):
 
 class GitHubClientError(ExternalClientError):
     pass
+
+
+class PartialGitHubIssueListError(GitHubClientError):
+    """Discovery failed after zero or more fully validated pages."""
+
+    def __init__(self, message: str, issues: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.issues = list(issues)

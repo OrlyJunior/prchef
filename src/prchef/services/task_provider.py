@@ -2,9 +2,18 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from prchef.clients.exceptions import PartialGitHubIssueListError
 from prchef.clients.github_issue_client import GitHubIssueClient
 from prchef.clients.trello_client import TrelloClient
 from prchef.models.development_task import DevelopmentTask
+
+
+class PartialTaskListError(RuntimeError):
+    """A source-neutral, explicitly incomplete task catalog."""
+
+    def __init__(self, message: str, tasks: list[DevelopmentTask]) -> None:
+        super().__init__(message)
+        self.tasks = list(tasks)
 
 
 class TaskProvider(Protocol):
@@ -69,11 +78,16 @@ class GitHubIssueTaskProvider:
         task.metadata["comments"] = self._client.get_comments(self._repository, task.id)
         return task
 
-    def list_tasks(self, *, limit: int = 50) -> list[DevelopmentTask]:
-        return [
-            self._to_task(issue, fallback_id=str(issue.get("number", "")))
-            for issue in self._client.list_issues(self._repository, limit=limit)
-        ]
+    def list_tasks(self, *, limit: int | None = None) -> list[DevelopmentTask]:
+        try:
+            issues = self._client.list_issues(self._repository, limit=limit)
+        except PartialGitHubIssueListError as exc:
+            raise PartialTaskListError(str(exc), [
+                self._to_task(issue, fallback_id=str(issue["number"]))
+                for issue in exc.issues
+            ]) from exc
+        return [self._to_task(issue, fallback_id=str(issue.get("number", "")))
+                for issue in issues]
 
     def list_labels(self) -> list[str]:
         names = self._label_names(self._client.list_labels(self._repository))
