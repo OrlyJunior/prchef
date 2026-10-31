@@ -362,7 +362,7 @@ class WorkflowRunnerScreen(Screen[None]):
                                             classes="default-indicator",
                                             id=f"{prefix}-max-output-tokens-source",
                                         )
-            yield Static("No workflow running.", id="workflow-progress")
+            yield Static("No workflow running.", id="workflow-progress", markup=False)
             yield BatchProgressView(id="batch-progress")
             with Horizontal(classes="screen-actions", id="workflow-stop-actions"):
                 yield Button("Stop workflow", variant="error", id="stop-workflow")

@@ -9159,6 +9159,15 @@ def test_failed_outcome_shows_literal_concise_error_and_keeps_controls(tmp_path:
             await settle_tui(pilot)
             screen = application.screen
             assert isinstance(screen, WorkflowRunnerScreen)
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id=execution.id,
+                kind=WorkflowEventKind.STAGE_FAILED,
+                stage=WorkflowStage.IMPLEMENT,
+                message=execution.error_message,
+            ))
+            progress = screen.query_one("#workflow-progress", Static)
+            assert progress.markup is False
+            assert "[error]" in str(progress.renderable)
             screen._workflow_finished(execution)
             await settle_tui(pilot)
             message = screen.query_one("#workflow-outcome-message", Static)
