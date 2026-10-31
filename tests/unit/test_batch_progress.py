@@ -28,7 +28,7 @@ from prchef.tui.batch_progress import (
     summarize,
 )
 from prchef.tui.diagnostics import format_diagnostics_for_export
-from prchef.tui.workflow_presentation import step_timeline_lines
+from prchef.tui.workflow_presentation import concise_error, step_timeline_lines, timeline_message
 
 
 def test_context_size_warning_appears_in_live_and_persisted_batch_rows() -> None:
@@ -822,3 +822,77 @@ def test_human_pause_after_failed_attempt_keeps_failure_in_both_projections() ->
         WorkflowBatchItem(0, "task-1", "Task 1", execution.id), controller  # type: ignore[arg-type]
     ).timeline
     assert timeline == ("✓ Specification generated", "✗ Generating specification failed: blocked")
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("", ""),
+        ("  [error]  ", "  [error]  "),
+        ("x" * 160, "x" * 160),
+        ("x" * 161, "x" * 140 + "… See detailed logs."),
+        ("x" * 1000, "x" * 140 + "… See detailed logs."),
+        ("first\nsecond", "first… See detailed logs."),
+        ("first\r\nsecond", "first… See detailed logs."),
+        ("first\rsecond", "first… See detailed logs."),
+        ("\nsecond", "… See detailed logs."),
+        ("x" * 200 + "\nsecond", "x" * 140 + "… See detailed logs."),
+    ],
+)
+def test_concise_error(message: str, expected: str) -> None:
+    assert concise_error(message) == expected
+    assert len(expected) <= 160
+
+
+@pytest.mark.parametrize("attempt", [1, 2])
+@pytest.mark.parametrize("message", ["[error]", "x" * 180 + "\ncomplete details"])
+def test_failure_wording_matches_live_and_persisted(message: str, attempt: int) -> None:
+    stage = WorkflowStage.IMPLEMENT
+    event = WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.STAGE_FAILED,
+        stage=stage, message=message,
+    )
+    step = WorkflowStep(
+        id=None, workflow_execution_id="execution-1", stage=stage,
+        status=StepStatus.FAILED, started_at=datetime.now(UTC), error_message=message,
+    )
+    steps = [step] * attempt
+    assert timeline_message(event, {stage: attempt}) == step_timeline_lines(steps)[-1]
+    assert event.message == step.error_message == message
+
+
+def test_batch_failure_summary_preserves_diagnostics() -> None:
+    message = "[error] " + "x" * 180 + "\ncomplete details"
+    stage = WorkflowStage.IMPLEMENT
+    progress = LiveBatchProgress(_batch(1))
+    progress.apply(WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.EXECUTION_CREATED,
+        payload={"batch_position": 0},
+    ))
+    progress.apply(WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.STAGE_FAILED,
+        stage=stage, message=message,
+    ))
+    diagnostic = WorkflowEvent(
+        execution_id="execution-1", kind=WorkflowEventKind.DIAGNOSTIC,
+        stage=stage, category=DiagnosticCategory.WORKFLOW_EVENT.value,
+        message=message,
+    )
+    progress.apply(diagnostic)
+    live = progress.rows()[0].timeline[-1]
+    execution = WorkflowExecution(id="execution-1", status=WorkflowStatus.FAILED)
+    step = WorkflowStep(
+        id=None, workflow_execution_id=execution.id, stage=stage,
+        status=StepStatus.FAILED, started_at=datetime.now(UTC), error_message=message,
+    )
+    progress.reconcile_execution(0, execution, [step])
+    assert live in progress.rows()[0].timeline
+    controller = _Controller()
+    controller.executions[execution.id] = (execution, [step])
+    row = persisted_row(
+        WorkflowBatchItem(0, "task-0", "Task 0", execution.id),
+        controller,  # type: ignore[arg-type]
+    )
+    assert live in row.timeline
+    assert progress.diagnostics_for(0)[0].payload["message"] == message
+    assert "complete details" in format_diagnostics_for_export(progress.diagnostics_for(0))

@@ -147,6 +147,15 @@ def status_message(status: WorkflowStatus | None, payload: dict[str, Any] | None
     return messages.get(status, "Workflow status updated")
 
 
+def concise_error(message: str) -> str:
+    """Keep failure summaries short while preserving fitting messages verbatim."""
+    suffix = "… See detailed logs."
+    first_line = message.split("\n", 1)[0].split("\r", 1)[0]
+    if first_line == message and len(message) <= 160:
+        return message
+    return first_line[: 160 - len(suffix)] + suffix
+
+
 def timeline_message(
     event: WorkflowEvent,
     stage_attempts: Mapping[WorkflowStage, int],
@@ -202,7 +211,7 @@ def timeline_message(
             return f"! {stage_activity(stage, attempt)} cancelled"
         return f"✓ {stage_complete(stage)}"
     if event.kind == WorkflowEventKind.STAGE_FAILED:
-        detail = f": {event.message}" if event.message else ""
+        detail = f": {concise_error(event.message)}" if event.message else ""
         return f"✗ {stage_activity(stage, attempt)} failed{detail}"
     return None
 
@@ -255,7 +264,7 @@ def step_timeline_lines(
         elif step.status is StepStatus.INTERRUPTED:
             lines.append(f"! {stage_activity(step.stage, attempt)} interrupted")
         elif step.status is StepStatus.FAILED:
-            detail = f": {step.error_message}" if step.error_message else ""
+            detail = f": {concise_error(step.error_message)}" if step.error_message else ""
             lines.append(f"✗ {stage_activity(step.stage, attempt)} failed{detail}")
         elif step.status is StepStatus.SKIPPED:
             lines.append(f"- {stage_activity(step.stage, attempt)} skipped")
