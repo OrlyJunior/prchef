@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
 
 from rich.text import Text
 from textual.app import ComposeResult, RenderResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Size
 from textual.message import Message
 from textual.widgets import Button, Checkbox, SelectionList, Static
@@ -15,6 +16,10 @@ from textual.widgets import Button, Checkbox, SelectionList, Static
 from prchef.models.development_task import DevelopmentTask
 from prchef.models.workflow_execution import WorkflowExecution
 from prchef.models.workflow_status import WorkflowStatus, can_start_fresh_run
+from prchef.tui.widgets import PrchefSelect
+
+if TYPE_CHECKING:
+    from prchef.tui.app import PrchefApp
 
 # Checked/unchecked/blocked glyphs. ASCII keeps every column aligned on
 # terminals that render the Unicode ballot boxes as double-width cells.
@@ -211,12 +216,24 @@ class TaskTableHeader(Static):
         self.refresh()
 
 
+class _PaginationButton(Button):
+    """Navigation accepts Space as well as Textual's standard Enter binding."""
+
+    BINDINGS = [("space", "press", "")]
+
+
 class TaskSelector(Vertical):
     """Display open tasks with repository-scoped execution availability."""
 
     class SelectionChanged(Message):
         def __init__(self, task_ids: tuple[str, ...]) -> None:
             self.task_ids = task_ids
+            super().__init__()
+
+    class PageChanged(Message):
+        def __init__(self, generation: int, tasks: tuple[DevelopmentTask, ...]) -> None:
+            self.generation = generation
+            self.tasks = tasks
             super().__init__()
 
     def __init__(
@@ -228,10 +245,23 @@ class TaskSelector(Vertical):
     ) -> None:
         super().__init__(id=id, classes=classes, disabled=disabled)
         self._tasks: list[DevelopmentTask] = []
+        self._positions: dict[str, int] = {}
+        self._filtered: list[DevelopmentTask] = []
+        self._filtered_ids: set[str] = set()
+        self._never_run: set[str] = set()
+        self._selected_never_count = 0
+        self._selected_filtered_count = 0
+        self._history: set[str] | None = set()
+        self._page = 0
+        self._page_size = 25
+        self._page_generation = 0
+        self._render_generation = 0
+        self._load_page_status = False
+        self._status_pending = False
+        self._incomplete = False
         self._executions: dict[str, WorkflowExecution] = {}
         self._checkbox_tasks: dict[str, str] = {}
         self._selected: set[str] = set()
-        self._pending_selection: set[str] | None = None
         self._provider = ""
         self._updating = False
         self._rows: list[tuple[DevelopmentTask, TaskRow]] = []
@@ -239,7 +269,6 @@ class TaskSelector(Vertical):
         # ``None`` means the provider has no label catalog, so no filter is offered.
         self._label_catalog: tuple[str, ...] | None = None
         self._label_filter: tuple[str, ...] = ()
-        self._pending_label_filter: tuple[str, ...] | None = None
         self._label_list: SelectionList[str] | None = None
 
     @property
@@ -250,7 +279,7 @@ class TaskSelector(Vertical):
 
     @property
     def visible_task_ids(self) -> tuple[str, ...]:
-        return tuple(task.id for task in self._visible_tasks())
+        return tuple(task.id for task in self.page_tasks)
 
     @property
     def label_filter(self) -> tuple[str, ...]:
@@ -277,9 +306,31 @@ class TaskSelector(Vertical):
             if task.id in self._selected and task.id in self._executions
         }
 
+    @property
+    def page_tasks(self) -> tuple[DevelopmentTask, ...]:
+        start = self._page * self._page_size
+        return tuple(self._filtered[start:start + self._page_size])
+
+    @property
+    def page_count(self) -> int:
+        return max(1, (len(self._filtered) + self._page_size - 1) // self._page_size)
+
+    def on_mount(self) -> None:
+        self._page_size = getattr(self.app, "task_page_size", 25)
+        self.query_one("#task-page-size", PrchefSelect).value = str(self._page_size)
+        self._sync_pagination()
+
     def compose(self) -> ComposeResult:
         yield Static("Tasks", classes="field-label")
-        yield Button("Refresh tasks", id="refresh-tasks")
+        with Horizontal(id="task-pagination"):
+            yield Button("Refresh tasks", id="refresh-tasks")
+            yield _PaginationButton("Previous", id="task-previous", disabled=True)
+            yield Static("Page 1 of 1", id="task-page-indicator")
+            yield _PaginationButton("Next", id="task-next", disabled=True)
+            yield PrchefSelect(
+                [(f"{size} / page", str(size)) for size in (10, 25, 50)],
+                value="25", allow_blank=False, id="task-page-size",
+            )
         # Shown only for providers with a label catalog.
         with Vertical(id="task-label-filter"):
             with Horizontal(id="task-label-filter-bar"):
@@ -298,7 +349,7 @@ class TaskSelector(Vertical):
                 classes="task-select-all",
             )
             # Keep the legacy id while replacing the single-value Select.
-            yield Vertical(id="available-tasks")
+            yield VerticalScroll(id="available-tasks")
         yield Static("Choose a provider and load tasks to browse it.", id="task-hint")
         yield Static("", id="task-error")
 
@@ -310,6 +361,10 @@ class TaskSelector(Vertical):
         executions: Mapping[str, WorkflowExecution] | None = None,
         labels: Sequence[str] | None = None,
         label_error: str = "",
+        history: set[str] | None = None,
+        history_error: str = "",
+        incomplete: str = "",
+        load_page_status: bool = False,
     ) -> None:
         """Show loaded tasks and, for a label-capable provider, its label filter.
 
@@ -318,21 +373,31 @@ class TaskSelector(Vertical):
         a failed catalog lookup for a provider that does support labels.
         """
 
-        previous = (
-            set(self._pending_selection)
-            if self._pending_selection is not None
-            else set(self._selected)
+        previous = set(self._selected)
+        previous_filter = self._label_filter
+        loaded = list(tasks)
+        if incomplete:
+            loaded_ids = {task.id for task in loaded}
+            loaded.extend(task for task in self._tasks if task.id not in loaded_ids)
+        self._tasks = loaded
+        self._executions = {
+            task_id: execution for task_id, execution in self._executions.items()
+            if task_id in previous
+        } | dict(executions or {})
+        self._positions = {task.id: index for index, task in enumerate(self._tasks)}
+        self._history = set(history) if history is not None else (
+            None if history_error else set(self._executions)
         )
-        previous_filter = (
-            self._pending_label_filter
-            if self._pending_label_filter is not None
-            else self._label_filter
+        self._load_page_status = load_page_status
+        self.query_one("#task-error", Static).update(
+            (f"Incomplete task list: {len(self._tasks)} tasks loaded. "
+             "Could not load remaining tasks. Refresh tasks to retry. "
+             f"Details: {incomplete}" if incomplete else "")
+            + (f" Execution history unavailable: {history_error}. Select all is disabled."
+               if history_error else "")
         )
-        self._pending_selection = None
-        self._pending_label_filter = None
-        self._tasks = list(tasks)
-        self._executions = dict(executions or {})
         self._provider = provider
+        self._incomplete = bool(incomplete)
         selectable = {
             task.id for task in self._tasks
             if can_start_fresh_run(
@@ -343,33 +408,103 @@ class TaskSelector(Vertical):
         self._checkbox_tasks.clear()
         self._set_label_catalog(labels, label_error=label_error, retained=previous_filter)
 
-        task_list = self.query_one("#available-tasks", Vertical)
-        task_list.remove_children()
+        self.query_one("#refresh-tasks", Button).disabled = False
+        self._rebuild_filter()
+        self._present_page()
+        self.post_message(self.SelectionChanged(self.selected_task_ids))
+
+    def _sync_pagination(self) -> None:
+        self.query_one("#task-page-indicator", Static).update(
+            f"Page {self._page + 1} of {self.page_count}"
+        )
+        self.query_one("#task-previous", Button).disabled = self._page == 0
+        self.query_one("#task-next", Button).disabled = self._page + 1 >= self.page_count
+
+    def _present_page(self) -> None:
+        self._page_generation += 1
+        self._status_pending = self._load_page_status and bool(self.page_tasks)
+        self._render_page()
+        self._sync_pagination()
+        if self._status_pending:
+            self.post_message(self.PageChanged(self._page_generation, self.page_tasks))
+
+    def set_page_executions(
+        self, generation: int, executions: Mapping[str, WorkflowExecution],
+        *, lookup_failed: bool = False,
+    ) -> None:
+        if generation != self._page_generation:
+            return
+        self._status_pending = False
+        # A failed lookup cannot establish that earlier executions are absent.
+        # Retain cached status for availability and fresh-run confirmation.
+        if not lookup_failed:
+            for task in self.page_tasks:
+                self._executions.pop(task.id, None)
+        self._executions.update(executions)
+        newly_seen = self._never_run.intersection(executions)
+        history_changed = bool(newly_seen)
+        self._selected_never_count -= sum(task_id in self._selected for task_id in newly_seen)
+        if self._history is not None:
+            self._history.update(executions)
+            self._never_run.difference_update(executions)
+        blocked = {task_id for task_id, execution in executions.items()
+                   if not can_start_fresh_run(execution.status)}
+        removed = self._selected & blocked
+        changed = bool(removed)
+        self._selected_filtered_count -= len(removed & self._filtered_ids)
+        self._selected.difference_update(blocked)
+        metrics = self._column_metrics()
+        if self._table_header is not None:
+            self._table_header._metrics = metrics
+            self._table_header.refresh()
+        for task, row in self._rows:
+            execution = self._executions.get(task.id)
+            row._status = _execution_status(execution) if execution else ""
+            row._metrics = metrics
+            row.disabled = not can_start_fresh_run(execution.status if execution else None)
+            row.label = self._row_label(task, execution)
+            row.tooltip = row.label.plain
+            self._set_checkbox_value_silently(row, task.id in self._selected)
+            row.refresh()
+        # Page status changes affect select-all eligibility; do not rescan the catalog.
+        if changed or history_changed:
+            self._sync_header_and_hint()
+        if changed:
+            self.post_message(self.SelectionChanged(self.selected_task_ids))
+
+    @staticmethod
+    def _row_label(task: DevelopmentTask, execution: WorkflowExecution | None) -> Text:
+        labels = _labels_of(task)
+        suffix = f" [{labels}]" if labels else ""
+        if execution is not None:
+            status = _execution_status(execution)
+            suffix += (
+                f" \u2014 Latest execution: {status}. Selecting starts a new run; "
+                "earlier runs remain in Execution history."
+                if can_start_fresh_run(execution.status)
+                else f" \u2014 Latest execution: {status} (open in Execution history)"
+            )
+        return Text(f"{task.id}: {task.title or '(untitled)'}{suffix}")
+
+    def _render_page(self) -> None:
         self._rows = []
+        self._checkbox_tasks.clear()
         self._table_header = None
         metrics = self._column_metrics()
         rows: list[Static] = []
-        if self._tasks:
+        if self.page_tasks:
             self._table_header = TaskTableHeader(metrics=metrics, id="task-table-header")
             rows.append(self._table_header)
-        for position, task in enumerate(self._tasks):
+        for task in self.page_tasks:
+            position = self._positions[task.id]
             checkbox_id = f"task-checkbox-{position}"
             self._checkbox_tasks[checkbox_id] = task.id
             execution = self._executions.get(task.id)
             label_text = _labels_of(task)
             title = task.title or "(untitled)"
-            suffix = f" [{label_text}]" if label_text else ""
-            status = ""
-            if execution is not None:
-                status = _execution_status(execution)
-                suffix += (
-                    f" — Latest execution: {status}. Selecting starts a new run; "
-                    "earlier runs remain in Execution history."
-                    if can_start_fresh_run(execution.status)
-                    else f" — Latest execution: {status} (open in Execution history)"
-                )
+            status = _execution_status(execution) if execution else ""
             row = TaskRow(
-                Text(f"{task.id}: {title}{suffix}"),
+                self._row_label(task, execution),
                 number=task.id,
                 title=title,
                 labels=label_text,
@@ -377,38 +512,40 @@ class TaskSelector(Vertical):
                 metrics=metrics,
                 value=task.id in self._selected,
                 id=checkbox_id,
-                disabled=not can_start_fresh_run(execution.status if execution else None),
+                disabled=self._status_pending or not can_start_fresh_run(
+                    execution.status if execution else None
+                ),
                 classes="task-row",
             )
             self._rows.append((task, row))
             rows.append(row)
-        if rows:
-            task_list.mount(*rows)
+        self._render_generation += 1
+        self.call_next(self._mount_page, rows, self._render_generation)
 
-        self.query_one("#refresh-tasks", Button).disabled = False
-        self.query_one("#task-error", Static).update("")
-        self._apply_label_filter()
-        if not self._tasks:
-            self.query_one("#task-hint", Static).update(
-                f"No open {provider} tasks were returned."
-            )
-        self.post_message(self.SelectionChanged(self.selected_task_ids))
+    async def _mount_page(self, rows: list[Static], generation: int) -> None:
+        if generation != self._render_generation:
+            return
+        task_list = self.query_one("#available-tasks", VerticalScroll)
+        await task_list.remove_children()
+        if generation == self._render_generation:
+            await task_list.mount(*rows)
+            task_list.scroll_home(animate=False)
 
     def _column_metrics(self) -> _ColumnMetrics:
-        """Measure the natural width of every column for the loaded tasks."""
+        """Measure only the visible page."""
 
         number = max(
-            (len(task.id) for task in self._tasks),
+            (len(task.id) for task in self.page_tasks),
             default=0,
         )
         labels = max(
-            (len(_labels_of(task)) for task in self._tasks),
+            (len(_labels_of(task)) for task in self.page_tasks),
             default=0,
         )
         status = max(
             (
                 len(_execution_status(execution))
-                for task in self._tasks
+                for task in self.page_tasks
                 if (execution := self._executions.get(task.id)) is not None
             ),
             default=0,
@@ -455,7 +592,15 @@ class TaskSelector(Vertical):
                 *[(Text(label), label, label in self._label_filter) for label in catalog],
                 id="task-label-list",
             )
-            options.mount(self._label_list)
+            self.call_next(self._mount_labels, self._label_list)
+
+    async def _mount_labels(self, label_list: SelectionList[str]) -> None:
+        if label_list is not self._label_list:
+            return
+        options = self.query_one("#task-label-options", Vertical)
+        await options.remove_children()
+        if label_list is self._label_list:
+            await options.mount(label_list)
 
     def _reset_label_filter(self) -> None:
         self._label_catalog = None
@@ -487,7 +632,27 @@ class TaskSelector(Vertical):
         )
         self._apply_label_filter()
 
+    def on_select_changed(self, event: PrchefSelect.Changed) -> None:
+        if event.select.id != "task-page-size":
+            return
+        event.stop()
+        size = int(str(event.value))
+        if size not in (10, 25, 50) or size == self._page_size:
+            return
+        self._page_size = size
+        cast("PrchefApp", self.app).task_page_size = size
+        self._page = 0
+        self._present_page()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id in {"task-previous", "task-next"}:
+            event.stop()
+            self._page = max(0, min(self.page_count - 1, self._page + (
+                1 if event.button.id == "task-next" else -1
+            )))
+            self._present_page()
+            if event.button.disabled:
+                self.query_one("#task-page-size", PrchefSelect).focus()
         if event.button.id == "clear-task-label-filter":
             event.stop()
             self.clear_label_filter()
@@ -497,18 +662,20 @@ class TaskSelector(Vertical):
         names = set(_label_names_of(task))
         return all(label in names for label in self._label_filter)
 
-    def _visible_tasks(self) -> list[DevelopmentTask]:
-        return [task for task in self._tasks if self._matches_label_filter(task)]
+    def _rebuild_filter(self) -> None:
+        self._filtered = [task for task in self._tasks if self._matches_label_filter(task)]
+        self._filtered_ids = {task.id for task in self._filtered}
+        self._never_run = (self._filtered_ids - self._history
+                           if self._history is not None else set())
+        self._page = min(self._page, self.page_count - 1)
+        self._sync_filter_controls()
+        self._recount_selection()
+        self._sync_header_and_hint()
 
     def _apply_label_filter(self) -> None:
-        any_visible = False
-        for task, row in self._rows:
-            row.display = self._matches_label_filter(task)
-            any_visible = any_visible or row.display
-        if self._table_header is not None:
-            self._table_header.display = any_visible
-        self._sync_filter_controls()
-        self._sync_header_and_hint()
+        self._page = 0
+        self._rebuild_filter()
+        self._present_page()
 
     def _sync_filter_controls(self) -> None:
         summary = self.query_one("#task-label-filter-summary", Static)
@@ -525,15 +692,26 @@ class TaskSelector(Vertical):
         )
 
     def clear_tasks(self) -> None:
-        self._pending_selection = None
-        self._pending_label_filter = None
         self._tasks = []
+        self._positions.clear()
+        self._history = set()
+        self._incomplete = False
+        self._provider = ""
+        self._filtered = []
+        self._filtered_ids.clear()
+        self._never_run.clear()
+        self._selected_never_count = 0
+        self._selected_filtered_count = 0
+        self._page = 0
+        self._page_generation += 1
+        self._render_generation += 1
+        self._sync_pagination()
         self._executions.clear()
         self._selected.clear()
         self._checkbox_tasks.clear()
         self._rows = []
         self._table_header = None
-        self.query_one("#available-tasks", Vertical).remove_children()
+        self.query_one("#available-tasks", VerticalScroll).remove_children()
         self._reset_label_filter()
         header = self.query_one("#select-all-tasks", Checkbox)
         self._set_checkbox_value_silently(header, False)
@@ -550,51 +728,42 @@ class TaskSelector(Vertical):
     ) -> None:
         """Render an inline busy state while the runner fetches tasks."""
 
-        retained = (
-            set(self._pending_selection or self._selected)
-            if preserve_selection
-            else set()
-        )
-        # A refresh reconciles the filter against the reloaded catalog; a new
-        # repository or provider starts unfiltered.
-        retained_filter = (
-            (
-                self._pending_label_filter
-                if self._pending_label_filter is not None
-                else self._label_filter
-            )
-            if preserve_selection
-            else ()
-        )
-        self.clear_tasks()
-        self._pending_selection = retained
-        self._pending_label_filter = retained_filter
+        if not preserve_selection:
+            self.clear_tasks()
+        self._page_generation += 1
+        self._provider = provider
         self.query_one("#refresh-tasks", Button).disabled = True
         self.query_one("#task-hint", Static).update(f"Loading available {provider} tasks...")
 
     def set_error(self, message: str) -> None:
         """Display a task-loading failure without interrupting the launcher."""
 
-        self.clear_tasks()
-        self.query_one("#task-hint", Static).update("Tasks could not be loaded. Try refreshing.")
-        self.query_one("#task-error", Static).update(f"Could not load tasks: {message}")
+        self._incomplete = True
+        self.set_page_executions(self._page_generation, {}, lookup_failed=True)
+        self._sync_header_and_hint()
+        self.query_one("#refresh-tasks", Button).disabled = False
+        self.query_one("#task-error", Static).update(
+            f"Incomplete task list: {len(self._tasks)} tasks loaded. "
+            "Could not load remaining tasks. Refresh tasks to retry. "
+            f"Details: {message}"
+        )
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if self._updating:
             return
         if event.checkbox.id == "select-all-tasks":
             # Only shown, available rows change; hidden selections are kept.
-            shown = {
-                task.id for task in self._visible_tasks() if task.id not in self._executions
-            }
+            if self._history is None:
+                return
+            shown = self._never_run
             if event.value:
                 self._selected |= shown
             else:
                 self._selected -= shown
             self._updating = True
             try:
-                for checkbox_id, task_id in self._checkbox_tasks.items():
-                    checkbox = self.query_one(f"#{checkbox_id}", Checkbox)
+                for task, checkbox in self._rows:
+                    task_id = task.id
                     if not checkbox.disabled:
                         self._set_checkbox_value_silently(
                             checkbox, task_id in self._selected
@@ -603,43 +772,43 @@ class TaskSelector(Vertical):
                 self._updating = False
         else:
             selected_task_id = self._checkbox_tasks.get(event.checkbox.id or "")
-            if selected_task_id is None or event.checkbox.disabled:
+            if (selected_task_id is None or event.checkbox.disabled
+                    or not any(row is event.checkbox for _, row in self._rows)):
                 return
             if event.value:
                 self._selected.add(selected_task_id)
             else:
                 self._selected.discard(selected_task_id)
+        self._recount_selection()
         self._sync_header_and_hint()
         self.post_message(self.SelectionChanged(self.selected_task_ids))
 
+    def _recount_selection(self) -> None:
+        # Catalog/filter changes and explicit selection actions may scan their scope.
+        # Routine page presentation uses these cached counts.
+        self._selected_never_count = len(self._selected & self._never_run)
+        self._selected_filtered_count = len(self._selected & self._filtered_ids)
+
     def _sync_header_and_hint(self) -> None:
-        visible = self._visible_tasks()
-        shown = {task.id for task in visible if task.id not in self._executions}
-        selectable_count = sum(
-            can_start_fresh_run(
-                self._executions[task.id].status if task.id in self._executions else None
-            ) for task in self._tasks
-        )
+        visible = self._filtered
+        shown = self._never_run
         header = self.query_one("#select-all-tasks", Checkbox)
         header.disabled = not shown
         self._updating = True
         try:
             self._set_checkbox_value_silently(
-                header, bool(shown) and shown <= self._selected
+                header, bool(shown) and self._selected_never_count == len(shown)
             )
         finally:
             self._updating = False
-        blocked_count = sum(
-            not can_start_fresh_run(self._executions[task.id].status)
-            for task in visible if task.id in self._executions
-        )
-        blocked = f" {blocked_count} have active or approved executions." if blocked_count else ""
         selected = (
-            f"Selected {len(self._selected)} of {selectable_count} available "
-            f"{self._provider} tasks. Select all includes only tasks without earlier runs."
+            f"Selected {len(self._selected)} of {len(self._tasks)} {self._provider} tasks. "
+            "Select all includes only tasks without earlier runs."
         )
+        if not self._tasks and not self._incomplete:
+            selected += f" No open {self._provider} tasks were returned."
         if not self._label_filter:
-            self.query_one("#task-hint", Static).update(f"{selected}{blocked}")
+            self.query_one("#task-hint", Static).update(selected)
             return
         labels = " + ".join(self._label_filter)
         if visible:
@@ -651,14 +820,14 @@ class TaskSelector(Vertical):
                 f"No loaded {self._provider} tasks have every selected label ({labels}). "
                 "Clear the filter to show all tasks."
             )
-        hidden_count = len(self._selected - {task.id for task in visible})
+        hidden_count = len(self._selected) - self._selected_filtered_count
         hidden = (
             f" {hidden_count} selected task(s) hidden by the filter will also start."
             if hidden_count
             else ""
         )
         self.query_one("#task-hint", Static).update(
-            Text(f"{showing} {selected}{hidden}{blocked}")
+            Text(f"{showing} {selected}{hidden}")
         )
 
     @staticmethod
