@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prchef"
-version = "0.1.0"
+version = "0.1.1"
 description = "Plan, implement, validate, and review GitHub or Trello tasks in isolated Git worktrees"
 readme = "README.md"
 license = "MIT"
