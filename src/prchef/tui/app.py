@@ -164,16 +164,15 @@ class PrchefApp(App[None]):
     #task-table {
         width: 100%;
         height: auto;
-        margin-top: 1;
         padding: 0 1;
         border: round $primary;
     }
-    /* Bound the rows; pagination shares the existing refresh row. */
+    /* Bound the rows so the controls and launch action remain reachable. */
     #available-tasks { width: 100%; height: auto; max-height: 12; overflow-x: hidden; }
+    #refresh-tasks { width: 16; }
     #task-pagination { width: 100%; height: 3; }
     #task-pagination Button { min-width: 10; width: 10; }
     #task-page-indicator { width: 1fr; min-width: 13; content-align: center middle; }
-    #task-pagination #refresh-tasks { width: 16; }
     #task-pagination #task-next { width: 8; min-width: 8; }
     #task-page-size { width: 20; margin-left: 1; }
     #task-error { height: auto; color: $warning; }
@@ -206,7 +205,7 @@ class PrchefApp(App[None]):
     }
     .task-row:focus { background: $accent 40%; }
     .task-row:disabled { color: $text-muted; }
-    #task-hint { margin-top: 1; }
+    #workflow-runner .navigation-actions { margin-top: 0; }
     #github-app-summary, #github-app-identity-summary, #github-app-status { height: auto; }
     .github-app-roles { width: 100%; height: auto; }
     .github-app-role { width: 100%; height: auto; margin-bottom: 1; }

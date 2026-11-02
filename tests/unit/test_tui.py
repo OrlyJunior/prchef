@@ -9392,6 +9392,7 @@ def test_task_pagination_navigation_selection_and_bounded_work(
                 next_button = screen.query_one("#task-next", Button)
                 next_button.focus()
                 await settle_tui(pilot)
+                await application.animator.wait_for_idle()
                 await wait_for_tui(pilot, lambda: screen.can_view_entire(next_button))
                 assert await pilot.click(next_button)
                 await settle_tui(pilot)
@@ -9715,10 +9716,23 @@ def test_task_pagination_controls_mouse_keyboard_and_visibility(
             pagination = screen.query_one("#task-pagination", Horizontal)
             content = screen.query_one("#workflow-runner", VerticalScroll)
             start_y = screen.query_one("#start-workflow", Button).region.y + content.scroll_offset.y
-            # The entire compact group fits without a horizontal or vertical scroll.
-            assert screen.can_view_entire(pagination)
+            table = screen.query_one("#task-table")
+            hint = screen.query_one("#task-hint")
+            assert table.region.bottom <= pagination.region.y
+            assert pagination.region.bottom == hint.region.y
+            assert start_y <= (52 if width == 80 else 50)
+            assert screen.query_one("#refresh-tasks").region.y + content.scroll_offset.y == 15
+            # Focusing the group scrolls it into view, with no controls clipped.
+            size_select.focus()
+            await wait_for_tui(pilot, lambda: screen.can_view_entire(pagination))
+            for control in pagination.children:
+                assert pagination.region.contains_region(control.region)
             assert [option[1] for option in size_select._options] == ["10", "25", "50"]
             for index, size in enumerate((10, 25, 50)):
+                size_select.focus()
+                await application.animator.wait_for_idle()
+                content.scroll_to_widget(pagination, animate=False, force=True, immediate=True)
+                await wait_for_tui(pilot, lambda: screen.can_view_entire(pagination))
                 await pilot.click(size_select)
                 await settle_tui(pilot)
                 overlay = size_select.query_one("SelectOverlay")
@@ -9760,6 +9774,34 @@ def test_task_pagination_controls_mouse_keyboard_and_visibility(
             history.focus()
             await wait_for_tui(pilot, lambda: screen.can_view_entire(history))
             assert screen.query_one("#workflow-runner", VerticalScroll).max_scroll_x == 0
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
+    "width,height,count,baseline_y",
+    [(80, 20, 0, 40), (80, 20, 1, 42), (100, 30, 0, 39), (100, 30, 1, 40),
+     (120, 40, 0, 39), (120, 40, 1, 40)],
+)
+def test_task_pagination_does_not_push_start_down_for_short_lists(
+    tmp_path: Path, width: int, height: int, count: int, baseline_y: int,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    provider = _LabelledTaskProvider(_pagination_tasks(count), ["bug", "Bug", "common"])
+    controller._task_provider_factory = lambda source, repository: provider
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(width, height)) as pilot:
+            await pilot.press("n")
+            await settle_tui(pilot)
+            screen = application.screen
+            content = screen.query_one("#workflow-runner", VerticalScroll)
+            start = screen.query_one("#start-workflow", Button)
+            assert start.region.y + content.scroll_offset.y <= baseline_y
+            start.focus()
+            await wait_for_tui(pilot, lambda: screen.can_view_entire(start))
+            assert content.max_scroll_x == 0
+
     asyncio.run(drive())
 
 

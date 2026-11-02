@@ -322,15 +322,7 @@ class TaskSelector(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static("Tasks", classes="field-label")
-        with Horizontal(id="task-pagination"):
-            yield Button("Refresh tasks", id="refresh-tasks")
-            yield _PaginationButton("Previous", id="task-previous", disabled=True)
-            yield Static("Page 1 of 1", id="task-page-indicator")
-            yield _PaginationButton("Next", id="task-next", disabled=True)
-            yield PrchefSelect(
-                [(f"{size} / page", str(size)) for size in (10, 25, 50)],
-                value="25", allow_blank=False, id="task-page-size",
-            )
+        yield Button("Refresh tasks", id="refresh-tasks")
         # Shown only for providers with a label catalog.
         with Vertical(id="task-label-filter"):
             with Horizontal(id="task-label-filter-bar"):
@@ -350,6 +342,14 @@ class TaskSelector(Vertical):
             )
             # Keep the legacy id while replacing the single-value Select.
             yield VerticalScroll(id="available-tasks")
+        with Horizontal(id="task-pagination"):
+            yield _PaginationButton("Previous", id="task-previous", disabled=True)
+            yield Static("Page 1 of 1", id="task-page-indicator")
+            yield _PaginationButton("Next", id="task-next", disabled=True)
+            yield PrchefSelect(
+                [(f"{size} / page", str(size)) for size in (10, 25, 50)],
+                value="25", allow_blank=False, id="task-page-size",
+            )
         yield Static("Choose a provider and load tasks to browse it.", id="task-hint")
         yield Static("", id="task-error")
 
