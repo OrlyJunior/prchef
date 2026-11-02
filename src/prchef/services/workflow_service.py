@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 
 _MANUAL_CONTINUATION_DIAGNOSTIC_KIND = "MANUAL_CONTINUATION"
 _QUOTA_EXHAUSTED_DIAGNOSTIC_KIND = "PROVIDER_QUOTA_EXHAUSTED"
+_CORRECTION_RESUME_MODES = frozenset({
+    "VALIDATION_CORRECTION", "REVIEW_CORRECTION", "REVIEW_VALIDATION_CORRECTION", "POLISH",
+})
 
 
 def _latest_failure_was_quota(diagnostics: Sequence[ExecutionDiagnostic]) -> bool:
@@ -485,10 +488,7 @@ class WorkflowService:
         # can safely correct a missing/moved worktree and try again.
         execution_clients.git.verify_worktree_branch(working_branch, execution.commit_sha)
         if stage in {WorkflowStage.PUSH, WorkflowStage.CREATE_PR}:
-            if execution.resume_mode in {
-                "VALIDATION_CORRECTION", "REVIEW_CORRECTION",
-                "REVIEW_VALIDATION_CORRECTION", "POLISH",
-            }:
+            if execution.resume_mode in _CORRECTION_RESUME_MODES:
                 raise WorkflowError(
                     "Cannot safely retry this correction or polish publishing checkpoint; "
                     "inspect the retained worktree and pull request"
@@ -572,7 +572,8 @@ class WorkflowService:
             return None
         if execution.workspace_path is not None and execution.working_branch is not None:
             if (execution.current_stage in {WorkflowStage.PUSH, WorkflowStage.CREATE_PR}
-                    and execution.commit_sha):
+                    and execution.commit_sha
+                    and execution.resume_mode not in _CORRECTION_RESUME_MODES):
                 return execution.current_stage
             return WorkflowStage.IMPLEMENT
         if execution.workspace_path is None and _latest_failure_was_quota(diagnostics()):

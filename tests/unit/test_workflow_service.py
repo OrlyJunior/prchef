@@ -1960,6 +1960,47 @@ def test_retry_refused_push_reuses_committed_work(workflow) -> None:
     assert any(d.payload.get("prior_error") == "push refused" for d in diagnostics)
 
 
+def test_failed_review_correction_push_continues_from_implementation(workflow, monkeypatch) -> None:
+    from copy import deepcopy
+
+    service, repository, _, factory = workflow
+    factory.planner.review_decisions = ["CHANGES_REQUESTED", "APPROVED"]
+    original_push = factory.git.push
+
+    def set_resume_mode(execution_id, mode, *, attempt=None):
+        repository.get_execution(execution_id).resume_mode = mode
+
+    monkeypatch.setattr(repository, "set_resume_mode", set_resume_mode, raising=False)
+
+    def refuse_correction_push(branch, protected_branches):
+        if factory.git.push_calls == 1:
+            factory.git.push_error = RuntimeError("correction push refused")
+        original_push(branch, protected_branches)
+
+    monkeypatch.setattr(factory.git, "push", refuse_correction_push)
+    failed = service.run("retry-review-correction")
+    assert failed.status is WorkflowStatus.FAILED
+    assert failed.current_stage is WorkflowStage.PUSH
+    assert failed.resume_mode == "REVIEW_CORRECTION"
+    candidate = deepcopy(failed)
+    for mode in (
+        "VALIDATION_CORRECTION", "REVIEW_CORRECTION", "REVIEW_VALIDATION_CORRECTION", "POLISH",
+    ):
+        for stage in (WorkflowStage.PUSH, WorkflowStage.CREATE_PR):
+            candidate.resume_mode = mode
+            candidate.current_stage = stage
+            assert service.continuation_stage(candidate, lambda: []) is WorkflowStage.IMPLEMENT
+
+    monkeypatch.setattr(factory.git, "push", original_push)
+    factory.git.push_error = None
+    result = service.continue_execution(failed.id, "Continue correction")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert result.workspace_path == failed.workspace_path
+    assert factory.github.create_calls == 1
+    assert repository.stage_changes.count(WorkflowStage.IMPLEMENT) == 3
+
+
 def test_publishing_retry_refuses_newly_protected_branch(workflow) -> None:
     service, _, _, factory = workflow
     factory.git.push_error = RuntimeError("push refused")
