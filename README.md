@@ -20,7 +20,7 @@ Known limitations:
 - Multiple-instance ownership covers one machine sharing one database. Each execution-producing instance records a heartbeat every **10 seconds**; an owner is considered stale when its heartbeat is more than **300 seconds** old. A live process stalled or unable to write heartbeats longer than that may be treated as gone. A second TUI leaves executions with a fresh owner unchanged and excludes them from resume choices.
 - Close old instances before upgrading; mixed old and new versions are unsupported. Older executions without owner information retain the previous recovery behavior.
 - Nothing is rolled back after a failure: a pushed branch or open pull request stays in place. Inspect the saved execution and its worktree before continuing.
-- If a push is refused after a commit, the commit remains in the retained worktree. Continuing from IMPLEMENT reruns the implementer instead of directly retrying the push; if it makes no new changes, continuation can fail before PUSH with `Implementation provider completed without changing files`.
+- If publishing fails after a commit, correct the cause and use Continue Execution to retry the publishing checkpoint in the retained worktree.
 
 ## Before you run it
 
@@ -301,7 +301,7 @@ We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.m
 
 - **An execution is not offered for resume after a crash:** recovery runs only when an instance starts. Wait until more than 300 seconds have passed since the last heartbeat, then reopen the app. Clock changes can delay or accelerate expiry.
 
-- **`refusing to allow a GitHub App to create or update workflow ... without workflows permission`:** An HTTPS push using the implementer App can be refused when the task changes `.github/workflows` and the App lacks Workflows permission. SSH and pushes without an implementer App use ambient Git credentials, which may be authorized. Workflows permission is not requested by default; granting it lets the App change CI and release workflows. Grant it deliberately, or push the committed branch from the retained worktree with your own credentials using `git push --set-upstream origin <branch>`, then run `gh pr create`. If your push is refused for lack of the `workflow` scope, run `gh auth refresh -s workflow`.
+- **`refusing to allow a GitHub App to create or update workflow ... without workflows permission`:** An HTTPS push using the implementer App can be refused when the task changes `.github/workflows` and the App lacks Workflows permission. SSH and pushes without an implementer App use ambient Git credentials, which may be authorized. Workflows permission is not requested by default; granting it lets the App change CI and release workflows. Grant it deliberately or correct the credentials, then use Continue Execution to retry publishing the committed branch. If your push is refused for lack of the `workflow` scope, run `gh auth refresh -s workflow`.
 
 - **`GitHub CLI failed`:** check that `gh` is authenticated and has access to the target repository.
 - **`Executable not found: codex`, `claude`, or `gh`:** install the CLI and make sure it's on your `PATH`, or select a provider you have installed.

@@ -226,6 +226,7 @@ class ImplementationService:
         repository_path: Path,
         *,
         instructions_repository_path: Path | None = None,
+        allow_no_changes: bool = False,
     ) -> ImplementationResult:
         """Start a fresh implementer invocation in a retained workflow workspace."""
         request = self._build_request(
@@ -236,7 +237,7 @@ class ImplementationService:
             feedback=feedback,
             instructions_repository_path=instructions_repository_path,
         )
-        return self._run_prompt(request)
+        return self._run_prompt(request, allow_no_changes=allow_no_changes)
 
     @staticmethod
     def render_validation_failures(validation: ValidationResult) -> str:

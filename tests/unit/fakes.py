@@ -456,6 +456,8 @@ class FakeGitClient:
         self.discard_calls = 0
         self.changed_files_results: list[list[str]] = []
         self.fetch_calls = 0
+        self.publication_check = False
+        self.remote_head: str | None = None
 
     def fetch_base(self, base_branch: str) -> str:
         self.fetch_calls += 1
@@ -504,7 +506,28 @@ class FakeGitClient:
         self.operation_paths.append(self.workspace_path)
         if self.changed_files_results:
             return self.changed_files_results.pop(0)
+        if self.publication_check:
+            return []
         return ["src/audit.py", "tests/test_audit.py"]
+
+    def verify_publication_branch(self, branch: str, protected_branches: list[str]) -> None:
+        from prchef.clients.git_client import GitClient
+
+        GitClient._assert_safe_working_branch(branch, protected_branches)
+        if self.branch != branch:
+            raise RuntimeError("Workflow workspace is on the wrong branch")
+        self.publication_check = True
+
+    def has_commits_ahead(self, base_ref: str) -> bool:
+        self.ensure_merge_base(base_ref)
+        return self.commit_calls > 0
+
+    def head_commit(self) -> str:
+        return "a" * 40
+
+    def remote_branch_commit(self, branch: str) -> str | None:
+        del branch
+        return self.remote_head
 
     def discard_uncommitted_changes(self) -> None:
         self.discard_calls += 1
@@ -533,6 +556,8 @@ class FakeGitClient:
         self.operation_paths.append(self.workspace_path)
         if self.push_error:
             raise self.push_error
+        self.remote_head = self.head_commit()
+        self.publication_check = False
 
     def diff(self, base_branch: str) -> str:
         self.ensure_merge_base(base_branch)
@@ -549,6 +574,7 @@ class FakeGitHubClient:
         self.implementer_identity: str | None = None
         self.last_pull_request_body: str | None = None
         self.create_calls = 0
+        self.found_pull_request: PullRequest | None = None
         self.review_calls: list[dict[str, Any]] = []
         self.assignment_calls: list[dict[str, Any]] = []
         self.comment_error: Exception | None = None
@@ -573,6 +599,10 @@ class FakeGitHubClient:
             {"repository": repository, "pull_request_number": pull_request_number}
         )
         return self.pr_open
+
+    def find_pull_request(self, head_branch: str, base_branch: str) -> PullRequest | None:
+        del head_branch, base_branch
+        return self.found_pull_request
 
     def create_pull_request(self, **kwargs: Any) -> PullRequest:
         self.create_calls += 1

@@ -1937,3 +1937,88 @@ def test_identity_diagnostic_is_persisted_before_delivery_and_pr(workflow) -> No
     pr = next(i for i, event in enumerate(events)
               if event.kind.value == "STAGE_STARTED" and event.stage is WorkflowStage.CREATE_PR)
     assert identity < pr
+
+
+def test_retry_refused_push_reuses_committed_work(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.git.push_error = RuntimeError("push refused")
+    failed = service.run("retry-push")
+    assert failed.current_stage is WorkflowStage.PUSH
+    commits = factory.git.commit_calls
+    factory.git.push_error = None
+
+    result = service.continue_execution(failed.id, "Retry publishing")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert result.workspace_path == failed.workspace_path
+    assert result.base_commit == failed.base_commit
+    assert factory.git.commit_calls == commits
+    assert factory.git.push_calls == 2
+    assert factory.github.create_calls == 1
+    assert factory.github.review_calls
+    diagnostics = repository.list_diagnostics(failed.id)
+    assert any(d.payload.get("prior_error") == "push refused" for d in diagnostics)
+
+
+def test_publishing_retry_refuses_newly_protected_branch(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.git.push_error = RuntimeError("push refused")
+    failed = service.run("retry-protected")
+    service._config_loader.config.repository.protected_branches.append(failed.working_branch)
+    with pytest.raises(GitClientError, match="protected branch"):
+        service.continue_execution(failed.id, "Retry publishing")
+    assert factory.git.push_calls == 1
+    assert factory.github.create_calls == 0
+
+
+def test_implementation_continuation_reuses_unpublished_commit(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.git.push_error = RuntimeError("push refused")
+    failed = service.run("retry-implement")
+    failed.current_stage = WorkflowStage.IMPLEMENT
+    factory.git.push_error = None
+    factory.git.changed_files_results = [[], []]
+    commits = factory.git.commit_calls
+
+    result = service.continue_execution(failed.id, "Continue retained work")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert result.implementation_snapshot is not None
+    assert "already committed" in result.implementation_snapshot["summary"]
+    assert factory.git.commit_calls == commits
+    assert factory.github.review_calls
+
+
+def test_retry_pr_creation_reconciles_existing_pr(workflow) -> None:
+    from prchef.models import PullRequest
+
+    service, _, _, factory = workflow
+    factory.github.error = RuntimeError("PR response lost")
+    failed = service.run("retry-pr")
+    assert failed.current_stage is WorkflowStage.CREATE_PR
+    factory.github.error = None
+    factory.github.found_pull_request = PullRequest(
+        number=42, url="https://github.example/pr/42", title="Existing",
+        base_branch=failed.base_branch, head_branch=failed.working_branch,
+    )
+    result = service.continue_execution(failed.id, "Retry publishing")
+    assert result.status is WorkflowStatus.APPROVED
+    assert factory.github.create_calls == 1
+    assert factory.git.push_calls == 1
+    assert factory.git.commit_calls == 1
+    assert factory.github.review_calls
+
+
+def test_retry_failure_preserves_previous_publication_error(workflow) -> None:
+    from prchef.tui.workflow_presentation import prior_publication_failure
+
+    service, repository, _, factory = workflow
+    factory.git.push_error = RuntimeError("first push refused")
+    failed = service.run("retry-twice")
+    factory.git.push_error = RuntimeError("second push refused")
+    result = service.continue_execution(failed.id, "Retry publishing")
+    assert result.status is WorkflowStatus.FAILED
+    assert result.error_message == "second push refused"
+    assert prior_publication_failure(repository.list_diagnostics(failed.id)) == (
+        "Previous PUSH failure: first push refused"
+    )

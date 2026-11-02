@@ -190,6 +190,8 @@ def timeline_message(
         return f"↳ {event.message or 'Agent fallback activated'}"
     if event.kind == WorkflowEventKind.DIAGNOSTIC:
         payload = event.payload or {}
+        if payload.get("kind") == "ALREADY_COMMITTED":
+            return "Work is already committed; validating retained work."
         if payload.get("kind") == "GITHUB_IDENTITIES":
             return github_identity_summary(
                 payload.get("planner") is True, payload.get("implementer") is True,
@@ -286,3 +288,15 @@ def step_timeline_lines(
             lines.append(f"- {stage_activity(step.stage, attempt)} skipped")
         previous_status = step.status
     return lines
+
+
+def prior_publication_failure(diagnostics: Sequence[Any]) -> str | None:
+    """Return the last captured terminal publishing failure, if one exists."""
+    for diagnostic in reversed(diagnostics):
+        payload = diagnostic.payload
+        if (payload.get("kind") == "MANUAL_CONTINUATION"
+                and payload.get("prior_stage") in {"PUSH", "CREATE_PR"}
+                and isinstance(payload.get("prior_error"), str)
+                and payload["prior_error"].strip()):
+            return f"Previous {payload['prior_stage']} failure: {payload['prior_error']}"
+    return None

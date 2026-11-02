@@ -55,6 +55,7 @@ from prchef.tui.workflow_presentation import (
     is_active_index_line,
     is_index_progress,
     is_index_ready,
+    prior_publication_failure,
     stage_activity,
     stage_complete,
     status_message,
@@ -1777,8 +1778,15 @@ class WorkflowRunnerScreen(Screen[None]):
         ):
             self._event_lines.append(message)
 
+        try:
+            prior = prior_publication_failure(
+                self.controller.execution_diagnostics(event.execution_id)
+            )
+        except Exception:
+            prior = None
+        lines = [line for line in self._event_lines if line]
         self.query_one("#workflow-events", Static).update(
-            "\n".join([line for line in self._event_lines if line][-10:])
+            "\n".join(([prior] if prior else []) + lines[-9 if prior else -10:])
         )
 
     def _ensure_stop_controls_visible(self, event: WorkflowEvent) -> None:
@@ -2204,8 +2212,17 @@ class WorkflowRunnerScreen(Screen[None]):
                 self.query_one("#outcome-continue", Button).display = True
             else:
                 message = "No continuation is available for this failure."
+            try:
+                prior = prior_publication_failure(
+                    self.controller.execution_diagnostics(execution.id)
+                )
+            except Exception:
+                prior = None
             if execution.error_message:
-                message = f"{concise_error(execution.error_message)}\n{message}"
+                stage = f"{execution.current_stage.value}: " if prior else ""
+                message = f"{stage}{concise_error(execution.error_message)}\n{message}"
+            if prior:
+                message = f"{prior}\n{message}"
         elif status is WorkflowStatus.APPROVED:
             outcome_class = "completed"
             title = "Workflow completed"
@@ -2299,7 +2316,14 @@ class WorkflowRunnerScreen(Screen[None]):
                 and "waiting for human input" not in self._event_lines[index]
             ):
                 self._successful_timeline_stages[step.stage] = index
-        self.query_one("#workflow-events", Static).update("\n".join(self._event_lines[-10:]))
+        try:
+            prior = prior_publication_failure(self.controller.execution_diagnostics(execution.id))
+        except Exception:
+            prior = None
+        excerpt = self._event_lines[-9:] if prior else self._event_lines[-10:]
+        self.query_one("#workflow-events", Static).update(
+            "\n".join(([prior] if prior else []) + excerpt)
+        )
 
         progress = self.query_one("#workflow-progress", Static)
         stop = self.query_one("#stop-workflow", Button)

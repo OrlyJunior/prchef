@@ -201,6 +201,17 @@ class GitClient:
         lines = self._git("status", "--porcelain").stdout.splitlines()
         return [line[3:].strip() for line in lines if len(line) > 3]
 
+    def has_commits_ahead(self, base_ref: str) -> bool:
+        """Check for commits reachable from HEAD but not from the retained base."""
+        self.ensure_merge_base(base_ref)
+        return bool(self._git("rev-list", "--max-count=1", f"{base_ref}..HEAD").stdout.strip())
+
+    def verify_publication_branch(self, branch: str, protected_branches: list[str]) -> None:
+        """Apply branch protection even when a retry does not need a push."""
+        self._assert_safe_working_branch(branch, protected_branches)
+        if self.current_branch() != branch:
+            raise GitClientError("Refusing to publish outside the workflow branch")
+
     def head_commit(self) -> str:
         return self._git("rev-parse", "HEAD").stdout.strip()
 
