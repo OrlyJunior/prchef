@@ -49,3 +49,4 @@ class WorkflowExecution:
     polish_outcome: PolishOutcome | None = None
     polish_skip_comment_attempted: bool = False
     human_interactions: list[HumanInteraction] = field(default_factory=list)
+    owner_id: str | None = None

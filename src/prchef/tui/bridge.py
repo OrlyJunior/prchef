@@ -45,6 +45,7 @@ from prchef.models.workflow_step import WorkflowStep
 from prchef.providers.concurrency import ProviderConcurrencyCoordinator
 from prchef.repositories.workflow_repository import WorkflowRepository
 from prchef.services.execution_dispatcher import ExecutionDispatcher, ExecutionHandle
+from prchef.services.execution_owner import ExecutionOwnerHeartbeat
 from prchef.services.project_context import (
     IMPLEMENTER_INSTRUCTIONS_FILE,
     PLANNER_INSTRUCTIONS_FILE,
@@ -155,8 +156,11 @@ class WorkflowController:
         dispatcher: ExecutionDispatcher | None = None,
         provider_coordinator: ProviderConcurrencyCoordinator | None = None,
         repository_index_clients: Any | None = None,
+        execution_owner: ExecutionOwnerHeartbeat | None = None,
     ) -> None:
         self._repository = workflow_repository
+        self._execution_owner = execution_owner
+        self._shutdown_complete = False
         self._config_loader = config_loader
         self._client_factory = client_factory
         self._task_provider_factory = task_provider_factory
@@ -1098,13 +1102,22 @@ class WorkflowController:
         ]
 
     def active_execution_count(self) -> int:
-        return sum(execution.status in ACTIVE_WORKFLOW_STATUSES
-                   for execution in self._repository.list_executions())
+        owner_id = getattr(self._repository, "owner_id", None)
+        return sum(
+            execution.status in ACTIVE_WORKFLOW_STATUSES
+            and owner_id is not None and execution.owner_id == owner_id
+            for execution in self._repository.list_executions()
+        )
+
+    def other_instance_execution_count(self) -> int:
+        return len(getattr(self._repository, "live_owner_execution_ids", ()))
 
     def shutdown_for_exit(self) -> None:
         """Stop admission and command trees before the UI process exits."""
         from prchef.clients.command_client import interrupt_active_commands
 
+        if self._shutdown_complete:
+            return
         with self._index_operation_lock:
             self._index_stopping = True
             index_runs = tuple(self._index_operations.values())
@@ -1117,11 +1130,15 @@ class WorkflowController:
         self._dispatcher.shutdown(wait=False, interrupt=True)
         if callable(stop_writes):
             interrupt_active_commands()
-        recover = getattr(self._repository, "recover_interrupted", None)
-        if callable(recover):
-            recover()
+        if self._execution_owner is not None:
+            self._execution_owner.close()
+        else:
+            interrupt_owned = getattr(self._repository, "interrupt_owned_and_end", None)
+            if callable(interrupt_owned):
+                interrupt_owned()
         if self._owns_repository_index_clients:
             self._repository_index_clients.close()
+        self._shutdown_complete = True
 
     def submit_interrupted(
         self, execution_id: str, *,

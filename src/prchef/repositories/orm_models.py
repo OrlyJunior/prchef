@@ -6,10 +6,19 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from prchef.config.database import Base
 
 
+class ExecutionOwnerEntity(Base):
+    __tablename__ = "execution_owners"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class WorkflowExecutionEntity(Base):
     __tablename__ = "workflow_executions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("execution_owners.id"))
     task_source: Mapped[str] = mapped_column(String(32), nullable=False, default="trello")
     task_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     task_url: Mapped[str] = mapped_column(Text, nullable=False, default="")

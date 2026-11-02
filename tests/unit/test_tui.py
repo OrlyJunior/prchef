@@ -851,6 +851,61 @@ def _painted_recovery_row(application: PrchefApp, row: Button) -> str:
     )
 
 
+@pytest.mark.parametrize("recovery_action", [None, "all", "selected"])
+@pytest.mark.parametrize("live_count", [1, 2])
+def test_startup_explains_live_owners_and_never_offers_them_for_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery_action: str | None,
+    live_count: int,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    foreign = [
+        WorkflowExecution(id=f"foreign-{index}", status=WorkflowStatus.RUNNING, owner_id="other")
+        for index in range(live_count)
+    ]
+    repository.executions = list(foreign)
+    monkeypatch.setattr(
+        repository, "live_owner_execution_ids", tuple(row.id for row in foreign), raising=False,
+    )
+    if recovery_action is not None:
+        repository.executions.extend(_recovery_executions())
+    submitted: list[str] = []
+    monkeypatch.setattr(controller, "submit_interrupted", submitted.append)
+    application = PrchefApp(controller)
+    notifications: list[str] = []
+    notify = application.notify
+
+    def record_notice(message: str, **kwargs: Any) -> None:
+        notifications.append(message)
+        notify(message, **kwargs)
+
+    monkeypatch.setattr(application, "notify", record_notice)
+
+    async def drive() -> None:
+        async with application.run_test(size=(120, 40)) as pilot:
+            await settle_tui(pilot)
+            subject = "1 execution appears" if live_count == 1 else "2 executions appear"
+            verb = "was" if live_count == 1 else "were"
+            assert notifications == [
+                f"{subject} to be running in another instance and {verb} left unchanged."
+            ]
+            assert controller.active_execution_count() == 0
+            if recovery_action is None:
+                assert not application.screen.query("#recovery-all")
+                await pilot.press("ctrl+q")
+            else:
+                assert len(application.screen.query("#recovery-items Button")) == 3
+                if recovery_action == "selected":
+                    await pilot.click("#recovery-item-0")
+                    await settle_tui(pilot)
+                await pilot.click(f"#recovery-{recovery_action}")
+                await settle_tui(pilot)
+                assert submitted == (["first"] if recovery_action == "selected"
+                                     else ["first", "second", "third"])
+            assert all(row.status is WorkflowStatus.RUNNING for row in foreign)
+
+    asyncio.run(drive())
+
+
 def test_recovery_rows_render_literal_text_and_submit_visible_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
