@@ -190,6 +190,11 @@ def timeline_message(
         return f"↳ {event.message or 'Agent fallback activated'}"
     if event.kind == WorkflowEventKind.DIAGNOSTIC:
         payload = event.payload or {}
+        if payload.get("kind") == "EXECUTION_OWNERSHIP_LOST":
+            return (
+                "! Another prchef instance took over this execution; "
+                "this instance stopped working on it"
+            )
         if payload.get("kind") == "GITHUB_IDENTITIES":
             return github_identity_summary(
                 payload.get("planner") is True, payload.get("implementer") is True,

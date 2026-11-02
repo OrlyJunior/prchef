@@ -12,7 +12,11 @@ from prchef.models.workflow_execution import WorkflowExecution
 from prchef.models.workflow_status import WorkflowStage, WorkflowStatus
 from prchef.providers.agent_provider import AgentProviderError
 from prchef.repositories.workflow_repository import WorkflowRepository
-from prchef.services.exceptions import WorkflowCancelledError, WorkflowError
+from prchef.services.exceptions import (
+    ExecutionOwnershipLostError,
+    WorkflowCancelledError,
+    WorkflowError,
+)
 from prchef.services.notifications import NotificationService
 from prchef.services.workflow_stage_events import StageEvents
 
@@ -164,6 +168,8 @@ class ExecutionLifecycle:
         if status is not WorkflowStatus.CANCELLED:
             try:
                 self._events._raise_if_cancellation_requested(execution_id)
+            except ExecutionOwnershipLostError:
+                raise
             except WorkflowCancelledError:
                 status = WorkflowStatus.CANCELLED
         self._repository.finish(execution_id, status)

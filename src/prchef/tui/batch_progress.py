@@ -142,6 +142,7 @@ class _LiveItem:
     provider_wait: str | None = None
     cancellation_requested: bool = False
     finished: bool = False
+    ownership_lost: bool = False
     timeline: list[str] = field(default_factory=list)
     active_stage_line: dict[WorkflowStage, int] = field(default_factory=dict)
     successful_stage_lines: dict[WorkflowStage, int] = field(default_factory=dict)
@@ -231,6 +232,8 @@ class LiveBatchProgress:
         if not (0 <= position < len(self._items)):
             return False
         item = self._items[position]
+        if item.ownership_lost:
+            return False
         if item.execution_id not in (None, execution.id):
             return False
         if (
@@ -302,6 +305,7 @@ class LiveBatchProgress:
             item.provider_wait = None
             item.cancellation_requested = False
             item.finished = False
+            item.ownership_lost = False
             item.timeline.clear()
             item.active_stage_line.clear()
             item.successful_stage_lines.clear()
@@ -332,6 +336,16 @@ class LiveBatchProgress:
                 item.cancellation_requested = False
         if event.kind is WorkflowEventKind.WORKFLOW_FINISHED:
             item.finished = True
+        if (
+            event.kind is WorkflowEventKind.DIAGNOSTIC
+            and payload.get("kind") == "EXECUTION_OWNERSHIP_LOST"
+        ):
+            item.status = WorkflowStatus.INTERRUPTED
+            item.finished = True
+            item.ownership_lost = True
+            item.provider_wait = None
+            item.cancellation_requested = False
+            clear_index_progress(item.timeline)
 
         if event.kind in {
             WorkflowEventKind.STAGE_STARTED,
@@ -555,6 +569,7 @@ def persisted_row(
             if diagnostic.payload.get("kind") in {
                 "PROVIDER_QUOTA_EXHAUSTED",
                 "PROJECT_CONTEXT_TRUNCATED",
+                "EXECUTION_OWNERSHIP_LOST",
                 "GITHUB_IDENTITIES",
                 "REPOSITORY_CONTEXT_FALLBACK",
             }:

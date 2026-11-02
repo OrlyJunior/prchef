@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,9 +15,26 @@ from sqlalchemy import event, text
 from sqlalchemy.exc import OperationalError
 
 from prchef.config.database import build_engine, build_session_factory
-from prchef.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
+from prchef.models.code_review import CodeReview
+from prchef.models.development_task import DevelopmentTask
+from prchef.models.implementation_result import ImplementationResult
+from prchef.models.pull_request import PullRequest
+from prchef.models.repository_spec import RepositorySpec
+from prchef.models.validation_result import ValidationResult
+from prchef.models.workflow_event import WorkflowEvent, WorkflowEventKind
+from prchef.models.workflow_interruption import ExecutionOwnershipLostError
+from prchef.models.workflow_status import (
+    PolishOutcome,
+    ReviewDecision,
+    StepStatus,
+    WorkflowStage,
+    WorkflowStatus,
+)
 from prchef.repositories.workflow_repository import WorkflowRepository
+from prchef.services.task_provider import TrelloTaskProvider
+from prchef.services.workflow_service import WorkflowService
 from prchef.tui.bridge import WorkflowController
+from tests.unit.fakes import FakeClientFactory, FakeConfigLoader, FakeTrelloClient
 
 
 @dataclass
@@ -105,6 +123,7 @@ def test_orphan_owners_recover_idempotently_with_checkpoint(
     assert [item.id for item in second.recover_interrupted()] == [execution.id]
     recovered = second.get_execution(execution.id)
     assert recovered.status is WorkflowStatus.INTERRUPTED
+    assert recovered.owner_id is None
     assert recovered.interrupted_from_status is status
     assert recovered.resume_stage is WorkflowStage.GENERATE_SPEC
     assert second.list_steps(execution.id)[0].status is StepStatus.INTERRUPTED
@@ -355,3 +374,295 @@ def test_controller_shutdown_only_counts_and_interrupts_local_work(
     # The other controller can still persist progress and finish normally.
     first.finish(foreign.id, WorkflowStatus.APPROVED)
     assert first.get_execution(foreign.id).status is WorkflowStatus.APPROVED
+
+
+@pytest.mark.parametrize("takeover", [False, True])
+@pytest.mark.parametrize(("method", "args"), [
+    ("assert_owned", ()),
+    ("update_status", (WorkflowStatus.RUNNING,)),
+    ("update_stage", (WorkflowStage.COMMIT,)),
+    ("update_task", (DevelopmentTask("changed", "trello", "Changed", "", ""),)),
+    ("update_project", ("other/repo", "main")),
+    ("start_step", (WorkflowStage.COMMIT,)),
+    ("finish_step", (StepStatus.SUCCEEDED,)),
+    ("record_base_commit", ("changed",)),
+    ("record_submission_repository", ("changed",)),
+    ("record_workspace", ("changed",)),
+    ("record_spec", (RepositorySpec("changed", "changed"),)),
+    ("record_spec_jules_session", ("changed", "url")),
+    ("record_branch", ("changed",)),
+    ("record_implementation", (ImplementationResult(success=True, summary="changed"),)),
+    ("record_validation", (ValidationResult(success=True),)),
+    ("record_commit", ("changed",)),
+    ("record_pull_request", (PullRequest(9, "url", "title", "main", "branch"),)),
+    ("record_review", (CodeReview(ReviewDecision.APPROVED),)),
+    ("finish_review_publication", ()),
+    ("record_polish_outcome", (PolishOutcome.APPLIED,)),
+    ("record_polish_skip_comment_attempt", ()),
+    ("record_review_jules_session", ("changed", "url")),
+    ("record_error", ("changed",)),
+    ("set_resume_mode", ("POLISH",)),
+    ("set_resume_stage", (WorkflowStage.REVIEW,)),
+    ("request_human_input", (WorkflowStage.REVIEW, "Changed?")),
+    ("finish", (WorkflowStatus.APPROVED,)),
+    ("reinterrupt", ("changed",)),
+])
+def test_returning_stalled_owner_cannot_write(
+    repositories: tuple[WorkflowRepository, WorkflowRepository], clock: Clock,
+    takeover: bool, method: str, args: tuple[Any, ...],
+) -> None:
+    first, second = repositories
+    first.register_owner("first")
+    execution = first.create_execution("stalled")
+    step = first.start_step(execution.id, WorkflowStage.IMPLEMENT)
+    clock.now += timedelta(seconds=301)
+    second.recover_interrupted()
+    assert second.get_execution(execution.id).owner_id is None
+    if takeover:
+        second.register_owner("second")
+        second.queue_interrupted(execution.id)
+        second.update_stage(execution.id, WorkflowStage.VALIDATE)
+        second.record_implementation(execution.id, ImplementationResult(True, "new owner"))
+        second.record_error(execution.id, "new owner's error")
+        second.start_step(execution.id, WorkflowStage.VALIDATE)
+
+    # Compare raw persisted columns, including every snapshot, timestamp and checkpoint.
+    def state() -> list[list[Any]]:
+        with second._sessions() as session:
+            return [list(session.execute(text(f"SELECT * FROM {table}")).all()) for table in (
+                "workflow_executions", "workflow_steps", "human_interactions",
+            )]
+
+    before = state()
+    with pytest.raises(ExecutionOwnershipLostError):
+        getattr(first, method)(step if method == "finish_step" else execution.id, *args)
+    assert state() == before
+
+
+def test_local_shutdown_retains_owner_and_allows_interrupted_step_completion(
+    repositories: tuple[WorkflowRepository, WorkflowRepository],
+) -> None:
+    first, _ = repositories
+    first.register_owner("first")
+    execution = first.create_execution("local")
+    step = first.start_step(execution.id, WorkflowStage.IMPLEMENT)
+    first.interrupt_owned_and_end()
+    assert first.get_execution(execution.id).owner_id == "first"
+    first.finish_step(step, StepStatus.SUCCEEDED)
+    assert first.list_steps(execution.id)[0].status is StepStatus.INTERRUPTED
+
+
+def test_continuation_claims_resume_fields_atomically(
+    repositories: tuple[WorkflowRepository, WorkflowRepository],
+) -> None:
+    first, second = repositories
+    first.register_owner("first")
+    second.register_owner("second")
+    execution = first.create_execution("continue")
+    first.finish(execution.id, WorkflowStatus.FAILED)
+    second.queue_execution(
+        execution.id, resume_mode="MANUAL_CONTINUATION", resume_stage=WorkflowStage.IMPLEMENT,
+    )
+    queued = first.get_execution(execution.id)
+    assert queued.owner_id == "second"
+    assert queued.status is WorkflowStatus.PENDING
+    assert queued.resume_mode == "MANUAL_CONTINUATION"
+    assert queued.resume_stage is WorkflowStage.IMPLEMENT
+
+
+@pytest.mark.parametrize("boundary", [
+    "admission", "step_exit", "commit", "push", "create_pr", "review", "provider", "validation",
+])
+def test_worker_stops_at_ownership_loss_without_finishing_or_external_writes(
+    repositories: tuple[WorkflowRepository, WorkflowRepository], clock: Clock,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    boundary: str,
+) -> None:
+    first, second = repositories
+    first.register_owner("first")
+    factory = FakeClientFactory()
+    notifications = Mock()
+    service = WorkflowService(
+        first, TrelloTaskProvider(FakeTrelloClient()), FakeConfigLoader(tmp_path), factory,
+        notification_service=notifications,
+    )
+    events: list[WorkflowEvent] = []
+    transferred: dict[str, Any] = {}
+
+    def effects() -> tuple[Any, ...]:
+        return (factory.git.commit_calls, factory.git.push_calls, factory.github.create_calls,
+                list(factory.github.review_calls), list(factory.github.comment_calls),
+                list(factory.github.assignment_calls))
+
+    def transfer(execution_id: str) -> None:
+        assert not transferred
+        clock.now += timedelta(seconds=301)
+        assert [item.id for item in second.recover_interrupted()] == [execution_id]
+        second.register_owner("second")
+        second.queue_interrupted(execution_id)
+        second.update_stage(execution_id, WorkflowStage.IMPLEMENT)
+        second.record_error(execution_id, "replacement owner checkpoint")
+        transferred.update(
+            execution=second.get_execution(execution_id), steps=second.list_steps(execution_id),
+            effects=effects(),
+        )
+
+    original_step = service._stage_events._step
+
+    @contextmanager
+    def step(execution_id: str, stage: WorkflowStage) -> Iterator[None]:
+        if (boundary, stage) in {
+            ("commit", WorkflowStage.COMMIT), ("push", WorkflowStage.PUSH),
+            ("create_pr", WorkflowStage.CREATE_PR),
+        }:
+            transfer(execution_id)
+        with original_step(execution_id, stage):
+            yield
+            if boundary == "step_exit" and stage is WorkflowStage.IMPLEMENT:
+                transfer(execution_id)
+
+    monkeypatch.setattr(service._stage_events, "_step", step)
+    if boundary == "admission":
+        original_start = service._lifecycle._start_admitted
+
+        def start(execution_id: str) -> None:
+            transfer(execution_id)
+            original_start(execution_id)
+
+        monkeypatch.setattr(service._lifecycle, "_start_admitted", start)
+    elif boundary == "review":
+        original_review = first.record_review
+
+        def record_review(execution_id: str, review: CodeReview) -> None:
+            original_review(execution_id, review)
+            transfer(execution_id)
+
+        monkeypatch.setattr(first, "record_review", record_review)
+    elif boundary == "provider":
+        original_slot = service._provider_coordinator.slot
+
+        @contextmanager
+        def slot(provider: str, **kwargs: Any) -> Iterator[None]:
+            with original_slot(provider, **kwargs):
+                execution_id = kwargs["execution_id"]
+                if first.get_execution(execution_id).current_stage is WorkflowStage.IMPLEMENT:
+                    transfer(execution_id)
+                yield
+
+        monkeypatch.setattr(service._provider_coordinator, "slot", slot)
+    elif boundary == "validation":
+        original_check = service._stage_events._record_validation_check
+
+        def check(execution_id: str, payload: dict[str, Any]) -> None:
+            transfer(execution_id)
+            original_check(execution_id, payload)
+
+        monkeypatch.setattr(service._stage_events, "_record_validation_check", check)
+
+    finish = Mock(wraps=service._lifecycle._finish)
+    reinterrupt = Mock(wraps=first.reinterrupt)
+    monkeypatch.setattr(service._lifecycle, "_finish", finish)
+    monkeypatch.setattr(first, "reinterrupt", reinterrupt)
+    try:
+        result = service.run("returning-owner", event_listener=events.append)
+    finally:
+        service._dispatcher.shutdown(wait=True)
+
+    assert transferred, "the test did not reach the intended takeover boundary"
+    assert result == transferred["execution"] == second.get_execution(result.id)
+    assert second.list_steps(result.id) == transferred["steps"]
+    assert effects() == transferred["effects"]
+    finish.assert_not_called()
+    reinterrupt.assert_not_called()
+    notifications.notify_outcome.assert_not_called()
+    assert not any(event.kind is WorkflowEventKind.WORKFLOW_FINISHED for event in events)
+    warnings = [event for event in events
+                if (event.payload or {}).get("kind") == "EXECUTION_OWNERSHIP_LOST"]
+    assert len(warnings) == 1
+    assert warnings[0].payload["severity"] == "warning"
+    diagnostics = [item for item in second.list_diagnostics(result.id)
+                   if item.payload.get("kind") == "EXECUTION_OWNERSHIP_LOST"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0].payload == warnings[0].payload
+    assert "this instance stopped working on it" in caplog.text
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_single_owner_workflow_is_unchanged(
+    repositories: tuple[WorkflowRepository, WorkflowRepository], tmp_path: Path, registered: bool,
+) -> None:
+    first, _ = repositories
+    if registered:
+        first.register_owner("first")
+    service = WorkflowService(
+        first, TrelloTaskProvider(FakeTrelloClient()),
+        FakeConfigLoader(tmp_path), FakeClientFactory(),
+    )
+    try:
+        result = service.run("normal")
+    finally:
+        service._dispatcher.shutdown(wait=True)
+    assert result.status is WorkflowStatus.APPROVED
+    assert result.owner_id == ("first" if registered else None)
+    assert all(step.status is StepStatus.SUCCEEDED for step in first.list_steps(result.id))
+    assert [step.stage for step in first.list_steps(result.id)] == [
+        WorkflowStage.LOAD_TASK, WorkflowStage.LOAD_CONFIG, WorkflowStage.GENERATE_SPEC,
+        WorkflowStage.PREPARE_BRANCH, WorkflowStage.IMPLEMENT, WorkflowStage.VALIDATE,
+        WorkflowStage.COMMIT, WorkflowStage.PUSH, WorkflowStage.CREATE_PR, WorkflowStage.REVIEW,
+    ]
+    assert not any(item.payload.get("kind") == "EXECUTION_OWNERSHIP_LOST"
+                   for item in first.list_diagnostics(result.id))
+
+
+def test_dropped_job_that_lost_ownership_does_not_finish(
+    repositories: tuple[WorkflowRepository, WorkflowRepository], clock: Clock,
+    tmp_path: Path,
+) -> None:
+    first, second = repositories
+    first.register_owner("first")
+    service = WorkflowService(
+        first, TrelloTaskProvider(FakeTrelloClient()),
+        FakeConfigLoader(tmp_path), FakeClientFactory(),
+    )
+    events: list[WorkflowEvent] = []
+    try:
+        handle = service.submit_execution("drop", admission_gate=lambda: False,
+                                          event_listener=events.append)
+        clock.now += timedelta(seconds=301)
+        second.recover_interrupted()
+        second.register_owner("second")
+        expected = second.queue_interrupted(handle.execution_id)
+        assert service._dispatcher.cancel(handle.execution_id)
+        assert handle.result(timeout=5) == expected
+        assert first.get_execution(handle.execution_id) == expected
+    finally:
+        service._dispatcher.shutdown(wait=True)
+    assert len([event for event in events
+                if (event.payload or {}).get("kind") == "EXECUTION_OWNERSHIP_LOST"]) == 1
+    assert not any(event.kind is WorkflowEventKind.WORKFLOW_FINISHED for event in events)
+
+
+def test_different_instance_can_continue_terminal_execution(
+    repositories: tuple[WorkflowRepository, WorkflowRepository], tmp_path: Path,
+) -> None:
+    first, second = repositories
+    first.register_owner("first")
+    second.register_owner("second")
+    factory = FakeClientFactory()
+    factory.github.error = RuntimeError("PR unavailable")
+    original = WorkflowService(
+        first, TrelloTaskProvider(FakeTrelloClient()), FakeConfigLoader(tmp_path), factory,
+    )
+    replacement = WorkflowService(
+        second, TrelloTaskProvider(FakeTrelloClient()), FakeConfigLoader(tmp_path), factory,
+    )
+    try:
+        failed = original.run("continue-elsewhere")
+        assert failed.status is WorkflowStatus.FAILED
+        factory.github.error = None
+        continued = replacement.continue_execution(failed.id, "Retry publication")
+        assert continued.status is WorkflowStatus.APPROVED
+        assert continued.owner_id == "second"
+    finally:
+        original._dispatcher.shutdown(wait=True)
+        replacement._dispatcher.shutdown(wait=True)
