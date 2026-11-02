@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import importlib.util
+import sqlite3
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+_spec = importlib.util.spec_from_file_location(
+    "_preview_database", Path(__file__).resolve().parents[2] / "scripts" / "_preview_database.py"
+)
+assert _spec and _spec.loader
+preview = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(preview)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://localhost/database",
+        "sqlite://",
+        "sqlite:///:memory:",
+        "sqlite:///file::memory:?cache=shared&uri=true",
+        "sqlite:///file:shared?mode=memory&cache=shared&uri=true",
+    ],
+)
+def test_refuses_non_file_database(url: str, tmp_path: Path) -> None:
+    with pytest.raises(preview.PreviewDatabaseError, match="file-backed SQLite"):
+        preview._sqlite_path(url, tmp_path)
+
+
+def test_relative_url_does_not_create_source_directory(tmp_path: Path) -> None:
+    assert preview._sqlite_path("sqlite:///missing/history.db", tmp_path) == (
+        tmp_path / "missing" / "history.db"
+    )
+    assert not (tmp_path / "missing").exists()
+
+
+def test_snapshot_includes_committed_wal_and_preserves_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.db"
+    destination = tmp_path / "copy.db"
+    connection = sqlite3.connect(source)
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE history (value TEXT)")
+        connection.execute("INSERT INTO history VALUES ('committed')")
+        connection.commit()
+        assert preview.snapshot(source, destination)
+        with sqlite3.connect(destination) as copy:
+            assert copy.execute("SELECT value FROM history").fetchall() == [("committed",)]
+            copy.execute("INSERT INTO history VALUES ('preview')")
+        assert connection.execute("SELECT value FROM history").fetchall() == [("committed",)]
+    finally:
+        connection.close()
+
+
+def test_missing_source_does_not_create_database(tmp_path: Path) -> None:
+    destination = tmp_path / "copy.db"
+    assert not preview.snapshot(tmp_path / "missing.db", destination)
+    assert not destination.exists()
+
+
+def test_environment_selection_precedes_dotenv_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "prchef.yml"
+    config.write_text("defaults: {}\n", encoding="utf-8")
+    monkeypatch.setattr(preview, "resolve_global_config", lambda: config)
+    monkeypatch.setattr(
+        preview,
+        "Settings",
+        lambda: SimpleNamespace(database_url="postgresql://server/db", database_path=None),
+    )
+    monkeypatch.setenv("PRCHEF_DATABASE_PATH", "local/history.db")
+    monkeypatch.delenv("PRCHEF_DATABASE_URL", raising=False)
+    assert preview.resolve_source() == (config, tmp_path / "local" / "history.db")
+    assert not (tmp_path / "local").exists()
+
+
+def test_dotenv_server_url_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = tmp_path / "prchef.yml"
+    config.write_text("defaults: {}\n", encoding="utf-8")
+    monkeypatch.setattr(preview, "resolve_global_config", lambda: config)
+    monkeypatch.setattr(
+        preview,
+        "Settings",
+        lambda: SimpleNamespace(database_url="postgresql://server/db", database_path=None),
+    )
+    monkeypatch.delenv("PRCHEF_DATABASE_URL", raising=False)
+    monkeypatch.delenv("PRCHEF_DATABASE_PATH", raising=False)
+    with pytest.raises(preview.PreviewDatabaseError, match="file-backed SQLite"):
+        preview.resolve_source()
