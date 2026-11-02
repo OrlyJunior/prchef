@@ -96,7 +96,16 @@ def snapshot(source: Path, destination: Path) -> bool:
     """Copy committed SQLite state, including WAL contents; return False if absent."""
     if not source.exists():
         return False
-    with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as original:
-        with closing(sqlite3.connect(destination)) as copy:
-            original.backup(copy)
+    created = False
+    try:
+        # Never overwrite a pre-existing file, even if backup fails partway through.
+        with destination.open("xb"):
+            created = True
+        with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as original:
+            with closing(sqlite3.connect(destination)) as copy:
+                original.backup(copy)
+    except (OSError, sqlite3.Error) as exc:
+        if created:
+            destination.unlink(missing_ok=True)
+        raise PreviewDatabaseError(f"Cannot copy SQLite database {source}: {exc}") from exc
     return True

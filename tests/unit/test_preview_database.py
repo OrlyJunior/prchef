@@ -61,6 +61,30 @@ def test_missing_source_does_not_create_database(tmp_path: Path) -> None:
     assert not destination.exists()
 
 
+@pytest.mark.parametrize("kind", ["directory", "invalid"])
+def test_invalid_source_reports_error_and_removes_partial_copy(tmp_path: Path, kind: str) -> None:
+    source = tmp_path / "source"
+    if kind == "directory":
+        source.mkdir()
+    else:
+        source.write_text("not a sqlite database", encoding="utf-8")
+    destination = tmp_path / "copy.db"
+    with pytest.raises(preview.PreviewDatabaseError, match="Cannot copy SQLite database"):
+        preview.snapshot(source, destination)
+    assert not destination.exists()
+
+
+def test_snapshot_does_not_overwrite_existing_destination(tmp_path: Path) -> None:
+    source = tmp_path / "source.db"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE history (value TEXT)")
+    destination = tmp_path / "copy.db"
+    destination.write_bytes(b"preserve")
+    with pytest.raises(preview.PreviewDatabaseError, match="Cannot copy SQLite database"):
+        preview.snapshot(source, destination)
+    assert destination.read_bytes() == b"preserve"
+
+
 def test_environment_selection_precedes_dotenv_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -90,4 +114,38 @@ def test_dotenv_server_url_is_refused(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.delenv("PRCHEF_DATABASE_URL", raising=False)
     monkeypatch.delenv("PRCHEF_DATABASE_PATH", raising=False)
     with pytest.raises(preview.PreviewDatabaseError, match="file-backed SQLite"):
+        preview.resolve_source()
+
+
+def test_configured_database_and_legacy_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "prchef.yml"
+    monkeypatch.setattr(preview, "resolve_global_config", lambda: config)
+    monkeypatch.setattr(
+        preview, "Settings", lambda: SimpleNamespace(database_url=None, database_path=None)
+    )
+    monkeypatch.delenv("PRCHEF_DATABASE_URL", raising=False)
+    monkeypatch.delenv("PRCHEF_DATABASE_PATH", raising=False)
+    config.write_text(
+        "defaults:\n  persistence:\n    database_path: data/history.db\n", encoding="utf-8"
+    )
+    assert preview.resolve_source()[1] == tmp_path / "data" / "history.db"
+    config.write_text("defaults: {}\n", encoding="utf-8")
+    legacy = tmp_path / "prchef.db"
+    legacy.touch()
+    assert preview.resolve_source()[1] == legacy
+
+
+def test_conflicting_environment_overrides_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "prchef.yml"
+    monkeypatch.setattr(preview, "resolve_global_config", lambda: config)
+    monkeypatch.setattr(
+        preview, "Settings", lambda: SimpleNamespace(database_url=None, database_path=None)
+    )
+    monkeypatch.setenv("PRCHEF_DATABASE_URL", "sqlite:///history.db")
+    monkeypatch.setenv("PRCHEF_DATABASE_PATH", "other.db")
+    with pytest.raises(preview.PreviewDatabaseError, match="only one"):
         preview.resolve_source()
