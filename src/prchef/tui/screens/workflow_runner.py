@@ -2490,6 +2490,7 @@ class WorkflowRunnerScreen(Screen[None]):
         if not response:
             return
         self.query_one("#resume-workflow", Button).disabled = True
+        self._ownership_lost_execution_ids.discard(self._active_execution_id)
         self._finished_event_ids.discard(self._active_execution_id)
         self._human_input_dismissed = False
         self._clear_workflow_outcome()

@@ -9927,6 +9927,49 @@ def test_ownership_loss_warns_once_and_settles_local_controls(
     asyncio.run(drive())
 
 
+def test_local_response_after_ownership_loss_restores_live_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            execution_id = repository.execution.id
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id, WorkflowEventKind.DIAGNOSTIC,
+                payload={"kind": "EXECUTION_OWNERSHIP_LOST", "severity": "warning"},
+            ))
+            screen._ownership_lost_execution_ids.add("another-execution")
+            resume = Mock()
+            monkeypatch.setattr(screen, "_resume_workflow", resume)
+            screen.query_one("#human-response", TextArea).load_text("Continue with this answer")
+
+            screen._resume_active_workflow()
+
+            resume.assert_called_once_with(
+                execution_id, "Continue with this answer", screen._run_epoch,
+            )
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id, WorkflowEventKind.STAGE_STARTED,
+                stage=WorkflowStage.IMPLEMENT, step_status=StepStatus.RUNNING,
+            ))
+            assert WorkflowStage.IMPLEMENT in screen._active_timeline_stages
+            assert screen.query_one("#workflow-stop-actions", Horizontal).display
+            repository.execution.status = WorkflowStatus.RUNNING
+            detail = Mock(return_value=(repository.execution, []))
+            monkeypatch.setattr(controller, "execution_detail", detail)
+            screen._reconcile_active_execution()
+            detail.assert_called_once_with(execution_id)
+            assert "another-execution" in screen._ownership_lost_execution_ids
+
+    asyncio.run(drive())
+
+
 def test_controller_ownership_loss_settles_batch_with_active_returned_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
