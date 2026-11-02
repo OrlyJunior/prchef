@@ -10,7 +10,7 @@ It works with the coding-agent CLIs you already use (Codex CLI, Claude Code) and
 
 ## Status
 
-This is an early v0.1.0 release, designed for one user on a local machine. See the multiple-instance limits below.
+This is an early release (v0.1.x), designed for one user on a local machine. See the multiple-instance limits below.
 
 Known limitations:
 
