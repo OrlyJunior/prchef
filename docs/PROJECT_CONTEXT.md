@@ -25,11 +25,8 @@ tests and repository retrieval.
 - Dispatch and provider limits are process-local; SQLite is default and local Qdrant single-process.
   Retrieval, indexing and cleanup share per-store admission; servers stay concurrent. Workflows
   wait, screen actions cannot overtake, and shutdown waits for admitted index work.
-- Active admission atomically records an instance owner. Startup recovery uses database heartbeats
-  on one machine; live-owned work stays untouched. Recovery serializes with heartbeat, admission
-  and completion; shutdown interrupts only local ownership. Bounded liveness can expire stalled
-  owners. Legacy ownerless rows retain orphan recovery; close old versions before upgrading.
-  Interrupted work requires explicit resumption; retained-worktree process guards still apply.
+- Ownership uses bounded database heartbeats: admission and recovery serialize; live-owned work is
+  untouched, shutdown is local, and resumption is explicit and guarded by retained-worktree checks.
 - Configuration comes only from a global `prchef.yml` (`defaults` deep-merged with
   `repositories.<key>`). Repository-local configuration files are ignored. Discovery and
   persistence never depend on the current directory or a source checkout. Explicit CLI and

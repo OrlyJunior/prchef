@@ -17,35 +17,10 @@ Known limitations:
 - Work runs inside the app's process. Closing the app interrupts only that instance's active executions; on reopening, you can choose which interrupted executions to resume.
 - Resume checks retained worktrees for surviving processes on Windows, macOS and Linux, and leaves an execution interrupted until its worktree is idle.
 - SQLite is the default database, local Qdrant is single-process, and provider concurrency limits don't coordinate across processes.
+- Multiple-instance ownership covers one machine sharing one database. Each execution-producing instance records a heartbeat every **10 seconds**; an owner is considered stale when its heartbeat is more than **300 seconds** old. A live process stalled or unable to write heartbeats longer than that may be treated as gone. A second TUI leaves executions with a fresh owner unchanged and excludes them from resume choices.
+- Close old instances before upgrading; mixed old and new versions are unsupported. Older executions without owner information retain the previous recovery behavior.
 - Nothing is rolled back after a failure: a pushed branch or open pull request stays in place. Inspect the saved execution and its worktree before continuing.
 - If a push is refused after a commit, the commit remains in the retained worktree. Continuing from IMPLEMENT reruns the implementer instead of directly retrying the push; if it makes no new changes, continuation can fail before PUSH with `Implementation provider completed without changing files`.
-
-### Multiple instances and recovery
-
-On one machine sharing one database (default: local SQLite), each execution-producing
-instance records a random owner identity and persists a heartbeat every **10 seconds**.
-Startup leaves active executions unchanged when their owner has not ended and its last
-persisted heartbeat is **at most 300 seconds** old. Exactly 300 seconds remains live;
-future timestamps are conservatively live. This detection is the same on Windows,
-macOS and Linux and does not inspect OS processes. A second TUI explains which runs
-appear to belong to another instance and excludes them from the startup resume prompt.
-Quitting it counts and interrupts only its own work.
-
-This is bounded liveness: an instance suspended, stalled, or unable to persist heartbeats
-for more than five minutes may be treated as gone even if its process still exists.
-A crash with a recent heartbeat delays recovery until it expires. Recovery runs at
-startup, without a background recovery worker; reopen an instance after expiry if it
-started too early to offer the crashed execution. System clock changes can delay or
-accelerate expiry. Retained-worktree process checks still guard resume independently,
-because a subprocess can survive its TUI.
-
-**Close older instances before upgrading.** Legacy executions without ownership keep
-the existing orphan recovery behavior. Running old and new versions together is
-unsupported; protection applies to executions created by ownership-recording versions.
-Shared/networked databases across machines are out of scope. This does not add remote
-execution control, coordinate provider capacity across processes, or make local Qdrant
-safe for concurrent processes. See the [ownership specification](docs/execution_ownership.md)
-for transaction and lifecycle rules.
 
 ## Before you run it
 
@@ -323,6 +298,8 @@ We recommend adding a versioned [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.m
   its `--dry-run` previews retention decisions. Existing worktrees are never migrated automatically.
 
 ## Troubleshooting
+
+- **An execution is not offered for resume after a crash:** recovery runs only when an instance starts. Wait until more than 300 seconds have passed since the last heartbeat, then reopen the app. Clock changes can delay or accelerate expiry.
 
 - **`refusing to allow a GitHub App to create or update workflow ... without workflows permission`:** An HTTPS push using the implementer App can be refused when the task changes `.github/workflows` and the App lacks Workflows permission. SSH and pushes without an implementer App use ambient Git credentials, which may be authorized. Workflows permission is not requested by default; granting it lets the App change CI and release workflows. Grant it deliberately, or push the committed branch from the retained worktree with your own credentials using `git push --set-upstream origin <branch>`, then run `gh pr create`. If your push is refused for lack of the `workflow` scope, run `gh auth refresh -s workflow`.
 

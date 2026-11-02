@@ -13,6 +13,19 @@ logger = logging.getLogger(__name__)
 
 
 class ExecutionOwnerHeartbeat:
+    """Maintain one random owner UUID for an execution-producing instance.
+
+    Registration commits the first heartbeat before admitting work. Refreshes use
+    independent short sessions; failures are logged and retried. Shutdown stops
+    local work, joins the heartbeat, then interrupts owned active executions and
+    ends the owner in one transaction. Owner rows persist after shutdown or crash.
+
+    Admission assigns ownership atomically. SQLite reserves writes before recovery;
+    PostgreSQL uses a transaction advisory lock at READ COMMITTED. These locks
+    serialize recovery with admission, heartbeats and completion, and are never
+    held across external work. Ownerless legacy rows use orphan recovery.
+    """
+
     def __init__(self, repository: WorkflowRepository) -> None:
         self._repository = repository
         self.owner_id = str(uuid.uuid4())
