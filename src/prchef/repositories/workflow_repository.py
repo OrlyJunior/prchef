@@ -24,7 +24,10 @@ from prchef.models.repository_spec import RepositorySpec
 from prchef.models.validation_result import ValidationResult
 from prchef.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from prchef.models.workflow_execution import WorkflowExecution
-from prchef.models.workflow_interruption import WorkflowInterruptedError
+from prchef.models.workflow_interruption import (
+    ExecutionOwnershipLostError,
+    WorkflowInterruptedError,
+)
 from prchef.models.workflow_status import (
     ACTIVE_WORKFLOW_STATUSES,
     PolishOutcome,
@@ -173,6 +176,23 @@ class WorkflowRepository:
     def stop_session_writes(self) -> None:
         """Prevent in-flight workers from reviving rows during UI shutdown."""
         self._interrupting = True
+
+    def _assert_owned(self, entity: WorkflowExecutionEntity) -> None:
+        if self.owner_id is not None and entity.owner_id != self.owner_id:
+            raise ExecutionOwnershipLostError(
+                "Another prchef instance took over this execution; "
+                "this instance stopped working on it"
+            )
+
+    def assert_owned(self, execution_id: str) -> None:
+        """Read-only check for cooperative safe boundaries; writes check under the lock."""
+        if self.owner_id is None:
+            return
+        with self._sessions() as session:
+            entity = session.get(WorkflowExecutionEntity, execution_id)
+            if entity is None:
+                raise KeyError(f"Workflow execution not found: {execution_id}")
+            self._assert_owned(entity)
 
     def create_execution(
         self, task_id: str, task_source: str = "trello", *,
@@ -514,6 +534,8 @@ class WorkflowRepository:
                     skipped.append(entity.id)
                     continue
                 recovered.append(entity)
+                if not local_shutdown:
+                    entity.owner_id = None
                 entity.interrupted_from_status = entity.status
                 latest_step = max(entity.steps, key=lambda step: step.id, default=None)
                 if entity.resume_mode is None:
@@ -589,9 +611,11 @@ class WorkflowRepository:
     def reinterrupt(self, execution_id: str, message: str) -> WorkflowExecution:
         """Keep a failed recovery attempt retryable, unless cancellation won."""
         with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
             entity = session.get(WorkflowExecutionEntity, execution_id)
             if entity is None:
                 raise KeyError(f"Workflow execution not found: {execution_id}")
+            self._assert_owned(entity)
             if entity.cancellation_requested_at is not None:
                 entity.status = WorkflowStatus.CANCELLED.value
                 entity.finished_at = _utcnow()
@@ -803,6 +827,11 @@ class WorkflowRepository:
             requested_at=_utcnow(),
         )
         with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
+            execution = session.get(WorkflowExecutionEntity, execution_id)
+            if execution is None:
+                raise KeyError(f"Workflow execution not found: {execution_id}")
+            self._assert_owned(execution)
             session.add(entity)
         return self._interaction_to_domain(entity)
 
@@ -861,9 +890,12 @@ class WorkflowRepository:
             entity.error_message = None
             entity.finished_at = None
 
-        self._mutate(execution_id, mutate)
+        self._mutate(execution_id, mutate, require_ownership=False)
 
-    def queue_execution(self, execution_id: str) -> None:
+    def queue_execution(
+        self, execution_id: str, *, resume_mode: str | None = None,
+        resume_stage: WorkflowStage | None = None,
+    ) -> None:
         """Return a resumed or continued execution to the queued state.
 
         Resumes and continuations compete for the same bounded capacity as
@@ -884,8 +916,12 @@ class WorkflowRepository:
             entity.error_message = None
             entity.finished_at = None
             entity.cancellation_requested_at = None
+            if resume_mode is not None:
+                entity.resume_mode = resume_mode
+            if resume_stage is not None:
+                entity.resume_stage = resume_stage.value
 
-        self._mutate(execution_id, mutate)
+        self._mutate(execution_id, mutate, require_ownership=False)
 
     def list_human_interactions(self, execution_id: str) -> list[HumanInteraction]:
         with self._sessions() as session:
@@ -914,6 +950,10 @@ class WorkflowRepository:
             )
         with self._sessions() as session, session.begin():
             _lock_ownership_state(session)
+            entity = session.get(WorkflowExecutionEntity, execution_id)
+            if entity is None:
+                raise KeyError(f"Workflow execution not found: {execution_id}")
+            self._assert_owned(entity)
             result = cast(
                 CursorResult[Any],
                 session.execute(
@@ -931,8 +971,6 @@ class WorkflowRepository:
                     raise KeyError(f"Workflow execution not found: {execution_id}")
 
     def start_step(self, execution_id: str, stage: WorkflowStage) -> int:
-        if self._interrupting:
-            raise WorkflowInterruptedError("Application is closing")
         entity = WorkflowStepEntity(
             workflow_execution_id=execution_id,
             stage=stage.value,
@@ -940,6 +978,13 @@ class WorkflowRepository:
             started_at=_utcnow(),
         )
         with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
+            execution = session.get(WorkflowExecutionEntity, execution_id)
+            if execution is None:
+                raise KeyError(f"Workflow execution not found: {execution_id}")
+            self._assert_owned(execution)
+            if self._interrupting:
+                raise WorkflowInterruptedError("Application is closing")
             session.add(entity)
         if entity.id is None:
             raise RuntimeError("Workflow step id was not generated")
@@ -952,13 +997,16 @@ class WorkflowRepository:
         error_message: str | None = None,
     ) -> None:
         with self._sessions() as session, session.begin():
+            _lock_ownership_state(session)
             entity = session.get(WorkflowStepEntity, step_id)
             if entity is None:
                 raise KeyError(f"Workflow step not found: {step_id}")
+            execution = session.get(WorkflowExecutionEntity, entity.workflow_execution_id)
+            if execution is not None:
+                self._assert_owned(execution)
             entity.status = status.value
             entity.error_message = error_message
             entity.finished_at = _utcnow()
-            execution = session.get(WorkflowExecutionEntity, entity.workflow_execution_id)
             if execution is not None and execution.status == WorkflowStatus.INTERRUPTED.value:
                 entity.status = StepStatus.INTERRUPTED.value
                 return
@@ -1024,12 +1072,15 @@ class WorkflowRepository:
         self,
         execution_id: str,
         operation: Callable[[WorkflowExecutionEntity], None],
+        *, require_ownership: bool = True,
     ) -> None:
         with self._sessions() as session, session.begin():
             _lock_ownership_state(session)
             entity = session.get(WorkflowExecutionEntity, execution_id)
             if entity is None:
                 raise KeyError(f"Workflow execution not found: {execution_id}")
+            if require_ownership:
+                self._assert_owned(entity)
             if self._interrupting:
                 raise WorkflowInterruptedError("Application is closing")
             self._admission_owner(session)

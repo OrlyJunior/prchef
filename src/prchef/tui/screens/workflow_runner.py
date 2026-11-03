@@ -231,6 +231,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._run_epoch = 0
         self._reconciled_at: dict[str, datetime] = {}
         self._finished_event_ids: set[str] = set()
+        self._ownership_lost_execution_ids: set[str] = set()
         self._reconcile_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
@@ -1548,6 +1549,7 @@ class WorkflowRunnerScreen(Screen[None]):
             self._pending_events.clear()
             self._reconciled_at.clear()
             self._finished_event_ids.clear()
+            self._ownership_lost_execution_ids.clear()
         self._event_lines.clear()
         self._raw_event_lines.clear()
         self._live_diagnostics.clear()
@@ -1673,7 +1675,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 return
             if event.occurred_at <= self._reconciled_at.get(
                 event.execution_id, datetime.min.replace(tzinfo=UTC)
-            ):
+            ) and not self._is_ownership_loss(event):
                 return
             if is_index_progress(event):
                 self._pending_events = deque(
@@ -1700,11 +1702,39 @@ class WorkflowRunnerScreen(Screen[None]):
                 stale = event.occurred_at <= self._reconciled_at.get(
                     event.execution_id, datetime.min.replace(tzinfo=UTC)
                 )
-            if not stale:
+            if not stale or self._is_ownership_loss(event):
                 self._render_workflow_event(event)
         self.app.call_later(self._drain_workflow_events)
 
+    @staticmethod
+    def _is_ownership_loss(event: WorkflowEvent) -> bool:
+        return (
+            event.kind is WorkflowEventKind.DIAGNOSTIC
+            and (event.payload or {}).get("kind") == "EXECUTION_OWNERSHIP_LOST"
+        )
+
+    def _render_pending_ownership_losses(self) -> None:
+        with self._event_lock:
+            execution_ids = {
+                event.execution_id for event in self._pending_events
+                if self._is_ownership_loss(event)
+            }
+            pending = [
+                event for event in self._pending_events if event.execution_id in execution_ids
+            ]
+        for event in pending:
+            self._render_workflow_event(event)
+
     def _render_workflow_event(self, event: WorkflowEvent) -> None:
+        ownership_lost = self._is_ownership_loss(event)
+        if event.execution_id in self._ownership_lost_execution_ids and not ownership_lost:
+            return
+        if ownership_lost:
+            if event.execution_id in self._ownership_lost_execution_ids:
+                return
+            self._ownership_lost_execution_ids.add(event.execution_id)
+            self._finished_event_ids.add(event.execution_id)
+            self.notify("Another instance took over; work stopped here", severity="warning")
         if self._batch_running and self._batch_progress is not None:
             self._render_batch_event(event)
             return
@@ -1714,6 +1744,11 @@ class WorkflowRunnerScreen(Screen[None]):
         elif self._active_execution_id is None:
             self._active_execution_id = event.execution_id
         self._ensure_stop_controls_visible(event)
+        if (
+            ownership_lost
+            and event.execution_id == self._active_execution_id
+        ):
+            self._reset_active_workflow_controls()
         if (
             event.kind is WorkflowEventKind.WORKFLOW_FINISHED
             and event.execution_id == self._active_execution_id
@@ -2162,6 +2197,11 @@ class WorkflowRunnerScreen(Screen[None]):
     ) -> None:
         if epoch is not None and epoch != self._run_epoch:
             return
+        self._render_pending_ownership_losses()
+        if execution.id in self._ownership_lost_execution_ids:
+            self._reset_active_workflow_controls()
+            self._refresh_task_statuses()
+            return
         self._active_execution_id = execution.id
         self._finished_event_ids.add(execution.id)
         self._reconcile_active_execution()
@@ -2286,6 +2326,8 @@ class WorkflowRunnerScreen(Screen[None]):
         """Refresh the timeline and terminal controls from persisted execution state."""
 
         assert self._active_execution_id is not None
+        if self._active_execution_id in self._ownership_lost_execution_ids:
+            return
         try:
             execution, steps = self.controller.execution_detail(self._active_execution_id)
         except Exception:
@@ -2359,6 +2401,7 @@ class WorkflowRunnerScreen(Screen[None]):
     def _batch_finished(self, batch: WorkflowBatch | None, epoch: int | None = None) -> None:
         if epoch is not None and epoch != self._run_epoch:
             return
+        self._render_pending_ownership_losses()
         if batch is not None:
             with self._event_lock:
                 finished_at = datetime.now(UTC)
@@ -2385,6 +2428,14 @@ class WorkflowRunnerScreen(Screen[None]):
                 rows = None
             if rows is not None:
                 view = self.query_one("#batch-progress", BatchProgressView)
+                local_rows = {
+                    row.execution_id: row for row in self._batch_progress.rows()
+                } if self._batch_progress is not None else {}
+                rows = [
+                    local_rows.get(row.execution_id, row)
+                    if row.execution_id in self._ownership_lost_execution_ids else row
+                    for row in rows
+                ]
                 for row in rows:
                     view.update_row(row)
                 view.update_summary(summarize(rows))
@@ -2470,6 +2521,7 @@ class WorkflowRunnerScreen(Screen[None]):
         if not response:
             return
         self.query_one("#resume-workflow", Button).disabled = True
+        self._ownership_lost_execution_ids.discard(self._active_execution_id)
         self._finished_event_ids.discard(self._active_execution_id)
         self._human_input_dismissed = False
         self._clear_workflow_outcome()

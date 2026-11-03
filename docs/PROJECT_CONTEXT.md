@@ -26,7 +26,8 @@ tests and repository retrieval.
   Retrieval, indexing and cleanup share per-store admission; servers stay concurrent. Workflows
   wait, screen actions cannot overtake, and shutdown waits for admitted index work.
 - Ownership uses bounded database heartbeats: admission and recovery serialize; live-owned work is
-  untouched, shutdown is local, and resumption is explicit and guarded by retained-worktree checks.
+  untouched and shutdown is local. An instance that loses ownership cannot change the execution
+  and stops at the next safe boundary; explicit resumption checks retained worktrees.
 - Configuration comes only from a global `prchef.yml` (`defaults` deep-merged with
   `repositories.<key>`). Repository-local configuration files are ignored. Discovery and
   persistence never depend on the current directory or a source checkout. Explicit CLI and

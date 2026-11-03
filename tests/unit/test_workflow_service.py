@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -30,6 +31,7 @@ from prchef.models import (
 )
 from prchef.models.execution_diagnostic import DiagnosticCategory
 from prchef.models.workflow_event import WorkflowEventKind
+from prchef.models.workflow_interruption import ExecutionOwnershipLostError
 from prchef.providers.agent_provider import AgentNeedsHumanError
 from prchef.runtime_logging import log_review_summary, log_spec_summary
 from prchef.services.notifications import NotificationService
@@ -2115,3 +2117,63 @@ def test_retry_failure_preserves_previous_publication_error(workflow) -> None:
     assert prior_publication_failure(repository.list_diagnostics(failed.id)) == (
         "Previous PUSH failure: first push refused"
     )
+
+
+@pytest.mark.parametrize("publication", ["review", "polish_comment"])
+def test_publication_helpers_propagate_ownership_loss(workflow, publication: str) -> None:
+    service, repository, _, factory = workflow
+    execution = repository.create_execution("lost")
+    failure = ExecutionOwnershipLostError("taken over")
+    if publication == "review":
+        factory.github.review_error = failure
+        def publish() -> None:
+            service._actions._publish_review(
+                execution_id=execution.id,
+                execution_clients=SimpleNamespace(github=factory.github),
+                repository_slug="example/api", pull_request_number=42,
+                review=CodeReview(ReviewDecision.APPROVED),
+            )
+    else:
+        factory.github.comment_error = failure
+
+        def publish() -> None:
+            service._corrections._publish_polish_skip_comment(
+                execution_id=execution.id,
+                execution_clients=SimpleNamespace(github=factory.github),
+                pull_request_number=42, implementation=ImplementationResult(True),
+            )
+    with pytest.raises(ExecutionOwnershipLostError):
+        publish()
+    assert execution.error_message is None
+    assert repository.diagnostics == []
+
+
+@pytest.mark.parametrize("path", ["fresh", "interrupted", "response", "continuation", "planning"])
+def test_sequencer_admission_propagates_ownership_loss(workflow, path: str) -> None:
+    service, repository, trello, factory = workflow
+    execution = repository.create_execution("lost")
+    execution.resume_stage = WorkflowStage.IMPLEMENT
+    task = trello.get_card("lost")
+    config = service._config_loader.load(task)
+    clients = factory.create(config)
+    spec = RepositorySpec("context", "behavior")
+    interaction = repository.request_human_input(execution.id, WorkflowStage.IMPLEMENT, "Question?")
+    sequencer = service._sequencer
+    service._lifecycle._start_admitted = Mock(side_effect=ExecutionOwnershipLostError("taken over"))
+    service._lifecycle._finish = Mock()
+    repository.reinterrupt = Mock()
+    calls = {
+        "fresh": lambda: sequencer._execute_workflow(execution, "lost", None, {}, {}),
+        "interrupted": lambda: sequencer._execute_interrupted(execution),
+        "response": lambda: sequencer._execute_response(execution, interaction, "answer"),
+        "continuation": lambda: sequencer._execute_continuation(
+            execution.id, task, spec, config, clients, config.path, "branch", "feedback",
+        ),
+        "planning": lambda: sequencer._execute_planning_retry(
+            execution, task, config, clients, "feedback",
+        ),
+    }
+    with pytest.raises(ExecutionOwnershipLostError):
+        calls[path]()
+    service._lifecycle._finish.assert_not_called()
+    repository.reinterrupt.assert_not_called()

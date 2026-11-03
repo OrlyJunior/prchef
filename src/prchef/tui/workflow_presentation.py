@@ -192,6 +192,11 @@ def timeline_message(
         payload = event.payload or {}
         if payload.get("kind") == "ALREADY_COMMITTED":
             return "Work is already committed; validating retained work."
+        if payload.get("kind") == "EXECUTION_OWNERSHIP_LOST":
+            return (
+                "! Another prchef instance took over this execution; "
+                "this instance stopped working on it"
+            )
         if payload.get("kind") == "GITHUB_IDENTITIES":
             return github_identity_summary(
                 payload.get("planner") is True, payload.get("implementer") is True,

@@ -23,7 +23,7 @@ from prchef.models.workflow_status import WorkflowStage, WorkflowStatus
 from prchef.providers.agent_provider import AgentProvider
 from prchef.providers.concurrency import ProviderConcurrencyCoordinator
 from prchef.repositories.workflow_repository import WorkflowRepository
-from prchef.services.exceptions import WorkflowError
+from prchef.services.exceptions import ExecutionOwnershipLostError, WorkflowError
 from prchef.services.execution_dispatcher import ExecutionDispatcher, ExecutionHandle
 from prchef.services.implementation_service import ImplementationService
 from prchef.services.notifications import NotificationService
@@ -336,12 +336,18 @@ class WorkflowService:
                         message=result.error_message,
                     )
                 return result
+            except ExecutionOwnershipLostError:
+                self._stage_events._ownership_lost(execution_id)
+                return self._repository.get_execution(execution_id)
             finally:
                 self._runtimes.end(execution_id)
 
         def drop_job() -> WorkflowExecution:
             try:
                 return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, None)
+            except ExecutionOwnershipLostError:
+                self._stage_events._ownership_lost(execution_id)
+                return self._repository.get_execution(execution_id)
             finally:
                 self._runtimes.end(execution_id)
 
@@ -468,10 +474,7 @@ class WorkflowService:
                 {"kind": _MANUAL_CONTINUATION_DIAGNOSTIC_KIND, "feedback": feedback},
                 stage=WorkflowStage.GENERATE_SPEC,
             )
-            if isinstance(self._repository, WorkflowRepository):
-                self._repository.set_resume_mode(execution_id, "MANUAL_CONTINUATION")
-                self._repository.set_resume_stage(execution_id, stage)
-            self._queue_resumed(execution_id)
+            self._queue_resumed(execution_id, resume_stage=stage)
             return self._submit(
                 execution_id,
                 lambda: self._sequencer._execute_planning_retry(
@@ -513,10 +516,7 @@ class WorkflowService:
              "prior_error": execution.error_message},
             stage=stage,
         )
-        if isinstance(self._repository, WorkflowRepository):
-            self._repository.set_resume_mode(execution_id, "MANUAL_CONTINUATION")
-            self._repository.set_resume_stage(execution_id, stage)
-        self._queue_resumed(execution_id)
+        self._queue_resumed(execution_id, resume_stage=stage)
         spec = RepositorySpec(**execution.spec_snapshot)
         return self._submit(
             execution_id,
@@ -546,10 +546,17 @@ class WorkflowService:
             execution_id, feedback, event_listener=event_listener
         ).result()
 
-    def _queue_resumed(self, execution_id: str) -> None:
+    def _queue_resumed(
+        self, execution_id: str, *, resume_stage: WorkflowStage | None = None,
+    ) -> None:
         """Park a resumed or continued execution in the shared submission queue."""
 
-        self._repository.queue_execution(execution_id)
+        if isinstance(self._repository, WorkflowRepository):
+            self._repository.queue_execution(
+                execution_id, resume_mode="MANUAL_CONTINUATION", resume_stage=resume_stage,
+            )
+        else:
+            self._repository.queue_execution(execution_id)
         self._stage_events._emit(
             execution_id, WorkflowEventKind.STATUS_CHANGED, status=WorkflowStatus.PENDING
         )

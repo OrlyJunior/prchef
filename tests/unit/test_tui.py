@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import EllipsisType
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from rich.text import Text
@@ -9901,3 +9902,158 @@ def test_task_pagination_launches_selected_pages_in_source_order(tmp_path: Path)
             await wait_for_tui(pilot, lambda: len(service.calls) == 3 and not screen._batch_running)
             assert [call[0] for call in service.calls] == ["1", "51", "101"]
     asyncio.run(drive())
+
+
+@pytest.mark.parametrize("batch_run", [False, True])
+def test_ownership_loss_warns_once_and_settles_local_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, batch_run: bool,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    repository.execution.status = WorkflowStatus.RUNNING
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            notification = Mock()
+            monkeypatch.setattr(screen, "notify", notification)
+            if batch_run:
+                batch = WorkflowBatch(
+                    id="batch-loss", repository="example", task_source="github",
+                    items=(WorkflowBatchItem(0, "12", "Task"),),
+                )
+                screen._batch_running = True
+                screen._batch_created(batch, _batch_launch("12"))
+            screen._render_workflow_event(WorkflowEvent(
+                "execution-1", WorkflowEventKind.EXECUTION_CREATED,
+                status=WorkflowStatus.PENDING, payload={"batch_position": 0},
+            ))
+            warning = WorkflowEvent(
+                "execution-1", WorkflowEventKind.DIAGNOSTIC,
+                category=DiagnosticCategory.WORKFLOW_EVENT.value,
+                payload={"kind": "EXECUTION_OWNERSHIP_LOST", "severity": "warning"},
+            )
+            if not batch_run:
+                # A result callback can overtake queued diagnostics, even after a periodic
+                # refresh advanced the presentation watermark past the warning timestamp.
+                screen._reconciled_at["execution-1"] = datetime.now(UTC)
+                screen._on_workflow_event(warning)
+                screen._workflow_finished(repository.execution)
+            screen._render_workflow_event(warning)
+            screen._render_workflow_event(warning)
+            notification.assert_called_once_with(
+                "Another instance took over; work stopped here", severity="warning",
+            )
+            assert not screen.query_one("#workflow-stop-actions", Horizontal).display
+            assert not screen.query_one("#start-workflow", Button).disabled
+            if batch_run:
+                progress = screen._batch_progress
+                assert progress is not None
+                row = progress.rows()[0]
+                assert row.category == "INTERRUPTED"
+                assert not progress.reconcile_execution(0, repository.execution, [])
+                linked_batch = replace(batch, items=(
+                    WorkflowBatchItem(0, "12", "Task", "execution-1"),
+                ))
+                screen._batch_finished(linked_batch)
+                view = screen.query_one("#batch-progress", BatchProgressView)
+                assert view._rows[0].category == "INTERRUPTED"
+                lines = row.timeline
+            else:
+                screen._workflow_finished(repository.execution)
+                screen._reconcile_active_execution()
+                notification.assert_called_once()
+                lines = screen._event_lines
+            assert sum("Another prchef instance took over" in line for line in lines) == 1
+
+    asyncio.run(drive())
+
+
+def test_local_response_after_ownership_loss_restores_live_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, repository = _controller(tmp_path)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            execution_id = repository.execution.id
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id, WorkflowEventKind.DIAGNOSTIC,
+                payload={"kind": "EXECUTION_OWNERSHIP_LOST", "severity": "warning"},
+            ))
+            screen._ownership_lost_execution_ids.add("another-execution")
+            resume = Mock()
+            monkeypatch.setattr(screen, "_resume_workflow", resume)
+            screen.query_one("#human-response", TextArea).load_text("Continue with this answer")
+
+            screen._resume_active_workflow()
+
+            resume.assert_called_once_with(
+                execution_id, "Continue with this answer", screen._run_epoch,
+            )
+            screen._render_workflow_event(WorkflowEvent(
+                execution_id, WorkflowEventKind.STAGE_STARTED,
+                stage=WorkflowStage.IMPLEMENT, step_status=StepStatus.RUNNING,
+            ))
+            assert WorkflowStage.IMPLEMENT in screen._active_timeline_stages
+            assert screen.query_one("#workflow-stop-actions", Horizontal).display
+            repository.execution.status = WorkflowStatus.RUNNING
+            detail = Mock(return_value=(repository.execution, []))
+            monkeypatch.setattr(controller, "execution_detail", detail)
+            screen._reconcile_active_execution()
+            detail.assert_called_once_with(execution_id)
+            assert "another-execution" in screen._ownership_lost_execution_ids
+
+    asyncio.run(drive())
+
+
+def test_controller_ownership_loss_settles_batch_with_active_returned_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, service, repository = _controller(tmp_path)
+    provider = _TaskProvider()
+    provider.list_tasks = lambda limit=50: [
+        DevelopmentTask("12", "github", "Task", "", "https://example/12"),
+    ]
+    controller._task_provider_factory = lambda source, repository: provider
+    observed: list[_BatchRun] = []
+
+    def submit(*args: Any, event_listener: Callable[..., None], **kwargs: Any) -> _Handle:
+        observed.extend(controller._active_batches.values())
+        repository.execution.status = WorkflowStatus.RUNNING
+        event_listener(WorkflowEvent(
+            "execution-1", WorkflowEventKind.EXECUTION_CREATED, status=WorkflowStatus.PENDING,
+        ))
+        assert controller._active_services["execution-1"] is service
+        event_listener(WorkflowEvent(
+            "execution-1", WorkflowEventKind.DIAGNOSTIC,
+            payload={"kind": "EXECUTION_OWNERSHIP_LOST", "severity": "warning"},
+        ))
+        assert "execution-1" not in controller._active_services
+        return _Handle(repository.execution)
+
+    monkeypatch.setattr(service, "submit_execution", submit)
+    result: list[WorkflowBatch | None] = []
+    worker = threading.Thread(
+        target=lambda: result.append(controller.start_batch(_batch_launch("12"))), daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive(), "ownership loss left the batch waiting on the replacement owner"
+    assert result[0] is not None
+    run = observed[0]
+    # A late watcher cannot revive a locally settled item with the replacement owner's status.
+    controller._watch_batch_handle(run, 0, 0, _Handle(repository.execution))
+    assert run.statuses[0] is WorkflowStatus.INTERRUPTED
+    assert run.complete()
+    assert controller.cancel_workflow("execution-1")
+    assert repository.cancellation_requests == ["execution-1"]
+    assert service.cancellations == []
