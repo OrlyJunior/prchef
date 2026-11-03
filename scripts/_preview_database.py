@@ -12,10 +12,11 @@ from contextlib import closing
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import yaml
+from pydantic import ValidationError
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
-from prchef.config.database import _read_configured_database_location
 from prchef.config.project_config import resolve_global_config
 from prchef.config.settings import Settings
 from prchef.config.state import default_state_directory
@@ -23,6 +24,32 @@ from prchef.config.state import default_state_directory
 
 class PreviewDatabaseError(ValueError):
     """The selected database cannot safely be copied for a preview."""
+
+
+def _configured_database(config: Path) -> tuple[str | None, str | None]:
+    """Read the same global persistence keys as the normal resolver, without side effects."""
+    try:
+        raw = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise PreviewDatabaseError(
+            f"Cannot read persistence configuration {config}: {exc}"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise PreviewDatabaseError("Configuration root must be a mapping")
+    defaults = raw.get("defaults", {})
+    if not isinstance(defaults, dict):
+        raise PreviewDatabaseError("'defaults' must be a mapping")
+    persistence = defaults.get("persistence", {})
+    if persistence is None:
+        persistence = {}
+    if not isinstance(persistence, dict):
+        raise PreviewDatabaseError("'defaults.persistence' must be a mapping")
+    url = persistence.get("database_url", defaults.get("database_url"))
+    path = persistence.get("database_path", defaults.get("database_path"))
+    if url is not None and path is not None:
+        raise PreviewDatabaseError("Configure only one database URL or path.")
+    return (str(url).strip() if url is not None else None,
+            str(path).strip() if path is not None else None)
 
 
 def _path(value: str | Path, base: Path) -> Path:
@@ -65,7 +92,10 @@ def resolve_source() -> tuple[Path, Path]:
     """Resolve the selected global config and database without writing either."""
     config = resolve_global_config()
     base = config.parent
-    settings = Settings()
+    try:
+        settings = Settings()
+    except (ValidationError, ValueError, OSError) as exc:
+        raise PreviewDatabaseError(f"Cannot read preview database settings: {exc}") from exc
     env_url = os.environ.get("PRCHEF_DATABASE_URL", "").strip()
     env_path = os.environ.get("PRCHEF_DATABASE_PATH", "").strip()
     if env_url and env_path:
@@ -82,7 +112,7 @@ def resolve_source() -> tuple[Path, Path]:
         return config, _sqlite_path(settings.database_url, base)
     if settings.database_path:
         return config, _path(settings.database_path, base)
-    configured_url, configured_path = _read_configured_database_location(config)
+    configured_url, configured_path = _configured_database(config)
     if configured_url:
         return config, _sqlite_path(configured_url, base)
     if configured_path:
@@ -94,7 +124,7 @@ def resolve_source() -> tuple[Path, Path]:
 
 def snapshot(source: Path, destination: Path) -> bool:
     """Copy committed SQLite state, including WAL contents; return False if absent."""
-    if not source.exists():
+    if not source.exists() and not source.is_symlink():
         return False
     created = False
     try:

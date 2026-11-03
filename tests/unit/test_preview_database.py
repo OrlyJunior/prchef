@@ -61,6 +61,19 @@ def test_missing_source_does_not_create_database(tmp_path: Path) -> None:
     assert not destination.exists()
 
 
+def test_settings_validation_error_is_explained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preview, "resolve_global_config", lambda: tmp_path / "prchef.yml")
+
+    def invalid_settings() -> None:
+        raise ValueError("invalid dotenv")
+
+    monkeypatch.setattr(preview, "Settings", invalid_settings)
+    with pytest.raises(preview.PreviewDatabaseError, match="invalid dotenv"):
+        preview.resolve_source()
+
+
 @pytest.mark.parametrize("kind", ["directory", "invalid"])
 def test_invalid_source_reports_error_and_removes_partial_copy(tmp_path: Path, kind: str) -> None:
     source = tmp_path / "source"

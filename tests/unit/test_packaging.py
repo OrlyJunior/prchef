@@ -22,6 +22,15 @@ def test_packaging_exposes_the_standard_prchef_console_script() -> None:
     assert project["scripts"] == {"prchef": "prchef.cli.main:app"}
 
 
+def test_development_scripts_are_not_in_the_wheel_package() -> None:
+    pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    with pyproject_path.open("rb") as pyproject_file:
+        document = tomllib.load(pyproject_file)
+    assert document["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == [
+        "src/prchef"
+    ]
+
+
 def test_packaging_keeps_migrations_inside_the_prchef_package() -> None:
     package_root = Path(__file__).resolve().parents[2] / "src" / "prchef"
 
