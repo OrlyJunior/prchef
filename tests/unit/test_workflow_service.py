@@ -2068,6 +2068,40 @@ def test_retry_pr_creation_reconciles_existing_pr(workflow) -> None:
     assert factory.github.review_calls
 
 
+def test_retry_pr_creation_after_push_succeeds_without_repeating_push(workflow) -> None:
+    service, repository, _, factory = workflow
+    factory.github.error = RuntimeError("PR creation refused")
+    failed = service.run("retry-pr-creation")
+    assert failed.current_stage is WorkflowStage.CREATE_PR
+    assert factory.git.remote_head == factory.git.head_commit()
+    implement_count = repository.stage_changes.count(WorkflowStage.IMPLEMENT)
+    factory.github.error = None
+
+    result = service.continue_execution(failed.id, "Retry publishing")
+
+    assert result.status is WorkflowStatus.APPROVED
+    assert repository.stage_changes.count(WorkflowStage.IMPLEMENT) == implement_count
+    assert factory.git.commit_calls == 1
+    assert factory.git.push_calls == 1
+    assert factory.github.create_calls == 2
+    assert factory.github.review_calls
+
+
+def test_pr_retry_refuses_protected_branch_even_when_remote_matches(workflow) -> None:
+    service, _, _, factory = workflow
+    factory.github.error = RuntimeError("PR creation refused")
+    failed = service.run("retry-protected-pr")
+    assert failed.current_stage is WorkflowStage.CREATE_PR
+    assert factory.git.remote_head == factory.git.head_commit()
+    service._config_loader.config.repository.protected_branches.append(failed.working_branch)
+
+    with pytest.raises(GitClientError, match="protected branch"):
+        service.continue_execution(failed.id, "Retry publishing")
+
+    assert factory.git.push_calls == 1
+    assert factory.github.create_calls == 1
+
+
 def test_retry_failure_preserves_previous_publication_error(workflow) -> None:
     from prchef.tui.workflow_presentation import prior_publication_failure
 
