@@ -104,6 +104,7 @@ class _BatchRun:
     positions: dict[str, int] = field(default_factory=dict)
     statuses: dict[int, WorkflowStatus] = field(default_factory=dict)
     generations: dict[int, int] = field(default_factory=dict)
+    ownership_lost: set[tuple[int, int]] = field(default_factory=set)
     skipped: set[int] = field(default_factory=set)
     stopping: bool = False
     submissions_done: bool = False
@@ -987,6 +988,12 @@ class WorkflowController:
                 payload = event.payload or {}
                 if (
                     event.kind is WorkflowEventKind.DIAGNOSTIC
+                    and payload.get("kind") == "EXECUTION_OWNERSHIP_LOST"
+                ):
+                    run.ownership_lost.add((position, run.generations.get(position, 0)))
+                    run.statuses[position] = WorkflowStatus.INTERRUPTED
+                if (
+                    event.kind is WorkflowEventKind.DIAGNOSTIC
                     and payload.get("kind") == "PROVIDER_QUOTA_EXHAUSTED"
                     and isinstance(payload.get("provider"), str)
                 ):
@@ -1017,6 +1024,10 @@ class WorkflowController:
             status = WorkflowStatus.FAILED
         with run.condition:
             if run.generations.get(position, 0) != generation:
+                return
+            if (position, generation) in run.ownership_lost:
+                run.statuses[position] = WorkflowStatus.INTERRUPTED
+                run.condition.notify_all()
                 return
             # The handle has settled, so this generation will not report again.
             # A persisted status may refine the outcome (for example a
@@ -1058,6 +1069,9 @@ class WorkflowController:
             elif event.kind is WorkflowEventKind.WORKFLOW_FINISHED or (
                 event.kind is WorkflowEventKind.STATUS_CHANGED
                 and event.status is WorkflowStatus.INTERRUPTED
+            ) or (
+                event.kind is WorkflowEventKind.DIAGNOSTIC
+                and (event.payload or {}).get("kind") == "EXECUTION_OWNERSHIP_LOST"
             ):
                 self._active_services.pop(event.execution_id, None)
             self._notify_detail_listeners(event)

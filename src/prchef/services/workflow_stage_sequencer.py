@@ -39,7 +39,11 @@ from prchef.models.workflow_status import (
 from prchef.providers.agent_provider import AgentNeedsHumanError
 from prchef.repositories.workflow_repository import WorkflowRepository
 from prchef.runtime_logging import log_review_summary, log_spec_summary, summarize_text
-from prchef.services.exceptions import WorkflowCancelledError, WorkflowError
+from prchef.services.exceptions import (
+    ExecutionOwnershipLostError,
+    WorkflowCancelledError,
+    WorkflowError,
+)
 from prchef.services.implementation_service import ImplementationService
 from prchef.services.repository_context import (
     RepositoryContextRequest,
@@ -259,6 +263,8 @@ class StageSequencer:
 
         try:
             self._lifecycle._start_admitted(execution.id)
+        except ExecutionOwnershipLostError:
+            raise
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution.id, WorkflowStatus.CANCELLED, None)
         workspace_path: Path | None = None
@@ -406,9 +412,11 @@ class StageSequencer:
             )
 
             with self._events._step(execution.id, WorkflowStage.PUSH):
+                self._events._raise_if_cancellation_requested(execution.id)
                 execution_clients.git.push(working_branch, config.repository.protected_branches)
 
             with self._events._step(execution.id, WorkflowStage.CREATE_PR):
+                self._events._raise_if_cancellation_requested(execution.id)
                 pull_request = execution_clients.github.create_pull_request(
                     title=task.title,
                     body=StageValues._pull_request_body(
@@ -420,6 +428,7 @@ class StageSequencer:
                     head_branch=working_branch,
                 )
                 self._repository.record_pull_request(execution.id, pull_request)
+                self._events._raise_if_cancellation_requested(execution.id)
                 self._actions._assign_implementer(
                     execution_clients=execution_clients,
                     pull_request_number=pull_request.number,
@@ -529,6 +538,8 @@ class StageSequencer:
             return self._lifecycle._finish(execution.id, final_status, config)
         except WorkflowInterruptedError as exc:
             return self._repository.reinterrupt(execution.id, str(exc))
+        except ExecutionOwnershipLostError:
+            raise
         except WorkflowCancelledError:
             result = self._lifecycle._finish(execution.id, WorkflowStatus.CANCELLED, config)
             if workspace_path is not None:
@@ -803,6 +814,8 @@ class StageSequencer:
                 continuation_feedback=continuation_feedback,
                 force_polish=continuation_feedback is not None,
             )
+        except ExecutionOwnershipLostError:
+            raise
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution.id, WorkflowStatus.CANCELLED, None)
         except Exception as exc:
@@ -908,6 +921,7 @@ class StageSequencer:
             with self._events._step(execution.id, WorkflowStage.PUSH):
                 if execution_clients.git.remote_branch_commit(branch) != \
                         execution_clients.git.head_commit():
+                    self._events._raise_if_cancellation_requested(execution.id)
                     execution_clients.git.push(
                         branch, config.repository.protected_branches
                     )
@@ -1182,10 +1196,12 @@ class StageSequencer:
                         remote = execution_clients.git.remote_branch_commit(working_branch)
                         local = execution_clients.git.head_commit()
                         if remote != local:
+                            self._events._raise_if_cancellation_requested(execution_id)
                             execution_clients.git.push(
                                 working_branch, config.repository.protected_branches
                             )
                     else:
+                        self._events._raise_if_cancellation_requested(execution_id)
                         execution_clients.git.push(
                             working_branch, config.repository.protected_branches
                         )
@@ -1210,6 +1226,7 @@ class StageSequencer:
                 pull_request = PullRequest(**pull_request_snapshot)
             else:
                 with self._events._step(execution_id, WorkflowStage.CREATE_PR):
+                    self._events._raise_if_cancellation_requested(execution_id)
                     pull_request = execution_clients.github.create_pull_request(
                         title=task.title,
                         body=StageValues._pull_request_body(
@@ -1221,6 +1238,7 @@ class StageSequencer:
                         head_branch=working_branch,
                     )
                     self._repository.record_pull_request(execution_id, pull_request)
+                    self._events._raise_if_cancellation_requested(execution_id)
                     self._actions._assign_implementer(
                         execution_clients=execution_clients,
                         pull_request_number=pull_request.number,
@@ -1341,6 +1359,8 @@ class StageSequencer:
             return self._lifecycle._finish(execution_id, status, config)
         except WorkflowInterruptedError as exc:
             return self._repository.reinterrupt(execution_id, str(exc))
+        except ExecutionOwnershipLostError:
+            raise
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         except AgentNeedsHumanError as exc:
@@ -1365,6 +1385,8 @@ class StageSequencer:
         execution_id = execution.id
         try:
             self._lifecycle._start_admitted(execution_id)
+        except ExecutionOwnershipLostError:
+            raise
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, None)
         config: ProjectConfig | None = None
@@ -1423,6 +1445,8 @@ class StageSequencer:
             )
         except WorkflowInterruptedError as exc:
             return self._repository.reinterrupt(execution_id, str(exc))
+        except ExecutionOwnershipLostError:
+            raise
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         except AgentNeedsHumanError as exc:
@@ -1449,6 +1473,8 @@ class StageSequencer:
     ) -> WorkflowExecution:
         try:
             self._lifecycle._start_admitted(execution_id)
+        except ExecutionOwnershipLostError:
+            raise
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         self._record_github_identities(execution_id, config)
@@ -1479,6 +1505,8 @@ class StageSequencer:
         execution_id = execution.id
         try:
             self._lifecycle._start_admitted(execution_id)
+        except ExecutionOwnershipLostError:
+            raise
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         try:
@@ -1507,6 +1535,8 @@ class StageSequencer:
             )
         except WorkflowInterruptedError as exc:
             return self._repository.reinterrupt(execution_id, str(exc))
+        except ExecutionOwnershipLostError:
+            raise
         except WorkflowCancelledError:
             return self._lifecycle._finish(execution_id, WorkflowStatus.CANCELLED, config)
         except AgentNeedsHumanError as exc:

@@ -19,7 +19,7 @@ from prchef.models.workflow_interruption import WorkflowInterruptedError
 from prchef.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from prchef.repositories.workflow_repository import WorkflowRepository
 from prchef.runtime_logging import redact_payload, redact_text
-from prchef.services.exceptions import WorkflowCancelledError
+from prchef.services.exceptions import ExecutionOwnershipLostError, WorkflowCancelledError
 
 logger = logging.getLogger("prchef.services.workflow_service")
 
@@ -48,6 +48,8 @@ class ExecutionRuntime:
 
     listener: WorkflowEventListener | None = None
     active_stage: WorkflowStage | None = None
+    ownership_lost_stage: WorkflowStage | None = None
+    ownership_loss_reported: bool = False
 
 
 class ExecutionRuntimes:
@@ -109,6 +111,9 @@ class StageEvents:
         try:
             yield
             self._raise_if_cancellation_requested(execution_id)
+        except ExecutionOwnershipLostError:
+            runtime.ownership_lost_stage = stage
+            raise
         except WorkflowInterruptedError:
             self._repository.finish_step(step_id, StepStatus.INTERRUPTED)
             raise
@@ -145,7 +150,11 @@ class StageEvents:
             logger.error("[workflow] %s failed: %s", label, redact_text(str(exc)))
             raise
         else:
-            self._repository.finish_step(step_id, StepStatus.SUCCEEDED)
+            try:
+                self._repository.finish_step(step_id, StepStatus.SUCCEEDED)
+            except ExecutionOwnershipLostError:
+                runtime.ownership_lost_stage = stage
+                raise
             self._emit(
                 execution_id,
                 WorkflowEventKind.STAGE_FINISHED,
@@ -262,8 +271,27 @@ class StageEvents:
             logger.warning("[workflow] Event listener failed")
 
     def _raise_if_cancellation_requested(self, execution_id: str) -> None:
+        assert_owned = getattr(self._repository, "assert_owned", None)
+        if callable(assert_owned):
+            assert_owned(execution_id)
         if self._repository.cancellation_requested(execution_id):
             raise WorkflowCancelledError("Cancellation requested by user")
+
+    def _ownership_lost(self, execution_id: str) -> None:
+        runtime = self._runtimes.runtime(execution_id)
+        if runtime.ownership_loss_reported:
+            return
+        runtime.ownership_loss_reported = True
+        message = (
+            "Another prchef instance took over this execution; "
+            "this instance stopped working on it"
+        )
+        logger.warning("[workflow] %s: %s", execution_id, message)
+        self._record_diagnostic(
+            execution_id, DiagnosticCategory.WORKFLOW_EVENT,
+            {"kind": "EXECUTION_OWNERSHIP_LOST", "severity": "warning", "message": message},
+            stage=runtime.ownership_lost_stage or runtime.active_stage,
+        )
 
     def _active_stage_of(self, execution_id: str) -> WorkflowStage | None:
         runtime = self._runtimes.peek(execution_id)

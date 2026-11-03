@@ -11,7 +11,7 @@ from prchef.models.development_task import DevelopmentTask
 from prchef.models.workflow_status import ReviewDecision, WorkflowStage
 from prchef.repositories.workflow_repository import WorkflowRepository
 from prchef.runtime_logging import redact_text
-from prchef.services.exceptions import WorkflowError
+from prchef.services.exceptions import ExecutionOwnershipLostError, WorkflowError
 from prchef.services.review_service import format_pull_request_review
 from prchef.services.workflow_stage_events import StageEvents
 from prchef.services.workflow_stage_values import StageValues
@@ -60,6 +60,7 @@ class StageActions:
                     "Cannot verify whether the interrupted commit completed; "
                     "inspect the retained branch before retrying"
                 )
+            self._events._raise_if_cancellation_requested(execution_id)
             commit_sha = execution_clients.git.commit_all(
                 StageValues._commit_message(task),
                 working_branch,
@@ -116,12 +117,15 @@ class StageActions:
             ):
                 self._repository.finish_review_publication(execution_id)
                 return
+            self._events._raise_if_cancellation_requested(execution_id)
             execution_clients.github.submit_pull_request_review(
                 repository=repository_slug,
                 pull_request_number=pull_request_number,
                 event=event,
                 body=body,
             )
+        except ExecutionOwnershipLostError:
+            raise
         except Exception as exc:
             if reconcile:
                 raise WorkflowError(

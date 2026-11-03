@@ -367,6 +367,9 @@ def test_correction_policy_owns_review_retry_and_push_order(
     calls: list[Any] = []
 
     class Events:
+        def _raise_if_cancellation_requested(self, execution_id: str) -> None:
+            pass
+
         @contextmanager
         def _step(self, execution_id: str, stage: WorkflowStage) -> Any:
             calls.append(stage)
@@ -525,6 +528,9 @@ def test_stage_actions_commit_records_sha_inside_stage() -> None:
     calls: list[Any] = []
 
     class Events:
+        def _raise_if_cancellation_requested(self, execution_id: str) -> None:
+            pass
+
         @contextmanager
         def _step(self, execution_id: str, stage: WorkflowStage) -> Any:
             calls.append(stage)

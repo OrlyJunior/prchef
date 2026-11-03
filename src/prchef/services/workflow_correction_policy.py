@@ -17,7 +17,7 @@ from prchef.models.validation_result import ValidationCheck, ValidationResult
 from prchef.models.workflow_status import PolishOutcome, ReviewDecision, WorkflowStage
 from prchef.repositories.workflow_repository import WorkflowRepository
 from prchef.runtime_logging import redact_text
-from prchef.services.exceptions import WorkflowError
+from prchef.services.exceptions import ExecutionOwnershipLostError, WorkflowError
 from prchef.services.implementation_service import ImplementationService
 from prchef.services.validation_service import ValidationService
 from prchef.services.workflow_stage_actions import StageActions
@@ -147,6 +147,7 @@ class CorrectionPolicy:
                     execution_clients.git.remote_branch_commit(working_branch)
                     != execution_clients.git.head_commit()
                 ):
+                    self._events._raise_if_cancellation_requested(execution_id)
                     execution_clients.git.push(
                         working_branch, config.repository.protected_branches
                     )
@@ -363,6 +364,7 @@ class CorrectionPolicy:
         with self._events._step(execution_id, WorkflowStage.PUSH):
             if before_push is not None:
                 before_push()
+            self._events._raise_if_cancellation_requested(execution_id)
             execution_clients.git.push(working_branch, config.repository.protected_branches)
 
         self._repository.record_polish_outcome(execution_id, PolishOutcome.APPLIED)
@@ -439,10 +441,13 @@ class CorrectionPolicy:
         # publish a second timeline comment. Publication itself remains deliberately non-fatal.
         self._repository.record_polish_skip_comment_attempt(execution_id)
         try:
+            self._events._raise_if_cancellation_requested(execution_id)
             execution_clients.github.comment_pull_request(
                 pr_number=pull_request_number,
                 body=self._format_polish_skip_comment(implementation, fallback_reason),
             )
+        except ExecutionOwnershipLostError:
+            raise
         except Exception as exc:
             # A skip explanation is audit context, not a new review decision. Keep the existing
             # approval intact if GitHub is temporarily unavailable.

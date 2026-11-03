@@ -3,7 +3,8 @@
 Heartbeat timestamps are UTC wall-clock values; scheduling uses a monotonic wait.
 An unended owner is live through the threshold, including future timestamps.
 Backward clock jumps delay recovery and forward jumps can expire an owner early.
-A stalled live process can be recovered and later overlap its replacement.
+A recovered owner is fenced from execution writes and stops at the next safe boundary.
+External calls already in flight cannot be undone; checks and calls are not atomic.
 """
 
 HEARTBEAT_INTERVAL_SECONDS = 10
