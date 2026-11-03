@@ -162,3 +162,14 @@ def test_conflicting_environment_overrides_are_refused(
     monkeypatch.setenv("PRCHEF_DATABASE_PATH", "other.db")
     with pytest.raises(preview.PreviewDatabaseError, match="only one"):
         preview.resolve_source()
+
+
+def test_snapshot_source_path_with_spaces_and_hash(tmp_path: Path) -> None:
+    source = tmp_path / "history #1.db"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE history (value TEXT)")
+        connection.execute("INSERT INTO history VALUES ('committed')")
+    destination = tmp_path / "copy.db"
+    assert preview.snapshot(source, destination)
+    with sqlite3.connect(destination) as connection:
+        assert connection.execute("SELECT value FROM history").fetchall() == [("committed",)]
