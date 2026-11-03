@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import deque
 from datetime import UTC, datetime
 from threading import Lock
@@ -79,6 +80,7 @@ _PermissionMode = Literal["dontAsk", "acceptEdits", "auto"]
 _CONTROLLED_GENERATION_OPTIONS = ("temperature", "max_output_tokens")
 # Non-terminal states. All of them can still be stopped by the operator.
 _CANCELLABLE_STATUSES = ACTIVE_WORKFLOW_STATUSES
+logger = logging.getLogger(__name__)
 
 
 class StopWorkflowConfirmation(ModalScreen[bool]):
@@ -217,6 +219,7 @@ class WorkflowRunnerScreen(Screen[None]):
         self._task_context: tuple[str, str] | None = None
         self._suppressed_task_provider_change: tuple[str, str] | None = None
         self._active_execution_id: str | None = None
+        self._prior_publication_failures: dict[str, str | None] = {}
         self._outcome_visible = False
         self._human_input_dismissed = False
         self._batch_tasks: tuple[DevelopmentTask, ...] = ()
@@ -456,6 +459,8 @@ class WorkflowRunnerScreen(Screen[None]):
     def on_screen_resume(self) -> None:
         """Reload repository choices and reconcile execution state on return."""
 
+        # A continuation may have been submitted while this screen was hidden.
+        self._prior_publication_failures.clear()
         try:
             repositories = self.controller.repositories()
         except Exception as exc:
@@ -1778,16 +1783,23 @@ class WorkflowRunnerScreen(Screen[None]):
         ):
             self._event_lines.append(message)
 
-        try:
-            prior = prior_publication_failure(
-                self.controller.execution_diagnostics(event.execution_id)
-            )
-        except Exception:
-            prior = None
+        prior = self._prior_publication_failure(event.execution_id)
         lines = [line for line in self._event_lines if line]
         self.query_one("#workflow-events", Static).update(
             "\n".join(([prior] if prior else []) + lines[-9 if prior else -10:])
         )
+
+    def _prior_publication_failure(self, execution_id: str) -> str | None:
+        if execution_id not in self._prior_publication_failures:
+            try:
+                prior = prior_publication_failure(
+                    self.controller.execution_diagnostics(execution_id)
+                )
+            except Exception:
+                logger.exception("Could not load prior publication failure for %s", execution_id)
+                prior = None
+            self._prior_publication_failures[execution_id] = prior
+        return self._prior_publication_failures[execution_id]
 
     def _ensure_stop_controls_visible(self, event: WorkflowEvent) -> None:
         """Show the stop control as soon as cancellable work exists.
@@ -1892,6 +1904,9 @@ class WorkflowRunnerScreen(Screen[None]):
                     self.notify(f"Could not refresh batch task: {exc}", severity="error")
                 continue
             if progress.reconcile_execution(item.position, execution, steps):
+                progress.set_prior_publication_failure(
+                    item.position, self._prior_publication_failure(execution.id)
+                )
                 with self._event_lock:
                     self._reconciled_at[execution.id] = datetime.now(UTC)
                 eligible = False
@@ -2212,12 +2227,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 self.query_one("#outcome-continue", Button).display = True
             else:
                 message = "No continuation is available for this failure."
-            try:
-                prior = prior_publication_failure(
-                    self.controller.execution_diagnostics(execution.id)
-                )
-            except Exception:
-                prior = None
+            prior = self._prior_publication_failure(execution.id)
             if execution.error_message:
                 stage = f"{execution.current_stage.value}: " if prior else ""
                 message = f"{stage}{concise_error(execution.error_message)}\n{message}"
@@ -2316,10 +2326,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 and "waiting for human input" not in self._event_lines[index]
             ):
                 self._successful_timeline_stages[step.stage] = index
-        try:
-            prior = prior_publication_failure(self.controller.execution_diagnostics(execution.id))
-        except Exception:
-            prior = None
+        prior = self._prior_publication_failure(execution.id)
         excerpt = self._event_lines[-9:] if prior else self._event_lines[-10:]
         self.query_one("#workflow-events", Static).update(
             "\n".join(([prior] if prior else []) + excerpt)

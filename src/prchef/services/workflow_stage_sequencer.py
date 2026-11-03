@@ -1184,12 +1184,18 @@ class StageSequencer:
                         git = execution_clients.git
                         if retained.commit_sha:
                             git.verify_worktree_branch(working_branch, retained.commit_sha)
-                            reuse_committed = (
-                                git.remote_branch_commit(working_branch) != git.head_commit()
-                                and git.has_commits_ahead(
-                                    retained.base_commit or config.repository.base_branch
+                            try:
+                                remote_commit = git.remote_branch_commit(working_branch)
+                            except GitClientError:
+                                # Without remote evidence, keep the normal strict no-change rule.
+                                pass
+                            else:
+                                reuse_committed = (
+                                    remote_commit != git.head_commit()
+                                    and git.has_commits_ahead(
+                                        retained.base_commit or config.repository.base_branch
+                                    )
                                 )
-                            )
                         implementation = implementation_service.continue_implementation(
                             task, spec, continuation_feedback, workspace_path,
                             instructions_repository_path=config.path,

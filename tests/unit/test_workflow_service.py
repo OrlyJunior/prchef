@@ -2030,6 +2030,24 @@ def test_implementation_continuation_reuses_unpublished_commit(workflow) -> None
     assert factory.github.review_calls
 
 
+def test_implementation_continuation_without_remote_evidence_keeps_strict_no_change_rule(
+    workflow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _, factory = workflow
+    factory.git.push_error = RuntimeError("push refused")
+    failed = service.run("offline-implement")
+    failed.current_stage = WorkflowStage.IMPLEMENT
+    factory.git.changed_files_results = [[], []]
+
+    def unavailable(_branch: str) -> str | None:
+        raise GitClientError("remote unavailable")
+
+    monkeypatch.setattr(factory.git, "remote_branch_commit", unavailable)
+    result = service.continue_execution(failed.id, "Continue retained work")
+    assert result.status is WorkflowStatus.FAILED
+    assert "completed without changing files" in (result.error_message or "")
+
+
 def test_retry_pr_creation_reconciles_existing_pr(workflow) -> None:
     from prchef.models import PullRequest
 

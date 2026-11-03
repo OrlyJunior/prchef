@@ -456,7 +456,7 @@ class ExecutionDetailScreen(Screen[None]):
             role = "planner" if continuation_stage is WorkflowStage.GENERATE_SPEC else "implementer"
             self.query_one("#execution-continuation-title", Static).update(
                 (f"Retry {continuation_stage.value}: publish committed work "
-                 "in the existing worktree."
+                 "in the existing worktree. The note below is saved, not sent to an agent."
                  if continuation_stage in {WorkflowStage.PUSH, WorkflowStage.CREATE_PR} else
                  f"Instructions for the {role} (sent when you click Continue Execution).")
                 + (
