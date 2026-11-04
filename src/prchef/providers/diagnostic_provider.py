@@ -74,6 +74,18 @@ class DiagnosticAgentProvider:
                                         "provider": self._provider_config}),
                     )
                 raise
+        if result.warnings:
+            self._record(
+                DiagnosticCategory.WARNING,
+                self._role,
+                self._sanitize(
+                    {
+                        "operation": "agent_provider.execute",
+                        "warnings": list(result.warnings),
+                        "provider": self._provider_config,
+                    }
+                ),
+            )
         self._record(DiagnosticCategory.RESPONSE, self._role, self._response_payload(result))
         return result
 

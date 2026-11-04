@@ -37,6 +37,7 @@ class CodexAgentProvider:
             success=result.success,
             error_message=result.error_message,
             workspace_changes_may_exist=result.workspace_changes_may_exist,
+            warnings=tuple(getattr(result, "warnings", ())),
         )
 
 
