@@ -71,6 +71,33 @@ def test_context_size_warning_appears_in_live_and_persisted_batch_rows() -> None
     assert "12001 / 12000 characters" in row.timeline[-1]
 
 
+def test_prior_publication_failure_in_live_and_persisted_batch_rows() -> None:
+    execution = WorkflowExecution(
+        id="execution-1", status=WorkflowStatus.FAILED, current_stage=WorkflowStage.PUSH,
+        error_message="second refusal",
+    )
+    diagnostic = ExecutionDiagnostic(
+        execution_id=execution.id, category=DiagnosticCategory.WORKFLOW_EVENT,
+        stage=WorkflowStage.PUSH,
+        payload={"kind": "MANUAL_CONTINUATION", "prior_stage": "PUSH",
+                 "prior_error": "first refusal"},
+    )
+    controller = _Controller()
+    controller.executions[execution.id] = (execution, [])
+    controller.diagnostics[execution.id] = [diagnostic]
+    row = persisted_row(
+        WorkflowBatchItem(0, "task-0", "Task 0", execution.id),
+        controller,  # type: ignore[arg-type]
+    )
+    prior = "Previous PUSH failure: first refusal"
+    assert prior in row.timeline
+
+    progress = LiveBatchProgress(_batch(1))
+    assert progress.reconcile_execution(0, execution, [])
+    progress.set_prior_publication_failure(0, prior)
+    assert prior in progress.rows()[0].timeline
+
+
 def _batch(positions: int = 3) -> WorkflowBatch:
     return WorkflowBatch(
         id="batch-1",

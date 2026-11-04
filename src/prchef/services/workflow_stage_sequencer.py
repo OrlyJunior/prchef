@@ -704,6 +704,23 @@ class StageSequencer:
                 clients.git.at_path(workspace_path).verify_worktree_branch(branch, None)
             if execution.base_commit:
                 clients.git.at_path(workspace_path).ensure_merge_base(execution.base_commit)
+            if stage in {WorkflowStage.PUSH, WorkflowStage.CREATE_PR}:
+                git = clients.git.at_path(workspace_path)
+                if not execution.commit_sha:
+                    raise WorkflowError("Cannot retry publishing without a recorded commit")
+                git.verify_worktree_branch(branch, execution.commit_sha)
+                git.verify_publication_branch(branch, config.repository.protected_branches)
+                if git.changed_files():
+                    raise WorkflowError(
+                        "Cannot retry publishing with uncommitted changes; "
+                        "inspect the retained worktree"
+                    )
+                if not git.has_commits_ahead(
+                    execution.base_commit or config.repository.base_branch
+                ):
+                    raise WorkflowError(
+                        "Cannot retry publishing: no committed work is ahead of the base"
+                    )
             if execution.resume_mode in {
                 "VALIDATION_CORRECTION", "REVIEW_CORRECTION",
                 "REVIEW_VALIDATION_CORRECTION",
@@ -1146,6 +1163,30 @@ class StageSequencer:
             if restart_stage not in downstream:
                 raise WorkflowError(f"Cannot resume from {restart_stage.value}")
             offset = downstream[restart_stage]
+            publication_retry = restart_stage in {WorkflowStage.PUSH, WorkflowStage.CREATE_PR}
+            if publication_retry:
+                retained = self._repository.get_execution(execution_id)
+                git = execution_clients.git
+                git.verify_worktree_branch(working_branch, retained.commit_sha)
+                if not retained.commit_sha:
+                    raise WorkflowError("Cannot retry publishing without a recorded commit")
+                git.verify_publication_branch(working_branch, config.repository.protected_branches)
+                if git.changed_files():
+                    raise WorkflowError(
+                        "Cannot retry publishing with uncommitted changes; "
+                        "inspect the retained worktree"
+                    )
+                if not git.has_commits_ahead(retained.base_commit or config.repository.base_branch):
+                    raise WorkflowError(
+                        "Cannot retry publishing: no committed work is ahead of the base"
+                    )
+                if (restart_stage is WorkflowStage.CREATE_PR
+                        and git.remote_branch_commit(working_branch) != git.head_commit()):
+                    raise WorkflowError(
+                        "Cannot retry pull request creation: remote branch differs "
+                        "from retained HEAD"
+                    )
+            reuse_committed = False
             if offset <= 0:
                 with self._events._step(execution_id, WorkflowStage.IMPLEMENT):
                     if continuation_feedback is None:
@@ -1153,10 +1194,36 @@ class StageSequencer:
                             task, spec, workspace_path, instructions_repository_path=config.path
                         )
                     else:
+                        retained = self._repository.get_execution(execution_id)
+                        git = execution_clients.git
+                        if retained.commit_sha:
+                            git.verify_worktree_branch(working_branch, retained.commit_sha)
+                            try:
+                                remote_commit = git.remote_branch_commit(working_branch)
+                            except GitClientError:
+                                # Without remote evidence, keep the normal strict no-change rule.
+                                pass
+                            else:
+                                reuse_committed = (
+                                    remote_commit != git.head_commit()
+                                    and git.has_commits_ahead(
+                                        retained.base_commit or config.repository.base_branch
+                                    )
+                                )
                         implementation = implementation_service.continue_implementation(
                             task, spec, continuation_feedback, workspace_path,
                             instructions_repository_path=config.path,
+                            allow_no_changes=reuse_committed,
                         )
+                        if (implementation.success and not implementation.changed_files
+                                and reuse_committed):
+                            implementation.summary = (
+                                "Work is already committed. " + implementation.summary
+                            )
+                            self._events._record_diagnostic(
+                                execution_id, DiagnosticCategory.WORKFLOW_EVENT,
+                                {"kind": "ALREADY_COMMITTED"}, stage=WorkflowStage.IMPLEMENT,
+                            )
                     self._repository.record_implementation(execution_id, implementation)
                     if not implementation.success:
                         raise WorkflowError(
@@ -1180,7 +1247,7 @@ class StageSequencer:
             if offset <= 2:
                 self._actions._commit_changes(
                     execution_id, execution_clients, task, working_branch, config,
-                    reconcile=recovering,
+                    reconcile=recovering or reuse_committed,
                 )
             if offset <= 3:
                 with self._events._step(execution_id, WorkflowStage.PUSH):
@@ -1192,7 +1259,7 @@ class StageSequencer:
                         self._actions._assert_pull_request_open(
                             execution_clients, repository_slug, existing_pr.number
                         )
-                    if recovering:
+                    if recovering or publication_retry:
                         remote = execution_clients.git.remote_branch_commit(working_branch)
                         local = execution_clients.git.head_commit()
                         if remote != local:
@@ -1209,7 +1276,7 @@ class StageSequencer:
                 pull_request_snapshot = self._repository.get_execution(
                     execution_id
                 ).pull_request_snapshot
-            if recovering and not pull_request_snapshot:
+            if (recovering or publication_retry) and not pull_request_snapshot:
                 found = execution_clients.github.find_pull_request(
                     working_branch, config.repository.base_branch
                 )
@@ -1224,6 +1291,10 @@ class StageSequencer:
                     )
             if pull_request_snapshot:
                 pull_request = PullRequest(**pull_request_snapshot)
+                if publication_retry:
+                    self._actions._assert_pull_request_open(
+                        execution_clients, repository_slug, pull_request.number
+                    )
             else:
                 with self._events._step(execution_id, WorkflowStage.CREATE_PR):
                     self._events._raise_if_cancellation_requested(execution_id)
@@ -1470,6 +1541,8 @@ class StageSequencer:
         workspace_path: Path,
         working_branch: str,
         feedback: str,
+        *,
+        restart_stage: WorkflowStage = WorkflowStage.IMPLEMENT,
     ) -> WorkflowExecution:
         try:
             self._lifecycle._start_admitted(execution_id)
@@ -1490,8 +1563,9 @@ class StageSequencer:
             workspace_path,
             working_branch,
             repository_context_strategy,
-            continuation_feedback=feedback,
-            force_polish=True,
+            continuation_feedback=feedback if restart_stage is WorkflowStage.IMPLEMENT else None,
+            force_polish=restart_stage is WorkflowStage.IMPLEMENT,
+            restart_stage=restart_stage,
         )
 
     def _execute_planning_retry(

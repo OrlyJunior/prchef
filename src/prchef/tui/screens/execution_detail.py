@@ -330,6 +330,8 @@ class ExecutionDetailScreen(Screen[None]):
             )
             self.app.call_from_thread(self._reenable_continue_button)
             return
+        self._continuation_seeded = False
+        self._continuation_status = None
         self.app.call_from_thread(self._refresh_execution)
         if in_batch:
             self.app.call_from_thread(
@@ -453,7 +455,10 @@ class ExecutionDetailScreen(Screen[None]):
             feedback = self.query_one("#execution-continuation-feedback", TextArea)
             role = "planner" if continuation_stage is WorkflowStage.GENERATE_SPEC else "implementer"
             self.query_one("#execution-continuation-title", Static).update(
-                f"Instructions for the {role} (sent when you click Continue Execution)."
+                (f"Retry {continuation_stage.value}: publish committed work "
+                 "in the existing worktree. The note below is saved, not sent to an agent."
+                 if continuation_stage in {WorkflowStage.PUSH, WorkflowStage.CREATE_PR} else
+                 f"Instructions for the {role} (sent when you click Continue Execution).")
                 + (
                     " Work resumes in the existing worktree without repeating earlier steps."
                     if continuation_stage is WorkflowStage.IMPLEMENT else ""

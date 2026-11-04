@@ -279,3 +279,24 @@ def test_fetched_base_is_shared_by_planning_worktree_and_diff(
     assert git("status", "--porcelain", cwd=control) == original_status
     assert git("rev-parse", "HEAD", cwd=control) == original_head
 
+
+
+def test_commits_ahead_checks_real_git_history(tmp_path: Path) -> None:
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=tmp_path, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    (tmp_path / "file.txt").write_text("base", encoding="utf-8")
+    git("add", "file.txt")
+    git("commit", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    client = GitClient(CommandClient(), tmp_path)
+    assert not client.has_commits_ahead(base)
+    (tmp_path / "file.txt").write_text("changed", encoding="utf-8")
+    git("add", "file.txt")
+    git("commit", "-m", "change")
+    assert client.has_commits_ahead(base)

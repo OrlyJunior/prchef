@@ -32,6 +32,7 @@ from prchef.tui.workflow_presentation import (
     clear_index_progress,
     is_active_index_line,
     is_index_progress,
+    prior_publication_failure,
     step_timeline_lines,
     timeline_message,
     update_human_blocked_line,
@@ -149,6 +150,7 @@ class _LiveItem:
     stage_attempts: dict[WorkflowStage, int] = field(default_factory=dict)
     diagnostics: list[ExecutionDiagnostic] = field(default_factory=list)
     continuation_eligible: bool = False
+    prior_publication_failure: str | None = None
 
 
 def _live_status(item: _LiveItem) -> tuple[str, str]:
@@ -203,6 +205,9 @@ class LiveBatchProgress:
 
     def set_continuation_eligible(self, position: int, eligible: bool) -> None:
         self._items[position].continuation_eligible = eligible
+
+    def set_prior_publication_failure(self, position: int, prior: str | None) -> None:
+        self._items[position].prior_publication_failure = prior
 
     def held_count(self, provider: str) -> int:
         if provider not in self._required_providers:
@@ -311,6 +316,7 @@ class LiveBatchProgress:
             item.successful_stage_lines.clear()
             item.stage_attempts.clear()
             item.diagnostics.clear()
+            item.prior_publication_failure = None
         elif event.execution_id != item.execution_id:
             # A stale event for a position whose item has since been replaced.
             return None
@@ -510,7 +516,10 @@ class LiveBatchProgress:
                     stage_label=(
                         item.stage.value.replace("_", " ").title() if item.stage else ""
                     ),
-                    timeline=tuple(line for line in item.timeline if line),
+                    timeline=tuple(
+                        ([item.prior_publication_failure] if item.prior_publication_failure else [])
+                        + [line for line in item.timeline if line]
+                    ),
                 )
             )
         return rows
@@ -583,6 +592,9 @@ def persisted_row(
                 )
                 if message:
                     timeline.append(message)
+    prior = prior_publication_failure(diagnostics)
+    if prior:
+        timeline.insert(0, prior)
     return BatchRowView(
         position=item.position,
         task_id=item.task_id,

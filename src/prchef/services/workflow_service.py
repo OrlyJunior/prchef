@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 
 _MANUAL_CONTINUATION_DIAGNOSTIC_KIND = "MANUAL_CONTINUATION"
 _QUOTA_EXHAUSTED_DIAGNOSTIC_KIND = "PROVIDER_QUOTA_EXHAUSTED"
+_CORRECTION_RESUME_MODES = frozenset({
+    "VALIDATION_CORRECTION", "REVIEW_CORRECTION", "REVIEW_VALIDATION_CORRECTION", "POLISH",
+})
 
 
 def _latest_failure_was_quota(diagnostics: Sequence[ExecutionDiagnostic]) -> bool:
@@ -487,12 +490,31 @@ class WorkflowService:
         # Do this before changing status or queueing the implementer: a human
         # can safely correct a missing/moved worktree and try again.
         execution_clients.git.verify_worktree_branch(working_branch, execution.commit_sha)
+        if stage in {WorkflowStage.PUSH, WorkflowStage.CREATE_PR}:
+            if execution.resume_mode in _CORRECTION_RESUME_MODES:
+                raise WorkflowError(
+                    "Cannot safely retry this correction or polish publishing checkpoint; "
+                    "inspect the retained worktree and pull request"
+                )
+            git = execution_clients.git
+            git.verify_publication_branch(working_branch, config.repository.protected_branches)
+            if git.changed_files():
+                raise WorkflowError(
+                    "Cannot retry publishing with uncommitted changes; "
+                    "inspect the retained worktree"
+                )
+            if not git.has_commits_ahead(execution.base_commit or config.repository.base_branch):
+                raise WorkflowError(
+                    "Cannot retry publishing: no committed work is ahead of the base"
+                )
         self._runtimes.begin(execution_id, event_listener)
         self._stage_events._record_diagnostic(
             execution_id,
             DiagnosticCategory.WORKFLOW_EVENT,
-            {"kind": _MANUAL_CONTINUATION_DIAGNOSTIC_KIND, "feedback": feedback},
-            stage=WorkflowStage.IMPLEMENT,
+            {"kind": _MANUAL_CONTINUATION_DIAGNOSTIC_KIND, "feedback": feedback,
+             "prior_stage": execution.current_stage.value, "prior_status": execution.status.value,
+             "prior_error": execution.error_message},
+            stage=stage,
         )
         self._queue_resumed(execution_id, resume_stage=stage)
         spec = RepositorySpec(**execution.spec_snapshot)
@@ -507,6 +529,7 @@ class WorkflowService:
                 workspace_path,
                 working_branch,
                 feedback,
+                restart_stage=stage,
             ),
             admission_gate=admission_gate,
         )
@@ -555,6 +578,10 @@ class WorkflowService:
         if execution.status is not WorkflowStatus.FAILED:
             return None
         if execution.workspace_path is not None and execution.working_branch is not None:
+            if (execution.current_stage in {WorkflowStage.PUSH, WorkflowStage.CREATE_PR}
+                    and execution.commit_sha
+                    and execution.resume_mode not in _CORRECTION_RESUME_MODES):
+                return execution.current_stage
             return WorkflowStage.IMPLEMENT
         if execution.workspace_path is None and _latest_failure_was_quota(diagnostics()):
             return WorkflowStage.GENERATE_SPEC

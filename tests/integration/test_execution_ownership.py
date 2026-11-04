@@ -642,14 +642,19 @@ def test_dropped_job_that_lost_ownership_does_not_finish(
     assert not any(event.kind is WorkflowEventKind.WORKFLOW_FINISHED for event in events)
 
 
+@pytest.mark.parametrize("stage", [WorkflowStage.PUSH, WorkflowStage.CREATE_PR])
 def test_different_instance_can_continue_terminal_execution(
     repositories: tuple[WorkflowRepository, WorkflowRepository], tmp_path: Path,
+    stage: WorkflowStage,
 ) -> None:
     first, second = repositories
     first.register_owner("first")
     second.register_owner("second")
     factory = FakeClientFactory()
-    factory.github.error = RuntimeError("PR unavailable")
+    if stage is WorkflowStage.PUSH:
+        factory.git.push_error = RuntimeError("push unavailable")
+    else:
+        factory.github.error = RuntimeError("PR unavailable")
     original = WorkflowService(
         first, TrelloTaskProvider(FakeTrelloClient()), FakeConfigLoader(tmp_path), factory,
     )
@@ -659,10 +664,65 @@ def test_different_instance_can_continue_terminal_execution(
     try:
         failed = original.run("continue-elsewhere")
         assert failed.status is WorkflowStatus.FAILED
+        assert failed.current_stage is stage
+        factory.git.push_error = None
         factory.github.error = None
         continued = replacement.continue_execution(failed.id, "Retry publication")
         assert continued.status is WorkflowStatus.APPROVED
         assert continued.owner_id == "second"
+        assert continued.commit_sha == failed.commit_sha
+        assert factory.git.commit_calls == 1
+        assert factory.git.push_calls == (2 if stage is WorkflowStage.PUSH else 1)
+        assert factory.github.create_calls == (1 if stage is WorkflowStage.PUSH else 2)
     finally:
         original._dispatcher.shutdown(wait=True)
         replacement._dispatcher.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("stage", [WorkflowStage.PUSH, WorkflowStage.CREATE_PR])
+def test_publication_retry_stops_when_another_instance_takes_ownership(
+    repositories: tuple[WorkflowRepository, WorkflowRepository], clock: Clock,
+    tmp_path: Path, stage: WorkflowStage,
+) -> None:
+    first, second = repositories
+    first.register_owner("first")
+    factory = FakeClientFactory()
+    service = WorkflowService(
+        first, TrelloTaskProvider(FakeTrelloClient()), FakeConfigLoader(tmp_path), factory,
+    )
+    if stage is WorkflowStage.PUSH:
+        factory.git.push_error = RuntimeError("push unavailable")
+    else:
+        factory.github.error = RuntimeError("PR unavailable")
+    events: list[WorkflowEvent] = []
+    transferred: dict[str, Any] = {}
+
+    def observe(event: WorkflowEvent) -> None:
+        events.append(event)
+        if event.kind is WorkflowEventKind.STAGE_STARTED and event.stage is stage:
+            clock.now += timedelta(seconds=301)
+            assert [item.id for item in second.recover_interrupted()] == [event.execution_id]
+            second.register_owner("second")
+            transferred["execution"] = second.queue_interrupted(event.execution_id)
+            transferred["steps"] = second.list_steps(event.execution_id)
+
+    try:
+        failed = service.run("retry-takeover")
+        assert failed.status is WorkflowStatus.FAILED
+        assert failed.current_stage is stage
+        effects = (factory.git.commit_calls, factory.git.push_calls, factory.github.create_calls)
+        factory.git.push_error = None
+        factory.github.error = None
+        result = service.continue_execution(
+            failed.id, "Retry publication", event_listener=observe,
+        )
+        assert result == transferred["execution"] == second.get_execution(failed.id)
+        assert second.list_steps(failed.id) == transferred["steps"]
+        assert (factory.git.commit_calls, factory.git.push_calls,
+                factory.github.create_calls) == effects
+        assert not factory.github.review_calls
+        assert not any(event.kind is WorkflowEventKind.WORKFLOW_FINISHED for event in events)
+        assert len([event for event in events
+                    if (event.payload or {}).get("kind") == "EXECUTION_OWNERSHIP_LOST"]) == 1
+    finally:
+        service._dispatcher.shutdown(wait=True)

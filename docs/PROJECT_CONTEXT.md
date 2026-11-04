@@ -85,7 +85,7 @@ tests and repository retrieval.
   For Qdrant retrieval, cleanup removes a worktree's index points before its Git worktree;
   index deletion failure leaves the worktree available for retry.
 - Agents never commit, push, create PRs, or merge; prchef owns Git and GitHub. A
-  reported successful implementation with no changes is a failure.
+  reported successful initial implementation with no changes is a failure; a continuation may reuse verified unpublished commits.
 - Commit and push refuse protected branches; push is only `--set-upstream origin <branch>`. The
   worktree must share a merge base with the recorded base commit before every commit and review;
   review diffs compare that commit to HEAD. Legacy rows without a recorded commit retain the
@@ -109,7 +109,7 @@ tests and repository retrieval.
 - `NEEDS_HUMAN` records the blocking prompt and response. An answer resumes the same execution:
   planner answers rerun planning before workspace creation; review answers reuse the worktree,
   branch, PR, and snapshots. Eligible `CHANGES_REQUESTED` and failed executions with retained
-  workspace/branch can be continued from `IMPLEMENT`; an existing PR must still be open.
+  workspace/branch can be continued from `IMPLEMENT` or a verified publishing checkpoint; an existing PR must still be open.
 - Configuration errors and explicit human-needed errors end as `NEEDS_HUMAN`; everything else
   ends as `FAILED`.
 - `debug` never changes workflow artifacts; `execution_mutated: false` excludes saved-state

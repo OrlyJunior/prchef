@@ -97,6 +97,51 @@ from prchef.tui.widgets import (
 from tests.unit.tui_sync import settle_tui, wait_for_tui
 
 
+def test_runner_caches_prior_publication_failure_across_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = PrchefApp(controller)
+    calls: list[str] = []
+    diagnostics: list[ExecutionDiagnostic] = []
+
+    def read_diagnostics(execution_id: str) -> list[ExecutionDiagnostic]:
+        calls.append(execution_id)
+        return diagnostics
+
+    monkeypatch.setattr(controller, "execution_diagnostics", read_diagnostics)
+
+    async def drive() -> None:
+        async with application.run_test() as pilot:
+            application.push_screen(WorkflowRunnerScreen())
+            await settle_tui(pilot)
+            screen = application.screen
+            assert isinstance(screen, WorkflowRunnerScreen)
+            event = WorkflowEvent(
+                execution_id="execution-1", kind=WorkflowEventKind.DIAGNOSTIC,
+                stage=WorkflowStage.PUSH,
+                payload={"kind": "PROJECT_CONTEXT_TRUNCATED", "actual_chars": 12001,
+                         "cap_chars": 12000},
+            )
+            for _ in range(12):
+                screen._render_workflow_event(event)
+            assert calls == ["execution-1"]
+            diagnostics.append(ExecutionDiagnostic(
+                execution_id="execution-1", category=DiagnosticCategory.WORKFLOW_EVENT,
+                stage=WorkflowStage.PUSH,
+                payload={"kind": "MANUAL_CONTINUATION", "prior_stage": "PUSH",
+                         "prior_error": "push refused"},
+            ))
+            screen.on_screen_resume()
+            screen._render_workflow_event(event)
+            assert calls == ["execution-1", "execution-1"]
+            timeline = str(screen.query_one("#workflow-events", Static).renderable)
+            assert "Previous PUSH failure: push refused" in timeline
+            assert len(timeline.splitlines()) == 10
+
+    asyncio.run(drive())
+
+
 def test_single_task_context_warning_stays_in_timeline_and_detailed_logs(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     application = PrchefApp(controller)
