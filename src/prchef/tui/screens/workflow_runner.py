@@ -21,6 +21,7 @@ from prchef.config.project_config import AgentPresetConfig
 from prchef.models.agent import AgentRole
 from prchef.models.development_task import DevelopmentTask
 from prchef.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
+from prchef.models.task_execution_summary import TaskExecutionSummary
 from prchef.models.workflow_batch import WorkflowBatch
 from prchef.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from prchef.models.workflow_execution import WorkflowExecution
@@ -119,7 +120,7 @@ class FreshRunConfirmation(ModalScreen[tuple[str, ...] | None]):
 
     def __init__(
         self,
-        previous: tuple[tuple[DevelopmentTask, WorkflowExecution], ...],
+        previous: tuple[tuple[DevelopmentTask, WorkflowExecution | TaskExecutionSummary], ...],
         new_count: int,
     ) -> None:
         super().__init__()
@@ -144,7 +145,8 @@ class FreshRunConfirmation(ModalScreen[tuple[str, ...] | None]):
                     )
                 if any(
                     execution.status == WorkflowStatus.CHANGES_REQUESTED
-                    and (execution.pr_url or execution.pull_request_snapshot)
+                    and (execution.has_pull_request if isinstance(execution, TaskExecutionSummary)
+                         else bool(execution.pr_url or execution.pull_request_snapshot))
                     for _, execution in self.previous
                 ):
                     yield Static(
@@ -1382,6 +1384,13 @@ class WorkflowRunnerScreen(Screen[None]):
     # Completion refreshes must not supersede the batch/workflow worker calling them.
     @work(thread=True, exclusive=True, group="task-load")
     def _load_tasks(self, repository: str, provider: str, token: int) -> None:
+        try:
+            with self.controller.task_discovery(repository=repository, task_provider=provider):
+                self._load_task_catalog(repository, provider, token)
+        except Exception as exc:
+            self.app.call_from_thread(self._task_loading_failed, str(exc), token)
+
+    def _load_task_catalog(self, repository: str, provider: str, token: int) -> None:
         incomplete = ""
         try:
             tasks = self.controller.list_tasks(repository=repository, task_provider=provider)
@@ -1391,6 +1400,9 @@ class WorkflowRunnerScreen(Screen[None]):
         except Exception as exc:
             self.app.call_from_thread(self._task_loading_failed, str(exc), token)
             return
+        self.app.call_from_thread(
+            self._set_task_loading_phase, token, provider, "Loading execution history..."
+        )
         history: set[str] | None = None
         history_error = ""
         try:
@@ -1400,6 +1412,9 @@ class WorkflowRunnerScreen(Screen[None]):
         # Labels share the task request token, so a stale catalog is discarded
         # with its tasks. A failed lookup is reported rather than treated as
         # a provider without label support.
+        self.app.call_from_thread(
+            self._set_task_loading_phase, token, provider, "Loading GitHub label choices..."
+        )
         labels: tuple[str, ...] | None = None
         label_error = ""
         try:
@@ -1412,6 +1427,10 @@ class WorkflowRunnerScreen(Screen[None]):
             self._set_available_tasks, tasks, provider, token, labels, label_error,
             history, history_error, incomplete
         )
+
+    def _set_task_loading_phase(self, token: int, provider: str, message: str) -> None:
+        if token == self._task_load_token and provider == "github":
+            self.query_one("#task-hint", Static).update(message)
 
     def _set_available_tasks(
         self,
@@ -1468,7 +1487,7 @@ class WorkflowRunnerScreen(Screen[None]):
 
     def _set_page_status(
         self, repository: str, provider: str, token: int, generation: int,
-        executions: dict[str, WorkflowExecution], error: str,
+        executions: dict[str, WorkflowExecution | TaskExecutionSummary], error: str,
     ) -> None:
         selector = self.query_one("#task-selector", TaskSelector)
         if (token != self._task_load_token

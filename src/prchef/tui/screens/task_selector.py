@@ -14,6 +14,7 @@ from textual.message import Message
 from textual.widgets import Button, Checkbox, SelectionList, Static
 
 from prchef.models.development_task import DevelopmentTask
+from prchef.models.task_execution_summary import TaskExecutionSummary
 from prchef.models.workflow_execution import WorkflowExecution
 from prchef.models.workflow_status import WorkflowStatus, can_start_fresh_run
 from prchef.tui.widgets import PrchefSelect
@@ -33,7 +34,7 @@ _MAX_LABELS_WIDTH = 28
 _MAX_STATUS_WIDTH = 32
 
 
-def _execution_status(execution: WorkflowExecution) -> str:
+def _execution_status(execution: WorkflowExecution | TaskExecutionSummary) -> str:
     if execution.status is WorkflowStatus.INTERRUPTED:
         return f"INTERRUPTED: {(execution.resume_stage or execution.current_stage).value}"
     return execution.status.value
@@ -258,8 +259,9 @@ class TaskSelector(Vertical):
         self._render_generation = 0
         self._load_page_status = False
         self._status_pending = False
+        self._hint = Text()
         self._incomplete = False
-        self._executions: dict[str, WorkflowExecution] = {}
+        self._executions: dict[str, WorkflowExecution | TaskExecutionSummary] = {}
         self._checkbox_tasks: dict[str, str] = {}
         self._selected: set[str] = set()
         self._provider = ""
@@ -299,7 +301,7 @@ class TaskSelector(Vertical):
         return tuple(task for task in self._tasks if task.id in self._selected)
 
     @property
-    def selected_previous_executions(self) -> dict[str, WorkflowExecution]:
+    def selected_previous_executions(self) -> dict[str, WorkflowExecution | TaskExecutionSummary]:
         return {
             task.id: self._executions[task.id]
             for task in self._tasks
@@ -358,7 +360,7 @@ class TaskSelector(Vertical):
         tasks: Iterable[DevelopmentTask],
         *,
         provider: str,
-        executions: Mapping[str, WorkflowExecution] | None = None,
+        executions: Mapping[str, WorkflowExecution | TaskExecutionSummary] | None = None,
         labels: Sequence[str] | None = None,
         label_error: str = "",
         history: set[str] | None = None,
@@ -425,11 +427,12 @@ class TaskSelector(Vertical):
         self._status_pending = self._load_page_status and bool(self.page_tasks)
         self._render_page()
         self._sync_pagination()
+        self._update_hint()
         if self._status_pending:
             self.post_message(self.PageChanged(self._page_generation, self.page_tasks))
 
     def set_page_executions(
-        self, generation: int, executions: Mapping[str, WorkflowExecution],
+        self, generation: int, executions: Mapping[str, WorkflowExecution | TaskExecutionSummary],
         *, lookup_failed: bool = False,
     ) -> None:
         if generation != self._page_generation:
@@ -469,11 +472,14 @@ class TaskSelector(Vertical):
         # Page status changes affect select-all eligibility; do not rescan the catalog.
         if changed or history_changed:
             self._sync_header_and_hint()
+        self._update_hint()
         if changed:
             self.post_message(self.SelectionChanged(self.selected_task_ids))
 
     @staticmethod
-    def _row_label(task: DevelopmentTask, execution: WorkflowExecution | None) -> Text:
+    def _row_label(
+        task: DevelopmentTask, execution: WorkflowExecution | TaskExecutionSummary | None,
+    ) -> Text:
         labels = _labels_of(task)
         suffix = f" [{labels}]" if labels else ""
         if execution is not None:
@@ -808,7 +814,7 @@ class TaskSelector(Vertical):
         if not self._tasks and not self._incomplete:
             selected += f" No open {self._provider} tasks were returned."
         if not self._label_filter:
-            self.query_one("#task-hint", Static).update(selected)
+            self._update_hint(selected)
             return
         labels = " + ".join(self._label_filter)
         if visible:
@@ -826,9 +832,15 @@ class TaskSelector(Vertical):
             if hidden_count
             else ""
         )
-        self.query_one("#task-hint", Static).update(
-            Text(f"{showing} {selected}{hidden}")
-        )
+        self._update_hint(Text(f"{showing} {selected}{hidden}"))
+
+    def _update_hint(self, message: str | Text | None = None) -> None:
+        if message is not None:
+            self._hint = Text(message) if isinstance(message, str) else message
+        hint = self._hint.copy()
+        if self._provider == "github" and self._status_pending:
+            hint.append(" Checking execution availability for this page...")
+        self.query_one("#task-hint", Static).update(hint)
 
     @staticmethod
     def _set_checkbox_value_silently(checkbox: Checkbox, value: bool) -> None:

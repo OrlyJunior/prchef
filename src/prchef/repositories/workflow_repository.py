@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any, cast
 
-from sqlalchemy import case, or_, select, text, update
+from sqlalchemy import case, func, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -21,6 +21,7 @@ from prchef.models.human_interaction import HumanInteraction
 from prchef.models.implementation_result import ImplementationResult
 from prchef.models.pull_request import PullRequest
 from prchef.models.repository_spec import RepositorySpec
+from prchef.models.task_execution_summary import TaskExecutionSummary
 from prchef.models.validation_result import ValidationResult
 from prchef.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from prchef.models.workflow_execution import WorkflowExecution
@@ -364,6 +365,48 @@ class WorkflowRepository:
                     ),
                 )
             ).all())
+
+    def task_execution_summaries(
+        self,
+        task_source: str,
+        task_ids: list[str],
+        repository: str,
+        repository_aliases: Sequence[str] = (),
+    ) -> dict[str, TaskExecutionSummary]:
+        """Read one latest-run projection per task in a single launcher query.
+
+        Rank within the same identity scope as admission, before projecting
+        results. No ORM entities, relationships or unrelated snapshots are loaded.
+        """
+        if not task_ids:
+            return {}
+        references = _repository_references(repository, repository_aliases)
+        execution = WorkflowExecutionEntity
+        ranked = select(
+            execution.id, execution.task_id, execution.status,
+            execution.current_stage, execution.resume_stage, execution.pr_url,
+            execution.pull_request_snapshot_json.label("pull_request_snapshot"),
+            func.row_number().over(
+                partition_by=execution.task_id,
+                order_by=(execution.created_at.desc(), execution.id.desc()),
+            ).label("position"),
+        ).where(
+            execution.task_source == task_source,
+            execution.task_id.in_(task_ids),
+            or_(execution.repository_ref.in_(references), execution.repository.in_(references)),
+        ).subquery()
+        with self._sessions() as session:
+            rows = session.execute(select(ranked).where(ranked.c.position == 1)).all()
+            return {
+                row.task_id: TaskExecutionSummary(
+                    id=row.id,
+                    status=WorkflowStatus(row.status),
+                    current_stage=WorkflowStage(row.current_stage),
+                    resume_stage=WorkflowStage(row.resume_stage) if row.resume_stage else None,
+                    has_pull_request=bool(row.pr_url or _load(row.pull_request_snapshot)),
+                )
+                for row in rows
+            }
 
     def executions_for_tasks(
         self,
