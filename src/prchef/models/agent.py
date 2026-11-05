@@ -50,3 +50,5 @@ class AgentResult:
     workspace_changes_may_exist: bool = False
     execution: AgentExecutionReference | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    # Non-fatal provider notices, such as transport reconnects, recorded as warnings.
+    warnings: tuple[str, ...] = ()

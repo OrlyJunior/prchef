@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
@@ -9,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from prchef.clients.command_client import CommandClient
+from prchef.clients.command_client import CommandClient, CommandResult
 from prchef.models.implementation_result import ImplementationResult
 from prchef.runtime_logging import format_duration, summarize_text
 
@@ -29,10 +30,14 @@ class _StructuredFailure:
 @dataclass(slots=True)
 class CodexImplementationResult(ImplementationResult):
     metadata: dict[str, int] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
 
 _TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
                  "output_tokens", "reasoning_output_tokens")
+# Codex reports transport reconnects and retries as ``error`` events even when
+# the turn later completes, e.g. "Reconnecting... 2/5 (...)".
+_RETRY_NOTICE = re.compile(r"^(?:reconnecting|retrying)\b|\bretrying\s+\d+/\d+", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +49,8 @@ class _CodexExecutionSignals:
     final_message: str | None = None
     terminal_failure: _StructuredFailure | None = None
     sandbox_denial: _StructuredFailure | None = None
+    notices: tuple[str, ...] = ()
+    structured_events: bool = False
 
 
 class CodexClient:
@@ -143,9 +150,9 @@ class CodexClient:
                 raise
             signals = self._structured_execution_signals(result.stdout)
             summary = self._summary(output_file, result.stdout, signals)
-            failure = signals.sandbox_denial or (
-                signals.terminal_failure if result.success else None
-            )
+            for notice in signals.notices:
+                logger.warning("[codex] Notice: %s", summarize_text(notice, limit=320))
+            failure = signals.sandbox_denial or signals.terminal_failure
             error_message = (
                 self._structured_failure_message(
                     failure,
@@ -155,6 +162,29 @@ class CodexClient:
                 if failure is not None
                 else None
             )
+            # A nonzero exit only flags the workspace for a sandbox denial, as before.
+            workspace_changes_may_exist = failure is not None and (
+                result.success or failure is signals.sandbox_denial
+            )
+            if (
+                result.success
+                and failure is None
+                and signals.notices
+                and not (
+                    signals.turn_completed
+                    and self._has_valid_final_message(output_file, signals, output_schema)
+                )
+            ):
+                # Notices are informational only once Codex completes the turn
+                # with a usable answer; otherwise they are all we know.
+                error_message = (
+                    "Codex did not complete the turn with a valid final message "
+                    f"(exit {result.exit_code}; last notice: "
+                    f"{summarize_text(signals.notices[-1], limit=320)})"
+                )
+                workspace_changes_may_exist = True
+            elif not result.success and failure is None:
+                error_message = self._unstructured_failure_message(result, signals)
             logger.debug(
                 "[codex] Structured events: file_changes=%s failed_commands=%s terminal=%s",
                 signals.file_change_count,
@@ -165,30 +195,25 @@ class CodexClient:
                 if signals.turn_completed
                 else "unknown",
             )
-            if result.success and failure is None:
+            succeeded = result.success and error_message is None
+            if succeeded:
                 logger.info("[codex] Completed in %s", format_duration(result.duration_seconds))
-            elif failure is not None:
+            elif failure is not None or result.success:
                 logger.error("[codex] %s", error_message)
             else:
-                detail = summarize_text(result.stderr or result.stdout)
                 logger.error(
                     "[codex] Failed (exit %s, %s): %s",
                     result.exit_code,
                     format_duration(result.duration_seconds),
-                    detail or "no output",
+                    summarize_text(error_message) or "no output",
                 )
             return CodexImplementationResult(
                 metadata=signals.usage,
-                success=result.success and failure is None,
+                warnings=list(signals.notices),
+                success=succeeded,
                 summary=summary,
-                error_message=None
-                if result.success and failure is None
-                else (
-                    error_message
-                    or summarize_text(result.stderr or result.stdout, limit=2_000)
-                    or "Codex failed"
-                ),
-                workspace_changes_may_exist=failure is not None,
+                error_message=None if succeeded else (error_message or "Codex failed"),
+                workspace_changes_may_exist=workspace_changes_may_exist,
             )
 
     @staticmethod
@@ -200,7 +225,10 @@ class CodexClient:
         turn_completed = False
         latest_final_message: str | None = None
         terminal_failure: _StructuredFailure | None = None
+        turn_failure: _StructuredFailure | None = None
         sandbox_denial: _StructuredFailure | None = None
+        notices: list[str] = []
+        structured_events = False
 
         for line in stdout.splitlines():
             try:
@@ -211,6 +239,7 @@ class CodexClient:
                 continue
 
             event_type = CodexClient._string_field(event, "type")
+            structured_events = structured_events or event_type is not None
             if event_type == "turn.completed":
                 turn_completed = True
                 reported = event.get("usage")
@@ -235,6 +264,17 @@ class CodexClient:
                 latest_final_message = final_message
             if event_type == "item.failed" and item_type == "command_execution":
                 failed_command_count += 1
+            # Completed ``error`` items are non-fatal notices, such as a transport fallback.
+            if event_type == "item.completed" and item_type == "error" and item_status is None:
+                notice = CodexClient._string_field(item_mapping, "message")
+                if notice is not None:
+                    notices.append(notice)
+                continue
+            if event_type == "error":
+                notice = CodexClient._string_field(event, "message")
+                if notice is not None and _RETRY_NOTICE.search(notice):
+                    notices.append(notice)
+                    continue
 
             failure_payload: Mapping[str, object] | None = None
             if event_type in {"error", "turn.failed"}:
@@ -247,7 +287,9 @@ class CodexClient:
             failure = CodexClient._structured_failure(event_type or "unknown", failure_payload)
             if CodexClient._is_structured_sandbox_denial(failure):
                 sandbox_denial = sandbox_denial or failure
-            if event_type in {"error", "turn.failed"}:
+            if event_type == "turn.failed":
+                turn_failure = turn_failure or failure
+            elif event_type == "error":
                 terminal_failure = terminal_failure or failure
 
         return _CodexExecutionSignals(
@@ -256,8 +298,11 @@ class CodexClient:
             failed_command_count=failed_command_count,
             turn_completed=turn_completed,
             final_message=latest_final_message,
-            terminal_failure=terminal_failure,
+            # ``turn.failed`` is the terminal outcome; earlier errors only lead up to it.
+            terminal_failure=turn_failure or terminal_failure,
             sandbox_denial=sandbox_denial,
+            notices=tuple(notices),
+            structured_events=structured_events,
         )
 
     @staticmethod
@@ -269,6 +314,36 @@ class CodexClient:
         if signals.final_message is not None:
             return signals.final_message
         return summarize_text(stdout, limit=2_000)
+
+    @staticmethod
+    def _has_valid_final_message(
+        output_file: Path,
+        signals: _CodexExecutionSignals,
+        output_schema: Mapping[str, Any] | None,
+    ) -> bool:
+        message = signals.final_message
+        if output_file.exists():
+            message = output_file.read_text(encoding="utf-8", errors="replace").strip() or None
+        if message is None:
+            return False
+        if output_schema is None:
+            return True
+        try:
+            return isinstance(json.loads(message), dict)
+        except json.JSONDecodeError:
+            return False
+
+    @staticmethod
+    def _unstructured_failure_message(
+        result: CommandResult, signals: _CodexExecutionSignals
+    ) -> str | None:
+        if result.stderr.strip() or not signals.structured_events:
+            return summarize_text(result.stderr or result.stdout, limit=2_000) or None
+        # The JSONL stream stays in the detailed logs; report only how it ended.
+        message = f"Codex exited with code {result.exit_code} without a terminal failure event"
+        if signals.notices:
+            message += f" (last notice: {summarize_text(signals.notices[-1], limit=320)})"
+        return message
 
     @staticmethod
     def _structured_failure(

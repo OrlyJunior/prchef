@@ -15,6 +15,7 @@ class DiagnosticCategory(StrEnum):
     REQUEST = "REQUEST"
     RESPONSE = "RESPONSE"
     VALIDATION = "VALIDATION"
+    WARNING = "WARNING"
     ERROR = "ERROR"
     WORKFLOW_EVENT = "WORKFLOW_EVENT"
 
