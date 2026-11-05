@@ -377,6 +377,7 @@ class WorkflowRepository:
 
         Rank within the same identity scope as admission, before projecting
         results. No ORM entities, relationships or unrelated snapshots are loaded.
+        SQLite deployments require 3.25+ for the window function below.
         """
         if not task_ids:
             return {}

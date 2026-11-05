@@ -9745,6 +9745,11 @@ def test_task_pagination_failed_refresh_reenables_preserved_pending_rows(tmp_pat
             assert selector._status_pending
             assert all(row.disabled for _, row in selector._rows)
             selector.set_tasks_loading(provider="github", preserve_selection=True)
+            assert not selector._status_pending
+            selector._update_hint()
+            assert str(screen.query_one("#task-hint", Static).renderable) == (
+                "Loading available github tasks..."
+            )
             selector.set_error("Offline.")
             await settle_tui(pilot)
             assert not selector._status_pending
@@ -9764,6 +9769,15 @@ def test_task_pagination_failed_refresh_reenables_preserved_pending_rows(tmp_pat
             await settle_tui(pilot)
             assert selector.selected_task_ids == ("1",)
             assert str(screen.query_one("#task-error").renderable) == ""
+
+            selector._present_page()
+            assert selector._status_pending
+            selector.clear_tasks()
+            assert not selector._status_pending
+            selector._update_hint()
+            assert str(screen.query_one("#task-hint", Static).renderable) == (
+                "Choose a provider and load tasks to browse it."
+            )
 
     asyncio.run(drive())
 

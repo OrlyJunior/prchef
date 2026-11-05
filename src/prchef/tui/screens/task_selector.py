@@ -698,6 +698,7 @@ class TaskSelector(Vertical):
         )
 
     def clear_tasks(self) -> None:
+        self._status_pending = False
         self._tasks = []
         self._positions.clear()
         self._history = set()
@@ -724,7 +725,7 @@ class TaskSelector(Vertical):
         header.disabled = True
         self.query_one("#refresh-tasks", Button).disabled = False
         self.query_one("#task-error", Static).update("")
-        self.query_one("#task-hint", Static).update(
+        self._update_hint(
             "Choose a provider and load tasks to browse it."
         )
         self.post_message(self.SelectionChanged(()))
@@ -737,9 +738,10 @@ class TaskSelector(Vertical):
         if not preserve_selection:
             self.clear_tasks()
         self._page_generation += 1
+        self._status_pending = False
         self._provider = provider
         self.query_one("#refresh-tasks", Button).disabled = True
-        self.query_one("#task-hint", Static).update(f"Loading available {provider} tasks...")
+        self._update_hint(f"Loading available {provider} tasks...")
 
     def set_error(self, message: str) -> None:
         """Display a task-loading failure without interrupting the launcher."""
