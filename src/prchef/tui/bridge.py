@@ -7,7 +7,9 @@ import os
 import stat
 import tempfile
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import EllipsisType
@@ -28,6 +30,7 @@ from prchef.models.agent import AgentRole
 from prchef.models.development_task import DevelopmentTask
 from prchef.models.execution_diagnostic import ExecutionDiagnostic
 from prchef.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
+from prchef.models.task_execution_summary import TaskExecutionSummary
 from prchef.models.workflow_batch import WorkflowBatch
 from prchef.models.workflow_event import (
     WorkflowEvent,
@@ -165,6 +168,9 @@ class WorkflowController:
         self._config_loader = config_loader
         self._client_factory = client_factory
         self._task_provider_factory = task_provider_factory
+        self._discovery_provider: ContextVar[tuple[str, str, TaskProvider] | None] = ContextVar(
+            "task_discovery_provider", default=None,
+        )
         self._verbose = verbose
         self._workflow_service_factory = workflow_service_factory
         # Process-scoped so every execution the UI starts, resumes, or
@@ -700,10 +706,33 @@ class WorkflowController:
             planner_app=planner_app,
         )
 
+    @contextmanager
+    def task_discovery(self, *, repository: str, task_provider: str) -> Iterator[None]:
+        """Share one GitHub adapter/token within a load, never across launches.
+
+        Context-local state isolates overlapping task workers and is reset on
+        failure as well as success. Other sources retain their existing path.
+        """
+        if task_provider != "github":
+            yield
+            return
+        provider = self._task_provider_factory(task_provider, repository)
+        token = self._discovery_provider.set((task_provider, repository, provider))
+        try:
+            yield
+        finally:
+            self._discovery_provider.reset(token)
+
+    def _provider_for_discovery(self, task_provider: str, repository: str) -> TaskProvider:
+        active = self._discovery_provider.get()
+        if active is not None and active[:2] == (task_provider, repository):
+            return active[2]
+        return self._task_provider_factory(task_provider, repository)
+
     def list_tasks(
         self, *, repository: str, task_provider: str, limit: int | None = None
     ) -> list[DevelopmentTask]:
-        provider = self._task_provider_factory(task_provider, repository)
+        provider = self._provider_for_discovery(task_provider, repository)
         return provider.list_tasks() if limit is None else provider.list_tasks(limit=limit)
 
     def list_task_labels(
@@ -716,7 +745,7 @@ class WorkflowController:
         launcher offers no label filter. Lookup failures propagate.
         """
 
-        provider = self._task_provider_factory(task_provider, repository)
+        provider = self._provider_for_discovery(task_provider, repository)
         if not isinstance(provider, LabelCatalogProvider):
             return None
         return tuple(provider.list_labels())
@@ -1273,10 +1302,15 @@ class WorkflowController:
         repository: str,
         task_provider: str,
         tasks: list[DevelopmentTask],
-    ) -> dict[str, WorkflowExecution]:
-        return self._executions_for_tasks(
+    ) -> dict[str, WorkflowExecution | TaskExecutionSummary]:
+        if task_provider == "github" and isinstance(self._repository, WorkflowRepository):
+            aliases = self._config_loader.repository_identity_aliases(repository)
+            return dict(self._repository.task_execution_summaries(
+                task_provider, [task.id for task in tasks], repository, repository_aliases=aliases
+            ))
+        return dict(self._executions_for_tasks(
             task_provider, [task.id for task in tasks], repository
-        )
+        ))
 
     def _executions_for_tasks(
         self, task_provider: str, task_ids: list[str], repository: str

@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
 from unittest.mock import Mock, call
@@ -27,6 +27,8 @@ from prchef.models import (
     WorkflowStage,
     WorkflowStatus,
 )
+from prchef.models.workflow_status import can_start_fresh_run
+from prchef.repositories.orm_models import HumanInteractionEntity, WorkflowExecutionEntity
 from prchef.repositories.workflow_repository import (
     WorkflowRepository,
     _lock_fresh_run_admission,
@@ -936,6 +938,118 @@ def test_executions_for_tasks_returns_latest_in_the_selected_repository(
     matches = repository.executions_for_tasks("github", ["12"], "example")
 
     assert matches["12"].id == newer.id
+
+
+def test_launcher_summaries_use_one_select_independent_of_task_and_history_count(
+    tmp_path: Path,
+) -> None:
+    from prchef.tui.bridge import WorkflowController
+
+    _migrated_repository(tmp_path, "launcher.db")
+    engine = build_engine(f"sqlite:///{(tmp_path / 'launcher.db').as_posix()}")
+    sessions = build_session_factory(engine)
+    repository = WorkflowRepository(sessions)
+    loader = Mock(spec=ProjectConfigLoader)
+    loader.repository_identity_aliases.return_value = ("legacy-path",)
+    controller = WorkflowController(
+        workflow_repository=repository, config_loader=loader, client_factory=Mock(),
+        task_provider_factory=Mock(), repository_index_clients=Mock(),
+    )
+    now = datetime(2026, 10, 30, tzinfo=UTC)
+    statuses = list(WorkflowStatus)
+    with sessions() as session, session.begin():
+        for number in range(50):
+            for suffix, created in [("old", now - timedelta(days=1)), ("a", now), ("z", now)]:
+                entity = WorkflowExecutionEntity(
+                    id=f"{number}-{suffix}", task_source="github", task_id=str(number),
+                    trello_card_id="", repository_ref="example" if number % 2 else "",
+                    repository="legacy-path" if number % 2 == 0 else "",
+                    status=statuses[number % len(statuses)].value,
+                    current_stage=WorkflowStage.IMPLEMENT.value,
+                    resume_stage=WorkflowStage.REVIEW.value,
+                    created_at=created, updated_at=created,
+                    task_snapshot_json='{"description": "task snapshot"}',
+                    spec_snapshot_json='{"plan": "spec snapshot"}',
+                    pull_request_snapshot_json='{"url": "https://example/pr/1"}',
+                )
+                if number % 2:
+                    entity.human_interactions = [HumanInteractionEntity(
+                        requesting_stage=WorkflowStage.REVIEW.value, prompt="Question?",
+                        requested_at=now,
+                    )]
+                session.add(entity)
+        # Newer rows outside the repository/source scope must not win the rank.
+        for source, ref in [("trello", "example"), ("github", "elsewhere")]:
+            session.add(WorkflowExecutionEntity(
+                id=f"isolated-{source}", task_source=source, task_id="0", trello_card_id="",
+                repository_ref=ref, status=WorkflowStatus.APPROVED.value,
+                current_stage=WorkflowStage.COMPLETED.value,
+                created_at=now + timedelta(days=1), updated_at=now,
+            ))
+    statements: list[str] = []
+
+    def observe(*args: object) -> None:
+        statement = str(args[2])
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        assert repository.task_execution_summaries("github", [], "example") == {}
+        assert statements == []
+        for count in (1, 9, 50):
+            statements.clear()
+            result = controller.task_execution_status(
+                "example", "github", [
+                    DevelopmentTask(task_id, "github", "Task", "", "")
+                    for task_id in [*(str(n) for n in range(count)), "absent"]
+                ],
+            )
+            assert len(statements) == 1
+            assert "human_interactions" not in statements[0]
+            assert "task_snapshot_json" not in statements[0]
+            assert "spec_snapshot_json" not in statements[0]
+            assert set(result) == {str(n) for n in range(count)}
+            for number in range(count):
+                summary = result[str(number)]
+                status = statuses[number % len(statuses)]
+                assert summary.id == f"{number}-z"
+                assert summary.status is status
+                assert summary.current_stage is WorkflowStage.IMPLEMENT
+                assert summary.resume_stage is WorkflowStage.REVIEW
+                assert summary.has_pull_request is True
+                assert can_start_fresh_run(summary.status) is (status in {
+                    WorkflowStatus.FAILED, WorkflowStatus.CANCELLED,
+                    WorkflowStatus.CHANGES_REQUESTED, WorkflowStatus.NEEDS_HUMAN,
+                })
+        statements.clear()
+        assert repository.task_execution_summaries("github", ["absent"], "example") == {}
+        assert len(statements) == 1
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+        engine.dispose()
+
+
+@pytest.mark.parametrize("snapshot,pr_url,expected", [
+    (None, None, False), ("{}", None, False), ('{"url": "https://example/pr"}', None, True),
+    (None, "https://example/pr", True),
+])
+def test_launcher_summaries_retain_changes_requested_pr_presence(
+    tmp_path: Path, snapshot: str | None, pr_url: str | None, expected: bool,
+) -> None:
+    repository = _migrated_repository(tmp_path, "launcher-pr.db")
+    execution = repository.create_execution("12", "github")
+    repository.record_submission_repository(execution.id, "example")
+    repository.update_status(execution.id, WorkflowStatus.CHANGES_REQUESTED)
+    engine = build_engine(f"sqlite:///{(tmp_path / 'launcher-pr.db').as_posix()}")
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE workflow_executions SET pull_request_snapshot_json=:snapshot, pr_url=:url"
+        ), {"snapshot": snapshot, "url": pr_url})
+    engine.dispose()
+    assert repository.task_execution_summaries("github", ["12"], "example")[
+        "12"
+    ].has_pull_request is expected
 
 
 @pytest.mark.parametrize(

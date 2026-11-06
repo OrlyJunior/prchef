@@ -45,11 +45,13 @@ from prchef.models.development_task import DevelopmentTask
 from prchef.models.execution_diagnostic import DiagnosticCategory, ExecutionDiagnostic
 from prchef.models.human_interaction import HumanInteraction
 from prchef.models.repository_context import IndexLifecycleState, RepositoryIndexStatus
+from prchef.models.task_execution_summary import TaskExecutionSummary
 from prchef.models.workflow_batch import WorkflowBatch, WorkflowBatchItem
 from prchef.models.workflow_event import WorkflowEvent, WorkflowEventKind
 from prchef.models.workflow_execution import WorkflowExecution
 from prchef.models.workflow_status import StepStatus, WorkflowStage, WorkflowStatus
 from prchef.models.workflow_step import WorkflowStep
+from prchef.repositories.workflow_repository import WorkflowRepository
 from prchef.services.qdrant_repository_context import RepositoryIndexOperationError
 from prchef.tui.app import PrchefApp
 from prchef.tui.batch_progress import BatchRowView, persisted_row
@@ -9374,6 +9376,198 @@ def _pagination_tasks(count: int = 125) -> list[DevelopmentTask]:
     ) for number in range(1, count + 1)]
 
 
+def test_github_launcher_routes_page_status_to_summaries_only(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    repository = Mock(spec=WorkflowRepository)
+    loader = Mock(spec=ProjectConfigLoader)
+    loader.repository_identity_aliases.return_value = ("legacy-path",)
+    controller._repository = repository
+    controller._config_loader = loader
+    summaries = {"1": TaskExecutionSummary(
+        "latest", WorkflowStatus.NEEDS_HUMAN, WorkflowStage.GENERATE_SPEC, None, False,
+    )}
+    repository.task_execution_summaries.return_value = summaries
+
+    assert controller.task_execution_status("example", "github", _pagination_tasks(50)) == summaries
+    repository.task_execution_summaries.assert_called_once_with(
+        "github", [str(n) for n in range(1, 51)], "example", repository_aliases=("legacy-path",),
+    )
+    repository.executions_for_tasks.assert_not_called()
+    repository.get_execution.assert_not_called()
+
+    repository.executions_for_tasks.return_value = {}
+    assert controller.task_execution_status("example", "trello", []) == {}
+    repository.executions_for_tasks.assert_called_once_with(
+        "trello", [], "example", repository_aliases=("legacy-path",),
+    )
+
+
+def test_github_discovery_reuses_one_provider_and_discards_it_after_each_load(
+    tmp_path: Path,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    created: list[_LabelledTaskProvider] = []
+
+    def factory(source: str, repository: str) -> _LabelledTaskProvider:
+        provider = _LabelledTaskProvider(_pagination_tasks(50), ["bug", "Bug", "unused"])
+        created.append(provider)
+        return provider
+
+    controller._task_provider_factory = factory
+    for _ in range(2):
+        with controller.task_discovery(repository="example", task_provider="github"):
+            assert len(controller.list_tasks(repository="example", task_provider="github")) == 50
+            assert controller.list_task_labels(
+                repository="example", task_provider="github",
+            ) == ("bug", "Bug", "unused")
+    assert len(created) == 2
+    with pytest.raises(RuntimeError, match="label lookup failed"), controller.task_discovery(
+        repository="example", task_provider="github",
+    ):
+        controller.list_tasks(repository="example", task_provider="github")
+        raise RuntimeError("label lookup failed")
+    controller.list_task_labels(repository="example", task_provider="github")
+    assert len(created) == 4
+    with controller.task_discovery(repository="example", task_provider="trello"):
+        controller.list_tasks(repository="example", task_provider="trello")
+        controller.list_task_labels(repository="example", task_provider="trello")
+    assert len(created) == 6
+
+
+def test_overlapping_github_discoveries_keep_their_own_provider(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    controller, _, _ = _controller(tmp_path)
+    rendezvous = threading.Barrier(2)
+    first = _LabelledTaskProvider(_pagination_tasks(1), ["first"])
+    second = _LabelledTaskProvider(_pagination_tasks(2), ["second"])
+    providers = iter((first, second))
+    construction_lock = threading.Lock()
+
+    def factory(source: str, repository: str) -> _LabelledTaskProvider:
+        with construction_lock:
+            return next(providers)
+
+    controller._task_provider_factory = factory
+
+    def discover() -> tuple[int, tuple[str, ...] | None]:
+        with controller.task_discovery(repository="example", task_provider="github"):
+            rendezvous.wait(timeout=10)
+            tasks = controller.list_tasks(repository="example", task_provider="github")
+            labels = controller.list_task_labels(repository="example", task_provider="github")
+            return len(tasks), labels
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [pool.submit(discover) for _ in range(2)]
+        assert {result.result(timeout=10) for result in results} == {
+            (1, ("first",)), (2, ("second",)),
+        }
+
+
+def test_launcher_loading_phases_are_inline_and_reject_stale_updates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    controller._task_provider_factory = lambda source, repository: _LabelledTaskProvider(
+        _pagination_tasks(50), ["bug", "Bug", "unused"],
+    )
+    releases = [threading.Event() for _ in range(3)]
+    entered = [threading.Event() for _ in range(3)]
+
+    def history(*args: Any) -> set[str]:
+        entered[0].set()
+        assert releases[0].wait(10)
+        return set()
+
+    def labels(**kwargs: Any) -> tuple[str, ...]:
+        entered[1].set()
+        assert releases[1].wait(10)
+        return ("bug", "Bug", "unused")
+
+    def status(*args: Any) -> dict[str, WorkflowExecution]:
+        entered[2].set()
+        assert releases[2].wait(10)
+        return {}
+
+    monkeypatch.setattr(controller, "task_execution_history", history)
+    monkeypatch.setattr(controller, "list_task_labels", labels)
+    monkeypatch.setattr(controller, "task_execution_status", status)
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(100, 30)) as pilot:
+            try:
+                await pilot.press("n")
+                screen = application.screen
+                assert isinstance(screen, WorkflowRunnerScreen)
+                hint = screen.query_one("#task-hint", Static)
+                for index, message in enumerate([
+                    "Loading execution history", "Loading GitHub label choices",
+                    "Checking execution availability",
+                ]):
+                    assert await asyncio.to_thread(entered[index].wait, 10)
+                    await pilot.pause()
+                    assert message in str(hint.renderable)
+                    focused = application.focused
+                    screen._set_task_loading_phase(screen._task_load_token - 1, "github", "STALE")
+                    assert "STALE" not in str(hint.renderable)
+                    assert application.focused is focused
+                    if index == 2:
+                        async with asyncio.timeout(10):
+                            while len(screen.query(TaskRow)) != 25:
+                                await pilot.pause()
+                        assert all(row.disabled for row in screen.query(TaskRow))
+                    releases[index].set()
+                await wait_for_tui(
+                    pilot, lambda: bool(screen.query(TaskRow))
+                    and all(not row.disabled for row in screen.query(TaskRow)),
+                    description="selectable GitHub page",
+                )
+                assert "Checking execution availability" not in str(hint.renderable)
+                assert screen.query_one(TaskSelector).label_catalog == ("bug", "Bug", "unused")
+            finally:
+                for release in releases:
+                    release.set()
+
+    asyncio.run(drive())
+
+
+def test_fresh_run_summary_preserves_warnings_and_interrupted_stage(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = PrchefApp(controller)
+    previous = tuple(zip(_pagination_tasks(3), [
+        TaskExecutionSummary(
+            "question", WorkflowStatus.NEEDS_HUMAN, WorkflowStage.GENERATE_SPEC, None, False,
+        ),
+        TaskExecutionSummary(
+            "pr", WorkflowStatus.CHANGES_REQUESTED, WorkflowStage.COMPLETED, None, True,
+        ),
+        TaskExecutionSummary(
+            "interrupted", WorkflowStatus.INTERRUPTED, WorkflowStage.IMPLEMENT,
+            WorkflowStage.REVIEW, False,
+        ),
+    ], strict=True))
+
+    async def drive() -> None:
+        async with application.run_test(size=(48, 16)) as pilot:
+            application.push_screen(FreshRunConfirmation(previous, 0))
+            await wait_for_tui(pilot, lambda: bool(application.screen.query("#fresh-run-2")))
+            content = " ".join(
+                str(widget.renderable) for widget in application.screen.query(Static)
+            )
+            assert "pending question" in content
+            assert "changes-requested PR may still be open" in content
+            assert "resume REVIEW" in str(
+                application.screen.query_one("#fresh-run-2", Checkbox).label
+            )
+            button = application.screen.query_one("#confirm-fresh-run", Button)
+            button.focus()
+            await wait_for_tui(pilot, lambda: application.screen.can_view_partial(button))
+            assert application.focused is button
+
+    asyncio.run(drive())
+
+
 @pytest.mark.parametrize("size,width", [(10, 80), (25, 100), (50, 120)])
 def test_task_pagination_navigation_selection_and_bounded_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, size: int, width: int,
@@ -9551,6 +9745,11 @@ def test_task_pagination_failed_refresh_reenables_preserved_pending_rows(tmp_pat
             assert selector._status_pending
             assert all(row.disabled for _, row in selector._rows)
             selector.set_tasks_loading(provider="github", preserve_selection=True)
+            assert not selector._status_pending
+            selector._update_hint()
+            assert str(screen.query_one("#task-hint", Static).renderable) == (
+                "Loading available github tasks..."
+            )
             selector.set_error("Offline.")
             await settle_tui(pilot)
             assert not selector._status_pending
@@ -9570,6 +9769,15 @@ def test_task_pagination_failed_refresh_reenables_preserved_pending_rows(tmp_pat
             await settle_tui(pilot)
             assert selector.selected_task_ids == ("1",)
             assert str(screen.query_one("#task-error").renderable) == ""
+
+            selector._present_page()
+            assert selector._status_pending
+            selector.clear_tasks()
+            assert not selector._status_pending
+            selector._update_hint()
+            assert str(screen.query_one("#task-hint", Static).renderable) == (
+                "Choose a provider and load tasks to browse it."
+            )
 
     asyncio.run(drive())
 

@@ -324,6 +324,58 @@ def test_planner_app_reads_issues_and_labels_without_gh(tmp_path: Path) -> None:
     assert len(requests) == 7
 
 
+@pytest.mark.parametrize("count", [1, 50, 125])
+def test_app_discovery_and_full_labels_share_one_installation_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int,
+) -> None:
+    from datetime import UTC, datetime
+
+    from prchef.clients.github_client import GitHubAppAuthenticator
+
+    paths: list[str] = []
+    settings = GitHubAppSettings(
+        app_id=1, installation_id=2, private_key_env="KEY",
+        api_url="https://github.example/api/v3",
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.method == "POST":
+            assert request.url.path == "/api/v3/app/installations/2/access_tokens"
+            return httpx.Response(201, json={
+                "token": "installation-token", "expires_at": "2099-01-01T00:00:00Z",
+            })
+        assert request.headers["Authorization"] == "Bearer installation-token"
+        page = int(request.url.params["page"])
+        if request.url.path.endswith("/issues"):
+            return httpx.Response(200, json=[
+                _rest_issue(number) for number in range((page - 1) * 100, min(page * 100, count))
+            ])
+        assert request.url.path == "/api/v3/repos/owner/api/labels"
+        return httpx.Response(200, json=(
+            [{"name": f"unused-{n}"} for n in range(100)] if page == 1 else
+            [{"name": "bug"}, {"name": "Bug"}]
+        ))
+
+    http = httpx.Client(transport=httpx.MockTransport(respond))
+    authenticator = GitHubAppAuthenticator(
+        settings, http_client=http, now=lambda: datetime(2026, 10, 30, tzinfo=UTC),
+    )
+    monkeypatch.setattr(authenticator, "_app_jwt", lambda now: "app-jwt")
+    commands = StubCommands(CommandResult([], 1, "", "gh must not run", 0.0))
+    client = GitHubIssueClient(
+        commands, cwd=tmp_path, planner_app=settings, authenticator=authenticator, http_client=http,
+    )
+    provider = GitHubIssueTaskProvider(client, "owner/api")
+    assert len(provider.list_tasks()) == count
+    assert set(provider.list_labels()) == {*(f"unused-{n}" for n in range(100)), "bug", "Bug"}
+    assert paths.count("/api/v3/app/installations/2/access_tokens") == 1
+    assert paths.count("/api/v3/repos/owner/api/issues") == count // 100 + 1
+    assert paths.count("/api/v3/repos/owner/api/labels") == 2
+    assert len(paths) == count // 100 + 4
+    assert commands.calls == []
+
+
 @pytest.mark.parametrize("payload", [[], {}, [{"body": None}]])
 def test_planner_app_comment_responses(tmp_path: Path, payload: Any) -> None:
     class Token:
