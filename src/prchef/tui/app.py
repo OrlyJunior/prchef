@@ -205,7 +205,9 @@ class PrchefApp(App[None]):
     }
     .task-row:focus { background: $accent 40%; }
     .task-row:disabled { color: $text-muted; }
-    #workflow-runner .navigation-actions { margin-top: 0; }
+    #workflow-launch-action { width: 100%; height: auto; }
+    #workflow-launch-action #start-workflow { width: 100%; min-width: 0; margin: 0; }
+    #workflow-help { width: 100%; height: auto; padding: 0 2; color: $text-muted; }
     #github-app-summary, #github-app-identity-summary, #github-app-status { height: auto; }
     .github-app-roles { width: 100%; height: auto; }
     .github-app-role { width: 100%; height: auto; margin-bottom: 1; }
@@ -271,12 +273,10 @@ class PrchefApp(App[None]):
         margin: 0 1 0 0;
     }
     .navigation-actions .navigation-control:last-of-type { margin-right: 0; }
-    #home.-compact-navigation .navigation-actions,
-    WorkflowRunnerScreen.-compact-navigation .navigation-actions {
+    #home.-compact-navigation .navigation-actions {
         layout: vertical;
     }
-    #home.-compact-navigation .navigation-actions .navigation-control,
-    WorkflowRunnerScreen.-compact-navigation .navigation-actions .navigation-control {
+    #home.-compact-navigation .navigation-actions .navigation-control {
         margin: 0 0 1 0;
     }
     #workflow-progress { margin-top: 2; text-style: bold; }

@@ -1904,45 +1904,41 @@ def test_main_navigation_reflows_compact_controls_without_content_sizing(tmp_pat
     asyncio.run(drive())
 
 
-def test_workflow_runner_navigation_reflows_compact_controls(tmp_path: Path) -> None:
+def test_workflow_runner_has_one_full_width_primary_action(tmp_path: Path) -> None:
     controller, _, _ = _controller(tmp_path)
     application = PrchefApp(controller)
-    navigation_ids = (
-        "start-workflow",
-        "workflow-history",
-        "workflow-repositories",
-        "workflow-github-apps",
-        "workflow-agent-instructions",
-        "workflow-agent-presets",
-    )
 
     async def drive() -> None:
         async with application.run_test(size=(120, 50)) as pilot:
             application.push_screen(WorkflowRunnerScreen())
             await settle_tui(pilot)
-            controls = [
-                application.screen.query_one(f"#{control_id}", Button)
-                for control_id in navigation_ids
-            ]
-
-            assert all(control.has_class("navigation-control") for control in controls)
-            assert len({control.size.height for control in controls}) == 1
-            assert len({control.region.y for control in controls}) == 1
-            assert all(control.size.width < application.size.width for control in controls)
-            assert all(str(control.styles.width) != "1fr" for control in controls)
-
-            await pilot.resize_terminal(70, 50)
-            await settle_tui(pilot)
-
-            assert len({control.region.y for control in controls}) > 1
-            assert len({control.size.height for control in controls}) == 1
-            assert all(control.size.width < application.size.width for control in controls)
-            assert all(str(control.styles.width) != "1fr" for control in controls)
+            screen = application.screen
+            action = screen.query_one("#workflow-launch-action", Vertical)
+            start = screen.query_one("#start-workflow", Button)
+            selector = screen.query_one("#task-selector", TaskSelector)
+            assert list(action.query(Button)) == [start]
+            assert start.variant == "success"
+            for name in ("history", "agent-presets", "repositories", "github-apps",
+                         "agent-instructions"):
+                assert not screen.query(f"#workflow-{name}")
+            for width in (120, 70):
+                await pilot.resize_terminal(width, 50)
+                await settle_tui(pilot)
+                assert start.region.x == selector.region.x
+                assert start.region.right == selector.region.right
+                assert screen.query_one("#workflow-runner", VerticalScroll).max_scroll_x == 0
+            assert str(screen.query_one("#runtime-settings-note", Static).renderable) == (
+                "Agent settings are temporary for this run; "
+                "Provider/YAML defaults are unchanged."
+            )
 
     asyncio.run(drive())
 
 
-def test_main_navigation_controls_keep_their_destinations(tmp_path: Path) -> None:
+@pytest.mark.parametrize("size", [(120, 50), (70, 30)])
+def test_main_navigation_controls_keep_their_destinations(
+    tmp_path: Path, size: tuple[int, int],
+) -> None:
     controller, _, _ = _controller(tmp_path)
     application = PrchefApp(controller)
     destinations = (
@@ -1955,8 +1951,13 @@ def test_main_navigation_controls_keep_their_destinations(tmp_path: Path) -> Non
     )
 
     async def drive() -> None:
-        async with application.run_test(size=(120, 50)) as pilot:
+        async with application.run_test(size=size) as pilot:
             for selector, expected_screen in destinations:
+                control = application.query_one(selector, Button)
+                control.focus()
+                await wait_for_tui(
+                    pilot, lambda control=control: application.screen.can_view_entire(control)
+                )
                 await pilot.click(selector)
                 await settle_tui(pilot)
                 assert isinstance(application.screen, expected_screen)
@@ -2685,7 +2686,7 @@ def test_workflow_repository_selector_refreshes_after_repository_settings_save(
             await pilot.press("n")
             await settle_tui(pilot)
             workflow = application.screen
-            workflow.query_one("#workflow-repositories", Button).press()
+            await pilot.press("r")
             await settle_tui(pilot)
             settings = application.screen
             assert isinstance(settings, RepositorySettingsScreen)
@@ -2725,7 +2726,9 @@ def test_tui_buttons_activate_on_initial_click(tmp_path: Path) -> None:
                 lambda: isinstance(application.screen, WorkflowRunnerScreen),
                 description="workflow runner after first click",
             )
-            await pilot.click("#workflow-history")
+            await pilot.press("escape")
+            await settle_tui(pilot)
+            await pilot.click("#history")
             await wait_for_tui(
                 pilot,
                 lambda: isinstance(application.screen, ExecutionHistoryScreen),
@@ -3934,7 +3937,21 @@ def test_workflow_runner_reloads_tasks_on_repository_or_provider_change(tmp_path
                 ("example", "trello"),
                 ("other", "github"),
             ]
-            screen.query_one("#workflow-agent-instructions", Button).press()
+            for key, selector in (("r", "#repository-picker"),
+                                  ("p", "#agent-presets-repository")):
+                screen.query_one("#start-workflow", Button).focus()
+                await pilot.press(key)
+                await wait_for_tui(
+                    pilot,
+                    lambda selector=selector: application.screen.query_one(
+                        selector, RepositorySelect
+                    ).value == "other",
+                    description=f"{key} repository selection",
+                )
+                await pilot.press("escape")
+                await wait_for_tui(pilot, lambda: application.screen is screen)
+            screen.query_one("#start-workflow", Button).focus()
+            await pilot.press("i")
             await wait_for_tui(
                 pilot,
                 lambda: isinstance(application.screen, AgentInstructionsScreen)
@@ -6100,7 +6117,8 @@ def test_workflow_runner_selects_available_tasks_and_starts_batch_in_list_order(
 
             header.value = True
             await settle_tui(pilot)
-            screen.query_one("#start-workflow", Button).press()
+            screen.query_one("#task-checkbox-0", Checkbox).focus()
+            await pilot.press("ctrl+s")
             await wait_for_tui(
                 pilot,
                 lambda: (
@@ -6149,7 +6167,7 @@ def test_fresh_run_confirmation_preserves_selection_and_starts_checked_task(
             assert screen.query_one("#select-all-tasks", Checkbox).disabled is True
             row.value = True
             await settle_tui(pilot)
-            screen.query_one("#start-workflow", Button).press()
+            await pilot.press("ctrl+s")
             await wait_for_tui(
                 pilot,
                 lambda: isinstance(application.screen, FreshRunConfirmation),
@@ -9951,6 +9969,117 @@ def test_batch_revalidates_old_tasks_and_distinguishes_partial_absence(
             controller.start_batch(replace(launch, task_ids=("125",)))
 
 
+def test_workflow_runner_secondary_shortcuts_return_to_runner(tmp_path: Path) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = PrchefApp(controller)
+    destinations = (
+        ("h", ExecutionHistoryScreen), ("p", AgentPresetsScreen),
+        ("r", RepositorySettingsScreen), ("c", GitHubAppSettingsScreen),
+        ("i", AgentInstructionsScreen),
+    )
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 20)) as pilot:
+            await pilot.press("n")
+            await wait_for_tui(pilot, lambda: bool(application.screen.query(TaskRow)))
+            runner = application.screen
+            for key, expected in destinations:
+                runner.query_one("#start-workflow", Button).focus()
+                await pilot.press(key)
+                await wait_for_tui(
+                    pilot, lambda expected=expected: isinstance(application.screen, expected)
+                )
+                if key == "r":
+                    assert application.screen._initial_repository == "example"
+                await pilot.press("escape")
+                await wait_for_tui(pilot, lambda: application.screen is runner)
+
+    asyncio.run(drive())
+
+
+def test_workflow_runner_shortcut_ignores_repeated_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, _, _ = _controller(tmp_path)
+    application = PrchefApp(controller)
+    launches: list[WorkflowLaunch] = []
+
+    async def drive() -> None:
+        async with application.run_test(size=(80, 20)) as pilot:
+            await pilot.press("n")
+            await wait_for_tui(pilot, lambda: bool(application.screen.query(TaskRow)))
+            screen = application.screen
+            monkeypatch.setattr(
+                screen, "_run_workflow", lambda launch, epoch: launches.append(launch)
+            )
+            screen.query_one("#task-checkbox-0", TaskRow).value = True
+            await settle_tui(pilot)
+            await pilot.press("ctrl+s", "ctrl+s")
+            await settle_tui(pilot)
+            assert len(launches) == 1
+            assert screen.query_one("#start-workflow", Button).disabled
+
+    asyncio.run(drive())
+
+
+@pytest.mark.parametrize(
+    "width,height,expected_visible",
+    [(80, 20, False), (100, 30, False), (120, 40, False)],
+)
+def test_workflow_runner_initial_visibility_and_start_shortcut(
+    tmp_path: Path, width: int, height: int, expected_visible: bool,
+) -> None:
+    controller, service, _ = _controller(tmp_path)
+    controller._task_provider_factory = lambda source, repository: _LabelledTaskProvider(
+        _pagination_tasks(), ["bug", "Bug", "common"]
+    )
+    application = PrchefApp(controller)
+
+    async def drive() -> None:
+        async with application.run_test(size=(width, height)) as pilot:
+            await pilot.press("n")
+            await wait_for_tui(
+                pilot, lambda: len(application.screen.query(TaskRow)) == 25
+                and all(not row.disabled for row in application.screen.query(TaskRow)),
+                description="loaded task page",
+            )
+            screen = application.screen
+            content = screen.query_one("#workflow-runner", VerticalScroll)
+            start = screen.query_one("#start-workflow", Button)
+            help_text = screen.query_one("#workflow-help", Static)
+            assert screen.query_one(TaskSelector)._page_size == 25
+            visible = content.content_region.contains_region(start.region)
+            assert visible is expected_visible
+            if not visible:
+                assert screen.region.contains_region(help_text.region)
+                assert "Ctrl+S: Start workflow" in str(help_text.renderable)
+            assert "Esc: Back" in str(help_text.renderable)
+            assert content.max_scroll_x == 0
+            await pilot.press("ctrl+s")
+            await settle_tui(pilot)
+            assert not service.calls
+            screen.query_one("#task-checkbox-0", TaskRow).value = True
+            await settle_tui(pilot)
+            start.disabled = True
+            await pilot.press("ctrl+s", "ctrl+s")
+            await settle_tui(pilot)
+            assert not service.calls
+            start.disabled = False
+            await pilot.press("ctrl+s")
+            await wait_for_tui(pilot, lambda: len(service.calls) == 1)
+            assert service.calls[0][0] == "1"
+            assert screen.region.contains_region(help_text.region)
+            start.focus()
+            await wait_for_tui(pilot, lambda: screen.can_view_entire(start))
+            assert screen.region.contains_region(help_text.region)
+            await pilot.resize_terminal(48, 16)
+            await settle_tui(pilot)
+            assert screen.region.contains_region(help_text.region)
+            assert content.max_scroll_x == 0
+
+    asyncio.run(drive())
+
+
 @pytest.mark.parametrize("width,height", [(80, 20), (100, 30), (120, 40)])
 def test_task_pagination_controls_mouse_keyboard_and_visibility(
     tmp_path: Path, width: int, height: int,
@@ -10024,9 +10153,6 @@ def test_task_pagination_controls_mouse_keyboard_and_visibility(
             start = screen.query_one("#start-workflow", Button)
             start.focus()
             await wait_for_tui(pilot, lambda: screen.can_view_entire(start))
-            history = screen.query_one("#workflow-history", Button)
-            history.focus()
-            await wait_for_tui(pilot, lambda: screen.can_view_entire(history))
             assert screen.query_one("#workflow-runner", VerticalScroll).max_scroll_x == 0
     asyncio.run(drive())
 

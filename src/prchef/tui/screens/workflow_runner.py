@@ -193,7 +193,11 @@ class FreshRunConfirmation(ModalScreen[tuple[str, ...] | None]):
 class WorkflowRunnerScreen(Screen[None]):
     """Collect compact launch selections and observe the workflow service."""
 
-    BINDINGS = [("escape", "app.pop_screen", "Back")]
+    BINDINGS = [
+        ("escape", "app.pop_screen", "Back"),
+        ("ctrl+s", "start_workflow", "Start workflow"),
+        ("r", "repositories", "Repositories"),
+    ]
     RECONCILE_INTERVAL = 2.0
     EVENT_DRAIN_LIMIT = 64
 
@@ -247,40 +251,8 @@ class WorkflowRunnerScreen(Screen[None]):
                 yield PrchefSelect([], prompt="Task provider", id="task-provider")
                 yield TaskSelector(id="task-selector")
                 yield Static("", id="github-app-summary")
-                # Launch and navigation remain usable before the optional role
-                # configuration sections, even on a short terminal.
-                with Horizontal(classes="screen-actions navigation-actions"):
-                    yield Button(
-                        "Start workflow",
-                        variant="success",
-                        id="start-workflow",
-                        classes="navigation-control",
-                    )
-                    yield Button(
-                        "Execution history",
-                        id="workflow-history",
-                        classes="navigation-control",
-                    )
-                    yield Button(
-                        "Agent presets",
-                        id="workflow-agent-presets",
-                        classes="navigation-control",
-                    )
-                    yield Button(
-                        "Repositories",
-                        id="workflow-repositories",
-                        classes="navigation-control",
-                    )
-                    yield Button(
-                        "GitHub Apps",
-                        id="workflow-github-apps",
-                        classes="navigation-control",
-                    )
-                    yield Button(
-                        "Agent instructions",
-                        id="workflow-agent-instructions",
-                        classes="navigation-control",
-                    )
+                with Vertical(id="workflow-launch-action"):
+                    yield Button("Start workflow", variant="success", id="start-workflow")
                 yield Static(
                     "Agent settings are temporary for this run; "
                     "Provider/YAML defaults are unchanged.",
@@ -405,6 +377,11 @@ class WorkflowRunnerScreen(Screen[None]):
             # a fixed viewport and its own scrollbar, which makes diagnostics
             # difficult to inspect in an execution screen.
             yield Static("", id="workflow-raw-events", markup=False, expand=True)
+        yield Static(
+            "Ctrl+S: Start workflow | Esc: Back | Home: Execution history, Agent presets, "
+            "Repositories, GitHub Apps, Agent instructions",
+            id="workflow-help",
+        )
 
     @property
     def controller(self) -> WorkflowController:
@@ -523,7 +500,6 @@ class WorkflowRunnerScreen(Screen[None]):
     def _set_layout_mode(self, width: int) -> None:
         self.set_class(width <= 80, "-narrow")
         self.set_class(width > 80, "-wide")
-        self.set_class(width <= 96, "-compact-navigation")
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         # A mouse press focuses a clickable control before its release/click.
@@ -1283,7 +1259,7 @@ class WorkflowRunnerScreen(Screen[None]):
                 return
             self._request_task_load(repository, provider)
         elif event.button.id == "start-workflow":
-            self._start_selected_workflow()
+            self.action_start_workflow()
         elif event.button.id == "stop-workflow":
             self._request_stop_workflow()
         elif event.button.id == "resume-workflow":
@@ -1304,26 +1280,6 @@ class WorkflowRunnerScreen(Screen[None]):
             self._open_active_execution_detail()
         elif event.button.id == "outcome-continue":
             self._open_active_execution_detail()
-        elif event.button.id == "workflow-history":
-            self._show_history()
-        elif event.button.id == "workflow-agent-presets":
-            from prchef.tui.screens.agent_presets import AgentPresetsScreen
-
-            self.app.push_screen(AgentPresetsScreen(self._selected("#repository")))
-        elif event.button.id == "workflow-repositories":
-            from prchef.tui.screens.repository_settings import RepositorySettingsScreen
-
-            self.app.push_screen(RepositorySettingsScreen(self._selected("#repository")))
-        elif event.button.id == "workflow-github-apps":
-            from prchef.tui.screens.github_app_settings import GitHubAppSettingsScreen
-
-            self.app.push_screen(GitHubAppSettingsScreen())
-        elif event.button.id == "workflow-agent-instructions":
-            from prchef.tui.screens.agent_instructions import AgentInstructionsScreen
-
-            self.app.push_screen(
-                AgentInstructionsScreen(self._selected("#repository"))
-            )
         elif event.button.id == "copy-detailed-logs-button":
             self._copy_detailed_logs()
         elif event.button.id == "toggle-workflow-logs":
@@ -1360,10 +1316,14 @@ class WorkflowRunnerScreen(Screen[None]):
                         )
                     return
 
-    def _show_history(self) -> None:
-        from prchef.tui.screens.execution_history import ExecutionHistoryScreen
+    def action_start_workflow(self) -> None:
+        if not self.query_one("#start-workflow", Button).disabled:
+            self._start_selected_workflow()
 
-        self.app.push_screen(ExecutionHistoryScreen())
+    def action_repositories(self) -> None:
+        from prchef.tui.screens.repository_settings import RepositorySettingsScreen
+
+        self.app.push_screen(RepositorySettingsScreen(self._selected("#repository")))
 
     def _open_active_execution_detail(self) -> None:
         if self._active_execution_id is None:
