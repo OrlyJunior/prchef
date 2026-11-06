@@ -10022,9 +10022,12 @@ def test_workflow_runner_shortcut_ignores_repeated_activation(
     asyncio.run(drive())
 
 
-@pytest.mark.parametrize("width,height", [(80, 20), (100, 30), (120, 40)])
+@pytest.mark.parametrize(
+    "width,height,expected_visible",
+    [(80, 20, False), (100, 30, False), (120, 40, False)],
+)
 def test_workflow_runner_initial_visibility_and_start_shortcut(
-    tmp_path: Path, width: int, height: int,
+    tmp_path: Path, width: int, height: int, expected_visible: bool,
 ) -> None:
     controller, service, _ = _controller(tmp_path)
     controller._task_provider_factory = lambda source, repository: _LabelledTaskProvider(
@@ -10046,6 +10049,7 @@ def test_workflow_runner_initial_visibility_and_start_shortcut(
             help_text = screen.query_one("#workflow-help", Static)
             assert screen.query_one(TaskSelector)._page_size == 25
             visible = content.content_region.contains_region(start.region)
+            assert visible is expected_visible
             if not visible:
                 assert screen.region.contains_region(help_text.region)
                 assert "Ctrl+S: Start workflow" in str(help_text.renderable)
